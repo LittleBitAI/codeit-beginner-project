@@ -21,7 +21,9 @@
 - credential, token, secret, `.env` 내용이나 민감한 값을 code, 문서, log, 예시에 노출하지 않습니다.
 - raw/processed dataset, checkpoint·weight, TensorBoard event, training log·run, cache, local environment, 대량 generated file을 commit 대상으로 추가하지 않습니다.
 - 사용자가 명시적으로 요청하지 않으면 commit을 만들지 않습니다. 모든 변경은 Pull Request를 통해 반영하며 `main`에 직접 commit하지 않습니다.
-- branch는 `pipeline/<area>/<task-summary>` 형식을 사용하고 한 branch와 Pull Request에는 한 가지 focused change만 담습니다.
+- Pull Request용 작업 branch는 `pipeline/<area>/<task-summary>` 형식을 사용하며 merge 후 삭제하는 임시 branch입니다. 한 branch와 Pull Request에는 한 가지 focused change만 담습니다.
+- `<area>`는 `data`, `train`, `evaluate`, `registry`, `web` 중 배정받은 pipeline 이름을 사용합니다. repository-wide 변경처럼 해당 값이 정해지지 않은 작업은 임의로 만들지 말고 사용자에게 확인합니다.
+- `main` 또는 GitHub remote가 없어 Pull Request를 만들 수 없다면 commit이나 local merge로 대신하지 말고 사용자에게 확인합니다.
 - commit을 요청받은 경우 message는 한국어로 작성하며 필요한 표준 기술 용어만 English로 유지합니다.
 - text file은 UTF-8 without BOM과 LF line ending을 사용합니다.
 
