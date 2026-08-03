@@ -10,7 +10,10 @@ from pathlib import Path
 
 
 BRANCH_PATTERN = re.compile(
-    r"^pipeline/(data|train|evaluate|registry|web)/[a-z0-9][a-z0-9-]*$"
+    r"^(?:"
+    r"pipeline/(data|train|evaluate|registry|web)/[a-z0-9][a-z0-9-]*"
+    r"|onboarding/(?!.*--)[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?"
+    r")$"
 )
 ALIAS_VALUE = "!python tools/git_pr.py"
 

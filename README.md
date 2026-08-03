@@ -63,13 +63,15 @@ python -m pytest -q
 
 모든 변경은 Pull Request로 반영하며 `main`에 직접 commit하지 않습니다. Pull Request에는 변경을 담을 임시 작업 branch가 필요하지만, 장기간 유지하는 개인 branch를 추가로 만들 필요는 없습니다. merge가 끝난 작업 branch는 삭제합니다.
 
-1. `main`에서 `pipeline/<area>/<task-summary>` 형식의 임시 작업 branch를 만듭니다.
+1. `main`에서 일반 작업은 `pipeline/<area>/<task-summary>`, 역할 배정 전 onboarding 상태 확인은 `onboarding/<github-username>` 형식의 임시 작업 branch를 만듭니다.
 2. 한 branch에는 한 가지에 집중한 변경만 commit합니다.
 3. `git pr`로 branch를 push하고 `main` 대상 draft Pull Request를 만듭니다.
 4. Pull Request template과 검증 결과를 작성하고 담당자 review를 받습니다.
 5. 승인을 받은 Pull Request만 merge하고 작업 branch를 삭제합니다.
 
 `<area>`는 담당 pipeline 이름인 `data`, `train`, `evaluate`, `registry`, `web` 중 하나를 사용합니다. repository-wide 문서나 공용 파일처럼 어느 area에도 속하지 않는 변경은 임의의 값을 만들지 말고 팀장에게 branch 이름을 확인합니다.
+
+`onboarding/<github-username>`은 역할 배정 전 onboarding 상태 확인에만 사용하는 예외입니다. 이 branch의 Pull Request는 `onboarding/docs/onboarding-status.md`에서 본인의 상태 한 줄만 변경해야 합니다.
 
 commit은 요청된 변경만 담고, message는 한국어로 작성합니다. 표준 기술 용어는 English로 남길 수 있습니다.
 
@@ -89,7 +91,7 @@ python tools/git_pr.py --install
 git pr
 ```
 
-이 명령은 branch 이름과 clean working tree를 확인하고, 현재 branch를 `origin`에 push한 다음 `main` 대상 draft Pull Request를 만듭니다. 같은 branch에 열린 Pull Request가 있으면 새로 만들지 않고 push된 commit으로 기존 Pull Request를 갱신합니다. `main`이나 규칙에 맞지 않는 branch에서는 실행되지 않습니다.
+이 명령은 branch 이름과 clean working tree를 확인하고, 현재 branch를 `origin`에 push한 다음 `main` 대상 draft Pull Request를 만듭니다. 같은 branch에 열린 Pull Request가 있으면 새로 만들지 않고 push된 commit으로 기존 Pull Request를 갱신합니다. `pipeline/<area>/<task-summary>`와 `onboarding/<github-username>` 외의 branch 또는 `main`에서는 실행되지 않습니다.
 
 외부 변경 없이 동작 조건과 실행 계획만 확인하려면 `git pr --dry-run`을 사용합니다. draft 생성 후 Pull Request template을 작성하고 검증 결과를 확인한 다음 review를 요청합니다.
 

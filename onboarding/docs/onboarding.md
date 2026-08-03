@@ -59,15 +59,28 @@ git status --short
 
 ## 5. Commit, push, Pull Request
 
-자신의 상태 파일만 commit하고 branch를 push합니다.
+자신의 상태 파일만 commit합니다.
 
 ```text
 git add onboarding/docs/onboarding-status.md
 git commit -m "온보딩 환경 확인 완료"
-git push -u origin onboarding/<github-username>
 ```
 
-GitHub에서 해당 branch의 Pull Request를 열고 base branch를 `main`으로 지정합니다. Pull Request에는 `onboarding/docs/onboarding-status.md`의 자신의 상태 한 줄만 포함되어야 합니다.
+GitHub CLI 인증 상태를 확인하고 이 repository에서 `git pr` alias를 한 번 설치합니다.
+
+```text
+gh auth status
+python tools/git_pr.py --install
+```
+
+먼저 외부 변경 없이 계획을 확인한 뒤 `git pr`을 실행합니다.
+
+```text
+git pr --dry-run
+git pr
+```
+
+`git pr`은 `onboarding/<github-username>` branch를 `origin`에 push하고 `main` 대상 draft Pull Request를 만듭니다. Pull Request에는 `onboarding/docs/onboarding-status.md`의 자신의 상태 한 줄만 포함되어야 합니다.
 
 Pull Request 설명에 다음 검증 결과를 포함합니다.
 
