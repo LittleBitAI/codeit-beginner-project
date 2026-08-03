@@ -1,6 +1,8 @@
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from src import main_pipeline
 
 
@@ -66,3 +68,21 @@ def test_pipeline_stops_on_failure(monkeypatch):
     assert result["status"] == "error"
     assert result["message"] == "train: 의도한 실패"
     assert calls == ["data", "train"]
+
+
+def test_pipeline_rejects_invalid_return_schema(monkeypatch):
+    def invalid(config):
+        return {
+            "status": "ok",
+            "artifacts": {},
+            "summary": {},
+        }
+
+    monkeypatch.setattr(
+        main_pipeline,
+        "_STAGES",
+        (("data", SimpleNamespace(run=invalid)),),
+    )
+
+    with pytest.raises(ValueError, match="공통 계약과 다릅니다"):
+        main_pipeline.run({})
