@@ -1,48 +1,66 @@
-# 저장소 공통 AI 작업 규칙
+# Repository-Wide AI Work Rules
 
-## 작업 시작 전
+## Before Starting Work
 
-- 저장소 구조, `git status`, 관련 파일을 먼저 확인합니다.
-- repository root 지침과 작업 대상에 가장 가까운 `CLAUDE.md` 또는 `AGENTS.md`를 읽고 함께 따릅니다.
-- 사용자가 지정한 범위만 수정합니다. 범위 밖의 정리, 기능 추가, unrelated refactoring은 하지 않습니다.
+- Inspect the repository structure, `git status`, and all relevant files first.
+- Read and follow both the repository-root instructions and the nearest `CLAUDE.md` or `AGENTS.md` for the target files.
+- Modify only the scope specified by the user. Do not perform out-of-scope cleanup, add unrelated features, or make unrelated refactors.
 
-## 소유권과 경계
+## Clarifying Vague Implementation Requests
 
-- directory 소유권 경계를 넘지 않습니다. 다른 component의 변경이 필요하면 직접 수정하지 말고 사용자에게 보고합니다.
-- 다른 pipeline의 내부 모듈을 직접 import하거나 호출하지 않습니다.
-- pipeline의 연결과 실행 순서 조정은 지정된 integration entry point에서만 수행합니다.
-- 다른 component가 생성하거나 소유한 artifact를 수정, 이동, 덮어쓰기, 삭제하지 않습니다.
-- shared contract, config, dependency, common code, integration file은 명시적으로 배정받지 않았다면 변경하지 않습니다.
-- pipeline별 책임과 구현 규칙은 해당 directory의 가장 가까운 지침을 따르며 repository root 지침에 추가하지 않습니다.
+- If the requested implementation is only a rough idea and cannot be made concrete from the repository context, stop before implementation and ask the user to choose a direction.
+- Present a concise set of concrete, mutually exclusive choices through an interactive selector that the user can navigate with the arrow keys and confirm with Enter.
+- Explain the main outcome or tradeoff of each choice in beginner-friendly language.
+- If an arrow-key-and-Enter selector is not available in the current environment, present numbered choices and ask the user to select one before continuing.
+- Do not guess or silently expand the scope when the choice could materially change the implementation.
 
-## 보안과 저장소 위생
+## Ownership and Boundaries
 
-- absolute path를 hardcode하지 않습니다.
-- credential, token, secret, `.env` 내용이나 민감한 값을 code, 문서, log, 예시에 노출하지 않습니다.
-- raw/processed dataset, checkpoint·weight, TensorBoard event, training log·run, cache, local environment, 대량 generated file을 commit 대상으로 추가하지 않습니다.
-- 사용자가 명시적으로 요청하지 않으면 commit을 만들지 않습니다. 모든 변경은 Pull Request를 통해 반영하며 `main`에 직접 commit하지 않습니다.
-- Pull Request용 작업 branch는 `pipeline/<area>/<task-summary>` 형식을 사용합니다. 역할 배정 전 onboarding 상태 확인에 한해 `onboarding/<github-username>`을 사용하며, 본인의 `onboarding/docs/onboarding-status.md` 상태 한 줄만 변경합니다. 두 형식 모두 merge 후 삭제하는 임시 branch이며 한 branch와 Pull Request에는 한 가지 focused change만 담습니다.
-- `<area>`는 `data`, `train`, `evaluate`, `registry`, `web` 중 배정받은 pipeline 이름을 사용합니다. repository-wide 변경처럼 해당 값이 정해지지 않은 작업은 임의로 만들지 말고 사용자에게 확인합니다.
-- `main` 또는 GitHub remote가 없어 Pull Request를 만들 수 없다면 commit이나 local merge로 대신하지 말고 사용자에게 확인합니다.
-- commit을 요청받은 경우 message는 한국어로 작성하며 필요한 표준 기술 용어만 English로 유지합니다.
-- commit 후 push와 Pull Request 생성을 명시적으로 요청받으면 관련 check와 clean working tree를 확인한 뒤 `git pr`을 사용합니다. 요청 없이 자동으로 push하거나 Pull Request를 만들지 않습니다.
-- `git pr`은 규칙에 맞는 작업 branch에서만 실행합니다. 먼저 `git pr --dry-run`으로 대상 branch와 계획을 확인하고, 생성된 draft Pull Request의 template과 검증 내용을 점검합니다.
-- text file은 UTF-8 without BOM과 LF line ending을 사용합니다.
+- Do not cross directory ownership boundaries. If another component must change, report it to the user instead of modifying it directly.
+- Do not directly import or call another pipeline's internal modules.
+- Adjust pipeline connections and execution order only at the designated integration entry point.
+- Do not modify, move, overwrite, or delete artifacts created or owned by another component.
+- Do not change shared contracts, configuration, dependencies, common code, or integration files unless they are explicitly assigned to you.
+- Follow the nearest directory-specific instructions for each pipeline's responsibilities and implementation rules; do not add those rules to the repository-root instructions.
 
-## 검증과 완료 보고
+## Security and Repository Hygiene
 
-- 변경 범위에 맞는 관련 check와 test를 실행하고 결과를 확인합니다.
-- 완료 시 변경 파일, 실행한 test·check와 결과, unresolved issue·TODO, `git status`를 보고합니다.
-- 실행하지 못한 test가 있으면 생략 이유와 남은 risk를 명시합니다.
+- Do not hardcode absolute paths, including paths specific to an individual's computer.
+- Do not expose credentials, tokens, secrets, `.env` contents, or other sensitive values in code, documentation, logs, or examples.
+- Do not add raw or processed datasets, checkpoints or weights, TensorBoard events, training logs or runs, caches, local environments, or large generated files to commits.
+- Do not create a commit unless the user explicitly asks. Apply all changes through a Pull Request, and do not commit directly to `main`.
+- Pull Request branches must use the format `pipeline/<area>/<task-summary>`. Only during onboarding status checks before role assignment may you use `onboarding/<github-username>`, and then you may change only your own status line in `onboarding/docs/onboarding-status.md`. Both branch types are temporary and must be deleted after merge. Each branch and Pull Request must contain one focused change.
+- `<area>` must be the assigned pipeline name: `data`, `train`, `evaluate`, `registry`, or `web`. For repository-wide work or any task without a defined area, do not invent one; ask the user.
+- If `main` or a GitHub remote is unavailable and a Pull Request cannot be created, do not substitute a commit or local merge; ask the user.
+- When the user requests a commit, write the commit message in Korean while retaining necessary standard technical terms in English.
+- When the user explicitly requests a push and Pull Request after a commit, verify the relevant checks and a clean working tree, then use `git pr`. Do not push or create a Pull Request without an explicit request.
+- Run `git pr` only from a valid work branch. First use `git pr --dry-run` to confirm the target branch and plan, then review the generated draft Pull Request template and validation details.
+- Store text files as UTF-8 without BOM with LF line endings.
 
-## 중단하고 확인할 상황
+## Beginner-Friendly Implementation Report
 
-다음 상황에서는 추측하거나 범위를 넓히지 말고 작업을 중단한 뒤 사용자에게 확인합니다.
+- After completing the implementation, clearly explain what was implemented in beginner-friendly language. Do not report only filenames or say that the work is complete.
+- For every changed file, explain why that file was changed and connect the change to the user's request.
+- Describe the implementation's inputs and outputs, including important types, formats, defaults, and assumptions when relevant. If there is no direct input or output, state that explicitly.
+- Explain what happens when the implementation fails, including expected errors, fallback behavior, partial results, cleanup, and recovery steps when relevant.
+- List every test and check that was run, explain what each one verified, and report its result. If a test was not run, explain why and state the remaining risk.
+- State whether the change affects any other pipeline. Name each affected pipeline and explain the impact. If there is no cross-pipeline impact, explicitly say so.
+- Confirm that no personal-computer-specific absolute path was introduced. Such paths are prohibited; if one is found, remove it before reporting completion.
 
-- shared contract 또는 공개 interface 변경
-- directory 소유권을 넘는 수정이나 integration 경계 변경
-- 삭제, overwrite, history 변경 등 destructive action
-- credential 또는 secret이 필요하거나 노출될 가능성이 있는 작업
-- 유료 infrastructure 생성·변경 등 비용이 발생할 수 있는 작업
-- train, validation, test 또는 competition data leakage 위험
-- competition 규칙이 불명확해 구현이나 검증 결과가 달라지는 작업
+## Validation and Completion Reporting
+
+- Run and review the checks and tests relevant to the changed scope.
+- On completion, report the changed files, the tests and checks run with their results, unresolved issues or TODOs, and `git status`.
+- If any test could not be run, explain why it was skipped and describe the remaining risk.
+
+## Situations That Require Stopping and Asking
+
+In the following situations, do not guess or expand the scope. Stop and ask the user:
+
+- A shared contract or public interface must change.
+- A modification would cross a directory ownership boundary or change an integration boundary.
+- A destructive action is required, such as deletion, overwriting, or history modification.
+- Credentials or secrets are required or could be exposed.
+- The work could incur costs, such as creating or modifying paid infrastructure.
+- There is a risk of train, validation, test, or competition data leakage.
+- Competition rules are unclear in a way that could change the implementation or validation result.
