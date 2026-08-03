@@ -35,7 +35,7 @@
 ## 저장·실행 역할
 
 - GitHub: code, 가벼운 config, contract, metadata, 작은 sample, 문서를 관리하고 branch review와 Pull Request merge의 기준점으로 사용합니다.
-- 외부 artifact 저장소: dataset, checkpoint, weight, training log, 대량 prediction 등 Git에 넣지 않는 파일을 보관합니다. 저장소 종류와 경로는 TODO입니다.
+- 외부 artifact 저장소: 공통 storage interface를 통해 local filesystem 또는 Amazon S3에 dataset, checkpoint, weight, training log, 대량 prediction 등 Git에 넣지 않는 파일을 보관합니다. 개별 pipeline은 `boto3`를 직접 사용하지 않습니다.
 - 로컬 또는 Colab: 같은 Git revision과 config를 기준으로 pipeline을 실행하는 환경입니다. 현재는 외부 runtime dependency가 없는 dummy pipeline만 제공합니다.
 - Kaggle: competition 규칙에 따른 최종 검증과 제출에 사용합니다. 제출 형식, 제한, 평가 규칙은 실제 competition 명세 확인 전까지 확정하지 않습니다.
 
@@ -58,6 +58,42 @@ python -m src.main_pipeline --only train
 ```
 python -m pytest -q
 ```
+
+## Local 및 Amazon S3 storage
+
+`src/common/storage.py`의 `create_storage(config)`는 local 또는 S3 backend를 같은 interface로 제공합니다. 지원 작업은 file upload/download, JSON read/write, 존재 확인, prefix listing이며 기존 대상은 `overwrite=True`를 명시하지 않으면 덮어쓰지 않습니다. 현재 dummy pipeline에는 storage를 연결하지 않았습니다.
+
+Backend는 config 또는 환경 변수로 선택하며 환경 변수가 우선합니다.
+
+| 환경 변수 | 용도 |
+| --- | --- |
+| `PILL_STORAGE_BACKEND` | `local` 또는 `s3` |
+| `PILL_STORAGE_LOCAL_ROOT` | local artifact root |
+| `PILL_STORAGE_S3_BUCKET` | S3 bucket 이름 |
+| `PILL_STORAGE_S3_PREFIX` | 선택적 공통 S3 key prefix |
+| `AWS_PROFILE` | AWS CLI/SDK profile 이름 |
+| `AWS_REGION` | AWS region |
+| `AWS_DEFAULT_REGION` | `AWS_REGION`이 없을 때 region fallback |
+
+AWS account, bucket, IAM Identity Center와 권한은 repository 밖에서 준비합니다. `aws sso login --profile <profile-name>`으로 임시 credential을 받은 뒤 실제 값을 shell 환경 또는 commit하지 않는 `.env`에 설정합니다. Access Key나 SSO cache를 repository에 저장하지 않습니다. Config key는 `storage.backend`, `storage.local.root`, `storage.s3.bucket`, `storage.s3.prefix`, `storage.s3.profile`, `storage.s3.region`입니다.
+
+S3 object는 다음 logical prefix를 사용합니다.
+
+- `datasets/`
+- `experiments/uploading/`
+- `experiments/completed/`
+- `experiments/failed/`
+- `registry/`
+- `submissions/`
+- `final-models/`
+
+Dependency를 설치하고 AWS 환경 변수를 설정한 뒤, 별도 승인을 받은 경우에만 다음 smoke test를 실행합니다.
+
+```powershell
+python scripts/s3_smoke_test.py --config configs/env.aws.json
+```
+
+Smoke test는 `experiments/uploading/smoke-tests/`에 고유한 작은 JSON object 하나를 업로드하고 다운로드 내용과 prefix listing을 확인합니다. Bucket·IAM·공개 접근 설정을 변경하거나 object를 자동 삭제하지 않습니다.
 
 ## Git 협업 규칙
 
@@ -107,6 +143,6 @@ git pr
 
 - TODO: 실제 pipeline 구현에 필요한 dependency와 환경별 설치 방법을 구현 시점에 확정합니다.
 - TODO: GitHub approval, CODEOWNERS 보호 규칙을 설정하고 실제 담당자 계정을 등록합니다.
-- TODO: 외부 artifact 저장소, 접근 권한, 경로 정책을 확정합니다.
+- TODO: 실제 pipeline별 S3 artifact schema와 lifecycle 정책은 각 담당자 협의 후 확정합니다.
 - TODO: 실제 dataset·class 정의, Kaggle 제출 형식·제한·평가 규칙을 competition 원문으로 확인합니다.
 - TODO: 기존 design handoff의 mock data와 가정값을 실제 계약과 명확히 구분합니다.

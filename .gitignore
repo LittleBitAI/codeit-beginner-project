@@ -1,10 +1,15 @@
 # Dataset and generated artifacts
 /data/
+/datasets/
 /artifacts/
 /runs/
+/experiments/
 /checkpoints/
 /weights/
 /predictions/
+/registry/
+/submissions/
+/final-models/
 
 # Model files
 *.pt
@@ -22,6 +27,9 @@ events.out.tfevents.*
 .env.*
 !.env.example
 .aws/
+**/.aws/
+.aws-sam/
+.aws-sso/
 .kaggle/
 credentials/
 *credentials*.json
