@@ -6,7 +6,7 @@
 
 ## 저장소 아키텍처
 
-팀 pipeline guide가 정의한 목표 구조는 다음과 같습니다. 현재 저장소에는 참고 문서, sample image, design handoff만 있고 실행 가능한 source와 config는 아직 없습니다.
+팀 pipeline guide가 정의한 구조에 따라 최소 dummy pipeline, 공용 config·contract, test skeleton이 준비되어 있습니다. 실제 data processing, training, evaluation, API, AWS, frontend logic은 아직 구현하지 않았습니다.
 
 ```
 .
@@ -36,23 +36,62 @@
 
 - GitHub: code, 가벼운 config, contract, metadata, 작은 sample, 문서를 관리하고 branch review와 Pull Request merge의 기준점으로 사용합니다.
 - 외부 artifact 저장소: dataset, checkpoint, weight, training log, 대량 prediction 등 Git에 넣지 않는 파일을 보관합니다. 저장소 종류와 경로는 TODO입니다.
-- 로컬 또는 Colab: 같은 Git revision과 config를 기준으로 pipeline을 실행하는 환경입니다. 현재 저장소에는 확인된 설치 및 실행 명령이 없습니다.
+- 로컬 또는 Colab: 같은 Git revision과 config를 기준으로 pipeline을 실행하는 환경입니다. 현재는 외부 runtime dependency가 없는 dummy pipeline만 제공합니다.
 - Kaggle: competition 규칙에 따른 최종 검증과 제출에 사용합니다. 제출 형식, 제한, 평가 규칙은 실제 competition 명세 확인 전까지 확정하지 않습니다.
+
+## 기본 dummy 실행
+
+전체 pipeline 연결을 확인합니다.
+
+```
+python -m src.main_pipeline --config configs/base.json
+```
+
+하나의 pipeline만 확인할 때는 `--only`를 사용합니다.
+
+```
+python -m src.main_pipeline --only train
+```
+
+공통 test는 다음 명령으로 실행합니다.
+
+```
+python -m pytest -q
+```
 
 ## Git 협업 규칙
 
 모든 변경은 Pull Request로 반영하며 `main`에 직접 commit하지 않습니다. Pull Request에는 변경을 담을 임시 작업 branch가 필요하지만, 장기간 유지하는 개인 branch를 추가로 만들 필요는 없습니다. merge가 끝난 작업 branch는 삭제합니다.
 
 1. `main`에서 `pipeline/<area>/<task-summary>` 형식의 임시 작업 branch를 만듭니다.
-2. 한 branch에는 한 가지에 집중한 변경만 commit하고 GitHub에 push합니다.
-3. `main`을 대상으로 Pull Request를 열고 담당자 review를 받습니다.
-4. 승인을 받은 Pull Request만 merge하고 작업 branch를 삭제합니다.
+2. 한 branch에는 한 가지에 집중한 변경만 commit합니다.
+3. `git pr`로 branch를 push하고 `main` 대상 draft Pull Request를 만듭니다.
+4. Pull Request template과 검증 결과를 작성하고 담당자 review를 받습니다.
+5. 승인을 받은 Pull Request만 merge하고 작업 branch를 삭제합니다.
 
 `<area>`는 담당 pipeline 이름인 `data`, `train`, `evaluate`, `registry`, `web` 중 하나를 사용합니다. repository-wide 문서나 공용 파일처럼 어느 area에도 속하지 않는 변경은 임의의 값을 만들지 말고 팀장에게 branch 이름을 확인합니다.
 
 commit은 요청된 변경만 담고, message는 한국어로 작성합니다. 표준 기술 용어는 English로 남길 수 있습니다.
 
 예: `프로젝트 공통 문서와 AI 작업 규칙 추가`, `README에 Git 협업 규칙 정리`
+
+### `git pr`로 Pull Request 만들기
+
+저장소를 clone한 뒤 한 번만 다음 명령으로 local Git alias를 설치합니다. GitHub CLI 설치와 `gh auth login` 인증이 먼저 필요합니다.
+
+```
+python tools/git_pr.py --install
+```
+
+작업 branch에서 변경을 commit한 뒤 `git pr`을 실행합니다.
+
+```
+git pr
+```
+
+이 명령은 branch 이름과 clean working tree를 확인하고, 현재 branch를 `origin`에 push한 다음 `main` 대상 draft Pull Request를 만듭니다. 같은 branch에 열린 Pull Request가 있으면 새로 만들지 않고 push된 commit으로 기존 Pull Request를 갱신합니다. `main`이나 규칙에 맞지 않는 branch에서는 실행되지 않습니다.
+
+외부 변경 없이 동작 조건과 실행 계획만 확인하려면 `git pr --dry-run`을 사용합니다. draft 생성 후 Pull Request template을 작성하고 검증 결과를 확인한 다음 review를 요청합니다.
 
 ## 저장소 공통 정책
 
@@ -64,9 +103,8 @@ commit은 요청된 변경만 담고, message는 한국어로 작성합니다. �
 
 ## 알려진 제한 및 TODO
 
-- TODO: `src/`, `configs/`, `contracts/`, `.github/` 등 목표 구조와 dependency를 확정하고 생성합니다.
-- TODO: 환경별 설치 방법과 기본 실행 명령을 실제 code와 config가 추가된 뒤 문서화합니다.
-- TODO: 현재 로컬 `master`를 `main`으로 전환하고 GitHub remote를 연결한 뒤 Pull Request, approval, CODEOWNERS 보호 규칙을 설정합니다. 완료 전에는 정상적인 Pull Request workflow를 사용할 수 없습니다.
+- TODO: 실제 pipeline 구현에 필요한 dependency와 환경별 설치 방법을 구현 시점에 확정합니다.
+- TODO: GitHub approval, CODEOWNERS 보호 규칙을 설정하고 실제 담당자 계정을 등록합니다.
 - TODO: 외부 artifact 저장소, 접근 권한, 경로 정책을 확정합니다.
 - TODO: 실제 dataset·class 정의, Kaggle 제출 형식·제한·평가 규칙을 competition 원문으로 확인합니다.
 - TODO: 기존 design handoff의 mock data와 가정값을 실제 계약과 명확히 구분합니다.

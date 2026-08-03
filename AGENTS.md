@@ -25,6 +25,8 @@
 - `<area>`는 `data`, `train`, `evaluate`, `registry`, `web` 중 배정받은 pipeline 이름을 사용합니다. repository-wide 변경처럼 해당 값이 정해지지 않은 작업은 임의로 만들지 말고 사용자에게 확인합니다.
 - `main` 또는 GitHub remote가 없어 Pull Request를 만들 수 없다면 commit이나 local merge로 대신하지 말고 사용자에게 확인합니다.
 - commit을 요청받은 경우 message는 한국어로 작성하며 필요한 표준 기술 용어만 English로 유지합니다.
+- commit 후 push와 Pull Request 생성을 명시적으로 요청받으면 관련 check와 clean working tree를 확인한 뒤 `git pr`을 사용합니다. 요청 없이 자동으로 push하거나 Pull Request를 만들지 않습니다.
+- `git pr`은 규칙에 맞는 작업 branch에서만 실행합니다. 먼저 `git pr --dry-run`으로 대상 branch와 계획을 확인하고, 생성된 draft Pull Request의 template과 검증 내용을 점검합니다.
 - text file은 UTF-8 without BOM과 LF line ending을 사용합니다.
 
 ## 검증과 완료 보고
