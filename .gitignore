@@ -1,0 +1,48 @@
+# Dataset and generated artifacts
+/data/
+/artifacts/
+/runs/
+/checkpoints/
+/weights/
+/predictions/
+
+# Model files
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# TensorBoard and training logs
+events.out.tfevents.*
+/tensorboard/
+/logs/
+
+# Secrets and credentials
+.env
+.env.*
+!.env.example
+.aws/
+.kaggle/
+credentials/
+*credentials*.json
+*service-account*.json
+*.pem
+*.key
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

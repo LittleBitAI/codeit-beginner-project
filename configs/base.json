@@ -1,0 +1,8 @@
+{
+  "project": {
+    "name": "pill-object-detection"
+  },
+  "execution": {
+    "mode": "dummy"
+  }
+}

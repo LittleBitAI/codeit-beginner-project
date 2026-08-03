@@ -1,0 +1,14 @@
+# TODO: 각 pipeline 담당자의 실제 GitHub 계정으로 교체합니다.
+* @LittleBitAI
+
+/src/main_pipeline.py @LittleBitAI
+/src/common/ @LittleBitAI
+/configs/ @LittleBitAI
+/contracts/ @LittleBitAI
+/.github/ @LittleBitAI
+
+/src/pipelines/data/ @LittleBitAI
+/src/pipelines/train/ @LittleBitAI
+/src/pipelines/evaluate/ @LittleBitAI
+/src/pipelines/registry/ @LittleBitAI
+/src/pipelines/web/ @LittleBitAI
