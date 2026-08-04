@@ -1,0 +1,19 @@
+{
+  "data": {
+    "train_manifest_uri": "s3://example-bucket/datasets/train_manifest.json",
+    "validation_manifest_uri": "s3://example-bucket/datasets/validation_manifest.json",
+    "class_map_uri": "s3://example-bucket/datasets/class_map.json",
+    "dataset_summary_uri": "s3://example-bucket/datasets/dataset_summary.json"
+  },
+  "train": {
+    "run_id": "exp-0002",
+    "best_checkpoint_uri": "s3://example-bucket/experiments/completed/exp-0002/best_checkpoint.pt",
+    "last_checkpoint_uri": "s3://example-bucket/experiments/completed/exp-0002/last_checkpoint.pt",
+    "training_history_uri": "s3://example-bucket/experiments/completed/exp-0002/training_history.json"
+  },
+  "evaluate": {
+    "run_id": "exp-0002",
+    "metrics_uri": "s3://example-bucket/experiments/completed/exp-0002/metrics.json",
+    "predictions_uri": "s3://example-bucket/experiments/completed/exp-0002/predictions.json"
+  }
+}
