@@ -18,6 +18,8 @@ from src.pipelines.registry.record import (
     InvalidSchemaError,
     MissingInputError,
     RegistryError,
+    describe_artifact,
+    resolve_local_uri,
     resolve_run_id,
     validate_inputs,
 )
@@ -197,3 +199,88 @@ def test_blank_configured_run_id_raises_invalid_schema_error(valid_inputs):
 
     with pytest.raises(InvalidSchemaError, match="비어 있지 않은 문자열"):
         resolve_run_id(validated, configured_run_id="   ")
+
+
+# --- local URI schema 검증 --------------------------------------------------
+#
+# 이 검증은 verify_artifacts 값과 관계없이 항상 수행해야 합니다. 검증을 건너뛰면
+# 저장소 밖 경로가 정상 record로 등록되어 URI 계약이 우회됩니다.
+
+# 계약을 어기는 local URI 모음입니다. 플랫폼과 무관하게 모두 거부해야 합니다.
+INVALID_LOCAL_URIS = [
+    "/etc/passwd",  # POSIX 절대 경로
+    "//server/share/model.pt",  # UNC 경로
+    "C:/Windows/model.pt",  # Windows 절대 경로
+    "C:\\Windows\\model.pt",  # Windows 절대 경로 (역슬래시)
+    "C:artifacts/model.pt",  # Windows drive 기준 경로
+    "../outside/model.pt",  # 저장소 밖으로 탈출
+    "../../outside/model.pt",
+    "artifacts/../../outside/model.pt",  # 중간에 섞인 탈출
+    "https://example.com/model.pt",  # 지원하지 않는 scheme
+    "file:///etc/passwd",
+]
+
+
+@pytest.mark.parametrize("uri", INVALID_LOCAL_URIS)
+def test_resolve_local_uri_rejects_uris_outside_the_repository(tmp_path, uri):
+    with pytest.raises(InvalidSchemaError):
+        resolve_local_uri(uri, repo_root=tmp_path)
+
+
+@pytest.mark.parametrize("uri", INVALID_LOCAL_URIS)
+def test_describe_artifact_rejects_bad_uri_even_without_verification(tmp_path, uri):
+    """verify=False로도 URI 계약을 우회할 수 없어야 합니다."""
+
+    with pytest.raises(InvalidSchemaError):
+        describe_artifact(uri, repo_root=tmp_path, verify=False)
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "artifacts/data/class_map.json",
+        "./artifacts/data/class_map.json",
+        "artifacts/train/../data/class_map.json",  # 저장소 안에 머무는 상대 경로
+    ],
+)
+def test_resolve_local_uri_accepts_repository_relative_paths(tmp_path, uri):
+    resolved = resolve_local_uri(uri, repo_root=tmp_path)
+
+    assert resolved.is_relative_to(tmp_path)
+
+
+def test_resolve_local_uri_does_not_require_the_file_to_exist(tmp_path):
+    """schema 검증과 존재 확인은 분리되어 있어야 합니다."""
+
+    resolved = resolve_local_uri("artifacts/없는파일.json", repo_root=tmp_path)
+
+    assert not resolved.exists()
+
+
+def test_describe_artifact_skips_only_existence_and_hash_when_not_verifying(tmp_path):
+    entry = describe_artifact(
+        "artifacts/없는파일.json", repo_root=tmp_path, verify=False
+    )
+
+    assert entry["location"] == "local"
+    assert entry["sha256"] is None
+    assert entry["size_bytes"] is None
+    assert entry["verified"] is False
+    assert "URI schema는 검증했습니다" in entry["note"]
+
+
+def test_describe_artifact_still_requires_the_file_when_verifying(tmp_path):
+    with pytest.raises(CorruptedArtifactError):
+        describe_artifact("artifacts/없는파일.json", repo_root=tmp_path, verify=True)
+
+
+@pytest.mark.parametrize("verify", [True, False])
+def test_remote_uri_is_unaffected_by_verification_flag(tmp_path, verify):
+    entry = describe_artifact(
+        "s3://example-bucket/datasets/class_map.json",
+        repo_root=tmp_path,
+        verify=verify,
+    )
+
+    assert entry["location"] == "s3"
+    assert entry["verified"] is False

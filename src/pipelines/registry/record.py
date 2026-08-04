@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +55,14 @@ _SECRET_KEY_HINTS = (
 _REDACTED = "***"
 
 _HASH_CHUNK_SIZE = 1024 * 1024
+
+# `scheme://`로 시작하는 URI는 local 상대 경로가 아닙니다. 계약이 허용하는 원격
+# artifact는 s3:// 뿐이므로, 나머지 scheme은 검증을 우회하지 못하도록 막습니다.
+_URI_SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
+
+# Windows의 `C:artifacts\...`는 Path.is_absolute()가 False지만 drive 기준 경로라
+# 저장소 상대 경로가 아닙니다. POSIX에서 실행할 때도 동일하게 막습니다.
+_WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
 
 
 class RegistryError(RuntimeError):
@@ -186,11 +195,42 @@ def _hash_local_file(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+def resolve_local_uri(uri: str, *, repo_root: Path) -> Path:
+    """Local artifact URI가 계약을 지키는지 확인하고 실제 경로를 돌려줍니다.
+
+    이 검증은 `verify_artifacts` 설정과 관계없이 **항상** 수행합니다. 파일이
+    실제로 있는지는 확인하지 않으므로, 존재 확인과 해시 계산만 선택적으로
+    생략할 수 있습니다.
+    """
+
+    if _URI_SCHEME_PATTERN.match(uri):
+        raise InvalidSchemaError(
+            f"local artifact는 저장소 기준 상대 경로여야 하고 원격 artifact는 "
+            f"s3:// 를 써야 합니다: {uri}"
+        )
+
+    candidate = Path(uri)
+    if candidate.is_absolute() or _WINDOWS_DRIVE_PATTERN.match(uri):
+        raise InvalidSchemaError(
+            f"local artifact는 저장소 기준 상대 경로여야 합니다: {uri}"
+        )
+
+    path = (repo_root / candidate).resolve()
+    try:
+        path.relative_to(repo_root)
+    except ValueError as error:
+        raise InvalidSchemaError(
+            f"local artifact 경로가 저장소 밖을 가리킵니다: {uri}"
+        ) from error
+    return path
+
+
 def describe_artifact(uri: str, *, repo_root: Path, verify: bool = True) -> dict[str, Any]:
     """Artifact 하나의 위치와 무결성 정보를 만듭니다.
 
-    local artifact는 저장소 root 기준 상대 경로로 보고 sha256을 계산합니다.
-    `s3://` artifact는 AWS 접근 없이 기록만 하고 검증은 건너뜁니다.
+    local artifact는 저장소 root 기준 상대 경로여야 하며, 이 URI schema 검증은
+    `verify`와 관계없이 항상 수행합니다. `verify`가 false면 파일 존재 확인과
+    sha256 계산만 생략합니다. `s3://` artifact는 AWS 접근 없이 기록만 합니다.
     """
 
     if is_remote_uri(uri):
@@ -203,6 +243,9 @@ def describe_artifact(uri: str, *, repo_root: Path, verify: bool = True) -> dict
             "note": "원격 artifact는 AWS 접근 없이 참조만 기록했습니다.",
         }
 
+    # URI schema 검증은 verify 값과 무관하게 항상 먼저 수행합니다.
+    path = resolve_local_uri(uri, repo_root=repo_root)
+
     entry: dict[str, Any] = {
         "uri": uri,
         "location": "local",
@@ -211,22 +254,11 @@ def describe_artifact(uri: str, *, repo_root: Path, verify: bool = True) -> dict
         "verified": False,
     }
     if not verify:
-        entry["note"] = "registry.verify_artifacts가 false여서 검증을 건너뛰었습니다."
-        return entry
-
-    candidate = Path(uri)
-    if candidate.is_absolute():
-        raise InvalidSchemaError(
-            f"local artifact는 저장소 기준 상대 경로여야 합니다: {uri}"
+        entry["note"] = (
+            "registry.verify_artifacts가 false여서 존재 확인과 sha256 계산을 "
+            "건너뛰었습니다. URI schema는 검증했습니다."
         )
-
-    path = (repo_root / candidate).resolve()
-    try:
-        path.relative_to(repo_root)
-    except ValueError as error:
-        raise InvalidSchemaError(
-            f"local artifact 경로가 저장소 밖을 가리킵니다: {uri}"
-        ) from error
+        return entry
 
     if not path.is_file():
         raise CorruptedArtifactError(f"local artifact file을 찾을 수 없습니다: {uri}")

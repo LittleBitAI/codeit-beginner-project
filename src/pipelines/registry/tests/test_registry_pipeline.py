@@ -279,6 +279,55 @@ def test_artifact_outside_repository_returns_error(local_run):
     assert "저장소 밖" in result["message"]
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "/etc/passwd",
+        "C:/Windows/model.pt",
+        "C:artifacts/model.pt",
+        "../outside/class_map.json",
+        "artifacts/../../outside/class_map.json",
+        "https://example.com/class_map.json",
+    ],
+)
+def test_bad_local_uri_is_rejected_even_when_verification_is_off(local_run, uri):
+    """verify_artifacts=false로 URI 계약을 우회할 수 없어야 합니다."""
+
+    repo_root, inputs = local_run
+    broken = copy.deepcopy(inputs)
+    broken["data"]["class_map_uri"] = uri
+
+    result = registry.run(make_config(repo_root, broken, verify_artifacts=False))
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert not list((repo_root / "artifacts" / "registry").rglob("*.json"))
+
+
+def test_verification_off_skips_only_existence_and_hash(local_run):
+    """존재 확인과 해시만 생략하고, 나머지 동작은 그대로여야 합니다."""
+
+    repo_root, inputs = local_run
+    (repo_root / inputs["evaluate"]["predictions_uri"]).unlink()
+
+    result = registry.run(make_config(repo_root, inputs, verify_artifacts=False))
+
+    assert result["status"] == "ok"
+    assert result["summary"]["artifacts_hashed"] == 0
+    assert result["summary"]["artifacts_checked"] == 9
+
+    record = json.loads(
+        (repo_root / result["artifacts"]["experiment_record_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    entry = record["pipelines"]["evaluate"]["predictions_uri"]
+    assert entry["location"] == "local"
+    assert entry["sha256"] is None
+    assert entry["verified"] is False
+    assert "URI schema는 검증했습니다" in entry["note"]
+
+
 def test_existing_record_is_not_overwritten_by_default(local_run):
     repo_root, inputs = local_run
 

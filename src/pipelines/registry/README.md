@@ -39,9 +39,15 @@ registry는 `config["inputs"]`에서 이전 pipeline 결과를 읽고 **수정�
 ### URI 규칙
 
 - 이름이 `_uri`로 끝나는 key만 실제 artifact 파일을 가리킵니다.
-- local artifact는 **저장소 root 기준 상대 경로**를 씁니다. 절대 경로와 저장소
-  밖을 가리키는 경로(`../`)는 오류입니다.
+- local artifact는 **저장소 root 기준 상대 경로**를 씁니다. 아래는 모두 오류입니다.
+  - 절대 경로 (`/etc/passwd`, `C:/Windows/model.pt`, `//server/share/model.pt`)
+  - Windows drive 기준 경로 (`C:artifacts/model.pt`)
+  - 저장소 밖으로 나가는 경로 (`../outside/model.pt`,
+    `artifacts/../../outside/model.pt`)
+  - `s3://` 이외의 scheme (`https://...`, `file://...`)
 - 원격 artifact는 `s3://bucket/key` 형식을 씁니다.
+- **이 URI schema 검증은 `verify_artifacts` 값과 관계없이 항상 수행합니다.**
+  `verify_artifacts: false`는 파일 존재 확인과 sha256 계산만 생략합니다.
 - 위 표에 없는 key가 더 들어와도 오류는 아니며, record에 기록되지 않고 무시됩니다.
 
 ## key 누락과 타입 오류 시 동작
@@ -59,8 +65,13 @@ registry는 `config["inputs"]`에서 이전 pipeline 결과를 읽고 **수정�
 | 값이 빈 문자열 | `InvalidSchemaError` | `... 비어 있지 않은 문자열이어야 합니다.` |
 | pipeline 값이 object가 아님 | `InvalidSchemaError` | `config['inputs']['train']는 object여야 합니다.` |
 | `train.run_id != evaluate.run_id` | `InvalidSchemaError` | `train과 evaluate의 run_id가 서로 다릅니다: ...` |
-| local artifact 경로가 절대/저장소 밖 | `InvalidSchemaError` | `local artifact는 저장소 기준 상대 경로여야 합니다: ...` |
+| local artifact 경로가 절대 경로 | `InvalidSchemaError` | `local artifact는 저장소 기준 상대 경로여야 합니다: ...` |
+| local artifact 경로가 저장소 밖 | `InvalidSchemaError` | `local artifact 경로가 저장소 밖을 가리킵니다: ...` |
+| 지원하지 않는 URI scheme | `InvalidSchemaError` | `local artifact는 저장소 기준 상대 경로여야 하고 원격 artifact는 s3:// 를 써야 합니다: ...` |
 | local artifact file 없음/읽기 실패 | `CorruptedArtifactError` | `local artifact file을 찾을 수 없습니다: ...` |
+
+앞의 세 가지 URI schema 오류는 `verify_artifacts: false`일 때도 그대로 발생합니다.
+`CorruptedArtifactError`(존재 확인)만 `verify_artifacts: false`에서 생략됩니다.
 
 세 예외 모두 `RegistryError`를 상속하므로, registry 내부에서 한 번에 잡을 수
 있습니다.
@@ -72,7 +83,7 @@ registry는 `config["inputs"]`에서 이전 pipeline 결과를 읽고 **수정�
 | `run_id` | `str` | train/evaluate의 `run_id` 승계 | record의 실행 식별자 |
 | `record_uri` | `str` | `registry/<run_id>/experiment_record.json` | record 저장 위치 (storage root 기준) |
 | `overwrite` | `bool` | `false` | 이미 있는 record를 덮어쓸지 여부 |
-| `verify_artifacts` | `bool` | `true` | local artifact의 sha256 계산 여부 |
+| `verify_artifacts` | `bool` | `true` | local artifact의 **존재 확인과 sha256 계산** 여부. `false`여도 URI schema 검증은 항상 수행합니다. |
 | `repo_root` | `str` | module 위치에서 계산한 저장소 root | local artifact를 찾을 기준 경로 |
 | `seed` | `int` | `config["seed"]` 또는 `0` | record에 남길 seed |
 
