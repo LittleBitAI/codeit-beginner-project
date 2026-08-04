@@ -13,11 +13,22 @@
 | key | 타입 | 설명 |
 | --- | --- | --- |
 | `status` | `str` | 실행 상태. `main_pipeline`은 `"ok"`가 아니면 이후 pipeline을 실행하지 않고 중단합니다. |
-| `artifacts` | `dict` | pipeline이 생성한 artifact 정보. 다음 pipeline에는 `config["inputs"]`로 전달됩니다. |
-| `summary` | `dict` | 실행 결과 요약. |
+| `artifacts` | **JSON 직렬화 가능한 `dict`** | pipeline이 생성한 artifact 정보. 다음 pipeline에는 `config["inputs"]`로 전달됩니다. |
+| `summary` | **JSON 직렬화 가능한 `dict`** | 실행 결과 요약. |
 | `message` | `str` | 사용자에게 전달할 설명 또는 오류 내용. |
 
 `bool`은 `str`이나 `dict` 자리에 올 수 없습니다.
+
+### `artifacts`와 `summary`의 추가 제약
+
+두 값은 그대로 JSON으로 기록되므로 **일반 `Mapping`이 아니라 `dict`여야 하고, `json.dumps()`로 직렬화할 수 있어야 합니다.**
+
+- `MappingProxyType`처럼 `Mapping`이지만 `json.dumps()`에서 실패하는 값은 거부합니다. 검증을 통과시키면 나중에 저장 시점에 깨집니다.
+- `set`, `datetime` 등 JSON으로 못 바꾸는 값이 안에 들어 있으면 거부합니다.
+- `NaN`과 `Infinity`도 거부합니다. 표준 JSON이 아니라 다른 도구가 읽을 때 깨집니다.
+- `OrderedDict`처럼 `dict`를 상속하고 직렬화 가능한 값은 허용합니다.
+
+값을 `dict`로 만들려면 `dict(...)`로 복사해서 반환하세요.
 
 ### 검증 방식
 
