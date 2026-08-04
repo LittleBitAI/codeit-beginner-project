@@ -1,4 +1,10 @@
 from .config import load_config
+from .contract import (
+    REQUIRED_RETURN_KEYS,
+    RETURN_SCHEMA,
+    PipelineContractError,
+    validate_pipeline_result,
+)
 from .storage import (
     LOGICAL_S3_PREFIXES,
     BucketNotFoundError,
@@ -17,11 +23,14 @@ from .storage import (
 
 __all__ = [
     "LOGICAL_S3_PREFIXES",
+    "REQUIRED_RETURN_KEYS",
+    "RETURN_SCHEMA",
     "BucketNotFoundError",
     "CredentialsNotFoundError",
     "LocalStorage",
     "ObjectAlreadyExistsError",
     "ObjectNotFoundError",
+    "PipelineContractError",
     "S3Storage",
     "Storage",
     "StorageAccessDeniedError",
@@ -30,4 +39,5 @@ __all__ = [
     "StorageError",
     "create_storage",
     "load_config",
+    "validate_pipeline_result",
 ]
