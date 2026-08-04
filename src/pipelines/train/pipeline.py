@@ -19,6 +19,7 @@ from src.common import S3Storage, Storage, StorageError, create_storage
 
 from .dataset import CocoDetectionDataset, REPOSITORY_ROOT, load_class_map, read_json_artifact
 from .model import ARCHITECTURE, build_model
+from .progress import ProgressEmitter
 from .trainer import set_seed, train_model
 
 
@@ -243,9 +244,21 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("train and validation manifests contain overlapping images")
         if train_dataset.category_ids != validation_dataset.category_ids:
             raise ValueError("train and validation COCO category ids must match")
+        progress = ProgressEmitter(settings["run_id"])
+        progress.emit(
+            "run_started",
+            architecture=ARCHITECTURE,
+            device=settings["device"],
+            epochs=settings["epochs"],
+            train_images=len(train_dataset),
+            validation_images=len(validation_dataset),
+            class_count=len(class_map),
+        )
         set_seed(settings["seed"])
         model = build_model(len(class_map) + 1, pretrained=settings["pretrained"])
-        best, last, history = train_model(model, train_dataset, validation_dataset, settings)
+        best, last, history = train_model(
+            model, train_dataset, validation_dataset, settings, progress
+        )
 
     category_ids = train_dataset.category_ids
     best_payload = _checkpoint_payload(best, settings, class_map, category_ids)
