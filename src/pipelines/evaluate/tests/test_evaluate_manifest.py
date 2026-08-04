@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 
 import pytest
 
@@ -16,6 +17,16 @@ VALID_RECORD = {
     "width": 100,
     "height": 100,
     "annotations": [{"category_id": 1, "bbox": [10, 10, 20, 20]}],
+}
+
+VALID_COCO = {
+    "images": [
+        {"id": 1, "file_name": "images/img-1.jpg", "width": 100, "height": 80}
+    ],
+    "annotations": [
+        {"id": 10, "image_id": 1, "category_id": 7, "bbox": [10, 5, 20, 30]}
+    ],
+    "categories": [{"id": 7, "name": "pill"}],
 }
 
 
@@ -38,6 +49,14 @@ def test_parse_manifest_ignores_blank_lines():
     assert len(parse_manifest(text, source="manifest.jsonl")) == 1
 
 
+def test_single_jsonl_record_keeps_coco_named_extra_fields():
+    record = dict(VALID_RECORD, images=["legacy metadata"], categories=["legacy metadata"])
+
+    records = parse_manifest(_jsonl(record), source="manifest.jsonl")
+
+    assert records[0]["image_id"] == "img-1"
+
+
 def test_parse_manifest_rejects_empty_manifest():
     with pytest.raises(InputArtifactError, match="record가 없습니다"):
         parse_manifest("\n\n", source="manifest.jsonl")
@@ -51,7 +70,7 @@ def test_parse_manifest_rejects_broken_json():
 def test_parse_manifest_rejects_missing_field():
     broken = {key: value for key, value in VALID_RECORD.items() if key != "width"}
 
-    with pytest.raises(InputArtifactError, match="필수 field가 없습니다"):
+    with pytest.raises(InputArtifactError, match=r"#line\[1\].*필수 field가 없습니다"):
         parse_manifest(_jsonl(broken), source="manifest.jsonl")
 
 
@@ -74,6 +93,95 @@ def test_parse_manifest_rejects_invalid_bbox(bbox, message):
 
     with pytest.raises(InputArtifactError, match=message):
         parse_manifest(_jsonl(record), source="manifest.jsonl")
+
+
+def test_parse_manifest_accepts_coco_object_and_resolves_relative_image_uri():
+    records = parse_manifest(
+        json.dumps(VALID_COCO), source="data/validation/instances.json"
+    )
+
+    assert records == [
+        {
+            "image_id": 1,
+            "image_key": "1",
+            "image_uri": "data/validation/images/img-1.jpg",
+            "width": 100,
+            "height": 80,
+            "annotations": [{"category_id": 7, "bbox": [10.0, 5.0, 20.0, 30.0]}],
+        }
+    ]
+
+
+def test_parse_manifest_resolves_coco_image_relative_to_s3_manifest():
+    records = parse_manifest(
+        json.dumps(VALID_COCO), source="s3://pill-data/validation/instances.json"
+    )
+
+    assert records[0]["image_uri"] == "s3://pill-data/validation/images/img-1.jpg"
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value", "message"),
+    [
+        ("annotations", "image_id", 999, "존재하지 않는 image_id"),
+        ("annotations", "category_id", 999, "존재하지 않는 category_id"),
+        ("annotations", "bbox", [90, 70, 20, 20], "이미지 범위"),
+        ("images", "width", 0, "0보다 큰 정수"),
+        ("images", "height", 1.5, "0보다 큰 정수"),
+    ],
+)
+def test_parse_manifest_rejects_invalid_coco_references_and_sizes(
+    section, field, value, message
+):
+    document = deepcopy(VALID_COCO)
+    document[section][0][field] = value
+
+    with pytest.raises(InputArtifactError, match=message):
+        parse_manifest(json.dumps(document), source="instances.json")
+
+
+@pytest.mark.parametrize(
+    ("section", "message"),
+    [
+        ("images", "image id가 중복"),
+        ("categories", "category id가 중복"),
+        ("annotations", "annotation id가 중복"),
+    ],
+)
+def test_parse_manifest_rejects_duplicate_coco_ids(section, message):
+    document = deepcopy(VALID_COCO)
+    document[section].append(dict(document[section][0]))
+
+    with pytest.raises(InputArtifactError, match=message):
+        parse_manifest(json.dumps(document), source="instances.json")
+
+
+@pytest.mark.parametrize("section", ["images", "categories", "annotations"])
+@pytest.mark.parametrize("invalid_id", [True, -1, 1.5, "1"])
+def test_parse_manifest_rejects_invalid_coco_id_types(section, invalid_id):
+    document = deepcopy(VALID_COCO)
+    document[section][0]["id"] = invalid_id
+
+    with pytest.raises(InputArtifactError, match="id는 0 이상의 정수"):
+        parse_manifest(json.dumps(document), source="instances.json")
+
+
+@pytest.mark.parametrize("iscrowd", [True, -1, 2, 0.0, "0"])
+def test_parse_manifest_rejects_invalid_coco_iscrowd(iscrowd):
+    document = deepcopy(VALID_COCO)
+    document["annotations"][0]["iscrowd"] = iscrowd
+
+    with pytest.raises(InputArtifactError, match="iscrowd는 0 또는 1"):
+        parse_manifest(json.dumps(document), source="instances.json")
+
+
+@pytest.mark.parametrize("field", ["images", "annotations", "categories"])
+def test_parse_manifest_rejects_missing_coco_top_level_field(field):
+    document = deepcopy(VALID_COCO)
+    document.pop(field)
+
+    with pytest.raises(InputArtifactError, match="COCO manifest 필수 field"):
+        parse_manifest(json.dumps(document), source="instances.json")
 
 
 def test_parse_class_map_supports_both_formats():

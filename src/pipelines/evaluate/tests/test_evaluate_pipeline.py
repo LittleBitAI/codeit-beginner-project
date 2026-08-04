@@ -155,6 +155,69 @@ def test_broken_manifest_returns_error_without_writing_artifacts(
     assert not (repository_root / "artifacts/evaluate/evaluate-0001").exists()
 
 
+def test_successful_run_accepts_coco_validation_manifest(
+    base_config: dict, repository_root: Path
+):
+    write_json(
+        repository_root / "data/val/manifest.jsonl",
+        {
+            "images": [
+                {"id": 1, "file_name": "img-1.jpg", "width": 100, "height": 100},
+                {"id": 2, "file_name": "img-2.jpg", "width": 100, "height": 100},
+            ],
+            "annotations": [
+                {"id": 1, "image_id": 1, "category_id": 1, "bbox": [10, 10, 20, 20]},
+                {"id": 2, "image_id": 1, "category_id": 2, "bbox": [50, 50, 20, 20]},
+                {"id": 3, "image_id": 2, "category_id": 1, "bbox": [30, 30, 10, 10]},
+            ],
+            "categories": [
+                {"id": 1, "name": "tylenol"},
+                {"id": 2, "name": "aspirin"},
+            ],
+        },
+    )
+    write_json(
+        repository_root / "data/val/predictions.json",
+        [
+            {"image_id": 1, "category_id": 1, "bbox": [10, 10, 20, 20], "score": 0.95},
+            {"image_id": 1, "category_id": 2, "bbox": [50, 50, 20, 20], "score": 0.90},
+            {"image_id": 2, "category_id": 1, "bbox": [30, 30, 10, 10], "score": 0.80},
+        ],
+    )
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    assert set(result["artifacts"]) == ARTIFACT_KEYS
+    assert result["summary"]["image_count"] == 2
+    assert result["summary"]["annotation_count"] == 3
+    assert result["summary"]["metrics"]["mAP"] == pytest.approx(1.0)
+
+
+def test_coco_manifest_with_unknown_reference_returns_error_without_artifacts(
+    base_config: dict, repository_root: Path
+):
+    write_json(
+        repository_root / "data/val/manifest.jsonl",
+        {
+            "images": [
+                {"id": 1, "file_name": "img-1.jpg", "width": 100, "height": 100}
+            ],
+            "annotations": [
+                {"id": 1, "image_id": 999, "category_id": 1, "bbox": [10, 10, 20, 20]}
+            ],
+            "categories": [{"id": 1, "name": "tylenol"}],
+        },
+    )
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert "존재하지 않는 image_id" in result["message"]
+    assert not (repository_root / "artifacts/evaluate/evaluate-0001").exists()
+
+
 def test_prediction_for_unknown_image_returns_error(base_config: dict, repository_root: Path):
     write_json(
         repository_root / "data/val/predictions.json",

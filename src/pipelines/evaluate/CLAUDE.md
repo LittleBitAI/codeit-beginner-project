@@ -21,7 +21,7 @@ result = run(config)  # {"status", "artifacts", "summary", "message"}
 | key | 기본값 | 설명 |
 | --- | --- | --- |
 | `run_id` | `inputs.train.run_id` → `evaluate-<UTC timestamp>` | 산출물 directory 이름 |
-| `validation_manifest_uri` | `inputs.data.validation_manifest_uri` | 필수. JSONL manifest |
+| `validation_manifest_uri` | `inputs.data.validation_manifest_uri` | 필수. JSONL 또는 COCO manifest |
 | `class_map_uri` | `inputs.data.class_map_uri` | 선택. 없으면 class 이름에 category_id 사용 |
 | `checkpoint_uri` | `inputs.train.best_checkpoint_uri` | checkpoint 추론에 사용 |
 | `predictions_input_uri` | 없음 | 지정하면 추론을 건너뛰고 이 예측으로 metric만 계산 |
@@ -38,7 +38,11 @@ result = run(config)  # {"status", "artifacts", "summary", "message"}
 
 ## 입력 형식
 
-### validation manifest (JSONL, 한 줄이 이미지 한 장)
+### validation manifest
+
+기존 JSONL과 COCO 단일 JSON object를 모두 지원합니다.
+
+JSONL은 한 줄이 이미지 한 장입니다.
 
 ```json
 {"image_id": "img-1", "image_uri": "datasets/.../img-1.jpg", "width": 640, "height": 480,
@@ -46,6 +50,18 @@ result = run(config)  # {"status", "artifacts", "summary", "message"}
 ```
 
 `bbox`는 COCO와 같은 pixel 단위 `[x, y, width, height]`이며 이미지 범위를 벗어나면 오류입니다. `image_id`는 manifest 안에서 유일해야 합니다.
+
+COCO 형식은 최상위 `images`, `annotations`, `categories` list가 모두 필요합니다.
+
+```json
+{
+  "images": [{"id": 1, "file_name": "images/img-1.jpg", "width": 640, "height": 480}],
+  "annotations": [{"id": 1, "image_id": 1, "category_id": 7, "bbox": [10, 10, 40, 40]}],
+  "categories": [{"id": 7, "name": "pill"}]
+}
+```
+
+COCO `file_name`은 manifest가 있는 directory 기준 local 또는 S3 URI로 해석합니다. image/category/annotation id의 형식과 중복, annotation 참조, 양의 이미지 크기, bbox의 숫자·크기·이미지 범위를 모두 검증합니다.
 
 ### class map (JSON)
 

@@ -1,6 +1,7 @@
 """Validation manifest와 class map을 읽고 schema를 검증합니다.
 
-Manifest는 JSON Lines(JSONL) 형식이며 한 줄이 이미지 한 장을 뜻합니다.
+Manifest는 기존 JSON Lines(JSONL) 형식과 COCO 단일 JSON object를 지원합니다.
+JSONL은 한 줄이 이미지 한 장을 뜻합니다.
 
     {"image_id": "img-1", "image_uri": "datasets/.../a.jpg", "width": 640,
      "height": 480,
@@ -13,15 +14,19 @@ from __future__ import annotations
 
 import json
 import math
+import posixpath
 import re
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .errors import InputArtifactError
-from .storage_io import ArtifactStore
+from .storage_io import ArtifactStore, is_remote_uri
 
 
 REQUIRED_RECORD_FIELDS = ("image_id", "image_uri", "width", "height")
+REQUIRED_COCO_FIELDS = ("images", "annotations", "categories")
 _INTEGER_TEXT = re.compile(r"[+-]?\d+")
 
 
@@ -31,6 +36,10 @@ def _is_number(value: Any) -> bool:
 
 def _positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _coco_id(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def normalize_image_key(value: Any) -> str:
@@ -80,8 +89,8 @@ def _parse_annotation(value: Any, *, label: str, width: int, height: int) -> dic
     return {"category_id": category_id, "bbox": [x, y, box_width, box_height]}
 
 
-def parse_manifest(text: str, *, source: str) -> list[dict[str, Any]]:
-    """JSONL manifest 문자열을 검증하고 정규화된 record 목록을 반환합니다."""
+def _parse_jsonl_manifest(text: str, *, source: str) -> list[dict[str, Any]]:
+    """기존 JSONL manifest를 검증하고 정규화합니다."""
     records: list[dict[str, Any]] = []
     seen_keys: set[str] = set()
 
@@ -139,9 +148,184 @@ def parse_manifest(text: str, *, source: str) -> list[dict[str, Any]]:
     return records
 
 
+def _resolve_coco_image_uri(
+    file_name: str,
+    *,
+    source: str,
+    store: ArtifactStore | None,
+) -> str:
+    """COCO file_name을 manifest가 있는 directory 기준 URI로 해석합니다."""
+    if is_remote_uri(file_name):
+        return file_name
+
+    normalized_name = file_name.replace("\\", "/")
+    if is_remote_uri(source):
+        parsed = urlsplit(source)
+        if not parsed.netloc:
+            raise InputArtifactError(f"{source}: 유효한 S3 manifest URI가 아닙니다.")
+        parent = posixpath.dirname(parsed.path.lstrip("/"))
+        key = posixpath.normpath(
+            posixpath.join(parent, normalized_name.lstrip("/"))
+        )
+        if key in {"", ".", ".."} or key.startswith("../"):
+            raise InputArtifactError(
+                f"{source}: COCO file_name이 S3 bucket 범위를 벗어났습니다: {file_name}"
+            )
+        return f"s3://{parsed.netloc}/{key}"
+
+    if store is not None:
+        manifest_path = store.local_path(source)
+        image_path = store.local_path(str(manifest_path.parent / Path(normalized_name)))
+        return store.normalize_uri(image_path)
+
+    return (Path(source).parent / Path(normalized_name)).as_posix()
+
+
+def _parse_coco_manifest(
+    document: Mapping[str, Any],
+    *,
+    source: str,
+    store: ArtifactStore | None,
+) -> list[dict[str, Any]]:
+    missing = [field for field in REQUIRED_COCO_FIELDS if field not in document]
+    if missing:
+        raise InputArtifactError(
+            f"{source}: COCO manifest 필수 field가 없습니다: {', '.join(missing)}"
+        )
+    for field in REQUIRED_COCO_FIELDS:
+        if not isinstance(document[field], list):
+            raise InputArtifactError(f"{source}: COCO {field}는 list여야 합니다.")
+
+    category_ids: set[int] = set()
+    category_names: set[str] = set()
+    for index, entry in enumerate(document["categories"]):
+        label = f"{source}#categories[{index}]"
+        if not isinstance(entry, Mapping):
+            raise InputArtifactError(f"{label}: category 항목은 object여야 합니다.")
+        category_id = entry.get("id")
+        if not _coco_id(category_id):
+            raise InputArtifactError(f"{label}: id는 0 이상의 정수여야 합니다.")
+        if category_id in category_ids:
+            raise InputArtifactError(f"{label}: category id가 중복되었습니다: {category_id}")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise InputArtifactError(f"{label}: name은 비어 있지 않은 문자열이어야 합니다.")
+        normalized_name = name.strip()
+        if normalized_name in category_names:
+            raise InputArtifactError(f"{label}: category name이 중복되었습니다: {normalized_name}")
+        category_ids.add(category_id)
+        category_names.add(normalized_name)
+
+    records: list[dict[str, Any]] = []
+    records_by_id: dict[int, dict[str, Any]] = {}
+    for index, entry in enumerate(document["images"]):
+        label = f"{source}#images[{index}]"
+        if not isinstance(entry, Mapping):
+            raise InputArtifactError(f"{label}: image 항목은 object여야 합니다.")
+        image_id = entry.get("id")
+        if not _coco_id(image_id):
+            raise InputArtifactError(f"{label}: id는 0 이상의 정수여야 합니다.")
+        if image_id in records_by_id:
+            raise InputArtifactError(f"{label}: image id가 중복되었습니다: {image_id}")
+        file_name = entry.get("file_name")
+        if not isinstance(file_name, str) or not file_name.strip():
+            raise InputArtifactError(
+                f"{label}: file_name은 비어 있지 않은 문자열이어야 합니다."
+            )
+        width, height = entry.get("width"), entry.get("height")
+        if not _positive_int(width) or not _positive_int(height):
+            raise InputArtifactError(f"{label}: width와 height는 0보다 큰 정수여야 합니다.")
+
+        record = {
+            "image_id": image_id,
+            "image_key": normalize_image_key(image_id),
+            "image_uri": _resolve_coco_image_uri(
+                file_name.strip(), source=source, store=store
+            ),
+            "width": width,
+            "height": height,
+            "annotations": [],
+        }
+        records.append(record)
+        records_by_id[image_id] = record
+
+    if not records:
+        raise InputArtifactError(f"COCO manifest에 image가 없습니다: {source}")
+
+    annotation_ids: set[int] = set()
+    for index, entry in enumerate(document["annotations"]):
+        label = f"{source}#annotations[{index}]"
+        if not isinstance(entry, Mapping):
+            raise InputArtifactError(f"{label}: annotation 항목은 object여야 합니다.")
+        annotation_id = entry.get("id")
+        if not _coco_id(annotation_id):
+            raise InputArtifactError(f"{label}: id는 0 이상의 정수여야 합니다.")
+        if annotation_id in annotation_ids:
+            raise InputArtifactError(
+                f"{label}: annotation id가 중복되었습니다: {annotation_id}"
+            )
+        image_id = entry.get("image_id")
+        if not _coco_id(image_id) or image_id not in records_by_id:
+            raise InputArtifactError(
+                f"{label}: 존재하지 않는 image_id를 참조합니다: {image_id!r}"
+            )
+        category_id = entry.get("category_id")
+        if not _coco_id(category_id) or category_id not in category_ids:
+            raise InputArtifactError(
+                f"{label}: 존재하지 않는 category_id를 참조합니다: {category_id!r}"
+            )
+        iscrowd = entry.get("iscrowd", 0)
+        if (
+            not isinstance(iscrowd, int)
+            or isinstance(iscrowd, bool)
+            or iscrowd not in {0, 1}
+        ):
+            raise InputArtifactError(f"{label}: iscrowd는 0 또는 1이어야 합니다.")
+
+        image_record = records_by_id[image_id]
+        annotation = _parse_annotation(
+            entry,
+            label=label,
+            width=image_record["width"],
+            height=image_record["height"],
+        )
+        image_record["annotations"].append(annotation)
+        annotation_ids.add(annotation_id)
+
+    return records
+
+
+def _looks_like_coco(document: Any) -> bool:
+    if not isinstance(document, Mapping):
+        return False
+    # 기존 JSONL의 단일 record도 전체 text로는 유효한 JSON object입니다.
+    # JSONL field가 하나라도 있으면 먼저 기존 parser로 보내 누락 field의
+    # line 단위 오류 형식을 유지합니다.
+    if any(field in document for field in REQUIRED_RECORD_FIELDS):
+        return False
+    return any(field in document for field in REQUIRED_COCO_FIELDS)
+
+
+def parse_manifest(
+    text: str,
+    *,
+    source: str,
+    store: ArtifactStore | None = None,
+) -> list[dict[str, Any]]:
+    """JSONL 또는 COCO manifest를 검증해 같은 record 목록으로 정규화합니다."""
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError:
+        document = None
+
+    if _looks_like_coco(document):
+        return _parse_coco_manifest(document, source=source, store=store)
+    return _parse_jsonl_manifest(text, source=source)
+
+
 def load_manifest(store: ArtifactStore, uri: str) -> list[dict[str, Any]]:
     """Manifest artifact를 읽고 검증합니다."""
-    return parse_manifest(store.read_text(uri), source=uri)
+    return parse_manifest(store.read_text(uri), source=uri, store=store)
 
 
 def parse_class_map(document: Any, *, source: str) -> dict[int, str]:
