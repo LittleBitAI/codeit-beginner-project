@@ -59,6 +59,35 @@ def test_reads_registry_local_result_uri_without_duplicating_storage_root(tmp_pa
     assert record["schema_version"] == "1.0"
 
 
+def test_reads_local_result_when_repo_root_equals_registry_named_storage_root(tmp_path):
+    repo_and_storage_root = tmp_path / "registry"
+    config = {
+        "storage": {
+            "backend": "local",
+            "local": {"root": str(repo_and_storage_root)},
+        },
+        "registry": {
+            "repo_root": str(repo_and_storage_root),
+            "verify_artifacts": False,
+            "created_at": "2026-08-04T00:00:00+00:00",
+        },
+        "inputs": registry_inputs(),
+    }
+    registry_result = registry.run(config)
+
+    assert registry_result["status"] == "ok"
+    record_uri = registry_result["artifacts"]["experiment_record_uri"]
+    assert record_uri == "registry/exp-lookup/experiment_record.json"
+
+    record = read_experiment_record(
+        record_uri,
+        config,
+        expected_run_id="exp-lookup",
+    )
+
+    assert record["run_id"] == "exp-lookup"
+
+
 def test_s3_uri_is_passed_to_storage_unchanged(monkeypatch):
     uri = "s3://example-bucket/registry/exp-lookup/experiment_record.json"
     storage = Mock()
@@ -104,11 +133,18 @@ def test_rejects_expected_run_id_mismatch(monkeypatch):
 
 
 def test_wraps_storage_error_with_public_error(monkeypatch):
+    uri = "registry/record.json?credential=SENSITIVE_URI_VALUE"
     storage = Mock()
-    storage.read_json.side_effect = ObjectNotFoundError("mock record 없음")
+    storage.read_json.side_effect = ObjectNotFoundError(
+        "token=SENSITIVE_STORAGE_VALUE"
+    )
     monkeypatch.setattr(experiment_registry, "create_storage", lambda config: storage)
 
-    with pytest.raises(ExperimentRegistryError, match="읽지 못했습니다") as error:
-        read_experiment_record("registry/missing.json", {})
+    with pytest.raises(ExperimentRegistryError, match="ObjectNotFoundError") as error:
+        read_experiment_record(uri, {})
 
+    message = str(error.value)
+    assert uri not in message
+    assert "SENSITIVE_URI_VALUE" not in message
+    assert "SENSITIVE_STORAGE_VALUE" not in message
     assert isinstance(error.value.__cause__, ObjectNotFoundError)

@@ -1,9 +1,12 @@
 import ast
 import inspect
+from unittest.mock import Mock
 
 import pytest
 
+import src.common.experiment_registry as experiment_registry
 from src.common import ExperimentRegistryError, validate_pipeline_result
+from src.common.storage import ObjectNotFoundError
 from src.pipelines import web
 
 
@@ -63,6 +66,23 @@ def test_web_returns_contract_error_when_facade_fails(monkeypatch):
     assert result["artifacts"] == {}
     assert "record schema 오류" in result["message"]
     assert validate_pipeline_result(result, pipeline_name="web") is result
+
+
+def test_web_message_hides_record_uri_and_storage_error_detail(monkeypatch):
+    uri = "s3://example-bucket/record.json?credential=SENSITIVE_URI_VALUE"
+    storage = Mock()
+    storage.read_json.side_effect = ObjectNotFoundError(
+        "token=SENSITIVE_STORAGE_VALUE"
+    )
+    monkeypatch.setattr(experiment_registry, "create_storage", lambda config: storage)
+
+    result = web.run({"web": {"experiment_record_uri": uri}})
+
+    assert result["status"] == "error"
+    assert "ObjectNotFoundError" in result["message"]
+    assert uri not in result["message"]
+    assert "SENSITIVE_URI_VALUE" not in result["message"]
+    assert "SENSITIVE_STORAGE_VALUE" not in result["message"]
 
 
 @pytest.mark.parametrize("uri", (None, "", "   ", 123))

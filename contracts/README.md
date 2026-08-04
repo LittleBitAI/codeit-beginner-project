@@ -60,14 +60,18 @@ record = read_experiment_record(
 
 이 interface는 `create_storage(config).read_json(...)`으로 지정된 record 하나만
 읽습니다. Prefix listing, 최신 record 검색, 다른 실험으로의 fallback은 하지
-않습니다. Local registry 결과가 repository 기준 `artifacts/registry/...`이고
-`LocalStorage.root`가 `<repo>/artifacts`이면 겹치는 `artifacts` prefix만 제거해
-같은 file을 읽습니다. `s3://` URI는 변경하지 않고 그대로 storage에 전달합니다.
+않습니다. Local URI는 `config["registry"]["repo_root"]`(없으면 common module
+위치에서 계산한 repository root) 기준 절대 후보로 해석합니다. 이 후보가 실제
+`LocalStorage.root` 안에 있을 때만 storage 기준 상대 경로로 바꾸므로, 이름이
+같다는 이유만으로 URI segment를 제거하지 않습니다. `s3://` URI는 변경하지 않고
+그대로 storage에 전달합니다.
 
 조회 결과는 object(`dict`)여야 하고 `run_id`는 비어 있지 않은 문자열이어야
 합니다. `expected_run_id`를 주면 record의 `run_id`와 정확히 같아야 합니다.
 Storage, schema, run ID 검증 실패는 모두 public `ExperimentRegistryError`로
-보고됩니다.
+보고됩니다. Storage 실패의 public message에는 입력 URI, query, backend 오류
+원문을 넣지 않고 안전한 예외 type만 표시하며, 원래 예외는 `__cause__`로
+보존합니다.
 
 ### Web 경계
 

@@ -11,36 +11,49 @@ from .storage import LocalStorage, StorageError, create_storage
 
 __all__ = ["ExperimentRegistryError", "read_experiment_record"]
 
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
 
 class ExperimentRegistryError(RuntimeError):
     """Experiment record 조회 또는 최소 schema 검증이 실패한 경우입니다."""
 
 
-def _local_read_source(uri: str, storage: LocalStorage) -> str:
+def _repo_root(config: Mapping[str, Any] | None) -> Path:
+    """Registry와 같은 config 규칙으로 repository root를 결정합니다."""
+
+    registry_config = config.get("registry") if isinstance(config, Mapping) else None
+    if registry_config is None:
+        return _REPOSITORY_ROOT
+    if not isinstance(registry_config, Mapping):
+        raise ExperimentRegistryError("config['registry']는 object여야 합니다.")
+
+    configured = registry_config.get("repo_root")
+    if configured is None:
+        return _REPOSITORY_ROOT
+    if not isinstance(configured, str) or not configured.strip():
+        raise ExperimentRegistryError(
+            "config['registry']['repo_root']는 비어 있지 않은 문자열이어야 합니다."
+        )
+    return Path(configured).expanduser().resolve()
+
+
+def _local_read_source(uri: str, storage: LocalStorage, repo_root: Path) -> str:
     """Registry의 repo-relative URI를 LocalStorage root 기준으로 맞춥니다.
 
-    Registry는 local 저장 결과를 repository 기준 상대 경로로 반환할 수 있습니다.
-    예를 들어 storage root가 ``<repo>/artifacts``이면 반환 URI는
-    ``artifacts/registry/...``입니다. URI 선두와 root 끝의 겹치는 경로만
-    제거해 LocalStorage가 ``artifacts/artifacts``로 중복 해석하지 않게 합니다.
+    이름이 같은 path segment를 추측해 제거하지 않습니다. URI를 registry의
+    repository root 기준 절대 후보로 만든 뒤, 그 후보가 실제 LocalStorage root
+    안에 있을 때만 storage 기준 상대 경로로 바꿉니다.
     """
 
     candidate = Path(uri)
     if candidate.is_absolute():
         return uri
 
-    uri_parts = candidate.parts
-    root_parts = storage.root.parts
-    maximum = min(len(uri_parts), len(root_parts))
-    for size in range(maximum, 0, -1):
-        uri_prefix = tuple(part.casefold() for part in uri_parts[:size])
-        root_suffix = tuple(part.casefold() for part in root_parts[-size:])
-        if uri_prefix != root_suffix:
-            continue
-        remainder = uri_parts[size:]
-        if remainder:
-            return Path(*remainder).as_posix()
-    return uri
+    absolute_candidate = (repo_root / candidate).resolve()
+    try:
+        return absolute_candidate.relative_to(storage.root).as_posix()
+    except ValueError:
+        return uri
 
 
 def read_experiment_record(
@@ -73,14 +86,15 @@ def read_experiment_record(
     try:
         storage = create_storage(config)
         source = (
-            _local_read_source(uri, storage)
+            _local_read_source(uri, storage, _repo_root(config))
             if isinstance(storage, LocalStorage)
             else uri
         )
         record = storage.read_json(source)
     except StorageError as error:
         raise ExperimentRegistryError(
-            f"experiment record를 읽지 못했습니다 ({uri}): {error}"
+            "experiment record storage 조회에 실패했습니다 "
+            f"({type(error).__name__})."
         ) from error
 
     if not isinstance(record, dict):
