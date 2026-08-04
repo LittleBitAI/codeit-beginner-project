@@ -1,0 +1,72 @@
+/* 색과 글꼴 값은 tokens.ts가 :root에 주입한 CSS 변수만 씁니다(단일 출처). */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-surface-page);
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  color: var(--color-text);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+a {
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-scrollbar);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.pulse-dot {
+  animation: pulse 1.6s infinite;
+}
+
+/* 추정값은 측정값과 시각적으로 구분합니다: 기울임 + ~ 접두 + 점선 밑줄 */
+.estimated {
+  font-style: italic;
+  border-bottom: 1px dotted #c9d3e0;
+}

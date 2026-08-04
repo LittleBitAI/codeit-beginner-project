@@ -1,0 +1,6 @@
+# 저장소 root의 .editorconfig를 이어받고 TypeScript 규칙만 더합니다.
+# root = true 를 쓰지 않으므로 상위 설정(UTF-8, LF, 마지막 줄 개행)이 그대로 적용됩니다.
+
+[*.{ts,tsx,js,jsx,css,html}]
+indent_style = space
+indent_size = 2
