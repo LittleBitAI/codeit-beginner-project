@@ -138,6 +138,32 @@ def test_filter_predictions_applies_score_threshold_and_top_k():
     ]
 
 
+def test_uncomputed_thresholds_are_reported_as_null():
+    """0.5나 0.75를 계산하지 않았다면 0.0이 아니라 None으로 남아야 합니다."""
+    records = [_record("img-1", [{"category_id": 1, "bbox": [10, 10, 20, 20]}])]
+    predictions = [_prediction("img-1", 1, [10, 10, 20, 20], 0.9)]
+
+    report = evaluate_detections(records, predictions, iou_thresholds=[0.6, 0.7])
+
+    assert report["metrics"]["mAP"] == pytest.approx(1.0)
+    assert report["metrics"]["mAP50"] is None
+    assert report["metrics"]["mAP75"] is None
+    assert report["metrics"]["precision50"] is None
+    assert report["metrics"]["recall50"] is None
+    assert report["per_class"][0]["ap50"] is None
+    assert report["per_class"][0]["precision50"] is None
+
+
+def test_computed_thresholds_keep_zero_apart_from_null():
+    """계산은 했지만 맞힌 게 없는 경우는 None이 아니라 0.0이어야 합니다."""
+    records = [_record("img-1", [{"category_id": 1, "bbox": [10, 10, 20, 20]}])]
+
+    report = evaluate_detections(records, [], iou_thresholds=[0.5, 0.75])
+
+    assert report["metrics"]["mAP50"] == 0.0
+    assert report["metrics"]["mAP75"] == 0.0
+
+
 def test_filter_predictions_without_limit_keeps_every_detection():
     predictions = [_prediction("img-1", 1, [0, 0, 10, 10], score) for score in (0.9, 0.8, 0.7)]
 

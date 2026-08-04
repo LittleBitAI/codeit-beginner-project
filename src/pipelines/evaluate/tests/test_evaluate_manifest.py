@@ -88,3 +88,24 @@ def test_parse_class_map_supports_both_formats():
 def test_parse_class_map_rejects_invalid_document():
     with pytest.raises(InputArtifactError, match="object여야 합니다"):
         parse_class_map(["tylenol"], source="class_map.json")
+
+
+@pytest.mark.parametrize("category_id", [True, False, 1.5, 1.0, "1.5", "", "abc", None, [1]])
+def test_parse_class_map_rejects_non_integer_ids(category_id):
+    """int()로는 통과하지만 뜻이 달라지는 값(true, 1.5 등)을 막습니다."""
+    with pytest.raises(InputArtifactError, match="category id는 정수여야 합니다"):
+        parse_class_map({"classes": [{"id": category_id, "name": "tylenol"}]}, source="c.json")
+
+
+def test_parse_class_map_accepts_integer_text_ids():
+    assert parse_class_map({" 12 ": "tylenol", "-3": "aspirin"}, source="c.json") == {
+        12: "tylenol",
+        -3: "aspirin",
+    }
+
+
+def test_parse_class_map_rejects_duplicate_ids():
+    document = {"classes": [{"id": 1, "name": "tylenol"}, {"id": "1", "name": "aspirin"}]}
+
+    with pytest.raises(InputArtifactError, match="중복되었습니다"):
+        parse_class_map(document, source="class_map.json")

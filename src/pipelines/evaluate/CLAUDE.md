@@ -77,7 +77,11 @@ result = run(config)  # {"status", "artifacts", "summary", "message"}
 - `metrics.json`: 실행 metadata, `iou_thresholds`, `metrics`(`mAP`, `mAP50`, `mAP75`, `precision50`, `recall50`), `per_class` 목록
 - `predictions.json`: 실행 metadata와 평가에 실제로 사용한 detection 목록(`bbox_format`은 `xywh`)
 
-Local 산출물 URI는 저장소 기준 상대 경로, S3 산출물은 `s3://bucket/key`로 반환합니다. 두 file 모두 UTF-8 without BOM, LF로 저장합니다.
+`iou_thresholds`에 0.5 또는 0.75가 없으면 계산하지 않은 `mAP50`, `mAP75`, `precision50`, `recall50`은 `0.0`이 아니라 `null`로 남습니다. `predictions.json`의 `bbox`와 `score`는 평가에 사용한 값 그대로 저장합니다. 반올림하면 저장된 predictions로 다시 평가할 때 metric이 달라질 수 있기 때문입니다.
+
+Local 산출물 URI는 저장소 기준 상대 경로, S3 산출물은 `s3://bucket/key`로 반환합니다. 두 file 모두 UTF-8 without BOM, LF로 저장합니다. `metrics_filename`과 `predictions_filename`이 같아 한 산출물이 다른 산출물을 덮어쓰는 설정은 실행 전에 거부합니다.
+
+Local 경로는 읽기와 쓰기 모두 저장소 root 안으로 제한합니다. `..`나 저장소 밖 절대 경로는 오류입니다.
 
 ## Metric 정의
 
@@ -85,7 +89,9 @@ pycocotools를 추가하지 않고 COCO 정의를 numpy로 구현합니다. 101-
 
 ## 실패 처리
 
-모든 실패는 `EvaluateError` 계열(`ConfigurationError`, `InputArtifactError`, `PredictionError`, `ArtifactWriteError`)로 모아 `status="error"`와 설명 message로 반환합니다. 산출물은 metric 계산이 모두 끝난 뒤에 쓰며, 두 번째 file 저장이 실패하면 이번 실행에서 만든 local file만 지웁니다. S3 object는 자동으로 지우지 않고 message로 알립니다.
+모든 실패는 `EvaluateError` 계열(`ConfigurationError`, `InputArtifactError`, `PredictionError`, `ArtifactWriteError`)로 모아 `status="error"`와 설명 message로 반환합니다. 산출물은 metric 계산이 모두 끝난 뒤에 씁니다.
+
+두 번째 file 저장이 실패하면 **이번 실행에서 새로 만든** local file만 지웁니다. `overwrite=true`로 기존 file 위에 덮어쓴 경우 그 file은 실행 전부터 있던 산출물이므로 지우지 않습니다. S3 object는 어떤 경우에도 자동으로 지우지 않고 message로 알립니다.
 
 ## Test
 

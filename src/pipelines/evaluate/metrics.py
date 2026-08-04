@@ -155,6 +155,8 @@ def evaluate_detections(
     목록이라고 가정합니다.
     """
     thresholds = [float(threshold) for threshold in iou_thresholds]
+    has_50 = 0.5 in thresholds
+    has_75 = 0.75 in thresholds
     names = dict(class_names or {})
 
     truths_by_class: dict[int, dict[str, list[list[float]]]] = {}
@@ -188,34 +190,36 @@ def evaluate_detections(
             results[threshold] = _average_precision(matched, truth_count)
 
         average_precisions = [results[threshold][0] for threshold in thresholds]
-        precision_50, recall_50 = results.get(0.5, (0.0, 0.0, 0.0))[1:]
+        scored = truth_count > 0
         per_class.append(
             {
                 "category_id": category_id,
                 "name": names.get(category_id, str(category_id)),
-                "ap": _mean(average_precisions) if truth_count else None,
-                "ap50": results[0.5][0] if 0.5 in results and truth_count else None,
-                "ap75": results[0.75][0] if 0.75 in results and truth_count else None,
-                "precision50": precision_50 if truth_count else None,
-                "recall50": recall_50 if truth_count else None,
+                "ap": _mean(average_precisions) if scored else None,
+                "ap50": results[0.5][0] if scored and has_50 else None,
+                "ap75": results[0.75][0] if scored and has_75 else None,
+                "precision50": results[0.5][1] if scored and has_50 else None,
+                "recall50": results[0.5][2] if scored and has_50 else None,
                 "truth_count": truth_count,
                 "prediction_count": len(detections),
             }
         )
 
-    scored = [entry for entry in per_class if entry["truth_count"] > 0]
+    scored_classes = [entry for entry in per_class if entry["truth_count"] > 0]
     return {
         "iou_thresholds": thresholds,
         "image_count": len(records),
         "annotation_count": annotation_count,
         "prediction_count": len(predictions),
-        "evaluated_class_count": len(scored),
+        "evaluated_class_count": len(scored_classes),
         "metrics": {
-            "mAP": _mean([entry["ap"] for entry in scored]),
-            "mAP50": _mean([entry["ap50"] for entry in scored if entry["ap50"] is not None]),
-            "mAP75": _mean([entry["ap75"] for entry in scored if entry["ap75"] is not None]),
-            "precision50": _mean([entry["precision50"] for entry in scored]),
-            "recall50": _mean([entry["recall50"] for entry in scored]),
+            "mAP": _mean([entry["ap"] for entry in scored_classes]),
+            "mAP50": _mean([entry["ap50"] for entry in scored_classes]) if has_50 else None,
+            "mAP75": _mean([entry["ap75"] for entry in scored_classes]) if has_75 else None,
+            "precision50": (
+                _mean([entry["precision50"] for entry in scored_classes]) if has_50 else None
+            ),
+            "recall50": _mean([entry["recall50"] for entry in scored_classes]) if has_50 else None,
         },
         "per_class": per_class,
     }

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -21,6 +22,7 @@ from .storage_io import ArtifactStore
 
 
 REQUIRED_RECORD_FIELDS = ("image_id", "image_uri", "width", "height")
+_INTEGER_TEXT = re.compile(r"[+-]?\d+")
 
 
 def _is_number(value: Any) -> bool:
@@ -39,6 +41,20 @@ def normalize_image_key(value: Any) -> str:
     if not key:
         raise InputArtifactError("image_id는 비어 있을 수 없습니다.")
     return key
+
+
+def _strict_category_id(value: Any, *, source: str) -> int:
+    """정수 또는 정수 문자열만 category id로 받아들입니다.
+
+    `True`나 `1.5`처럼 int()로는 통과하지만 뜻이 달라지는 값은 거부합니다.
+    """
+    if isinstance(value, bool):
+        raise InputArtifactError(f"{source}: category id는 정수여야 합니다: {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and _INTEGER_TEXT.fullmatch(value.strip()):
+        return int(value.strip())
+    raise InputArtifactError(f"{source}: category id는 정수여야 합니다: {value!r}")
 
 
 def _parse_annotation(value: Any, *, label: str, width: int, height: int) -> dict[str, Any]:
@@ -148,10 +164,9 @@ def parse_class_map(document: Any, *, source: str) -> dict[int, str]:
 
     class_map: dict[int, str] = {}
     for raw_id, raw_name in entries:
-        try:
-            category_id = int(raw_id)
-        except (TypeError, ValueError) as error:
-            raise InputArtifactError(f"{source}: category id는 정수여야 합니다: {raw_id!r}") from error
+        category_id = _strict_category_id(raw_id, source=source)
+        if category_id in class_map:
+            raise InputArtifactError(f"{source}: category id가 중복되었습니다: {category_id}")
         if not isinstance(raw_name, str) or not raw_name.strip():
             raise InputArtifactError(f"{source}: class 이름은 비어 있지 않은 문자열이어야 합니다.")
         class_map[category_id] = raw_name.strip()

@@ -190,14 +190,22 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
     if not isinstance(overwrite, bool):
         raise ConfigurationError("evaluate.overwrite는 true 또는 false여야 합니다.")
 
+    metrics_uri = join_uri(output_dir, metrics_filename)
+    predictions_uri = join_uri(output_dir, predictions_filename)
+    if metrics_uri == predictions_uri:
+        raise ConfigurationError(
+            "metrics와 predictions는 같은 위치에 저장할 수 없습니다. "
+            f"evaluate.metrics_filename과 evaluate.predictions_filename을 다르게 두세요: {metrics_uri}"
+        )
+
     return Settings(
         run_id=resolved_run_id,
         validation_manifest_uri=manifest_uri,
         class_map_uri=class_map_uri,
         checkpoint_uri=checkpoint_uri,
         predictions_input_uri=predictions_input_uri,
-        metrics_uri=join_uri(output_dir, metrics_filename),
-        predictions_uri=join_uri(output_dir, predictions_filename),
+        metrics_uri=metrics_uri,
+        predictions_uri=predictions_uri,
         iou_thresholds=_resolve_iou_thresholds(settings.get("iou_thresholds")),
         score_threshold=float(score_threshold),
         max_detections_per_image=_resolve_max_detections(settings.get("max_detections_per_image")),
@@ -218,11 +226,15 @@ def _error_result(message: str) -> dict[str, Any]:
 
 
 def _public_prediction(prediction: Mapping[str, Any]) -> dict[str, Any]:
+    """평가에 사용한 값을 그대로 남깁니다.
+
+    반올림하면 저장된 predictions로 다시 평가할 때 metric이 달라질 수 있습니다.
+    """
     return {
         "image_id": prediction["image_id"],
         "category_id": prediction["category_id"],
-        "bbox": [round(float(value), 4) for value in prediction["bbox"]],
-        "score": round(float(prediction["score"]), 6),
+        "bbox": [float(value) for value in prediction["bbox"]],
+        "score": float(prediction["score"]),
     }
 
 
@@ -246,7 +258,7 @@ def run(config: dict) -> dict:
         }
 
     started_at = _utc_now()
-    written_uris: list[str] = []
+    created_uris: list[str] = []
     store: ArtifactStore | None = None
 
     try:
@@ -315,19 +327,23 @@ def run(config: dict) -> dict:
             "bbox_format": "xywh",
             "predictions": [_public_prediction(prediction) for prediction in predictions],
         }
+        predictions_existed = store.exists(settings.predictions_uri)
         predictions_uri = store.write_json(
             settings.predictions_uri, predictions_document, overwrite=settings.overwrite
         )
-        written_uris.append(settings.predictions_uri)
+        if not predictions_existed:
+            created_uris.append(settings.predictions_uri)
 
         metrics_document = {**common_fields, **report}
+        metrics_existed = store.exists(settings.metrics_uri)
         metrics_uri = store.write_json(
             settings.metrics_uri, metrics_document, overwrite=settings.overwrite
         )
-        written_uris.append(settings.metrics_uri)
+        if not metrics_existed:
+            created_uris.append(settings.metrics_uri)
     except EvaluateError as error:
         if store is not None:
-            for uri in written_uris:
+            for uri in created_uris:
                 store.remove_local(uri)
         return _error_result(str(error))
 

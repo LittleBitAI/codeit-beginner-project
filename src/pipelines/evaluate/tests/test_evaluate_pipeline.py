@@ -255,6 +255,124 @@ def test_dummy_execution_mode_keeps_previous_behaviour():
     assert result["artifacts"] == {}
 
 
+def test_same_filename_for_both_artifacts_is_rejected(base_config: dict, repository_root: Path):
+    """한 산출물이 다른 산출물을 덮어쓰지 않도록 실행 전에 막습니다."""
+    base_config["evaluate"]["metrics_filename"] = "result.json"
+    base_config["evaluate"]["predictions_filename"] = "result.json"
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "같은 위치에 저장할 수 없습니다" in result["message"]
+    assert not (repository_root / "artifacts/evaluate/evaluate-0001").exists()
+
+
+def test_failed_metrics_write_keeps_pre_existing_predictions(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """overwrite 실행이 중간에 실패해도 실행 전부터 있던 file은 지우지 않습니다."""
+    from src.pipelines.evaluate import storage_io
+
+    predictions_path = repository_root / "artifacts/evaluate/evaluate-0001/predictions.json"
+    predictions_path.parent.mkdir(parents=True, exist_ok=True)
+    predictions_path.write_text('{"from": "previous run"}\n', encoding="utf-8", newline="\n")
+    base_config["evaluate"]["overwrite"] = True
+
+    original_write_json = storage_io.ArtifactStore.write_json
+
+    def write_json(self, uri, value, *, overwrite=False):
+        if uri.endswith("metrics.json"):
+            raise storage_io.ArtifactWriteError("의도한 저장 실패")
+        return original_write_json(self, uri, value, overwrite=overwrite)
+
+    monkeypatch.setattr(storage_io.ArtifactStore, "write_json", write_json)
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert result["message"] == "의도한 저장 실패"
+    assert predictions_path.is_file()
+
+
+def test_failed_metrics_write_removes_newly_created_predictions(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from src.pipelines.evaluate import storage_io
+
+    original_write_json = storage_io.ArtifactStore.write_json
+
+    def write_json(self, uri, value, *, overwrite=False):
+        if uri.endswith("metrics.json"):
+            raise storage_io.ArtifactWriteError("의도한 저장 실패")
+        return original_write_json(self, uri, value, overwrite=overwrite)
+
+    monkeypatch.setattr(storage_io.ArtifactStore, "write_json", write_json)
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert not (repository_root / "artifacts/evaluate/evaluate-0001/predictions.json").exists()
+
+
+def test_saved_predictions_reproduce_the_same_metrics(
+    base_config: dict, repository_root: Path
+):
+    """저장된 predictions로 다시 평가해도 같은 metric이 나와야 합니다."""
+    write_json(
+        repository_root / "data/val/predictions.json",
+        [
+            {
+                "image_id": "img-1",
+                "category_id": 1,
+                "bbox": [10.000123456789, 10.98765432101, 20.111111111, 20.999999999],
+                "score": 0.123456789012345,
+            },
+            {"image_id": "img-2", "category_id": 1, "bbox": [30, 30, 10, 10], "score": 0.8},
+        ],
+    )
+    first = run(base_config)
+    assert first["status"] == "ok", first["message"]
+
+    rerun_config = copy.deepcopy(base_config)
+    rerun_config["evaluate"]["run_id"] = "evaluate-0002"
+    rerun_config["evaluate"]["predictions_input_uri"] = first["artifacts"]["predictions_uri"]
+    second = run(rerun_config)
+
+    assert second["status"] == "ok", second["message"]
+    assert second["summary"]["metrics"] == first["summary"]["metrics"]
+
+
+def test_repository_outside_paths_are_rejected(base_config: dict, repository_root: Path):
+    base_config["evaluate"]["validation_manifest_uri"] = "../outside/manifest.jsonl"
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "저장소 root 밖의 local 경로" in result["message"]
+
+
+def test_output_dir_outside_the_repository_is_rejected(base_config: dict, repository_root: Path):
+    base_config["evaluate"]["output_dir"] = "../outside/evaluate"
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "저장소 root 밖의 local 경로" in result["message"]
+    assert not (repository_root.parent / "outside").exists()
+
+
+def test_metrics_without_iou_50_report_null(base_config: dict, repository_root: Path):
+    base_config["evaluate"]["iou_thresholds"] = [0.6, 0.7]
+
+    result = run(base_config)
+    metrics = _read_json(repository_root, result["artifacts"]["metrics_uri"])
+
+    assert result["status"] == "ok", result["message"]
+    assert metrics["metrics"]["mAP50"] is None
+    assert metrics["metrics"]["mAP75"] is None
+    assert metrics["metrics"]["mAP"] == pytest.approx(1.0)
+
+
 def test_settings_prefer_own_config_over_inputs(base_config: dict, repository_root: Path):
     base_config["evaluate"]["validation_manifest_uri"] = "data/val/manifest.jsonl"
     base_config["inputs"]["data"]["validation_manifest_uri"] = "data/val/other.jsonl"

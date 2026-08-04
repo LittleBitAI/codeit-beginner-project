@@ -59,11 +59,18 @@ class ArtifactStore:
         return self._storage
 
     def local_path(self, uri: str) -> Path:
-        """Local URI를 저장소 root 기준으로 해석합니다."""
+        """Local URI를 저장소 root 기준으로 해석하고 root 밖 경로를 막습니다."""
         candidate = Path(uri).expanduser()
-        if candidate.is_absolute():
-            return candidate
-        return self.repository_root / candidate
+        absolute = candidate if candidate.is_absolute() else self.repository_root / candidate
+        resolved = absolute.resolve()
+        root = self.repository_root.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError as error:
+            raise InputArtifactError(
+                f"저장소 root 밖의 local 경로는 사용할 수 없습니다: {uri}"
+            ) from error
+        return resolved
 
     def normalize_uri(self, uri: str | Path) -> str:
         """저장 결과를 계약 형식(S3 URI 또는 저장소 기준 상대 경로)으로 바꿉니다."""
@@ -154,7 +161,7 @@ class ArtifactStore:
             return
         try:
             self.local_path(uri).unlink(missing_ok=True)
-        except OSError:
+        except (OSError, InputArtifactError):
             return
 
 
