@@ -15,7 +15,7 @@ from torchvision.models.detection import FasterRCNN
 from src.common import LocalStorage, S3Storage, StorageError
 from src.pipelines import train
 from src.pipelines.train import pipeline
-from src.pipelines.train.dataset import REPOSITORY_ROOT
+from src.pipelines.train.dataset import REPOSITORY_ROOT, load_class_map
 from src.pipelines.train.model import build_model
 from src.pipelines.train.trainer import train_model
 
@@ -200,6 +200,56 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
         assert checkpoint["category_ids"] == [0, 7]
         assert checkpoint["num_classes"] == 2
         assert checkpoint["seed"] == 17
+
+
+def test_load_class_map_converts_category_ids_in_sorted_order_without_mutating_input():
+    document = {"11": " capsule ", "7": "pill"}
+    original = copy.deepcopy(document)
+    storage = Mock()
+    storage.read_json.return_value = document
+
+    class_map = load_class_map("s3://bucket/class-map.json", storage)
+
+    assert class_map == {"pill": 1, "capsule": 2}
+    assert document == original
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ({"7": "pill", "11": " pill "}, "names must be unique"),
+        ({"category-seven": "pill"}, "category ids must be non-negative integers"),
+        ({"-7": "pill"}, "category ids must be non-negative integers"),
+        ({"7": "   "}, "names must be non-empty strings"),
+        ({"1": "pill", "01": "capsule"}, "category ids must be unique"),
+    ],
+)
+def test_load_class_map_rejects_invalid_category_id_format(document, message):
+    storage = Mock()
+    storage.read_json.return_value = document
+
+    with pytest.raises(ValueError, match=message):
+        load_class_map("s3://bucket/class-map.json", storage)
+
+
+def test_run_accepts_category_id_to_name_class_map_and_keeps_checkpoint_contract(
+    local_config,
+):
+    class_map_path = REPOSITORY_ROOT / local_config["inputs"]["data"]["class_map_uri"]
+    _write_json(class_map_path, {"7": "pill"})
+    original_inputs = copy.deepcopy(local_config["inputs"])
+
+    result = train.run(local_config)
+
+    assert result["status"] == "ok"
+    assert local_config["inputs"] == original_inputs
+    checkpoint = torch.load(
+        REPOSITORY_ROOT / result["artifacts"]["best_checkpoint_uri"],
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert checkpoint["class_map"] == {"pill": 1}
+    assert checkpoint["category_ids"] == [0, 7]
 
 
 def test_checkpoint_category_ids_are_indexed_by_model_label():
