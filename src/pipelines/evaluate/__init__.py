@@ -1,11 +1,5 @@
+"""Evaluate pipeline: validation manifest와 예측으로 detection metric을 만듭니다."""
+
+from .pipeline import run
+
 __all__ = ["run"]
-
-
-def run(config: dict) -> dict:
-    """Evaluate pipeline의 연결 상태를 확인하는 dummy 실행입니다."""
-    return {
-        "status": "ok",
-        "artifacts": {},
-        "summary": {"pipeline": "evaluate", "mode": "dummy"},
-        "message": "evaluate pipeline dummy 실행 완료",
-    }
