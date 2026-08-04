@@ -1,0 +1,19 @@
+{
+  "data": {
+    "train_manifest_uri": "artifacts/data/train_manifest.json",
+    "validation_manifest_uri": "artifacts/data/validation_manifest.json",
+    "class_map_uri": "artifacts/data/class_map.json",
+    "dataset_summary_uri": "artifacts/data/dataset_summary.json"
+  },
+  "train": {
+    "run_id": "exp-0001",
+    "best_checkpoint_uri": "artifacts/train/exp-0001/best_checkpoint.pt",
+    "last_checkpoint_uri": "artifacts/train/exp-0001/last_checkpoint.pt",
+    "training_history_uri": "artifacts/train/exp-0001/training_history.json"
+  },
+  "evaluate": {
+    "run_id": "exp-0001",
+    "metrics_uri": "artifacts/evaluate/exp-0001/metrics.json",
+    "predictions_uri": "artifacts/evaluate/exp-0001/predictions.json"
+  }
+}
