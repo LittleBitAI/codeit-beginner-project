@@ -5,6 +5,7 @@ from .contract import (
     PipelineContractError,
     validate_pipeline_result,
 )
+from .experiment_registry import ExperimentRegistryError, read_experiment_record
 from .storage import (
     LOGICAL_S3_PREFIXES,
     BucketNotFoundError,
@@ -27,6 +28,7 @@ __all__ = [
     "RETURN_SCHEMA",
     "BucketNotFoundError",
     "CredentialsNotFoundError",
+    "ExperimentRegistryError",
     "LocalStorage",
     "ObjectAlreadyExistsError",
     "ObjectNotFoundError",
@@ -39,5 +41,6 @@ __all__ = [
     "StorageError",
     "create_storage",
     "load_config",
+    "read_experiment_record",
     "validate_pipeline_result",
 ]

@@ -35,6 +35,13 @@ def test_valid_result_passes_and_is_returned_unchanged():
     assert validate_pipeline_result(result, pipeline_name="data") is result
 
 
+def test_status_outside_allowed_values_is_rejected():
+    with pytest.raises(PipelineContractError) as error:
+        validate_pipeline_result(valid_result(status="pending"), pipeline_name="train")
+
+    assert "'status'는 'ok' 또는 'error'여야 합니다." in str(error.value)
+
+
 def test_missing_key_names_the_key():
     result = valid_result()
     del result["message"]
@@ -96,6 +103,19 @@ def test_non_mapping_result_is_rejected():
 
     assert "object(dict)를 반환해야" in str(error.value)
     assert "list" in str(error.value)
+
+
+def test_top_level_mapping_proxy_type_is_rejected():
+    """최상위 반환값은 읽기 전용 Mapping이 아니라 실제 dict여야 합니다."""
+
+    result = MappingProxyType(valid_result())
+
+    with pytest.raises(PipelineContractError) as error:
+        validate_pipeline_result(result, pipeline_name="registry")
+
+    message = str(error.value)
+    assert "object(dict)를 반환해야" in message
+    assert "mappingproxy" in message
 
 
 def test_contract_error_is_a_value_error():

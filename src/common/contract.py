@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from typing import Any
 
 
@@ -25,6 +24,9 @@ JSON_SERIALIZABLE_KEYS = frozenset({"artifacts", "summary"})
 
 #: `RETURN_SCHEMA`의 key 집합입니다.
 REQUIRED_RETURN_KEYS = frozenset(RETURN_SCHEMA)
+
+#: pipeline status에 허용되는 공통 계약 값입니다.
+_ALLOWED_STATUS_VALUES = frozenset({"ok", "error"})
 
 #: 오류 메시지에 사용할 사람이 읽기 쉬운 타입 이름입니다.
 _TYPE_NAMES: dict[type, str] = {
@@ -61,14 +63,14 @@ class PipelineContractError(ValueError):
     """
 
 
-def validate_pipeline_result(result: Any, *, pipeline_name: str) -> Mapping[str, Any]:
+def validate_pipeline_result(result: Any, *, pipeline_name: str) -> dict[str, Any]:
     """`run(config)` 반환값이 공통 계약을 지키는지 확인하고 그대로 돌려줍니다.
 
     누락 key, 계약에 없는 key, 타입 불일치를 모두 모아 한 번에 알립니다.
     문제가 없으면 전달받은 `result`를 그대로 반환합니다.
     """
 
-    if not isinstance(result, Mapping):
+    if not isinstance(result, dict):
         raise PipelineContractError(
             f"{pipeline_name} pipeline은 공통 계약에 따라 object(dict)를 반환해야 하지만 "
             f"{_actual_type_name(result)}을(를) 반환했습니다."
@@ -93,6 +95,8 @@ def validate_pipeline_result(result: Any, *, pipeline_name: str) -> Mapping[str,
                 f"{_actual_type_name(value)}을(를) 받음"
             )
             continue
+        if key == "status" and value not in _ALLOWED_STATUS_VALUES:
+            problems.append("'status'는 'ok' 또는 'error'여야 합니다.")
         if key in JSON_SERIALIZABLE_KEYS:
             reason = _json_problem(value)
             if reason is not None:
