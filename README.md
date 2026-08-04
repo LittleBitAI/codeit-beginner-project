@@ -113,6 +113,22 @@ commit은 요청된 변경만 담고, message는 한국어로 작성합니다. �
 
 예: `프로젝트 공통 문서와 AI 작업 규칙 추가`, `README에 Git 협업 규칙 정리`
 
+### `git update-main`으로 main 업데이트하기
+
+저장소를 clone한 뒤 한 번만 다음 명령으로 local Git alias를 설치합니다.
+
+```
+python tools/git_update_main.py --install
+```
+
+작업을 시작하거나 Pull Request가 merge된 뒤 다음 명령으로 최신 `origin/main`을 가져옵니다.
+
+```
+git update-main
+```
+
+이 명령은 clean working tree를 확인하고 `main`으로 이동한 뒤 `git pull --ff-only origin main`을 실행합니다. 수정 중인 파일이 있거나 fast-forward가 불가능하면 변경을 숨기거나 history를 강제로 바꾸지 않고 중단합니다. 기존 작업 branch는 삭제하지 않으며, 완료 후 최신 commit과 Git 상태를 출력합니다.
+
 ### `git pr`로 Pull Request 만들기
 
 저장소를 clone한 뒤 한 번만 다음 명령으로 local Git alias를 설치합니다. GitHub CLI 설치와 `gh auth login` 인증이 먼저 필요합니다.
