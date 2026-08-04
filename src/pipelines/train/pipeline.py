@@ -125,12 +125,15 @@ def _checkpoint_payload(
     class_map: Mapping[str, int],
     category_ids: Mapping[int, int],
 ) -> dict[str, Any]:
+    category_ids_by_label = [0] + [
+        category_ids[label] for label in range(1, len(class_map) + 1)
+    ]
     return {
         **checkpoint,
         "architecture": ARCHITECTURE,
         "num_classes": len(class_map) + 1,
         "class_map": dict(class_map),
-        "category_ids": dict(category_ids),
+        "category_ids": category_ids_by_label,
         "seed": settings["seed"],
     }
 
