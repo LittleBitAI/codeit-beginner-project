@@ -9,6 +9,10 @@ from src.common.storage import S3Storage, StorageError
 
 SMOKE_URI = "s3://test-bucket/experiments/uploading/smoke-tests/fixed-id.json"
 SMOKE_KEY = "experiments/uploading/smoke-tests/fixed-id.json"
+PREFIXED_SMOKE_URI = (
+    "s3://test-bucket/team/dev/experiments/uploading/smoke-tests/fixed-id.json"
+)
+PREFIXED_SMOKE_KEY = "team/dev/experiments/uploading/smoke-tests/fixed-id.json"
 PAYLOAD_TEXT = (
     '{\n'
     '  "purpose": "pill-object-detection-s3-smoke-test",\n'
@@ -98,6 +102,23 @@ def test_versioned_bucket_deletes_the_uploaded_version():
     assert result["cleanup"]["version_id"] == "v-uploaded-1"
     # 삭제 확인도 해당 version을 직접 조회해야 합니다.
     assert storage.client.head_calls[-1] == {"Key": SMOKE_KEY, "VersionId": "v-uploaded-1"}
+
+
+def test_version_lookup_uses_the_prefixed_key_from_the_uploaded_uri():
+    storage = build_storage(version_id="v-uploaded-1")
+    storage.upload_file.return_value = PREFIXED_SMOKE_URI
+    storage.list.return_value = [PREFIXED_SMOKE_URI]
+
+    result = run(storage)
+
+    assert result["status"] == "ok"
+    assert storage.client.head_calls[0] == {
+        "Key": PREFIXED_SMOKE_KEY,
+        "VersionId": None,
+    }
+    assert storage.client.delete_calls == [
+        {"Key": PREFIXED_SMOKE_KEY, "VersionId": "v-uploaded-1"}
+    ]
 
 
 def test_unversioned_bucket_null_version_deletes_without_version_id():

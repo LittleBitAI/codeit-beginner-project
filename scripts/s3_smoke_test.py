@@ -128,7 +128,8 @@ def run_smoke_test(config_path: str | Path, *, keep: bool = False) -> dict:
             )
 
             object_uri = storage.upload_file(upload_path, object_key)
-            version_id = _version_id(storage, object_key)
+            uploaded_key = unquote(urlsplit(object_uri).path.lstrip("/"))
+            version_id = _version_id(storage, uploaded_key)
             storage.download_file(object_uri, download_path)
             downloaded_payload = json.loads(download_path.read_text(encoding="utf-8"))
             if downloaded_payload != payload:
