@@ -197,9 +197,24 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
         )
         assert checkpoint["architecture"] == "fasterrcnn_mobilenet_v3_large_320_fpn"
         assert checkpoint["class_map"] == {"pill": 1}
-        assert checkpoint["category_ids"] == {1: 7}
+        assert checkpoint["category_ids"] == [0, 7]
         assert checkpoint["num_classes"] == 2
         assert checkpoint["seed"] == 17
+
+
+def test_checkpoint_category_ids_are_indexed_by_model_label():
+    checkpoint = {"model_state_dict": {"weight": torch.tensor(1.0)}}
+
+    payload = pipeline._checkpoint_payload(
+        checkpoint,
+        {"seed": 17},
+        {"capsule": 2, "pill": 1},
+        {2: 11, 1: 7},
+    )
+
+    assert payload["category_ids"] == [0, 7, 11]
+    assert payload["model_state_dict"] is checkpoint["model_state_dict"]
+    assert payload["num_classes"] == 3
 
 
 def test_run_accepts_absolute_paths_returned_by_local_storage(tmp_path, monkeypatch):
