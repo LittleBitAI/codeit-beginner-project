@@ -2,7 +2,7 @@ import argparse
 import json
 from collections.abc import Sequence
 
-from src.common import load_config
+from src.common import load_config, validate_pipeline_result
 from src.pipelines import data, evaluate, registry, train, web
 
 
@@ -13,7 +13,6 @@ _STAGES = (
     ("registry", registry),
     ("web", web),
 )
-_RETURN_KEYS = {"status", "artifacts", "summary", "message"}
 
 
 def run(config: dict | None = None, only: str | None = None) -> dict:
@@ -33,9 +32,7 @@ def run(config: dict | None = None, only: str | None = None) -> dict:
         stage_config = dict(resolved_config)
         stage_config["inputs"] = dict(artifacts)
         result = pipeline.run(stage_config)
-
-        if set(result) != _RETURN_KEYS:
-            raise ValueError(f"{name} pipeline의 반환 key가 공통 계약과 다릅니다.")
+        validate_pipeline_result(result, pipeline_name=name)
 
         artifacts[name] = result["artifacts"]
         summaries[name] = result["summary"]

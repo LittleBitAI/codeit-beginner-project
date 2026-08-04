@@ -84,5 +84,24 @@ def test_pipeline_rejects_invalid_return_schema(monkeypatch):
         (("data", SimpleNamespace(run=invalid)),),
     )
 
-    with pytest.raises(ValueError, match="공통 계약과 다릅니다"):
+    with pytest.raises(ValueError, match="필수 key 누락: message"):
+        main_pipeline.run({})
+
+
+def test_pipeline_rejects_wrong_return_type(monkeypatch):
+    def wrong_type(config):
+        return {
+            "status": "ok",
+            "artifacts": [],
+            "summary": {},
+            "message": "",
+        }
+
+    monkeypatch.setattr(
+        main_pipeline,
+        "_STAGES",
+        (("data", SimpleNamespace(run=wrong_type)),),
+    )
+
+    with pytest.raises(ValueError, match="'artifacts' 타입 불일치"):
         main_pipeline.run({})
