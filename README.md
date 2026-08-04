@@ -93,7 +93,16 @@ Dependency를 설치하고 AWS 환경 변수를 설정한 뒤, 별도 승인을 
 python scripts/s3_smoke_test.py --config configs/env.aws.json
 ```
 
-Smoke test는 `experiments/uploading/smoke-tests/`에 고유한 작은 JSON object 하나를 업로드하고 다운로드 내용과 prefix listing을 확인합니다. Bucket·IAM·공개 접근 설정을 변경하거나 object를 자동 삭제하지 않습니다.
+저장소를 clone한 뒤 한 번만 다음 명령으로 local Git alias를 설치하면 `git s3-smoke`로도 실행할 수 있습니다.
+
+```powershell
+python scripts/s3_smoke_test.py --install
+git s3-smoke --config configs/env.aws.json
+```
+
+Smoke test는 `experiments/uploading/smoke-tests/`에 고유한 작은 임시 JSON object 하나를 업로드하고, 다운로드 내용과 prefix listing을 확인한 뒤 그 object를 삭제합니다. 삭제 후 실제로 사라졌는지까지 확인하며, 검증이 중간에 실패해도 업로드된 임시 object는 정리합니다. 남겨서 직접 확인하려면 `--keep`을 사용합니다.
+
+삭제에 실패하면 검증 결과를 가리지 않고 `status`가 `warning`이 되며, 종료 코드 1과 함께 남은 object URI를 알려줍니다. Bucket·IAM·공개 접근 설정은 변경하지 않고, 이 smoke test가 만든 object 외에는 삭제하지 않습니다.
 
 ## Git 협업 규칙
 
