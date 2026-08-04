@@ -35,6 +35,13 @@ def test_valid_result_passes_and_is_returned_unchanged():
     assert validate_pipeline_result(result, pipeline_name="data") is result
 
 
+def test_status_outside_allowed_values_is_rejected():
+    with pytest.raises(PipelineContractError) as error:
+        validate_pipeline_result(valid_result(status="pending"), pipeline_name="train")
+
+    assert "'status'는 'ok' 또는 'error'여야 합니다." in str(error.value)
+
+
 def test_missing_key_names_the_key():
     result = valid_result()
     del result["message"]

@@ -25,6 +25,9 @@ JSON_SERIALIZABLE_KEYS = frozenset({"artifacts", "summary"})
 #: `RETURN_SCHEMA`의 key 집합입니다.
 REQUIRED_RETURN_KEYS = frozenset(RETURN_SCHEMA)
 
+#: pipeline status에 허용되는 공통 계약 값입니다.
+_ALLOWED_STATUS_VALUES = frozenset({"ok", "error"})
+
 #: 오류 메시지에 사용할 사람이 읽기 쉬운 타입 이름입니다.
 _TYPE_NAMES: dict[type, str] = {
     str: "문자열(str)",
@@ -92,6 +95,8 @@ def validate_pipeline_result(result: Any, *, pipeline_name: str) -> dict[str, An
                 f"{_actual_type_name(value)}을(를) 받음"
             )
             continue
+        if key == "status" and value not in _ALLOWED_STATUS_VALUES:
+            problems.append("'status'는 'ok' 또는 'error'여야 합니다.")
         if key in JSON_SERIALIZABLE_KEYS:
             reason = _json_problem(value)
             if reason is not None:
