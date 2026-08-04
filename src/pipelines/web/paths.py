@@ -22,6 +22,12 @@ _WINDOWS_RESERVED_NAMES = frozenset(
 )
 
 
+def web_state_dir() -> Path:
+    """Web이 만드는 상태 파일의 뿌리 경로입니다."""
+
+    return REPOSITORY_ROOT / WEB_STATE_DIRNAME
+
+
 def config_dir() -> Path:
     """Runtime config를 저장할 절대 경로를 반환합니다."""
 

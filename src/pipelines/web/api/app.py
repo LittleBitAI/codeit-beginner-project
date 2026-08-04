@@ -19,7 +19,7 @@ from ..errors import (
     WebValidationError,
     error_payload,
 )
-from . import routes_gpu, routes_meta, routes_train
+from . import routes_data, routes_gpu, routes_meta, routes_train
 
 
 __all__ = ["ALLOWED_ORIGINS", "create_app"]
@@ -121,6 +121,7 @@ def create_app(*, serve_frontend: bool = True) -> FastAPI:
     _register_error_handlers(app)
     app.include_router(routes_meta.router)
     app.include_router(routes_train.router)
+    app.include_router(routes_data.router)
     app.include_router(routes_gpu.router)
 
     if serve_frontend and _FRONTEND_DIST.is_dir():

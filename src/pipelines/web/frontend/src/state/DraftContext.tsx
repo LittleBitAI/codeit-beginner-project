@@ -16,6 +16,8 @@ interface DraftContextValue {
   draft: Draft;
   setTrainField: (name: string, value: string) => void;
   setDataField: (name: string, value: string) => void;
+  /** 전처리 데이터셋을 고르면 4칸을 한꺼번에 채웁니다. */
+  setDataFields: (values: Record<string, string>) => void;
   resetDraft: () => void;
   saved: CreatedConfig | null;
   setSaved: (value: CreatedConfig | null) => void;
@@ -67,11 +69,18 @@ export function DraftProvider({ children }: { children: ReactNode }) {
     [draft, update],
   );
 
+  const setDataFields = useCallback(
+    (values: Record<string, string>) => {
+      update({ ...draft, data: { ...draft.data, ...values } });
+    },
+    [draft, update],
+  );
+
   const resetDraft = useCallback(() => update(EMPTY_DRAFT), [update]);
 
   const value = useMemo(
-    () => ({ draft, setTrainField, setDataField, resetDraft, saved, setSaved }),
-    [draft, setTrainField, setDataField, resetDraft, saved],
+    () => ({ draft, setTrainField, setDataField, setDataFields, resetDraft, saved, setSaved }),
+    [draft, setTrainField, setDataField, setDataFields, resetDraft, saved],
   );
 
   return <DraftContext.Provider value={value}>{children}</DraftContext.Provider>;

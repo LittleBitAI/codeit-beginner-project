@@ -11,9 +11,10 @@ from pathlib import Path
 import pytest
 
 from src.pipelines.web.api.app import ALLOWED_ORIGINS
+from src.pipelines.web.api.routes_train import ARCHITECTURE
 from src.pipelines.web.jobs import runner
 from src.pipelines.web.paths import REPOSITORY_ROOT
-from src.pipelines.web.train_config import DATA_ARTIFACT_KEYS
+from src.pipelines.web.train_config import DATA_ARTIFACT_KEYS  # noqa: F401  (fixture에서 사용)
 
 
 TRAVERSAL_IDS = (
@@ -58,7 +59,8 @@ def test_defaults_expose_every_train_field(client):
         "output_prefix",
     }
     assert {field["name"] for field in body["data_fields"]} == set(DATA_ARTIFACT_KEYS)
-    assert body["architecture"] == "fasterrcnn_resnet50_fpn"
+    # 값 자체가 train과 같은지는 test_web_train_contract.py가 train source를 읽어 확인합니다.
+    assert body["architecture"] == ARCHITECTURE
 
 
 def test_defaults_report_cuda_availability(client, monkeypatch):
@@ -337,6 +339,96 @@ def test_cors_denies_everything_else(client, origin):
     response = client.get("/api/health", headers={"Origin": origin})
 
     assert response.headers.get("access-control-allow-origin") is None
+
+
+# --- 전처리 데이터셋 ---------------------------------------------------------
+
+
+@pytest.fixture
+def demo_dataset(isolated_repo):
+    directory = isolated_repo / "artifacts" / "demo"
+    directory.mkdir(parents=True)
+    manifest = {
+        "images": [{"id": 1, "file_name": "a.png", "width": 16, "height": 12}],
+        "annotations": [{"id": 1, "image_id": 1, "category_id": 7, "bbox": [1, 2, 3, 4]}],
+        "categories": [{"id": 7, "name": "pill"}],
+    }
+    for name, document in (
+        ("train.json", manifest),
+        ("validation.json", manifest),
+        ("class_map.json", {"pill": 1}),
+        ("summary.json", {"train_images": 1, "validation_images": 1}),
+    ):
+        (directory / name).write_text(
+            json.dumps(document, ensure_ascii=False), encoding="utf-8", newline="\n"
+        )
+    return "artifacts/demo"
+
+
+def test_inspect_reports_matched_artifacts(client, demo_dataset):
+    body = client.post("/api/data/inspect", json={"directory": demo_dataset}).json()
+
+    assert body["complete"] is True
+    assert body["matched"]["class_map_uri"]["name"] == "class_map.json"
+
+
+def test_inspect_does_not_save_the_selection(client, demo_dataset):
+    client.post("/api/data/inspect", json={"directory": demo_dataset})
+
+    assert client.get("/api/data/source").json()["source"] is None
+
+
+def test_source_can_be_selected_and_read_back(client, demo_dataset):
+    created = client.post("/api/data/source", json={"directory": demo_dataset})
+
+    assert created.status_code == 200
+    assert created.json()["source"]["complete"] is True
+
+    body = client.get("/api/data/source").json()["source"]
+    assert body["directory"] == "artifacts/demo"
+    assert set(body["data"]) == set(DATA_ARTIFACT_KEYS)
+
+
+def test_selected_source_can_fill_a_config(client, demo_dataset):
+    """전처리에서 나온 4개가 그대로 설정 저장까지 통과해야 합니다."""
+
+    source = client.post("/api/data/source", json={"directory": demo_dataset}).json()["source"]
+
+    response = client.post(
+        "/api/train/configs",
+        json={"train": {"run_id": "from-source"}, "inputs": {"data": source["data"]}},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["config"]["inputs"]["data"] == source["data"]
+
+
+def test_incomplete_directory_cannot_be_selected(client, isolated_repo):
+    directory = isolated_repo / "artifacts" / "partial"
+    directory.mkdir(parents=True)
+    (directory / "class_map.json").write_text('{"pill": 1}', encoding="utf-8", newline="\n")
+
+    response = client.post("/api/data/source", json={"directory": "artifacts/partial"})
+
+    assert response.status_code == 400
+    assert client.get("/api/data/source").json()["source"] is None
+
+
+def test_source_can_be_cleared(client, demo_dataset):
+    client.post("/api/data/source", json={"directory": demo_dataset})
+
+    client.delete("/api/data/source")
+
+    assert client.get("/api/data/source").json()["source"] is None
+
+
+@pytest.mark.parametrize(
+    "bad", ("../outside", "/etc", "C:/Windows", "\\\\server\\share", "artifacts/../../x")
+)
+def test_directory_traversal_is_rejected(client, bad):
+    for path in ("/api/data/inspect", "/api/data/source"):
+        response = client.post(path, json={"directory": bad})
+        assert response.status_code == 400, f"{path} 가 {bad} 를 받아들였습니다"
 
 
 def test_app_does_not_start_jobs_on_import(client, isolated_repo):

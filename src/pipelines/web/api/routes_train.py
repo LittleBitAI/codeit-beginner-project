@@ -28,7 +28,13 @@ router = APIRouter(prefix="/api/train", tags=["train"])
 
 # 이 저장소의 train pipeline은 torchvision Faster R-CNN 하나만 지원합니다.
 # design mockup에 있는 모델 family 선택은 실제로 존재하지 않으므로 만들지 않습니다.
-ARCHITECTURE = "fasterrcnn_resnet50_fpn"
+#
+# 이 값은 ``src/pipelines/train/model.py``의 ARCHITECTURE를 그대로 옮긴 것입니다.
+# train을 import하면 경계를 넘으므로 복제하되, 조용히 어긋나면 화면이 실제로 학습되는
+# 모델과 다른 이름을 보여 주게 됩니다. 그래서
+# ``test_web_train_contract.py::test_architecture_matches_train_source``가 train의
+# source를 읽어 값이 같은지 확인합니다.
+ARCHITECTURE = "fasterrcnn_mobilenet_v3_large_320_fpn"
 
 SSE_POLL_SECONDS = 1.0
 SSE_MAX_SECONDS = 60 * 60 * 12

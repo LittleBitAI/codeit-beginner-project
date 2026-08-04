@@ -137,6 +137,32 @@ export interface GpuStatus {
   queried_at: string;
 }
 
+export interface MatchedArtifact {
+  name: string;
+  uri: string;
+}
+
+export interface ExaminedFile {
+  name: string;
+  uri: string;
+  kind: 'manifest' | 'class_map' | 'summary' | 'unknown';
+  problem: string | null;
+}
+
+/** 전처리 결과 폴더를 살펴본 결과. */
+export interface DataSource {
+  directory: string;
+  complete: boolean;
+  data: Record<string, string>;
+  matched: Record<string, MatchedArtifact | null>;
+  labels: Record<string, string>;
+  missing: string[];
+  problems: string[];
+  examined: ExaminedFile[];
+  available?: boolean;
+  selected_at?: string | null;
+}
+
 export interface CreatedConfig {
   config_id: string;
   run_id: string;

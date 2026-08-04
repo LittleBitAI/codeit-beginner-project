@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { api } from '../api/client';
-import type { GpuStatus, JobListing, JobRecord, JobStatus } from '../api/types';
+import type { DataSource, GpuStatus, JobListing, JobRecord, JobStatus } from '../api/types';
+import { DataSourcePanel } from '../components/DataSourcePanel';
 import {
   AlertRow,
   Button,
@@ -27,7 +28,15 @@ const FILTERS: { key: string; label: string; match: (status: JobStatus) => boole
 
 const COLUMNS = '1.5fr .7fr .6fr .9fr .95fr .7fr .9fr';
 
-export function TrainingOverview({ listing }: { listing: JobListing | null }) {
+export function TrainingOverview({
+  listing,
+  source,
+  onSourceSelected,
+}: {
+  listing: JobListing | null;
+  source: DataSource | null;
+  onSourceSelected: (source: DataSource) => void;
+}) {
   const navigate = useNavigate();
   const [filter, setFilter] = useState('all');
   const gpu = usePolling<GpuStatus>(() => api.gpu(), 5000);
@@ -101,6 +110,8 @@ export function TrainingOverview({ listing }: { listing: JobListing | null }) {
           }
         />
       </div>
+
+      <DataSourcePanel source={source} onSelected={onSourceSelected} />
 
       <Panel
         title="학습 실행"

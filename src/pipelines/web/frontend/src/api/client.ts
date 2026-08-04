@@ -1,5 +1,6 @@
 import type {
   CreatedConfig,
+  DataSource,
   Defaults,
   GpuStatus,
   JobListing,
@@ -95,4 +96,21 @@ export const api = {
     request<LogPage>(`/api/train/jobs/${jobId}/logs?after=${after}&limit=${limit}`),
 
   gpu: () => request<GpuStatus>('/api/gpu/status'),
+
+  inspectDirectory: (directory: string) =>
+    request<DataSource>('/api/data/inspect', {
+      method: 'POST',
+      body: JSON.stringify({ directory }),
+    }),
+
+  getDataSource: () => request<{ source: DataSource | null }>('/api/data/source'),
+
+  setDataSource: (directory: string) =>
+    request<{ source: DataSource }>('/api/data/source', {
+      method: 'POST',
+      body: JSON.stringify({ directory }),
+    }),
+
+  clearDataSource: () =>
+    request<{ source: null }>('/api/data/source', { method: 'DELETE' }),
 };

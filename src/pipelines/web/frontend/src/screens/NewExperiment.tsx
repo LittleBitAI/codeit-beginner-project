@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { api, ApiError } from '../api/client';
-import type { Defaults, FieldSpec, ValidationResult } from '../api/types';
+import type { DataSource, Defaults, FieldSpec, ValidationResult } from '../api/types';
 import {
   AlertRow,
   Button,
@@ -29,9 +29,15 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
   { key: 'output', label: '출력', fields: ['output_dir', 'output_prefix'] },
 ];
 
-export function NewExperiment({ defaults }: { defaults: Defaults | null }) {
+export function NewExperiment({
+  defaults,
+  source,
+}: {
+  defaults: Defaults | null;
+  source: DataSource | null;
+}) {
   const navigate = useNavigate();
-  const { draft, setTrainField, setDataField, setSaved } = useDraft();
+  const { draft, setTrainField, setDataField, setDataFields, setSaved } = useDraft();
   const [tab, setTab] = useState<TabKey>('basic');
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [saving, setSaving] = useState(false);
@@ -39,6 +45,20 @@ export function NewExperiment({ defaults }: { defaults: Defaults | null }) {
 
   const fields = defaults?.fields ?? [];
   const payload = useMemo(() => toPayload(draft, fields), [draft, fields]);
+
+  // 전처리 데이터셋을 골라 두었으면 artifact 4칸을 자동으로 채웁니다.
+  // 사용자가 직접 넣어 둔 값은 덮어쓰지 않습니다. 빈 칸만 채우므로, 한 번 채운 뒤에는
+  // 채울 것이 없어져 곧바로 멈춥니다.
+  useEffect(() => {
+    if (!source?.complete || !defaults) return;
+    const filled: Record<string, string> = {};
+    for (const spec of defaults.data_fields) {
+      const current = draft.data[spec.name] ?? '';
+      const value = source.data[spec.name];
+      if (current.trim() === '' && value) filled[spec.name] = value;
+    }
+    if (Object.keys(filled).length > 0) setDataFields(filled);
+  }, [source, defaults, draft.data, setDataFields]);
 
   // 입력이 멈추면 서버에 검증을 맡깁니다. 판단 기준은 언제나 서버입니다.
   useEffect(() => {
@@ -175,9 +195,35 @@ export function NewExperiment({ defaults }: { defaults: Defaults | null }) {
                   gap: 12,
                 }}
               >
-                <span style={{ font: `600 12px/1 ${font.sans}`, color: color.text }}>
-                  data pipeline artifact
-                </span>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 10,
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <span style={{ font: `600 12px/1 ${font.sans}`, color: color.text }}>
+                    data pipeline artifact
+                  </span>
+                  {source?.complete && (
+                    <span
+                      style={{
+                        font: `400 10.5px/1.4 ${font.mono}`,
+                        color: color.textMuted,
+                        overflowWrap: 'anywhere',
+                      }}
+                    >
+                      전처리 데이터셋에서 자동으로 채움 · {source.directory}
+                    </span>
+                  )}
+                </div>
+                {!source?.complete && (
+                  <span style={{ font: `400 11px/1.6 ${font.sans}`, color: color.textBody }}>
+                    학습 개요 화면에서 전처리 데이터셋을 고르면 이 네 칸이 자동으로 채워집니다.
+                  </span>
+                )}
                 {defaults.data_fields.map((spec) => (
                   <Field
                     key={spec.name}
