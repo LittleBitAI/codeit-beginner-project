@@ -15,13 +15,15 @@ Storage 접근은 `src/common/storage.py`의 `create_storage(config)`로만 합�
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from src.common import Storage, StorageError, create_storage
+from src.common import LocalStorage, Storage, StorageError, create_storage
 
 from .coco import ConsolidatedDataset, consolidate
 from .errors import DatasetPreparationError
@@ -31,14 +33,19 @@ from .split import SplitResult, split_images
 __all__ = [
     "ARTIFACT_FILE_NAMES",
     "DEFAULT_SEED",
+    "LocationPublisher",
     "PreparationSettings",
+    "REPOSITORY_ROOT",
     "SPLIT_RATIO_OPTIONS",
+    "build_publisher",
     "preparation_error_result",
     "preparation_requested",
     "resolve_settings",
     "run_preparation",
 ]
 
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 # 원본과 산출물의 기본 위치입니다. config로 바꿀 수 있지만 두 값 모두
 # 공용 logical prefix인 `datasets/` 아래여야 합니다.
@@ -235,17 +242,96 @@ def _read_documents(
     return list(zip(annotation_locations, documents))
 
 
+def _is_remote(location: Any) -> bool:
+    return str(location).lower().startswith("s3://")
+
+
+@dataclass(frozen=True)
+class LocationPublisher:
+    """Storage가 돌려준 위치를 소비자가 쓸 수 있는 URI로 바꿉니다.
+
+    S3 backend가 돌려주는 `s3://` URI는 그대로 씁니다. 반면 local backend의
+    `list`와 `write_json`은 storage root 기준으로 resolve한 **절대 경로**를
+    돌려주는데, 절대 경로와 Windows drive 경로는 다음 소비자가 계약 위반으로
+    거부하고 다른 컴퓨터에서도 쓸 수 없습니다. 그래서 local backend에서는
+
+    - artifact URI를 **저장소 root 기준** 상대 POSIX 경로로,
+    - manifest 안 이미지 경로를 **manifest 자신의 위치 기준** 상대 POSIX 경로로
+
+    바꿔서 내보냅니다.
+    """
+
+    storage_root: Path | None
+    manifest_directory: Path | None
+
+    def _absolute(self, location: str) -> Path:
+        candidate = Path(location)
+        if candidate.is_absolute() or self.storage_root is None:
+            return candidate
+        return (self.storage_root / candidate).resolve()
+
+    def artifact_uri(self, location: str) -> str:
+        """다음 pipeline에 넘길 artifact URI를 만듭니다."""
+
+        text = str(location)
+        if _is_remote(text) or self.storage_root is None:
+            return text
+        path = self._absolute(text)
+        try:
+            return path.relative_to(REPOSITORY_ROOT).as_posix()
+        except ValueError as error:
+            raise DatasetPreparationError(
+                "local artifact는 저장소 root 기준 상대 경로여야 하는데 산출물이 "
+                "저장소 밖에 있습니다. storage.local.root를 저장소 안 경로로 "
+                "설정하세요."
+            ) from error
+
+    def image_file_name(self, location: str) -> str:
+        """manifest에 적을 이미지 경로를 만듭니다."""
+
+        text = str(location)
+        if _is_remote(text) or self.manifest_directory is None:
+            return text
+        relative = os.path.relpath(self._absolute(text), self.manifest_directory)
+        return relative.replace("\\", "/")
+
+
+def build_publisher(storage: Storage, settings: PreparationSettings) -> LocationPublisher:
+    """Backend에 맞는 URI 변환기를 만듭니다. 쓰기 전에 먼저 확인합니다."""
+
+    if not isinstance(storage, LocalStorage):
+        return LocationPublisher(storage_root=None, manifest_directory=None)
+
+    root = Path(storage.root).resolve()
+    try:
+        root.relative_to(REPOSITORY_ROOT)
+    except ValueError as error:
+        raise DatasetPreparationError(
+            "local backend의 storage root는 저장소 안에 있어야 합니다. 소비자는 "
+            "저장소 root 기준 상대 경로 URI만 받기 때문입니다. "
+            "storage.local.root 또는 PILL_STORAGE_LOCAL_ROOT를 저장소 안 경로로 "
+            "설정하세요."
+        ) from error
+    return LocationPublisher(
+        storage_root=root,
+        manifest_directory=(root / settings.processed_prefix).resolve(),
+    )
+
+
 def _manifest(
     split: str,
     image_ids: set[int],
     dataset: ConsolidatedDataset,
     settings: PreparationSettings,
+    publisher: LocationPublisher,
 ) -> dict[str, Any]:
     """train이 그대로 읽을 수 있는 COCO manifest를 만듭니다.
 
-    `file_name`에는 원본 이미지의 storage 위치를 그대로 넣습니다. manifest는
-    `processed/` 아래, 이미지는 `raw/` 아래에 있으므로 상대경로로 두면 소비자가
-    엉뚱한 위치를 가리키게 됩니다.
+    `file_name`은 소비자가 manifest 위치를 기준으로 푸는 값입니다. manifest는
+    `processed/` 아래, 이미지는 `raw/` 아래에 있으므로 단순한 파일 이름만 적으면
+    엉뚱한 위치를 가리킵니다. S3에서는 `s3://` URI를, local에서는 manifest
+    directory 기준 상대 경로(예: `../../raw/v1/train_images/img_001.jpg`)를
+    적어서 두 backend 모두에서 이식 가능하게 만듭니다.
     """
 
     return {
@@ -256,7 +342,11 @@ def _manifest(
             "split_ratio": settings.split_ratio,
             "validation_ratio": settings.validation_ratio,
         },
-        "images": [image for image in dataset.images if image["id"] in image_ids],
+        "images": [
+            {**image, "file_name": publisher.image_file_name(image["file_name"])}
+            for image in dataset.images
+            if image["id"] in image_ids
+        ],
         "annotations": [
             annotation
             for annotation in dataset.annotations
@@ -361,6 +451,9 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
     """원본을 읽어 artifact 4개를 저장하고 URI와 요약을 돌려줍니다."""
 
     settings = resolve_settings(config)
+    # URI 변환기를 먼저 만들어, 내보낼 수 없는 위치라면 아무것도 쓰기 전에
+    # 실패하게 합니다.
+    publisher = build_publisher(storage, settings)
     _guard_existing(storage, settings)
 
     image_locations, annotation_locations = _raw_objects(storage, settings.raw_prefix)
@@ -374,9 +467,15 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
     )
 
     manifests = {
-        "train": _manifest("train", split_result.train_image_ids, dataset, settings),
+        "train": _manifest(
+            "train", split_result.train_image_ids, dataset, settings, publisher
+        ),
         "validation": _manifest(
-            "validation", split_result.validation_image_ids, dataset, settings
+            "validation",
+            split_result.validation_image_ids,
+            dataset,
+            settings,
+            publisher,
         ),
     }
     # 원본 COCO category id를 그대로 남깁니다. 소비자는 이 id 순서대로 1부터
@@ -391,10 +490,12 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         ("validation_manifest_uri", manifests["validation"]),
         ("class_map_uri", class_map),
     ):
-        artifacts[key] = storage.write_json(
-            f"{settings.processed_prefix}{ARTIFACT_FILE_NAMES[key]}",
-            value,
-            overwrite=settings.overwrite,
+        artifacts[key] = publisher.artifact_uri(
+            storage.write_json(
+                f"{settings.processed_prefix}{ARTIFACT_FILE_NAMES[key]}",
+                value,
+                overwrite=settings.overwrite,
+            )
         )
 
     summary_document = _dataset_summary(
@@ -407,10 +508,12 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         annotation_document_count=len(annotation_locations),
         generated_at=_utc_now(),
     )
-    artifacts["dataset_summary_uri"] = storage.write_json(
-        f"{settings.processed_prefix}{ARTIFACT_FILE_NAMES['dataset_summary_uri']}",
-        summary_document,
-        overwrite=settings.overwrite,
+    artifacts["dataset_summary_uri"] = publisher.artifact_uri(
+        storage.write_json(
+            f"{settings.processed_prefix}{ARTIFACT_FILE_NAMES['dataset_summary_uri']}",
+            summary_document,
+            overwrite=settings.overwrite,
+        )
     )
 
     summary = {

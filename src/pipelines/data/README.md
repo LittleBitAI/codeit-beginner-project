@@ -44,6 +44,23 @@ Storage backend, bucket, credential은 `src/common/storage.py`의
 `create_storage(config)`와 환경 변수(`PILL_STORAGE_*`, `AWS_*`)가 담당합니다.
 이 pipeline은 `boto3`를 직접 쓰지 않습니다.
 
+> **local backend를 쓸 때**: `storage.local.root`는 **저장소 안**이어야 합니다.
+> 소비자(registry)가 local artifact URI를 저장소 root 기준 상대 경로로만 받기
+> 때문입니다. 저장소 밖 root를 주면 아무것도 쓰지 않고 오류로 알려 줍니다.
+
+## 내보내는 URI 형식
+
+`artifacts`의 값 4개는 backend에 따라 다음 형태입니다.
+
+| backend | 형태 | 예 |
+| --- | --- | --- |
+| `s3` | `s3://` URI | `s3://<bucket>/datasets/pill_detection/processed/v1-seed42-8020/train_manifest.json` |
+| `local` | 저장소 root 기준 상대 POSIX 경로 | `artifacts/datasets/pill_detection/processed/v1-seed42-8020/train_manifest.json` |
+
+`LocalStorage`는 절대 경로를 돌려주지만, 절대 경로와 Windows drive 경로는
+registry가 계약 위반으로 거부하고(`resolve_local_uri`) 다른 컴퓨터에서도 쓸 수
+없으므로 내보내기 직전에 상대 경로로 바꿉니다.
+
 ## 저장 위치
 
 산출물 directory 이름에 seed와 비율이 들어가므로 **8:2와 9:1의 산출물은 서로
@@ -66,9 +83,17 @@ Storage backend, bucket, credential은 `src/common/storage.py`의
 
 ### `train_manifest.json`, `validation_manifest.json`
 
-COCO 형식입니다. `file_name`에는 원본 이미지의 **절대 위치**(S3 backend면
-`s3://` URI)를 넣습니다. manifest는 `processed/`, 이미지는 `raw/` 아래에 있어서
-상대경로로 두면 소비자가 엉뚱한 위치를 찾기 때문입니다.
+COCO 형식입니다. `file_name`은 소비자가 **manifest 자신의 위치를 기준으로**
+푸는 값입니다. manifest는 `processed/`, 이미지는 `raw/` 아래에 있으므로 파일
+이름만 적으면 엉뚱한 위치를 가리킵니다.
+
+| backend | `file_name` | 예 |
+| --- | --- | --- |
+| `s3` | 이미지의 `s3://` URI | `s3://<bucket>/datasets/pill_detection/raw/v1/train_images/img_001.jpg` |
+| `local` | manifest directory 기준 상대 POSIX 경로 | `../../raw/v1/train_images/img_001.jpg` |
+
+local backend에서 절대 경로를 넣으면 그 artifact를 다른 컴퓨터에서 쓸 수 없고
+개인 경로가 파일에 박히므로, manifest 기준 상대 경로로 적습니다.
 
 ```json
 {
@@ -143,6 +168,8 @@ background).
 - **재현성**: 같은 원본, 같은 seed, 같은 비율이면 항상 같은 분할이 나옵니다.
 - **덮어쓰기 방지**: 기본값은 덮어쓰지 않기이며, 산출물이 이미 있으면 아무것도
   쓰지 않고 오류로 알려 줍니다.
+- **이식성**: 내보내는 URI와 manifest 안 이미지 경로 모두 backend에 맞는 형태로
+  바꾸므로, 개인 컴퓨터 절대경로가 artifact나 반환값에 들어가지 않습니다.
 - **오류 처리**: 실패해도 예외를 밖으로 던지지 않고 `status: "error"`와 사람이
   읽을 message를 반환합니다. message에는 credential이나 개인 절대경로를 넣지
   않습니다.

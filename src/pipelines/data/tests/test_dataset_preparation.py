@@ -8,19 +8,27 @@ from __future__ import annotations
 
 import copy
 import json
+import re
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
 
-from src.common import StorageError, validate_pipeline_result
+from src.common import LocalStorage, StorageError, validate_pipeline_result
 from src.common.storage import S3Storage
 from src.pipelines.data import preparation, run
+from src.pipelines.data.preparation import REPOSITORY_ROOT
 
 
 BUCKET = "test-bucket"
 RAW_PREFIX = "datasets/pill_detection/raw/v1/"
 CATEGORY_NAMES = {1: "pill_a", 2: "pill_b", 3: "pill_c"}
+# registry가 local artifact URI를 거부하는 두 형태입니다.
+# (src/pipelines/registry/record.py의 resolve_local_uri)
+WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
 
 
 # --- 대역 storage와 원본 fixture ------------------------------------------
@@ -557,6 +565,163 @@ def test_dummy_mode_wins_over_preparation():
         "message": "data pipeline dummy 실행 완료",
     }
     assert not [uri for uri in stored if "/processed/" in uri]
+
+
+def test_s3_backend_keeps_s3_uris_unchanged():
+    result, stored = prepare(prepare_config("8:2"))
+
+    assert all(
+        uri.startswith(f"s3://{BUCKET}/") for uri in result["artifacts"].values()
+    )
+    manifest = artifact_document(stored, result, "train_manifest_uri")
+    assert all(image["file_name"].startswith("s3://") for image in manifest["images"])
+
+
+# --- local backend URI 계약 --------------------------------------------------
+#
+# LocalStorage는 storage root 기준으로 resolve한 절대 경로를 돌려줍니다. 절대
+# 경로와 Windows drive 경로는 소비자(registry)가 계약 위반으로 거부하므로,
+# 내보내는 URI는 저장소 root 기준 상대 POSIX 경로여야 합니다.
+
+
+@pytest.fixture
+def local_storage_root():
+    """저장소 안에 임시 local storage root를 만듭니다.
+
+    저장소 밖(system 임시 directory)에 두면 저장소 기준 상대 URI를 만들 수 없어
+    이 test가 검증하려는 상황 자체를 만들 수 없습니다.
+    """
+
+    parent = REPOSITORY_ROOT / "artifacts"
+    parent.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="data-preparation-test-", dir=parent))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def build_local_raw(root: Path, image_count: int = 20) -> None:
+    """Local storage root 안에 원본 train 이미지와 annotation을 만듭니다."""
+
+    images = root / RAW_PREFIX / "train_images"
+    annotations = root / RAW_PREFIX / "train_annotations"
+    test_images = root / RAW_PREFIX / "test_images"
+    for directory in (images, annotations, test_images):
+        directory.mkdir(parents=True, exist_ok=True)
+    (test_images / "test_001.jpg").write_bytes(b"never read")
+    for index in range(1, image_count + 1):
+        (images / f"img_{index:03d}.jpg").write_bytes(b"fake image bytes")
+        document = annotation_document(index, [(index - 1) % 2 + 1])
+        (annotations / f"img_{index:03d}.json").write_text(
+            json.dumps(document, ensure_ascii=False), encoding="utf-8", newline="\n"
+        )
+
+
+def local_config(root: Path, split_ratio: str = "8:2") -> dict[str, Any]:
+    return {
+        "execution": {"mode": "local"},
+        "storage": {"backend": "local", "local": {"root": str(root)}},
+        "data": {"prepare": True, "split_ratio": split_ratio},
+    }
+
+
+@pytest.fixture
+def clean_storage_environment(monkeypatch):
+    """환경 변수가 config보다 우선하므로 test에서는 비웁니다."""
+
+    for name in (
+        "PILL_STORAGE_BACKEND",
+        "PILL_STORAGE_LOCAL_ROOT",
+        "PILL_STORAGE_S3_BUCKET",
+        "PILL_STORAGE_S3_PREFIX",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_local_backend_publishes_repository_relative_artifact_uris(
+    local_storage_root, clean_storage_environment
+):
+    build_local_raw(local_storage_root)
+
+    result = run(local_config(local_storage_root))
+
+    assert result["status"] == "ok", result["message"]
+    assert validate_pipeline_result(result, pipeline_name="data") is result
+    assert set(result["artifacts"]) == set(preparation.ARTIFACT_FILE_NAMES)
+    for key, uri in result["artifacts"].items():
+        # registry의 resolve_local_uri가 거부하는 형태가 아니어야 합니다.
+        assert not Path(uri).is_absolute(), f"{key}가 절대 경로입니다: {uri}"
+        assert not WINDOWS_DRIVE_PATTERN.match(uri), f"{key}에 drive 문자가 있습니다"
+        assert "\\" not in uri
+        assert not uri.startswith("s3://")
+        resolved = (REPOSITORY_ROOT / uri).resolve()
+        assert resolved.is_file()
+        assert resolved.relative_to(REPOSITORY_ROOT)
+
+
+def test_local_backend_manifest_images_resolve_from_the_manifest_directory(
+    local_storage_root, clean_storage_environment
+):
+    build_local_raw(local_storage_root)
+
+    result = run(local_config(local_storage_root))
+
+    assert result["status"] == "ok", result["message"]
+    for key in ("train_manifest_uri", "validation_manifest_uri"):
+        manifest_path = (REPOSITORY_ROOT / result["artifacts"][key]).resolve()
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["images"]
+        for image in manifest["images"]:
+            file_name = image["file_name"]
+            # 개인 컴퓨터 경로가 artifact 안에 박히면 다른 컴퓨터에서 못 씁니다.
+            assert not Path(file_name).is_absolute()
+            assert not WINDOWS_DRIVE_PATTERN.match(file_name)
+            assert "\\" not in file_name
+            # train의 _resolve_image와 같은 방식으로 풉니다.
+            resolved = (manifest_path.parent / file_name).resolve()
+            assert resolved.is_file(), f"이미지를 찾지 못했습니다: {file_name}"
+            assert resolved.relative_to(REPOSITORY_ROOT)
+            assert "/train_images/" in resolved.as_posix()
+            assert "test_images" not in resolved.as_posix()
+
+
+def test_local_backend_image_paths_are_relative_to_the_manifest_not_the_root(
+    local_storage_root, clean_storage_environment
+):
+    """`processed/`에 있는 manifest에서 `raw/`로 거슬러 올라가야 합니다."""
+
+    build_local_raw(local_storage_root)
+
+    result = run(local_config(local_storage_root))
+
+    manifest = json.loads(
+        (REPOSITORY_ROOT / result["artifacts"]["train_manifest_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    for image in manifest["images"]:
+        assert image["file_name"].startswith("../")
+        assert image["file_name"].endswith(".jpg")
+        assert "/raw/v1/train_images/" in image["file_name"]
+
+
+def test_local_storage_root_outside_the_repository_is_rejected(
+    clean_storage_environment,
+):
+    outside_root = Path(tempfile.mkdtemp(prefix="data-preparation-outside-"))
+    try:
+        build_local_raw(outside_root)
+
+        result = run(local_config(outside_root))
+
+        assert result["status"] == "error"
+        assert "저장소 안" in result["message"]
+        assert str(outside_root) not in result["message"]
+        assert validate_pipeline_result(result, pipeline_name="data") is result
+        assert not list((outside_root / "datasets/pill_detection/processed").glob("**/*"))
+    finally:
+        shutil.rmtree(outside_root, ignore_errors=True)
 
 
 def test_pass_through_still_works_when_preparation_is_not_requested():
