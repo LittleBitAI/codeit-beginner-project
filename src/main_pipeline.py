@@ -137,13 +137,13 @@ def run(
     stage_names = {name for name, _ in _STAGES}
     if only is not None and only not in stage_names:
         raise ValueError(f"지원하지 않는 pipeline입니다: {only}")
-    if dry_run:
-        return _dry_run_result(only)
 
     try:
         configured_inputs = _configured_inputs(resolved_config)
     except ValueError as error:
         return _error_result("config", str(error))
+    if dry_run:
+        return _dry_run_result(only)
 
     artifacts: dict[str, dict[str, Any]] = {}
     summaries: dict[str, dict[str, Any]] = {}

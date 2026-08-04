@@ -138,6 +138,24 @@ def test_dry_run_reports_order_without_executing(monkeypatch):
     assert result["artifacts"] == {}
 
 
+def test_dry_run_rejects_invalid_inputs_without_executing(monkeypatch):
+    def must_not_run(config):
+        raise AssertionError("입력 검증에 실패한 dry-run에서 pipeline이 실행되었습니다.")
+
+    monkeypatch.setattr(
+        main_pipeline,
+        "_STAGES",
+        (("data", SimpleNamespace(run=must_not_run)),),
+    )
+
+    result = main_pipeline.run({"inputs": []}, dry_run=True)
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert result["summary"] == {}
+    assert result["message"] == "config: config['inputs']는 object여야 합니다."
+
+
 def test_pipeline_stops_on_reported_failure(monkeypatch):
     calls = []
 
