@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections import defaultdict
 from collections.abc import Mapping
 from pathlib import Path
@@ -19,6 +20,7 @@ from src.common import LocalStorage, Storage
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+_INTEGER_TEXT = re.compile(r"[+-]?\d+")
 
 
 def _is_s3(location: str) -> bool:
@@ -72,6 +74,35 @@ def load_class_map(location: str, storage: Storage) -> dict[str, int]:
     document = read_json_artifact(location, storage)
     if not isinstance(document, Mapping) or not document:
         raise ValueError("class map must be a non-empty JSON object")
+
+    if all(isinstance(value, str) for value in document.values()):
+        categories: list[tuple[int, str]] = []
+        category_ids: set[int] = set()
+        names: set[str] = set()
+        for raw_id, raw_name in document.items():
+            if not isinstance(raw_id, str) or not _INTEGER_TEXT.fullmatch(raw_id.strip()):
+                raise ValueError("class map category ids must be non-negative integers")
+            category_id = int(raw_id.strip())
+            if category_id < 0:
+                raise ValueError("class map category ids must be non-negative integers")
+            if category_id in category_ids:
+                raise ValueError("class map category ids must be unique")
+            name = raw_name.strip()
+            if not name:
+                raise ValueError("class map names must be non-empty strings")
+            if name in names:
+                raise ValueError("class map names must be unique")
+            categories.append((category_id, name))
+            category_ids.add(category_id)
+            names.add(name)
+        categories.sort(key=lambda category: category[0])
+        return {
+            name: label
+            for label, (_, name) in enumerate(categories, start=1)
+        }
+
+    if any(isinstance(value, str) for value in document.values()):
+        raise ValueError("class map cannot mix model labels and class names")
 
     class_map: dict[str, int] = {}
     for name, label in document.items():
