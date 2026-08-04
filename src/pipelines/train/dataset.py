@@ -15,7 +15,7 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from src.common import Storage
+from src.common import LocalStorage, Storage
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -37,12 +37,27 @@ def _repo_path(location: str | Path) -> Path:
     return resolved
 
 
+def _local_artifact_path(location: str | Path, storage: Storage) -> Path:
+    """Resolve local input while containing absolute paths in LocalStorage.root."""
+    candidate = Path(location)
+    if not candidate.is_absolute():
+        return _repo_path(candidate)
+    if not isinstance(storage, LocalStorage):
+        raise ValueError(f"absolute local artifact URI requires LocalStorage: {location}")
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(storage.root)
+    except ValueError as error:
+        raise ValueError(f"absolute local artifact URI leaves the storage root: {location}") from error
+    return resolved
+
+
 def read_json_artifact(location: str, storage: Storage) -> Any:
     """Read a local repository-relative or S3 JSON artifact."""
     if _is_s3(location):
         return storage.read_json(location)
 
-    path = _repo_path(location)
+    path = _local_artifact_path(location, storage)
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as error:
@@ -130,6 +145,9 @@ class CocoDetectionDataset(Dataset):
             names.add(name)
         if names != set(self.class_map):
             raise ValueError("COCO categories and class map names must match exactly")
+        self._category_ids = {
+            label: category_id for category_id, label in category_labels.items()
+        }
         return category_labels
 
     def _resolve_image(self, file_name: str) -> str:
@@ -138,13 +156,14 @@ class CocoDetectionDataset(Dataset):
         if self.manifest_uri.lower().startswith("s3://"):
             return _s3_relative(self.manifest_uri, file_name)
 
-        manifest_path = _repo_path(self.manifest_uri)
+        manifest_path = _local_artifact_path(self.manifest_uri, self.storage)
         candidate = (manifest_path.parent / file_name).resolve()
+        if Path(self.manifest_uri).is_absolute() or Path(file_name).is_absolute():
+            return str(_local_artifact_path(candidate, self.storage))
         try:
-            relative = candidate.relative_to(REPOSITORY_ROOT)
+            return candidate.relative_to(REPOSITORY_ROOT).as_posix()
         except ValueError as error:
             raise ValueError(f"COCO image path leaves the repository: {file_name}") from error
-        return relative.as_posix()
 
     def _validate_images(self, entries: list[Any]) -> list[dict[str, Any]]:
         images: list[dict[str, Any]] = []
@@ -213,12 +232,17 @@ class CocoDetectionDataset(Dataset):
     def image_locations(self) -> set[str]:
         return {str(image["location"]) for image in self._images}
 
+    @property
+    def category_ids(self) -> dict[int, int]:
+        """Map contiguous model labels back to original COCO category ids."""
+        return dict(self._category_ids)
+
     def __len__(self) -> int:
         return len(self._images)
 
     def _local_image_path(self, location: str) -> Path:
         if not _is_s3(location):
-            return _repo_path(location)
+            return _local_artifact_path(location, self.storage)
         suffix = Path(urlsplit(location).path).suffix or ".image"
         digest = hashlib.sha256(location.encode("utf-8")).hexdigest()
         destination = self.cache_directory / f"{digest}{suffix}"

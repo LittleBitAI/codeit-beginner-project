@@ -2,6 +2,7 @@ import copy
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -11,7 +12,7 @@ from PIL import Image
 from torch import nn
 from torchvision.models.detection import FasterRCNN
 
-from src.common import S3Storage
+from src.common import LocalStorage, S3Storage, StorageError
 from src.pipelines import train
 from src.pipelines.train import pipeline
 from src.pipelines.train.dataset import REPOSITORY_ROOT
@@ -90,6 +91,40 @@ def _manifest(image_name: str) -> dict:
     }
 
 
+def _absolute_storage_config(tmp_path: Path, monkeypatch) -> tuple[dict, Path]:
+    monkeypatch.setattr(pipeline, "build_model", lambda *args, **kwargs: TinyDetector())
+    storage_root = tmp_path / "absolute-storage"
+    storage = LocalStorage(storage_root)
+    source_train = tmp_path / "source-train.png"
+    source_validation = tmp_path / "source-validation.png"
+    _write_image(source_train, color="red")
+    _write_image(source_validation, color="blue")
+    storage.upload_file(source_train, "datasets/train.png")
+    storage.upload_file(source_validation, "datasets/validation.png")
+    inputs = {
+        "train_manifest_uri": storage.write_json(
+            "datasets/train.json", _manifest("train.png")
+        ),
+        "validation_manifest_uri": storage.write_json(
+            "datasets/validation.json", _manifest("validation.png")
+        ),
+        "class_map_uri": storage.write_json("datasets/class_map.json", {"pill": 1}),
+        "dataset_summary_uri": storage.write_json(
+            "datasets/summary.json", {"train_images": 1, "validation_images": 1}
+        ),
+    }
+    config = {
+        "storage": {"backend": "local", "local": {"root": _relative(storage_root)}},
+        "inputs": {"data": inputs},
+        "train": {
+            "run_id": "absolute-inputs",
+            "epochs": 1,
+            "output_dir": _relative(tmp_path / "absolute-outputs"),
+        },
+    }
+    return config, storage_root
+
+
 @pytest.fixture
 def local_config(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "build_model", lambda *args, **kwargs: TinyDetector())
@@ -154,15 +189,37 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
         (REPOSITORY_ROOT / result["artifacts"]["training_history_uri"]).read_text(encoding="utf-8")
     )
     assert [entry["epoch"] for entry in history] == [1, 2]
-    checkpoint = torch.load(
-        REPOSITORY_ROOT / result["artifacts"]["best_checkpoint_uri"],
-        map_location="cpu",
-        weights_only=True,
-    )
-    assert checkpoint["architecture"] == "fasterrcnn_mobilenet_v3_large_320_fpn"
-    assert checkpoint["class_map"] == {"pill": 1}
-    assert checkpoint["num_classes"] == 2
-    assert checkpoint["seed"] == 17
+    for artifact_name in ("best_checkpoint_uri", "last_checkpoint_uri"):
+        checkpoint = torch.load(
+            REPOSITORY_ROOT / result["artifacts"][artifact_name],
+            map_location="cpu",
+            weights_only=True,
+        )
+        assert checkpoint["architecture"] == "fasterrcnn_mobilenet_v3_large_320_fpn"
+        assert checkpoint["class_map"] == {"pill": 1}
+        assert checkpoint["category_ids"] == {1: 7}
+        assert checkpoint["num_classes"] == 2
+        assert checkpoint["seed"] == 17
+
+
+def test_run_accepts_absolute_paths_returned_by_local_storage(tmp_path, monkeypatch):
+    config, _ = _absolute_storage_config(tmp_path, monkeypatch)
+
+    result = train.run(config)
+
+    assert result["status"] == "ok"
+
+
+def test_run_rejects_absolute_input_outside_local_storage_root(tmp_path, monkeypatch):
+    config, storage_root = _absolute_storage_config(tmp_path, monkeypatch)
+    outside_class_map = storage_root.parent / "outside-class-map.json"
+    _write_json(outside_class_map, {"pill": 1})
+    config["inputs"]["data"]["class_map_uri"] = str(outside_class_map.resolve())
+
+    result = train.run(config)
+
+    assert result["status"] == "error"
+    assert "leaves the storage root" in result["message"]
 
 
 def test_run_refuses_to_overwrite_an_existing_run(local_config):
@@ -250,6 +307,19 @@ def test_run_rejects_train_validation_image_overlap(local_config):
     assert "overlapping images" in result["message"]
 
 
+def test_run_rejects_different_category_ids_between_splits(local_config):
+    validation_manifest_path = REPOSITORY_ROOT / local_config["inputs"]["data"]["validation_manifest_uri"]
+    manifest = _manifest("validation.png")
+    manifest["categories"][0]["id"] = 9
+    manifest["annotations"][0]["category_id"] = 9
+    _write_json(validation_manifest_path, manifest)
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert "category ids must match" in result["message"]
+
+
 def test_model_builder_creates_faster_rcnn_without_downloading_weights():
     model = build_model(3, pretrained=False)
 
@@ -305,7 +375,14 @@ def test_validation_does_not_update_batch_norm_running_statistics():
     assert torch.allclose(model.batch_norm.running_mean, torch.full((3,), 0.1))
 
 
-def test_s3_publisher_returns_s3_uris_and_uses_conditional_writes(tmp_path):
+def test_s3_publisher_returns_attempt_uris_and_writes_completion_marker(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        pipeline,
+        "uuid4",
+        lambda: SimpleNamespace(hex="fixed-attempt"),
+    )
     client = Mock()
     client.head_object.side_effect = ClientError(
         {"Error": {"Code": "404", "Message": "missing"}}, "HeadObject"
@@ -330,13 +407,62 @@ def test_s3_publisher_returns_s3_uris_and_uses_conditional_writes(tmp_path):
     )
 
     assert artifacts == {
-        "best_checkpoint_uri": "s3://bucket/experiments/completed/s3-smoke/best_checkpoint.pt",
-        "last_checkpoint_uri": "s3://bucket/experiments/completed/s3-smoke/last_checkpoint.pt",
-        "training_history_uri": "s3://bucket/experiments/completed/s3-smoke/training_history.json",
+        "best_checkpoint_uri": "s3://bucket/experiments/completed/s3-smoke/attempts/fixed-attempt/best_checkpoint.pt",
+        "last_checkpoint_uri": "s3://bucket/experiments/completed/s3-smoke/attempts/fixed-attempt/last_checkpoint.pt",
+        "training_history_uri": "s3://bucket/experiments/completed/s3-smoke/attempts/fixed-attempt/training_history.json",
     }
     assert set(uploaded) == {
-        "experiments/completed/s3-smoke/best_checkpoint.pt",
-        "experiments/completed/s3-smoke/last_checkpoint.pt",
-        "experiments/completed/s3-smoke/training_history.json",
+        "experiments/completed/s3-smoke/attempts/fixed-attempt/best_checkpoint.pt",
+        "experiments/completed/s3-smoke/attempts/fixed-attempt/last_checkpoint.pt",
+        "experiments/completed/s3-smoke/attempts/fixed-attempt/training_history.json",
+        "experiments/completed/s3-smoke/completed.json",
     }
     assert all(call.kwargs["IfNoneMatch"] == "*" for call in client.put_object.call_args_list)
+
+
+def test_s3_publisher_can_retry_same_run_id_after_intermediate_failure(monkeypatch):
+    attempt_ids = iter(("failed-attempt", "successful-attempt"))
+    monkeypatch.setattr(
+        pipeline,
+        "uuid4",
+        lambda: SimpleNamespace(hex=next(attempt_ids)),
+    )
+
+    class RetryStorage:
+        def __init__(self):
+            self.objects = {}
+            self.fail_once = True
+
+        def exists(self, location):
+            return location in self.objects
+
+        def upload_file(self, source, destination):
+            if self.fail_once and destination.endswith("last_checkpoint.pt"):
+                self.fail_once = False
+                raise StorageError("simulated intermediate upload failure")
+            self.objects[destination] = Path(source).read_bytes()
+            return f"s3://bucket/{destination}"
+
+        def write_json(self, destination, value):
+            self.objects[destination] = value
+            return f"s3://bucket/{destination}"
+
+    storage = RetryStorage()
+    checkpoint = {"model_state_dict": {"weight": torch.tensor(1.0)}}
+    history = [{"epoch": 1, "train_loss": 1.0, "validation_loss": 1.0}]
+    settings = {"run_id": "retry-smoke", "output_prefix": "experiments/completed"}
+
+    with pytest.raises(StorageError, match="intermediate upload failure"):
+        pipeline._publish_s3(storage, checkpoint, checkpoint, history, settings)
+
+    completion = "experiments/completed/retry-smoke/completed.json"
+    assert completion not in storage.objects
+    artifacts = pipeline._publish_s3(storage, checkpoint, checkpoint, history, settings)
+
+    assert "/attempts/successful-attempt/" in artifacts["best_checkpoint_uri"]
+    assert storage.objects[completion] == {
+        "run_id": "retry-smoke",
+        "artifacts": artifacts,
+    }
+    with pytest.raises(FileExistsError, match="already exists"):
+        pipeline._publish_s3(storage, checkpoint, checkpoint, history, settings)

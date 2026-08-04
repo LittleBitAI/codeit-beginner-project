@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import torch
 
@@ -122,12 +123,14 @@ def _checkpoint_payload(
     checkpoint: Mapping[str, Any],
     settings: Mapping[str, Any],
     class_map: Mapping[str, int],
+    category_ids: Mapping[int, int],
 ) -> dict[str, Any]:
     return {
         **checkpoint,
         "architecture": ARCHITECTURE,
         "num_classes": len(class_map) + 1,
         "class_map": dict(class_map),
+        "category_ids": dict(category_ids),
         "seed": settings["seed"],
     }
 
@@ -180,13 +183,15 @@ def _publish_s3(
     settings: Mapping[str, Any],
 ) -> dict[str, str]:
     prefix = f"{settings['output_prefix']}/{settings['run_id']}"
-    destinations = {
-        "best_checkpoint_uri": f"{prefix}/best_checkpoint.pt",
-        "last_checkpoint_uri": f"{prefix}/last_checkpoint.pt",
-        "training_history_uri": f"{prefix}/training_history.json",
-    }
-    if any(storage.exists(destination) for destination in destinations.values()):
+    completion_destination = f"{prefix}/completed.json"
+    if storage.exists(completion_destination):
         raise FileExistsError(f"training run artifact already exists: {settings['run_id']}")
+    attempt_prefix = f"{prefix}/attempts/{uuid4().hex}"
+    destinations = {
+        "best_checkpoint_uri": f"{attempt_prefix}/best_checkpoint.pt",
+        "last_checkpoint_uri": f"{attempt_prefix}/last_checkpoint.pt",
+        "training_history_uri": f"{attempt_prefix}/training_history.json",
+    }
 
     scratch_root = REPOSITORY_ROOT / "artifacts"
     scratch_root.mkdir(parents=True, exist_ok=True)
@@ -199,11 +204,16 @@ def _publish_s3(
         best_uri = storage.upload_file(best_path, destinations["best_checkpoint_uri"])
         last_uri = storage.upload_file(last_path, destinations["last_checkpoint_uri"])
         history_uri = storage.write_json(destinations["training_history_uri"], history)
-    return {
+    artifacts = {
         "best_checkpoint_uri": best_uri,
         "last_checkpoint_uri": last_uri,
         "training_history_uri": history_uri,
     }
+    storage.write_json(
+        completion_destination,
+        {"run_id": settings["run_id"], "artifacts": artifacts},
+    )
+    return artifacts
 
 
 def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -228,12 +238,15 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
         overlap = train_dataset.image_locations & validation_dataset.image_locations
         if overlap:
             raise ValueError("train and validation manifests contain overlapping images")
+        if train_dataset.category_ids != validation_dataset.category_ids:
+            raise ValueError("train and validation COCO category ids must match")
         set_seed(settings["seed"])
         model = build_model(len(class_map) + 1, pretrained=settings["pretrained"])
         best, last, history = train_model(model, train_dataset, validation_dataset, settings)
 
-    best_payload = _checkpoint_payload(best, settings, class_map)
-    last_payload = _checkpoint_payload(last, settings, class_map)
+    category_ids = train_dataset.category_ids
+    best_payload = _checkpoint_payload(best, settings, class_map, category_ids)
+    last_payload = _checkpoint_payload(last, settings, class_map, category_ids)
     if isinstance(storage, S3Storage):
         artifact_uris = _publish_s3(storage, best_payload, last_payload, history, settings)
     else:
