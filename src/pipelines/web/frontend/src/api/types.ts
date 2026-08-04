@@ -163,6 +163,15 @@ export interface DataSource {
   selected_at?: string | null;
 }
 
+/** 실제 data pipeline(--only data)을 불러 받은 결과. */
+export interface DataVerification {
+  ok: boolean;
+  exit_code: number | null;
+  message: string;
+  artifacts: Record<string, string>;
+  summary: Record<string, unknown>;
+}
+
 export interface CreatedConfig {
   config_id: string;
   run_id: string;

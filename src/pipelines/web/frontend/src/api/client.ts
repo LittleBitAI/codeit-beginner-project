@@ -1,6 +1,7 @@
 import type {
   CreatedConfig,
   DataSource,
+  DataVerification,
   Defaults,
   GpuStatus,
   JobListing,
@@ -113,4 +114,10 @@ export const api = {
 
   clearDataSource: () =>
     request<{ source: null }>('/api/data/source', { method: 'DELETE' }),
+
+  verifyDataSource: (directory: string) =>
+    request<{ inspected: DataSource; verification: DataVerification }>('/api/data/verify', {
+      method: 'POST',
+      body: JSON.stringify({ directory }),
+    }),
 };

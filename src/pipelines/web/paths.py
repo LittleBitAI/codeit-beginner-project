@@ -22,6 +22,15 @@ _WINDOWS_RESERVED_NAMES = frozenset(
 )
 
 
+def repository_root() -> Path:
+    """저장소 root를 호출 시점에 확인합니다.
+
+    값으로 가져가면 import 시점에 고정돼 test가 root를 바꿔도 반영되지 않습니다.
+    """
+
+    return REPOSITORY_ROOT
+
+
 def web_state_dir() -> Path:
     """Web이 만드는 상태 파일의 뿌리 경로입니다."""
 

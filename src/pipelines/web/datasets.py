@@ -29,18 +29,31 @@ import tempfile
 from datetime import datetime, timezone
 
 from .errors import FieldError, WebPathError, WebValidationError
+import subprocess
+
+from .jobs import runner
+from .masking import sanitize_line
+
 # REPOSITORY_ROOT를 값으로 가져오면 안 됩니다. 그러면 import 시점에 고정돼 test가
 # 저장소 root를 바꿔도 실제 저장소에 파일을 쓰게 됩니다. 항상 함수로 물어봅니다.
-from .paths import resolve_within_repo, to_repo_relative_posix, web_state_dir
+from .paths import (
+    config_dir,
+    repository_root,
+    resolve_within_repo,
+    to_repo_relative_posix,
+    web_state_dir,
+)
 from .train_config import DATA_ARTIFACT_KEYS
 
 
 __all__ = [
+    "build_data_config",
     "classify_document",
     "clear_selection",
     "inspect_directory",
     "load_selection",
     "save_selection",
+    "verify_with_pipeline",
 ]
 
 
@@ -406,3 +419,118 @@ def clear_selection() -> None:
     """고른 전처리 데이터셋을 지웁니다."""
 
     _selection_path().unlink(missing_ok=True)
+
+
+# ------------------------------------------------- data pipeline으로 검증
+
+VERIFY_TIMEOUT_SECONDS = 120
+
+
+def build_data_config(data_inputs: dict[str, str]) -> dict[str, Any]:
+    """``--only data``에 넘길 최소 config를 만듭니다.
+
+    data pipeline은 ``config["inputs"]["data"]``만 봅니다. ``execution.mode``가
+    ``"dummy"``면 검증을 건너뛰고 dummy 결과를 돌려주므로 반드시 덮어씁니다.
+    """
+
+    uses_s3_inputs = any(value.lower().startswith("s3://") for value in data_inputs.values())
+    storage: dict[str, Any] = (
+        {"backend": "s3", "s3": {"prefix": ""}}
+        if uses_s3_inputs
+        else {"backend": "local", "local": {"root": "artifacts"}}
+    )
+    return {
+        "project": {"name": "pill-object-detection"},
+        "execution": {"mode": "real"},
+        "storage": storage,
+        "inputs": {"data": dict(data_inputs)},
+    }
+
+
+def verify_with_pipeline(data_inputs: dict[str, str]) -> dict[str, Any]:
+    """실제 data pipeline을 공개 CLI로 불러 계약이 성립하는지 확인합니다.
+
+    web이 자체적으로 하는 검사와 달리, 여기서는 ``main_pipeline``이 data의 ``run()``을
+    돌리고 필수 artifact 검사까지 통과시킵니다. 즉 전체 실행에서 data → train 연결이
+    성립하는지를 학습 전에 같은 경로로 확인합니다.
+
+    data pipeline은 파일을 만들지 않습니다. 넘긴 URI를 검증해 그대로 돌려줄 뿐입니다.
+    """
+
+    # train과 같은 곳에 임시 config를 쓰고, 끝나면 지웁니다.
+    from .train_config import config_relative_path, write_runtime_config
+
+    config_id = write_runtime_config(build_data_config(data_inputs))
+    try:
+        completed = runner.run_stage(
+            config_relative_path(config_id),
+            "data",
+            cwd=repository_root(),
+            timeout=VERIFY_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "exit_code": None,
+            "message": "data pipeline이 시간 안에 끝나지 않았습니다.",
+            "artifacts": {},
+            "summary": {},
+        }
+    except OSError as error:
+        return {
+            "ok": False,
+            "exit_code": None,
+            "message": f"data pipeline을 실행하지 못했습니다({type(error).__name__}).",
+            "artifacts": {},
+            "summary": {},
+        }
+    finally:
+        (config_dir() / f"{config_id}.json").unlink(missing_ok=True)
+
+    result = _parse_result(completed.stdout)
+    if result is None:
+        lines = (completed.stderr or "").strip().splitlines()
+        detail = sanitize_line(lines[-1]) if lines else ""
+        return {
+            "ok": False,
+            "exit_code": completed.returncode,
+            "message": f"data pipeline 결과를 해석하지 못했습니다. {detail}".strip(),
+            "artifacts": {},
+            "summary": {},
+        }
+
+    stage_artifacts = result.get("artifacts")
+    stage_summary = result.get("summary")
+    return {
+        "ok": completed.returncode == 0 and result.get("status") == "ok",
+        "exit_code": completed.returncode,
+        "message": sanitize_line(str(result.get("message") or "")),
+        "artifacts": _unwrap_stage(stage_artifacts),
+        "summary": _unwrap_stage(stage_summary),
+    }
+
+
+def _parse_result(stdout: str) -> dict[str, Any] | None:
+    text = (stdout or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        if start < 0:
+            return None
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(text[start:])
+        except ValueError:
+            return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _unwrap_stage(value: Any) -> dict[str, Any]:
+    """``--only data`` 결과는 stage 이름으로 한 겹 감싸여 옵니다."""
+
+    if not isinstance(value, dict):
+        return {}
+    stage = value.get("data")
+    return dict(stage) if isinstance(stage, dict) else dict(value)

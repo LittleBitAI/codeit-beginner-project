@@ -39,12 +39,19 @@ TERMINATE_GRACE_SECONDS = 10
 SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
-def build_argv(config_relative_path: str) -> list[str]:
-    """학습을 실행할 argv를 만듭니다. 순수 함수입니다.
+# ``--only``에 넘길 수 있는 stage. 사용자 입력이 여기 닿는 일은 없어야 하므로
+# 목록을 못 박아 둡니다.
+ALLOWED_STAGES = ("train", "data")
 
-    이 저장소에서 학습을 시작하는 유일하게 허용된 방법입니다.
+
+def build_argv(config_relative_path: str, stage: str = "train") -> list[str]:
+    """pipeline stage 하나를 실행할 argv를 만듭니다. 순수 함수입니다.
+
+    이 저장소에서 pipeline을 실행하는 유일하게 허용된 방법입니다.
     """
 
+    if stage not in ALLOWED_STAGES:
+        raise ValueError(f"허용되지 않은 stage입니다: {stage}")
     return [
         sys.executable,
         "-m",
@@ -52,8 +59,28 @@ def build_argv(config_relative_path: str) -> list[str]:
         "--config",
         config_relative_path,
         "--only",
-        "train",
+        stage,
     ]
+
+
+def run_stage(
+    config_relative_path: str, stage: str, *, cwd: Path, timeout: float
+) -> subprocess.CompletedProcess[str]:
+    """짧게 끝나는 stage를 그 자리에서 실행하고 결과를 돌려줍니다.
+
+    학습처럼 오래 걸리지 않는 stage(예: data 검증)에 씁니다. shell을 쓰지 않습니다.
+    """
+
+    return subprocess.run(
+        build_argv(config_relative_path, stage),
+        cwd=str(cwd),
+        env=child_environment(),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
 
 
 def child_environment() -> dict[str, str]:

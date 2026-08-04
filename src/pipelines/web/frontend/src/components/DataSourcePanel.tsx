@@ -1,7 +1,7 @@
 import { useState } from 'react';
 
 import { api, ApiError } from '../api/client';
-import type { DataSource } from '../api/types';
+import type { DataSource, DataVerification } from '../api/types';
 import { DATA_KEYS } from '../lib/dataKeys';
 import { color, font, radius } from '../design/tokens';
 import { IconCheck, IconError, IconWarning } from './Icon';
@@ -25,6 +25,8 @@ export function DataSourcePanel({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [verification, setVerification] = useState<DataVerification | null>(null);
+  const [verifying, setVerifying] = useState(false);
 
   async function run(action: 'inspect' | 'select') {
     const target = directory.trim();
@@ -34,6 +36,7 @@ export function DataSourcePanel({
     }
     setBusy(true);
     setError(null);
+    setVerification(null);
     try {
       if (action === 'inspect') {
         setPreview(await api.inspectDirectory(target));
@@ -49,6 +52,21 @@ export function DataSourcePanel({
       setError(caught instanceof ApiError ? caught.message : '폴더를 확인하지 못했습니다.');
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** 실제 data pipeline을 불러 계약이 성립하는지 확인합니다. */
+  async function verify(target: string) {
+    setVerifying(true);
+    setError(null);
+    try {
+      const result = await api.verifyDataSource(target);
+      setVerification(result.verification);
+    } catch (caught) {
+      setVerification(null);
+      setError(caught instanceof ApiError ? caught.message : 'data pipeline을 부르지 못했습니다.');
+    } finally {
+      setVerifying(false);
     }
   }
 
@@ -79,7 +97,20 @@ export function DataSourcePanel({
         </span>
 
         {source && !editing ? (
-          <SelectedSummary source={source} />
+          <>
+            <SelectedSummary source={source} />
+            {source.available !== false && source.complete && (
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <Button onClick={() => void verify(source.directory)} disabled={verifying}>
+                  {verifying ? 'data pipeline 실행 중…' : 'data pipeline으로 검증'}
+                </Button>
+                <span style={{ font: `400 10.5px/1.5 ${font.sans}`, color: color.textMuted }}>
+                  python -m src.main_pipeline --only data 를 실제로 실행해, 이 4개가 train으로
+                  넘어갈 수 있는지 확인합니다.
+                </span>
+              </div>
+            )}
+          </>
         ) : (
           <>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-start' }}>
@@ -125,6 +156,29 @@ export function DataSourcePanel({
         )}
 
         {preview && <MatchTable source={preview} heading="찾은 파일" />}
+
+        {verification && (
+          <AlertRow
+            level={verification.ok ? 'success' : 'error'}
+            title={
+              verification.ok
+                ? 'data pipeline 검증 통과'
+                : 'data pipeline이 이 데이터를 받아들이지 않았습니다'
+            }
+          >
+            {verification.message}
+            {verification.ok && (
+              <>
+                {' '}
+                artifact 4개가 train으로 넘어갈 수 있습니다. data pipeline은 파일을 만들지 않고
+                넘긴 위치를 검증해 그대로 넘겨줍니다.
+              </>
+            )}
+            {verification.exit_code !== null && verification.exit_code !== 0 && (
+              <> (exit code {verification.exit_code})</>
+            )}
+          </AlertRow>
+        )}
       </div>
     </Panel>
   );

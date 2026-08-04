@@ -48,3 +48,32 @@ def set_source(payload: DirectoryRequest = Body(...)) -> dict[str, Any]:
 def clear_source() -> dict[str, Any]:
     datasets.clear_selection()
     return {"source": None}
+
+
+@router.post("/verify")
+def verify(payload: DirectoryRequest = Body(...)) -> dict[str, Any]:
+    """실제 data pipeline을 공개 CLI로 불러 계약이 성립하는지 확인합니다.
+
+    ``python -m src.main_pipeline --config <config> --only data``
+
+    data pipeline은 파일을 만들지 않습니다. 넘긴 URI 4개가 다음 pipeline으로 넘어갈 수
+    있는지 검증해서 그대로 돌려줄 뿐입니다. 그래서 이 검사는 학습 전에 data → train
+    연결이 성립하는지를 실제 pipeline 경로로 확인하는 용도입니다.
+    """
+
+    inspected = datasets.inspect_directory(payload.directory)
+    if not inspected["complete"]:
+        return {
+            "inspected": inspected,
+            "verification": {
+                "ok": False,
+                "exit_code": None,
+                "message": "artifact 4개를 모두 찾은 폴더만 검증할 수 있습니다.",
+                "artifacts": {},
+                "summary": {},
+            },
+        }
+    return {
+        "inspected": inspected,
+        "verification": datasets.verify_with_pipeline(inspected["data"]),
+    }

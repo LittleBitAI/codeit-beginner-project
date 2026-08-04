@@ -269,6 +269,132 @@ def test_clear_selection(isolated_repo, dataset_dir):
     assert datasets.load_selection() is None
 
 
+# --- data pipeline으로 검증 -------------------------------------------------
+
+
+def test_data_config_never_uses_dummy_mode():
+    """execution.mode가 dummy면 data가 검증을 건너뛰고 dummy 결과만 돌려줍니다."""
+
+    config = datasets.build_data_config({key: f"artifacts/{key}.json" for key in DATA_ARTIFACT_KEYS})
+
+    assert config["execution"] == {"mode": "real"}
+    assert set(config["inputs"]["data"]) == set(DATA_ARTIFACT_KEYS)
+
+
+def test_data_config_switches_to_s3_backend():
+    config = datasets.build_data_config({key: f"s3://bucket/{key}.json" for key in DATA_ARTIFACT_KEYS})
+
+    assert config["storage"]["backend"] == "s3"
+
+
+def test_verify_calls_the_public_cli_with_only_data(isolated_repo, monkeypatch):
+    """train과 같은 방식으로 공개 CLI만 부릅니다."""
+
+    import subprocess
+    import sys
+
+    captured = {}
+
+    def fake_run_stage(config_relative_path, stage, *, cwd, timeout):
+        captured["path"] = config_relative_path
+        captured["stage"] = stage
+        captured["cwd"] = cwd
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "status": "ok",
+                    "artifacts": {"data": {key: "x" for key in DATA_ARTIFACT_KEYS}},
+                    "summary": {"data": {"pipeline": "data", "mode": "integration"}},
+                    "message": "pipeline 실행을 완료했습니다.",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(datasets.runner, "run_stage", fake_run_stage)
+
+    result = datasets.verify_with_pipeline({key: f"artifacts/{key}.json" for key in DATA_ARTIFACT_KEYS})
+
+    assert captured["stage"] == "data"
+    assert captured["path"].startswith("artifacts/web/configs/")
+    assert result["ok"] is True
+    # stage 이름으로 감싼 한 겹을 벗겨야 합니다.
+    assert set(result["artifacts"]) == set(DATA_ARTIFACT_KEYS)
+    assert result["summary"]["mode"] == "integration"
+    assert sys.executable  # argv 구성은 runner test가 확인합니다
+
+
+def test_verify_removes_the_temporary_config(isolated_repo, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(
+        datasets.runner,
+        "run_stage",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, '{"status":"ok"}', ""),
+    )
+
+    datasets.verify_with_pipeline({key: f"artifacts/{key}.json" for key in DATA_ARTIFACT_KEYS})
+
+    leftovers = list((isolated_repo / "artifacts" / "web" / "configs").glob("*.json"))
+    assert leftovers == []
+
+
+def test_verify_reports_pipeline_failure(isolated_repo, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(
+        datasets.runner,
+        "run_stage",
+        lambda *a, **k: subprocess.CompletedProcess(
+            [],
+            1,
+            json.dumps({"status": "error", "artifacts": {}, "summary": {}, "message": "data: 실패"}),
+            "",
+        ),
+    )
+
+    result = datasets.verify_with_pipeline({key: "x" for key in DATA_ARTIFACT_KEYS})
+
+    assert result["ok"] is False
+    assert result["exit_code"] == 1
+    assert "실패" in result["message"]
+
+
+def test_verify_handles_timeout(isolated_repo, monkeypatch):
+    import subprocess
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+    monkeypatch.setattr(datasets.runner, "run_stage", timeout)
+
+    result = datasets.verify_with_pipeline({key: "x" for key in DATA_ARTIFACT_KEYS})
+
+    assert result["ok"] is False
+    assert "시간 안에 끝나지 않았습니다" in result["message"]
+
+
+def test_verify_handles_unparsable_output_without_leaking_paths(isolated_repo, monkeypatch):
+    import subprocess
+
+    from src.pipelines.web.paths import REPOSITORY_ROOT
+
+    monkeypatch.setattr(
+        datasets.runner,
+        "run_stage",
+        lambda *a, **k: subprocess.CompletedProcess([], 1, "깨진 출력", f"실패 {REPOSITORY_ROOT}/x"),
+    )
+
+    result = datasets.verify_with_pipeline({key: "x" for key in DATA_ARTIFACT_KEYS})
+
+    assert result["ok"] is False
+    assert str(REPOSITORY_ROOT) not in result["message"]
+
+
 def test_corrupt_selection_file_is_ignored(isolated_repo):
     path = isolated_repo / "artifacts" / "web" / "data_source.json"
     path.parent.mkdir(parents=True, exist_ok=True)

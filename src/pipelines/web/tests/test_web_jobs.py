@@ -132,6 +132,35 @@ def test_build_argv_ignores_user_strings(hostile, isolated_repo, data_inputs):
     assert argv[5:] == ["--only", "train"]
 
 
+def test_build_argv_supports_the_data_stage():
+    assert runner.build_argv("artifacts/web/configs/abc.json", "data")[-2:] == ["--only", "data"]
+
+
+@pytest.mark.parametrize("stage", ("evaluate", "registry", "web", "", "train; rm -rf /", None))
+def test_build_argv_rejects_stages_outside_the_allowlist(stage):
+    """--only에 들어갈 수 있는 값을 못 박아 둡니다."""
+
+    with pytest.raises(ValueError):
+        runner.build_argv("artifacts/web/configs/abc.json", stage)
+
+
+def test_run_stage_never_uses_shell(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    runner.run_stage("artifacts/web/configs/abc.json", "data", cwd=tmp_path, timeout=5)
+
+    assert "shell" not in captured["kwargs"]
+    assert captured["args"][-2:] == ["--only", "data"]
+    assert captured["kwargs"]["timeout"] == 5
+
+
 def test_spawn_never_uses_shell(monkeypatch, tmp_path):
     captured = {}
 
