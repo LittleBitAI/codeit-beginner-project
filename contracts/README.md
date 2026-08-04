@@ -41,3 +41,38 @@
 - 타입이 다른 key의 기대 타입과 실제 타입
 
 한 pipeline은 다른 component가 소유한 artifact를 수정하지 않습니다. 구체적인 경로, file name, schema가 확정되기 전에는 이 문서에 임의로 추가하지 않습니다.
+
+## Experiment registry exact-URI 조회 interface
+
+Experiment record 소비자는 registry pipeline의 내부 module을 import하거나
+registry pipeline을 다시 실행하지 않습니다. 아래 `src.common` facade에 registry가
+반환한 **정확한** `experiment_record_uri`와 같은 storage config를 전달합니다.
+
+```python
+from src.common import ExperimentRegistryError, read_experiment_record
+
+record = read_experiment_record(
+    experiment_record_uri,
+    config,
+    expected_run_id="exp-0001",  # 선택
+)
+```
+
+이 interface는 `create_storage(config).read_json(...)`으로 지정된 record 하나만
+읽습니다. Prefix listing, 최신 record 검색, 다른 실험으로의 fallback은 하지
+않습니다. Local registry 결과가 repository 기준 `artifacts/registry/...`이고
+`LocalStorage.root`가 `<repo>/artifacts`이면 겹치는 `artifacts` prefix만 제거해
+같은 file을 읽습니다. `s3://` URI는 변경하지 않고 그대로 storage에 전달합니다.
+
+조회 결과는 object(`dict`)여야 하고 `run_id`는 비어 있지 않은 문자열이어야
+합니다. `expected_run_id`를 주면 record의 `run_id`와 정확히 같아야 합니다.
+Storage, schema, run ID 검증 실패는 모두 public `ExperimentRegistryError`로
+보고됩니다.
+
+### Web 경계
+
+Web pipeline이 외부에 공개하는 interface는 계속 `run(config) -> dict` 하나뿐입니다.
+`config["web"]["experiment_record_uri"]`가 있으면 위 common facade만 호출하며,
+`Path`, `open`, `read_text`, storage 직접 생성, registry pipeline import/호출로
+artifact를 읽지 않습니다. 선택 설정 `expected_run_id`로 조회한 실험을 고정할 수
+있습니다. URI 설정이 없으면 기존 dummy 결과를 그대로 반환합니다.
