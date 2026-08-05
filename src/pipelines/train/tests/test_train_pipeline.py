@@ -1,6 +1,7 @@
 import copy
 import io
 import json
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -17,6 +18,8 @@ from src.pipelines import train
 from src.pipelines.train import pipeline
 from src.pipelines.train.dataset import REPOSITORY_ROOT, load_class_map
 from src.pipelines.train.model import build_model
+from src.pipelines.train import progress as progress_module
+from src.pipelines.train.progress import SCHEMA, ProgressEmitter
 from src.pipelines.train.trainer import train_model
 
 
@@ -200,6 +203,138 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
         assert checkpoint["category_ids"] == [0, 7]
         assert checkpoint["num_classes"] == 2
         assert checkpoint["seed"] == 17
+
+
+def _progress_events(captured_stderr: str) -> list[dict]:
+    """torch 경고처럼 JSON이 아닌 줄은 건너뛰고 진행 event만 모읍니다."""
+
+    events = []
+    for line in captured_stderr.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("schema") == SCHEMA:
+            events.append(payload)
+    return events
+
+
+def test_run_emits_progress_events_on_stderr_and_leaves_stdout_empty(
+    local_config, capsys
+):
+    result = train.run(local_config)
+    captured = capsys.readouterr()
+
+    assert result["status"] == "ok"
+    assert captured.out == ""
+
+    events = _progress_events(captured.err)
+    assert [event["event"] for event in events] == [
+        "run_started",
+        "epoch_started",
+        "epoch_completed",
+        "epoch_started",
+        "epoch_completed",
+    ]
+    assert all(event["run_id"] == "cpu-smoke" for event in events)
+    for event in events:
+        datetime.strptime(event["ts"], "%Y-%m-%dT%H:%M:%S.%fZ")
+
+    started, _, first, _, last = events
+    assert started == {
+        "schema": SCHEMA,
+        "event": "run_started",
+        "run_id": "cpu-smoke",
+        "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
+        "device": "cpu",
+        "epochs": 2,
+        "train_images": 1,
+        "validation_images": 1,
+        "class_count": 1,
+        "ts": started["ts"],
+    }
+    assert set(first) == {
+        "schema",
+        "event",
+        "run_id",
+        "epoch",
+        "epochs",
+        "train_loss",
+        "validation_loss",
+        "best_validation_loss",
+        "best_epoch",
+        "is_best",
+        "epoch_seconds",
+        "ts",
+    }
+    assert (first["epoch"], last["epoch"]) == (1, 2)
+    assert first["is_best"] is True
+    assert first["best_epoch"] == 1
+    assert first["best_validation_loss"] == first["validation_loss"]
+    assert isinstance(first["epoch_seconds"], float)
+    assert first["epoch_seconds"] >= 0.0
+
+    history = json.loads(
+        (REPOSITORY_ROOT / result["artifacts"]["training_history_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [entry["epoch"] for entry in history] == [1, 2]
+    assert [entry["train_loss"] for entry in history] == [
+        first["train_loss"],
+        last["train_loss"],
+    ]
+    assert result["summary"]["best_epoch"] == last["best_epoch"]
+    assert result["summary"]["best_validation_loss"] == last["best_validation_loss"]
+
+
+def test_progress_stream_stays_silent_for_the_dummy_execution(capsys):
+    result = train.run({"execution": {"mode": "dummy"}})
+    captured = capsys.readouterr()
+
+    assert result["status"] == "ok"
+    assert captured.out == ""
+    assert _progress_events(captured.err) == []
+
+
+def test_progress_emitter_does_not_raise_when_the_reader_closed_the_pipe():
+    class ClosedPipe:
+        def write(self, line):
+            raise BrokenPipeError("reader is gone")
+
+        def flush(self):
+            raise BrokenPipeError("reader is gone")
+
+    emitter = ProgressEmitter("cancelled-run", ClosedPipe())
+
+    assert emitter.emit("epoch_started", epoch=1, epochs=2) is None
+
+
+def test_progress_emitter_stays_quiet_outside_the_creating_process(monkeypatch):
+    stream = io.StringIO()
+    emitter = ProgressEmitter("worker-run", stream)
+    monkeypatch.setattr(progress_module.os, "getpid", lambda: -1)
+
+    emitter.emit("epoch_started", epoch=1, epochs=2)
+
+    assert stream.getvalue() == ""
+
+
+def test_progress_emitter_writes_null_instead_of_invalid_json_numbers():
+    stream = io.StringIO()
+
+    ProgressEmitter("nan-run", stream).emit(
+        "epoch_completed", train_loss=float("nan"), validation_loss=float("inf")
+    )
+
+    line = stream.getvalue()
+    assert line.endswith("\n")
+    assert "NaN" not in line and "Infinity" not in line
+    payload = json.loads(line)
+    assert payload["train_loss"] is None
+    assert payload["validation_loss"] is None
 
 
 def test_load_class_map_converts_category_ids_in_sorted_order_without_mutating_input():

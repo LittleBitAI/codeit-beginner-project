@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import math
 import random
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -12,6 +13,8 @@ import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
+
+from .progress import ProgressEmitter
 
 
 def set_seed(seed: int) -> None:
@@ -69,6 +72,7 @@ def _train_model(
     train_dataset: Dataset,
     validation_dataset: Dataset,
     settings: Mapping[str, Any],
+    progress: ProgressEmitter | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, float | int]]]:
     seed = settings["seed"]
     device = torch.device(settings["device"])
@@ -102,8 +106,12 @@ def _train_model(
 
     history: list[dict[str, float | int]] = []
     best_loss = math.inf
+    best_epoch = 0
     best_checkpoint: dict[str, Any] | None = None
     for epoch in range(1, settings["epochs"] + 1):
+        epoch_started_at = time.perf_counter()
+        if progress is not None:
+            progress.emit("epoch_started", epoch=epoch, epochs=settings["epochs"])
         model.train()
         train_total = 0.0
         for images, targets in train_loader:
@@ -128,14 +136,28 @@ def _train_model(
             "validation_loss": validation_loss,
         }
         history.append(epoch_record)
-        if validation_loss < best_loss:
+        is_best = validation_loss < best_loss
+        if is_best:
             best_loss = validation_loss
+            best_epoch = epoch
             best_checkpoint = {
                 "epoch": epoch,
                 "model_state_dict": _state_on_cpu(model),
                 "optimizer_state_dict": copy.deepcopy(optimizer.state_dict()),
                 "validation_loss": validation_loss,
             }
+        if progress is not None:
+            progress.emit(
+                "epoch_completed",
+                epoch=epoch,
+                epochs=settings["epochs"],
+                train_loss=train_loss,
+                validation_loss=validation_loss,
+                best_validation_loss=best_loss,
+                best_epoch=best_epoch,
+                is_best=is_best,
+                epoch_seconds=round(time.perf_counter() - epoch_started_at, 3),
+            )
 
     if best_checkpoint is None:
         raise RuntimeError("training completed without a best checkpoint")
@@ -153,6 +175,7 @@ def train_model(
     train_dataset: Dataset,
     validation_dataset: Dataset,
     settings: Mapping[str, Any],
+    progress: ProgressEmitter | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, float | int]]]:
     """Train deterministically without leaving the global algorithm mode changed."""
     previous_deterministic = torch.are_deterministic_algorithms_enabled()
@@ -160,7 +183,7 @@ def train_model(
     try:
         set_seed(settings["seed"])
         torch.use_deterministic_algorithms(True, warn_only=True)
-        return _train_model(model, train_dataset, validation_dataset, settings)
+        return _train_model(model, train_dataset, validation_dataset, settings, progress)
     finally:
         torch.use_deterministic_algorithms(
             previous_deterministic,
