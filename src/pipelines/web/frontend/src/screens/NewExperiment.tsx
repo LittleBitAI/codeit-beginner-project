@@ -16,6 +16,7 @@ import { IconShield } from '../components/Icon';
 import { color, font, radius } from '../design/tokens';
 import { dataMatchesSource } from '../lib/dataSource';
 import { messageFor, toPayload } from '../lib/draftPayload';
+import { resolveTrainCapability } from '../lib/trainCapabilities';
 import { useDraft } from '../state/DraftContext';
 
 type TabKey = 'basic' | 'hyper' | 'output';
@@ -89,6 +90,7 @@ export function NewExperiment({
     return <Panel>설정 정보를 불러오는 중입니다.</Panel>;
   }
 
+  const capability = resolveTrainCapability(defaults);
   const activeTab = TABS.find((item) => item.key === tab) ?? TABS[0]!;
   const tabHasError = (item: (typeof TABS)[number]) =>
     item.fields.some((name) => messageFor(errors, `train.${name}`) !== undefined);
@@ -106,6 +108,23 @@ export function NewExperiment({
         값을 비워 두면 backend의 기본값을 씁니다. 저장하기 전에는 학습을 시작할 수 없고, 저장 버튼은 모든
         검증을 통과해야 열립니다.
       </ScreenIntro>
+
+      <div style={{ marginBottom: 14 }}>
+        <AlertRow
+          level="info"
+          title={
+            capability.source === 'legacy_fallback'
+              ? 'Train capability 호환 기본값을 사용합니다'
+              : 'Train capability를 반영했습니다'
+          }
+        >
+          모델 <code style={{ fontFamily: font.mono }}>{capability.model.default}</code> · optimizer{' '}
+          <code style={{ fontFamily: font.mono }}>{capability.optimizer.default}</code>
+          {capability.source === 'legacy_fallback'
+            ? '로 실행합니다. Train이 capability를 아직 제공하지 않아 현재 실제 구현과 맞춘 고정값입니다.'
+            : '를 기본 구성으로 사용합니다.'}
+        </AlertRow>
+      </div>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, alignItems: 'flex-start' }}>
         <div style={{ flex: '3 1 400px', minWidth: 0 }}>

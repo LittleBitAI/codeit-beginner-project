@@ -57,9 +57,11 @@ def test_adapter_selects_comparison_fields_without_mutating_record():
     assert summary["model"] == {
         "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
         "pretrained": True,
+        "source": "record",
     }
     assert summary["optimizer"] == {
-        "name": None,
+        "name": "SGD",
+        "source": "legacy_fallback",
         "learning_rate": 0.005,
         "momentum": 0.9,
         "weight_decay": 0.0005,
@@ -91,6 +93,18 @@ def test_dataset_identity_matches_for_the_same_complete_artifact_set():
     assert first_dataset["identity"] == second_dataset["identity"]
     assert first_dataset["identity_source"] == "artifact_set"
     assert first_dataset["artifacts_complete"] is True
+
+
+def test_missing_recorded_model_and_optimizer_use_capability_fallback():
+    record = make_record()
+    record.summary = {}
+
+    summary = experiment_summary(record)
+
+    assert summary["model"]["architecture"] == "fasterrcnn_mobilenet_v3_large_320_fpn"
+    assert summary["model"]["source"] == "legacy_fallback"
+    assert summary["optimizer"]["name"] == "SGD"
+    assert summary["optimizer"]["source"] == "legacy_fallback"
 
 
 def test_dataset_identity_is_unknown_when_any_artifact_is_missing():

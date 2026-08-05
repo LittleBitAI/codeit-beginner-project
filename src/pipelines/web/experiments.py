@@ -12,6 +12,7 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+from . import train_capabilities
 from .jobs.model import STATUS_LABELS, JobRecord
 from .masking import redact
 from .train_config import DATA_ARTIFACT_KEYS
@@ -83,23 +84,46 @@ def _dataset(record: JobRecord) -> dict[str, Any]:
     }
 
 
-def experiment_summary(record: JobRecord) -> dict[str, Any]:
+def experiment_summary(
+    record: JobRecord, capability: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
     """``JobRecord`` 한 건을 비교 화면의 안정된 최소 형태로 변환합니다.
 
-    기록에 없는 값은 추정하지 않고 ``None``으로 둡니다. 특히 model/optimizer 선택
-    기능이 아직 없더라도 현재 기본값을 이 adapter에서 지어내지는 않습니다.
+    metric처럼 알 수 없는 값은 추정하지 않고 ``None``으로 둡니다. 다만 현재 Train에서
+    고정된 model/optimizer는 capability 호환 계층의 값과 출처를 함께 기록합니다.
     """
 
+    resolved_capability = (
+        dict(capability) if capability is not None else train_capabilities.current_train_capability()
+    )
     settings = record.settings
     train_summary = record.summary
     progress = record.progress
     metrics_value = train_summary.get("metrics")
     metrics = metrics_value if isinstance(metrics_value, Mapping) else {}
 
-    architecture = _text(train_summary.get("architecture")) or _text(
+    recorded_architecture = _text(train_summary.get("architecture")) or _text(
         progress.get("architecture")
     )
-    optimizer_name = _text(settings.get("optimizer"))
+    recorded_optimizer = _text(settings.get("optimizer"))
+    model_capability = resolved_capability.get("model")
+    optimizer_capability = resolved_capability.get("optimizer")
+    architecture = recorded_architecture or (
+        _text(model_capability.get("default"))
+        if isinstance(model_capability, Mapping)
+        else None
+    )
+    optimizer_name = recorded_optimizer or (
+        _text(optimizer_capability.get("default"))
+        if isinstance(optimizer_capability, Mapping)
+        else None
+    )
+    reported_source = resolved_capability.get("source")
+    capability_source = (
+        reported_source
+        if reported_source in {"train", "legacy_fallback"}
+        else "legacy_fallback"
+    )
 
     value = {
         "experiment_id": record.job_id,
@@ -114,9 +138,11 @@ def experiment_summary(record: JobRecord) -> dict[str, Any]:
         "model": {
             "architecture": architecture,
             "pretrained": _boolean(settings.get("pretrained")),
+            "source": "record" if recorded_architecture is not None else capability_source,
         },
         "optimizer": {
             "name": optimizer_name,
+            "source": "record" if recorded_optimizer is not None else capability_source,
             "learning_rate": _number(settings.get("learning_rate")),
             "momentum": _number(settings.get("momentum")),
             "weight_decay": _number(settings.get("weight_decay")),

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Body, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from .. import train_capabilities
 from ..errors import FieldError, JobConflictError, WebValidationError
 from ..evaluation import DEFAULT_MAX_DETECTIONS, get_evaluation_runner
 from ..experiments import experiment_summary
@@ -37,7 +38,7 @@ router = APIRouter(prefix="/api/train", tags=["train"])
 # 모델과 다른 이름을 보여 주게 됩니다. 그래서
 # ``test_web_train_contract.py::test_architecture_matches_train_source``가 train의
 # source를 읽어 값이 같은지 확인합니다.
-ARCHITECTURE = "fasterrcnn_mobilenet_v3_large_320_fpn"
+ARCHITECTURE = train_capabilities.LEGACY_ARCHITECTURE
 
 SSE_POLL_SECONDS = 1.0
 SSE_MAX_SECONDS = 60 * 60 * 12
@@ -54,9 +55,17 @@ def get_defaults() -> dict[str, Any]:
     """새 실험 form을 서버가 정의합니다. 기본값의 유일한 출처입니다."""
 
     cuda = cuda_is_available()
+    capability = train_capabilities.current_train_capability()
+    architecture = capability["model"]["default"]
     return {
-        "architecture": ARCHITECTURE,
-        "architecture_note": "이 저장소의 train pipeline은 Faster R-CNN만 지원합니다.",
+        # 기존 frontend와의 호환을 위해 top-level 두 field를 유지합니다.
+        "architecture": architecture,
+        "architecture_note": (
+            "Train capability가 없어 현재 Faster R-CNN 기본값을 사용합니다."
+            if capability["source"] == "legacy_fallback"
+            else "Train pipeline이 보고한 capability를 사용합니다."
+        ),
+        "train_capability": capability,
         "fields": field_specs(),
         "data_fields": data_field_specs(),
         "devices": [
@@ -122,7 +131,10 @@ def list_experiments() -> dict[str, Any]:
     """저장된 학습 기록을 비교 화면에 필요한 최소 형태로 돌려줍니다."""
 
     records = get_manager().list_jobs()
-    return {"experiments": [experiment_summary(record) for record in records]}
+    capability = train_capabilities.current_train_capability()
+    return {
+        "experiments": [experiment_summary(record, capability) for record in records]
+    }
 
 
 @router.post("/jobs", status_code=201)

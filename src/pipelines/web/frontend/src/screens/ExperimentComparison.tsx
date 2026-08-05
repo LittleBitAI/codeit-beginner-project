@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 
 import { api } from '../api/client';
-import type { ExperimentSummary } from '../api/types';
+import type { CapabilityValueSource, ExperimentSummary } from '../api/types';
 import { AlertRow, Button, EmptyState, Panel, ScreenIntro, StatusBadge } from '../components/primitives';
 import { color, font, type } from '../design/tokens';
 import { usePolling } from '../hooks/usePolling';
@@ -19,6 +19,11 @@ function booleanLabel(value: boolean | null): string {
 
 function metric(value: number | null): string {
   return value === null ? '-' : value.toFixed(4);
+}
+
+function capabilityValue(value: string | null, source: CapabilityValueSource): string {
+  const text = shown(value);
+  return source === 'legacy_fallback' && value !== null ? `${text} (호환 기본값)` : text;
 }
 
 function relationLabel(experiments: ExperimentSummary[]): string {
@@ -79,7 +84,9 @@ function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) 
     },
     {
       label: '모델',
-      values: experiments.map((experiment) => shown(experiment.model.architecture)),
+      values: experiments.map((experiment) =>
+        capabilityValue(experiment.model.architecture, experiment.model.source),
+      ),
     },
     {
       label: 'PRETRAINED',
@@ -87,7 +94,9 @@ function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) 
     },
     {
       label: 'OPTIMIZER',
-      values: experiments.map((experiment) => shown(experiment.optimizer.name)),
+      values: experiments.map((experiment) =>
+        capabilityValue(experiment.optimizer.name, experiment.optimizer.source),
+      ),
     },
     {
       label: 'DEVICE',

@@ -24,10 +24,28 @@ export interface FieldSpec {
 export interface Defaults {
   architecture: string;
   architecture_note: string;
+  /** 구버전 backend 응답에는 없을 수 있어 frontend도 fallback을 유지합니다. */
+  train_capability?: TrainCapability;
   fields: FieldSpec[];
   data_fields: FieldSpec[];
   devices: { value: string; available: boolean; reason: string | null }[];
 }
+
+export interface TrainCapabilityChoice {
+  default: string;
+  choices: string[];
+  selection_supported: boolean;
+}
+
+export interface TrainCapability {
+  schema_version: 1;
+  source: 'train' | 'legacy_fallback';
+  fallback_reason: 'train_capability_unavailable' | 'train_capability_invalid' | null;
+  model: TrainCapabilityChoice;
+  optimizer: TrainCapabilityChoice;
+}
+
+export type CapabilityValueSource = 'record' | 'train' | 'legacy_fallback';
 
 export interface FieldMessage {
   field: string;
@@ -120,9 +138,11 @@ export interface ExperimentSummary {
   model: {
     architecture: string | null;
     pretrained: boolean | null;
+    source: CapabilityValueSource;
   };
   optimizer: {
     name: string | null;
+    source: CapabilityValueSource;
     learning_rate: number | null;
     momentum: number | null;
     weight_decay: number | null;
