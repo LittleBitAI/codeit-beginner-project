@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from src.pipelines.web.api.routes_train import ARCHITECTURE
+from src.pipelines.web.train_capabilities import LEGACY_OPTIMIZER
 from src.pipelines.web.train_config import (
     DATA_ARTIFACT_KEYS,
     DEFAULT_OUTPUT_DIR,
@@ -108,6 +109,13 @@ def test_architecture_matches_train_source():
     """화면에 보여 주는 모델 이름이 실제로 학습되는 모델과 같아야 합니다."""
 
     assert ARCHITECTURE == module_constant(read_source("model.py"), "ARCHITECTURE")
+
+
+def test_fallback_optimizer_matches_train_source():
+    """Capability이 없을 때 보여 주는 optimizer가 실제 고정 구현과 같아야 합니다."""
+
+    source = read_source("trainer.py")
+    assert f"torch.optim.{LEGACY_OPTIMIZER}(" in source
 
 
 def test_numeric_defaults_match_train_source():

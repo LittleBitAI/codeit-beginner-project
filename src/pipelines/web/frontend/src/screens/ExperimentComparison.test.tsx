@@ -31,8 +31,14 @@ function makeExperiment(
       identity_source: datasetIdentity ? 'artifact_set' : 'unknown',
       artifacts_complete: datasetIdentity !== null,
     },
-    model: { architecture: 'fasterrcnn', pretrained: true },
-    optimizer: { name: null, learning_rate: 0.005, momentum: 0.9, weight_decay: 0.0005 },
+    model: { architecture: 'fasterrcnn', pretrained: true, source: 'record' },
+    optimizer: {
+      name: 'SGD',
+      source: 'legacy_fallback',
+      learning_rate: 0.005,
+      momentum: 0.9,
+      weight_decay: 0.0005,
+    },
     training: { device: 'cpu', epochs: 2, batch_size: 1, num_workers: 0, seed: 42 },
     metrics: { best_epoch: 2, best_validation_loss: 0.4, map: null, map50: null },
   };
@@ -72,6 +78,7 @@ describe('ExperimentComparison', () => {
     expect(screen.getByText('같은 dataset 입력으로 기록된 실험입니다')).toBeInTheDocument();
     expect(screen.getByText('BEST VAL LOSS')).toBeInTheDocument();
     expect(screen.getAllByText('0.4000')).toHaveLength(2);
+    expect(screen.getAllByText('SGD (호환 기본값)')).toHaveLength(2);
   });
 
   it('dataset 기록이 빠진 선택은 판정 불가로 알린다', async () => {
