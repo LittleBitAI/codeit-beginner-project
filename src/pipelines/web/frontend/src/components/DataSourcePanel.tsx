@@ -94,9 +94,9 @@ export function DataSourcePanel({
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <span style={{ font: `400 12px/1.7 ${font.sans}`, color: color.textBody }}>
-          data pipeline이 만든 결과가 들어 있는 폴더를 한 번만 고르면, 그 안에서 학습에 필요한
-          JSON 4개를 찾아 기억합니다. 새 실험을 만들 때 자동으로 채워집니다. 파일 이름이 달라도
-          내용을 보고 찾습니다.
+          data pipeline이 만든 결과가 있는 위치를 한 번만 고르면, 그 안에서 학습에 필요한
+          JSON 4개를 찾아 기억합니다. 새 실험을 만들 때 자동으로 채워집니다. 로컬 폴더와 S3
+          위치를 모두 받고, 파일 이름이 달라도 내용을 보고 찾습니다.
         </span>
 
         {source && !editing ? (
@@ -119,7 +119,7 @@ export function DataSourcePanel({
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-start' }}>
               <input
                 value={directory}
-                placeholder="예: artifacts/data/v1"
+                placeholder="예: artifacts/data/v1 또는 s3://bucket/datasets/.../processed/v1/"
                 onChange={(event) => setDirectory(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') void run('inspect');
@@ -147,7 +147,9 @@ export function DataSourcePanel({
               </Button>
             </div>
             <span style={{ font: `400 10.5px/1.5 ${font.sans}`, color: color.textMuted }}>
-              저장소 기준 상대 경로만 받습니다. 절대 경로와 ..는 거부됩니다.
+              저장소 기준 상대 경로 또는 <code style={{ fontFamily: font.mono }}>s3://bucket/prefix/</code>
+              를 받습니다. 이미 S3에 준비해 둔 산출물이 있으면 그 위치를 그대로 넣으세요.
+              절대 경로와 ..는 거부됩니다.
             </span>
           </>
         )}

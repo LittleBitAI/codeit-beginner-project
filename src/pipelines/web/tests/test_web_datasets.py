@@ -395,6 +395,99 @@ def test_verify_handles_unparsable_output_without_leaking_paths(isolated_repo, m
     assert str(REPOSITORY_ROOT) not in result["message"]
 
 
+# --- S3에 이미 있는 산출물 고르기 ---------------------------------------------
+
+
+class FakeS3Storage:
+    """s3:// URI를 돌려주는 최소 storage 대역입니다."""
+
+    def __init__(self, documents: dict[str, object]) -> None:
+        self.documents = documents
+
+    def list(self, prefix):
+        return sorted(uri for uri in self.documents if uri.startswith(str(prefix)))
+
+    def read_json(self, location):
+        return self.documents[str(location)]
+
+
+@pytest.fixture
+def fake_s3(monkeypatch):
+    base = "s3://bucket/datasets/pill_detection/processed/v1-seed42/"
+    documents = {
+        base + "train_manifest.json": MANIFEST,
+        base + "validation_manifest.json": MANIFEST,
+        base + "class_map.json": CLASS_MAP,
+        base + "dataset_summary.json": SUMMARY,
+        base + "notes.txt": "무시되어야 합니다",
+    }
+    import src.common as common
+
+    monkeypatch.setattr(common, "create_storage", lambda config: FakeS3Storage(documents))
+    return base
+
+
+def test_finds_artifacts_already_prepared_in_s3(fake_s3):
+    """이미 S3에 준비된 산출물을 그대로 쓸 수 있어야 합니다."""
+
+    result = datasets.inspect_directory(fake_s3)
+
+    assert result["complete"] is True
+    assert result["directory"] == fake_s3
+    assert result["data"]["class_map_uri"] == fake_s3 + "class_map.json"
+    # artifact URI가 s3:// 이면 train도 registry도 그대로 받습니다.
+    assert all(uri.startswith("s3://") for uri in result["data"].values())
+
+
+def test_s3_prefix_without_a_trailing_slash_is_accepted(fake_s3):
+    result = datasets.inspect_directory(fake_s3.rstrip("/"))
+
+    assert result["complete"] is True
+
+
+def test_s3_prefix_ignores_non_json_objects(fake_s3):
+    result = datasets.inspect_directory(fake_s3)
+
+    assert all(entry["name"].endswith(".json") for entry in result["examined"])
+
+
+@pytest.mark.parametrize("bad", ("s3://", "s3:///key", "s3://bucket/p/?x=1", "s3://bucket/p/#f"))
+def test_bad_s3_locations_are_rejected(bad):
+    with pytest.raises(WebValidationError) as error:
+        datasets.inspect_directory(bad)
+
+    assert error.value.errors[0].field == "directory"
+
+
+def test_s3_access_failure_does_not_leak_details(monkeypatch):
+    from src.common import StorageError
+    import src.common as common
+
+    class Failing:
+        def list(self, prefix):
+            raise StorageError("token=SENSITIVE 접근 거부")
+
+    monkeypatch.setattr(common, "create_storage", lambda config: Failing())
+
+    with pytest.raises(WebValidationError) as error:
+        datasets.inspect_directory("s3://bucket/p/")
+
+    message = error.value.errors[0].message
+    assert "SENSITIVE" not in message
+    assert "StorageError" in message
+
+
+def test_s3_selection_round_trips(isolated_repo, fake_s3):
+    saved = datasets.save_selection(fake_s3)
+
+    assert saved["origin"] == "folder"
+    assert saved["complete"] is True
+
+    loaded = datasets.load_selection()
+    assert loaded["directory"] == fake_s3
+    assert loaded["data"]["train_manifest_uri"].startswith("s3://")
+
+
 # --- 원본에서 준비 실행 -------------------------------------------------------
 
 

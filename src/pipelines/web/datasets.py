@@ -28,6 +28,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .errors import FieldError, WebPathError, WebValidationError
 from .jobs import runner
@@ -252,7 +253,14 @@ def _pick_manifests(
 
 
 def inspect_directory(directory: object) -> dict[str, Any]:
-    """폴더 하나를 살펴 artifact 4개를 찾습니다. 읽기만 합니다."""
+    """위치 하나를 살펴 artifact 4개를 찾습니다. 읽기만 합니다.
+
+    ``s3://bucket/prefix/`` 를 주면 S3에서, 그 밖에는 저장소 안 폴더에서 찾습니다.
+    이미 S3에 준비돼 있는 산출물을 그대로 쓸 수 있어야 하기 때문입니다.
+    """
+
+    if isinstance(directory, str) and directory.strip().lower().startswith("s3://"):
+        return inspect_s3_prefix(directory)
 
     try:
         resolved = resolve_within_repo(directory, label="전처리 폴더")
@@ -290,6 +298,16 @@ def inspect_directory(directory: object) -> dict[str, Any]:
         elif kind == "summary":
             summaries.append(entry)
 
+    return _assemble(to_repo_relative_posix(resolved), examined, empty=not files)
+
+
+def _assemble(location: str, examined: list[dict[str, Any]], *, empty: bool) -> dict[str, Any]:
+    """살펴본 파일 목록에서 artifact 4개를 골라 결과를 만듭니다."""
+
+    manifests = [entry for entry in examined if entry["kind"] == "manifest"]
+    class_maps = [entry for entry in examined if entry["kind"] == "class_map"]
+    summaries = [entry for entry in examined if entry["kind"] == "summary"]
+
     problems: list[str] = []
     train_entry, validation_entry, manifest_problems = _pick_manifests(manifests)
     problems.extend(manifest_problems)
@@ -314,11 +332,11 @@ def inspect_directory(directory: object) -> dict[str, Any]:
         else:
             resolved_uris[key] = entry["uri"]
 
-    if not files:
-        problems.append("이 폴더에 JSON 파일이 없습니다.")
+    if empty:
+        problems.append("이 위치에 JSON 파일이 없습니다.")
 
     return {
-        "directory": to_repo_relative_posix(resolved),
+        "directory": location,
         "complete": not missing,
         "data": resolved_uris,
         "matched": {
@@ -334,6 +352,65 @@ def inspect_directory(directory: object) -> dict[str, Any]:
         "problems": problems,
         "examined": examined,
     }
+
+
+# S3 prefix 하나에서 읽어 볼 JSON 개수 상한입니다. 잘못된 prefix를 넣어도 요청이
+# 수백 개로 늘어나지 않게 합니다.
+MAX_S3_FILES = 40
+
+
+def inspect_s3_prefix(location: str) -> dict[str, Any]:
+    """``s3://bucket/prefix/`` 아래에서 artifact 4개를 찾습니다. 읽기만 합니다."""
+
+    prefix = location.strip()
+    if not prefix.lower().startswith("s3://"):
+        raise WebValidationError([FieldError("directory", "s3:// 로 시작해야 합니다.")])
+    split = urlsplit(prefix)
+    if not split.netloc:
+        raise WebValidationError(
+            [FieldError("directory", "s3://bucket/prefix/ 형식이어야 합니다.")]
+        )
+    if split.query or split.fragment:
+        raise WebValidationError(
+            [FieldError("directory", "s3 위치에 query나 fragment를 쓸 수 없습니다.")]
+        )
+    if not prefix.endswith("/"):
+        prefix += "/"
+
+    from src.common import StorageError, create_storage
+
+    try:
+        storage = create_storage({"storage": {"backend": "s3", "s3": {"prefix": ""}}})
+        entries_found = [str(item) for item in storage.list(prefix)]
+    except StorageError as error:
+        # 원문에는 bucket 경로나 backend 오류가 섞일 수 있어 type만 전합니다.
+        raise WebValidationError(
+            [
+                FieldError(
+                    "directory",
+                    f"S3 위치를 읽지 못했습니다({type(error).__name__}). "
+                    "bucket 이름과 접근 권한을 확인해 주세요.",
+                )
+            ]
+        ) from error
+
+    json_uris = sorted(uri for uri in entries_found if uri.lower().endswith(".json"))[
+        :MAX_S3_FILES
+    ]
+    examined: list[dict[str, Any]] = []
+    for uri in json_uris:
+        try:
+            document = storage.read_json(uri)
+            kind, problem = classify_document(document), None
+        except StorageError as error:
+            kind, problem = "unknown", f"읽지 못했습니다({type(error).__name__})."
+        except (ValueError, TypeError):
+            kind, problem = "unknown", "올바른 JSON이 아닙니다."
+        examined.append(
+            {"name": uri.rsplit("/", 1)[-1], "uri": uri, "kind": kind, "problem": problem}
+        )
+
+    return _assemble(prefix, examined, empty=not json_uris)
 
 
 # --------------------------------------------------------------- 선택 저장
