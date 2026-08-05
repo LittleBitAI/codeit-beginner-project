@@ -17,26 +17,20 @@ BRANCH_PATTERN = re.compile(
 )
 ALIAS_VALUE = "!python tools/git_pr.py"
 
-# Commit 하나가 끝나는 자리를 표시합니다. 본문에 줄바꿈이 들어가므로 줄 단위로는
-# 나눌 수 없어서, commit message에 나올 수 없는 제어 문자를 구분자로 씁니다.
-COMMIT_SEPARATOR = "\x1e"
-
 SUMMARY_HEADING = "변경 요약"
 REASON_HEADING = "변경 이유"
 VERIFICATION_HEADING = "검증"
 
 
-def parse_commit_log(raw: str) -> list[tuple[str, str]]:
-    """`git log` 출력을 (제목, 본문) 목록으로 나눕니다. 순수 함수입니다."""
+def configure_utf8_console(
+    stdout: object | None = None, stderr: object | None = None
+) -> None:
+    """Windows에서도 한국어 안내를 UTF-8 without BOM으로 출력합니다."""
 
-    commits: list[tuple[str, str]] = []
-    for chunk in raw.split(COMMIT_SEPARATOR):
-        text = chunk.strip("\n")
-        if not text.strip():
-            continue
-        subject, _, body = text.partition("\n")
-        commits.append((subject.strip(), body.strip()))
-    return commits
+    for stream in (stdout or sys.stdout, stderr or sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
 
 
 def _split_sections(markdown: str) -> list[tuple[str, list[str]]]:
@@ -56,52 +50,44 @@ def _split_sections(markdown: str) -> list[tuple[str, list[str]]]:
     return sections
 
 
-# `Co-Authored-By: ...`처럼 끝에 붙는 git trailer입니다. ASCII 글자로 시작하는
-# key만 봅니다. 한국어 본문 줄("참고: ...")은 걸리지 않습니다.
-_TRAILER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z-]*:\s")
+def _require_korean(items: list[str], heading: str) -> list[str]:
+    """한국어로 작성한 비어 있지 않은 PR 설명만 받습니다."""
 
-
-def _strip_trailers(body: str) -> str:
-    """끝에 붙은 git trailer를 뺍니다. trailer는 변경 이유가 아닙니다."""
-
-    lines = body.splitlines()
-    while lines and (not lines[-1].strip() or _TRAILER_PATTERN.match(lines[-1])):
-        lines.pop()
-    return "\n".join(lines).strip()
-
-
-def _reason_lines(commits: list[tuple[str, str]]) -> list[str]:
-    """Commit 본문을 변경 이유로 씁니다. 본문이 없으면 제목을 대신 씁니다."""
-
-    blocks: list[str] = []
-    for subject, body in commits:
-        reason = _strip_trailers(body)
-        blocks.append(reason if reason else f"- {subject}")
-    return "\n\n".join(blocks).splitlines()
+    cleaned = [item.strip() for item in items if item.strip()]
+    if not cleaned:
+        raise RuntimeError(f"{heading} 절을 채울 내용이 없습니다.")
+    if any(re.search(r"[가-힣]", item) is None for item in cleaned):
+        raise RuntimeError(f"{heading} 절은 한국어로 작성하세요.")
+    return cleaned
 
 
 def build_body(
     template: str,
-    commits: list[tuple[str, str]],
+    summaries: list[str],
+    reasons: list[str],
     checks: list[str],
 ) -> str:
     """Template의 안내 문구를 실제 내용으로 바꾼 Pull Request 본문을 만듭니다.
 
     `범위 확인` 항목은 사람이 확인하는 attestation이라 자동으로 체크하지
-    않습니다. 검증 내용은 git에서 알아낼 수 없으므로 반드시 받아야 합니다.
+    않습니다. 요약과 이유는 작성자가 diff를 확인한 뒤 직접 전달해야 하며,
+    commit 제목으로 대신하지 않습니다.
     """
 
-    if not commits:
-        raise RuntimeError("origin/main보다 앞선 commit이 없어 본문을 만들 수 없습니다.")
+    summaries = _require_korean(summaries, SUMMARY_HEADING)
+    reasons = _require_korean(reasons, REASON_HEADING)
     if not checks:
         raise RuntimeError(
             "검증 절을 채울 내용이 없습니다. 실행한 명령과 결과를 "
             "--check \"명령 → 결과\"로 전달하세요."
         )
 
+    if {item.casefold() for item in summaries} == {item.casefold() for item in reasons}:
+        raise RuntimeError("변경 요약과 변경 이유는 서로 다르게 작성하세요.")
+
     filled = {
-        SUMMARY_HEADING: [f"- {subject}" for subject, _ in commits],
-        REASON_HEADING: _reason_lines(commits),
+        SUMMARY_HEADING: [f"- {summary}" for summary in summaries],
+        REASON_HEADING: [f"- {reason}" for reason in reasons],
         VERIFICATION_HEADING: [f"- {check}" for check in checks],
     }
 
@@ -132,6 +118,24 @@ def capture(*command: str) -> str:
     return result.stdout.strip()
 
 
+def capture_with_utf8_input(input_text: str, *command: str) -> str:
+    """Text를 UTF-8 without BOM 표준 입력으로 보내고 출력을 돌려줍니다."""
+
+    result = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        input=input_text,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(detail or f"Command failed: {' '.join(command)}")
+    return result.stdout.strip()
+
+
 def execute(*command: str) -> None:
     result = subprocess.run(command, check=False)
     if result.returncode != 0:
@@ -154,30 +158,13 @@ def validate_tools() -> None:
         raise RuntimeError("GitHub CLI was not found. https://cli.github.com/")
 
 
-def commit_log_args() -> list[str]:
-    """`git log` 인자입니다.
-
-    `%x1e`는 git이 **출력에서** 0x1E 바이트로 바꿔 주는 표기입니다. 구분자
-    바이트를 인자 문자열에 직접 넣으면 안 됩니다. Windows `CreateProcess`가
-    제어 문자가 들어간 인자를 거부해서 실행 자체가 실패합니다.
-    """
-
-    return [
-        "git",
-        "log",
-        "origin/main..HEAD",
-        "--reverse",
-        "--pretty=format:%s%n%b%x1e",
-    ]
-
-
-def collect_commits() -> list[tuple[str, str]]:
-    """origin/main 이후의 commit을 오래된 순서로 모읍니다."""
-
-    return parse_commit_log(capture(*commit_log_args()))
-
-
-def publish(dry_run: bool, checks: list[str], update_body: bool) -> None:
+def publish(
+    dry_run: bool,
+    summaries: list[str],
+    reasons: list[str],
+    checks: list[str],
+    update_body: bool,
+) -> None:
     validate_tools()
     root = repository_root()
     template_path = root / ".github" / "pull_request_template.md"
@@ -208,7 +195,7 @@ def publish(dry_run: bool, checks: list[str], update_body: bool) -> None:
         print(f"planned: git push -u origin {branch}")
         print(f"planned: create or update draft PR from {branch} to main")
         try:
-            body = build_body(template, collect_commits(), checks)
+            body = build_body(template, summaries, reasons, checks)
         except RuntimeError as error:
             print(f"warning: actual 'git pr' will stop: {error}")
         else:
@@ -226,7 +213,7 @@ def publish(dry_run: bool, checks: list[str], update_body: bool) -> None:
 
     # 본문을 push보다 먼저 만듭니다. 검증 내용이 없어서 중단될 때 branch만
     # 원격에 올라가 있는 상태를 남기지 않기 위해서입니다.
-    body = build_body(template, collect_commits(), checks)
+    body = build_body(template, summaries, reasons, checks)
 
     execute("git", "push", "-u", "origin", branch)
     existing_url = capture(
@@ -247,7 +234,9 @@ def publish(dry_run: bool, checks: list[str], update_body: bool) -> None:
     if existing_url:
         print(f"Existing pull request updated: {existing_url}")
         if update_body:
-            execute("gh", "pr", "edit", existing_url, "--body", body)
+            capture_with_utf8_input(
+                body, "gh", "pr", "edit", existing_url, "--body-file", "-"
+            )
             print("Pull request body replaced.")
         else:
             print(
@@ -257,7 +246,8 @@ def publish(dry_run: bool, checks: list[str], update_body: bool) -> None:
         return
 
     title = capture("git", "log", "-1", "--pretty=%s")
-    created_url = capture(
+    created_url = capture_with_utf8_input(
+        body,
         "gh",
         "pr",
         "create",
@@ -268,8 +258,8 @@ def publish(dry_run: bool, checks: list[str], update_body: bool) -> None:
         "--draft",
         "--title",
         title,
-        "--body",
-        body,
+        "--body-file",
+        "-",
     )
     print(f"Draft pull request created: {created_url}")
 
@@ -287,6 +277,26 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Show the plan and the generated body without making external changes.",
+    )
+    parser.add_argument(
+        "--summary",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help=(
+            "변경 요약에 넣을 한국어 설명. diff를 확인해 사용자 동작이나 구조가 "
+            "어떻게 바뀌었는지 적으세요. 여러 번 쓸 수 있습니다."
+        ),
+    )
+    parser.add_argument(
+        "--reason",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help=(
+            "변경 이유에 넣을 한국어 설명. 기존 문제와 이 변경이 필요한 이유를 "
+            "요약과 다르게 적으세요. 여러 번 쓸 수 있습니다."
+        ),
     )
     parser.add_argument(
         "--check",
@@ -312,7 +322,13 @@ def main() -> int:
         if args.install:
             install_alias()
         else:
-            publish(args.dry_run, args.check, args.update_body)
+            publish(
+                args.dry_run,
+                args.summary,
+                args.reason,
+                args.check,
+                args.update_body,
+            )
     except RuntimeError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -320,4 +336,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    configure_utf8_console()
     raise SystemExit(main())

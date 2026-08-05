@@ -1,3 +1,5 @@
+from subprocess import CompletedProcess
+
 import pytest
 
 from tools import git_pr
@@ -56,33 +58,26 @@ TEMPLATE = """## 변경 요약
 - [ ] 관련 test와 check를 실행했습니다.
 """
 
-COMMITS = [("문서 역할 분리", "지침서가 서로 겹쳐서 정리했습니다.\n두 번째 줄입니다.")]
+SUMMARIES = ["서로 겹치던 문서 지침을 독자별 역할에 맞게 분리했습니다."]
+REASONS = ["한 도구의 지침을 고치면 다른 도구의 지침까지 바뀌는 문제를 막기 위해서입니다."]
 CHECKS = ["`python -m pytest -q` → 871 passed"]
 
 
 def test_body_replaces_every_placeholder():
-    """template의 안내 문구가 본문에 하나도 남지 않아야 합니다."""
-
-    body = git_pr.build_body(TEMPLATE, COMMITS, CHECKS)
+    body = git_pr.build_body(TEMPLATE, SUMMARIES, REASONS, CHECKS)
 
     assert "적어 주세요" not in body
 
 
-def test_body_fills_summary_from_commit_subjects():
-    body = git_pr.build_body(TEMPLATE, COMMITS, CHECKS)
+def test_body_fills_explicit_summary_and_reason():
+    body = git_pr.build_body(TEMPLATE, SUMMARIES, REASONS, CHECKS)
 
-    assert "- 문서 역할 분리" in body
-
-
-def test_body_fills_reason_from_commit_body():
-    body = git_pr.build_body(TEMPLATE, COMMITS, CHECKS)
-
-    assert "지침서가 서로 겹쳐서 정리했습니다." in body
-    assert "두 번째 줄입니다." in body
+    assert f"- {SUMMARIES[0]}" in body
+    assert f"- {REASONS[0]}" in body
 
 
 def test_body_fills_verification_from_supplied_checks():
-    body = git_pr.build_body(TEMPLATE, COMMITS, CHECKS)
+    body = git_pr.build_body(TEMPLATE, SUMMARIES, REASONS, CHECKS)
 
     assert "- `python -m pytest -q` → 871 passed" in body
 
@@ -90,78 +85,90 @@ def test_body_fills_verification_from_supplied_checks():
 def test_body_keeps_scope_checkboxes_unchecked():
     """범위 확인은 사람이 확인하는 항목이므로 자동으로 체크하지 않습니다."""
 
-    body = git_pr.build_body(TEMPLATE, COMMITS, CHECKS)
+    body = git_pr.build_body(TEMPLATE, SUMMARIES, REASONS, CHECKS)
 
     assert "- [ ] 하나의 목적에 집중한 변경입니다." in body
     assert "- [x]" not in body
 
 
 def test_body_keeps_section_order_and_headings():
-    body = git_pr.build_body(TEMPLATE, COMMITS, CHECKS)
+    body = git_pr.build_body(TEMPLATE, SUMMARIES, REASONS, CHECKS)
 
     headings = [line for line in body.splitlines() if line.startswith("## ")]
     assert headings == ["## 변경 요약", "## 변경 이유", "## 검증", "## 범위 확인"]
 
 
-def test_body_without_checks_is_refused():
-    """검증 내용을 못 받으면 빈 절을 올리지 않고 중단합니다."""
+@pytest.mark.parametrize(
+    ("summaries", "reasons", "checks", "message"),
+    (
+        ([], REASONS, CHECKS, "변경 요약"),
+        (SUMMARIES, [], CHECKS, "변경 이유"),
+        (SUMMARIES, REASONS, [], "검증"),
+    ),
+)
+def test_body_refuses_missing_explanation(summaries, reasons, checks, message):
+    """실제 diff를 설명하지 않으면 PR을 만들지 않습니다."""
 
-    with pytest.raises(RuntimeError, match="검증"):
-        git_pr.build_body(TEMPLATE, COMMITS, [])
-
-
-def test_commit_with_no_body_still_explains_the_reason():
-    body = git_pr.build_body(TEMPLATE, [("제목만 있는 commit", "")], CHECKS)
-
-    assert "적어 주세요" not in body
-    assert "제목만 있는 commit" in body
-
-
-def test_multiple_commits_each_appear_in_the_summary():
-    commits = [("첫 번째", "이유 하나"), ("두 번째", "이유 둘")]
-
-    body = git_pr.build_body(TEMPLATE, commits, CHECKS)
-
-    assert "- 첫 번째" in body
-    assert "- 두 번째" in body
+    with pytest.raises(RuntimeError, match=message):
+        git_pr.build_body(TEMPLATE, summaries, reasons, checks)
 
 
-def test_reason_drops_git_trailers():
-    """Co-Authored-By 같은 trailer는 변경 이유가 아니므로 본문에서 뺍니다."""
+def test_multiple_explanations_each_appear():
+    summaries = ["설정 API에 인증 header를 추가했습니다.", "팀 학습 현황 화면을 추가했습니다."]
+    reasons = ["학습 실행자를 확인하고 팀별 접근을 제한하기 위해서입니다."]
 
-    commits = [("제목", "진짜 이유입니다.\n\nCo-Authored-By: 누군가 <a@b.c>")]
+    body = git_pr.build_body(TEMPLATE, summaries, reasons, CHECKS)
 
-    body = git_pr.build_body(TEMPLATE, commits, CHECKS)
-
-    assert "진짜 이유입니다." in body
-    assert "Co-Authored-By" not in body
-
-
-def test_reason_keeps_korean_lines_ending_with_colon():
-    """trailer 제거가 한국어 본문 줄까지 지우면 안 됩니다."""
-
-    commits = [("제목", "이유 첫 줄\n참고: 남아 있어야 합니다")]
-
-    body = git_pr.build_body(TEMPLATE, commits, CHECKS)
-
-    assert "참고: 남아 있어야 합니다" in body
+    assert f"- {summaries[0]}" in body
+    assert f"- {summaries[1]}" in body
 
 
-def test_commit_log_args_carry_no_control_character():
-    """회귀: 구분자 바이트를 인자에 직접 넣으면 Windows CreateProcess가 거부합니다.
+def test_body_refuses_same_summary_and_reason():
+    """제목을 요약과 이유에 반복한 #40 형태를 막습니다."""
 
-    git이 출력에서 바꿔 주는 `%x1e` 표기를 인자로 보내야 합니다.
-    """
+    duplicated = ["web 팀 학습 실시간 동기화 추가"]
 
-    for argument in git_pr.commit_log_args():
-        assert git_pr.COMMIT_SEPARATOR not in argument
-        assert "\x00" not in argument
+    with pytest.raises(RuntimeError, match="서로 다르게"):
+        git_pr.build_body(TEMPLATE, duplicated, duplicated, CHECKS)
 
 
-def test_parse_commit_log_splits_subject_and_body():
-    raw = f"제목 A\n본문 A 첫 줄\n본문 A 둘째 줄\n{git_pr.COMMIT_SEPARATOR}제목 B\n\n{git_pr.COMMIT_SEPARATOR}"
+def test_body_requires_korean_explanation():
+    with pytest.raises(RuntimeError, match="한국어"):
+        git_pr.build_body(TEMPLATE, ["Add team sync"], REASONS, CHECKS)
 
-    assert git_pr.parse_commit_log(raw) == [
-        ("제목 A", "본문 A 첫 줄\n본문 A 둘째 줄"),
-        ("제목 B", ""),
-    ]
+
+def test_github_body_is_sent_as_utf8_without_bom(monkeypatch):
+    captured = {}
+
+    def fake_run(*command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return CompletedProcess(command, 0, stdout="https://example.test/pr/1\n", stderr="")
+
+    monkeypatch.setattr(git_pr.subprocess, "run", fake_run)
+
+    result = git_pr.capture_with_utf8_input(
+        "한국어 PR 본문\n", "gh", "pr", "create", "--body-file", "-"
+    )
+
+    assert result == "https://example.test/pr/1"
+    assert captured["kwargs"]["encoding"] == "utf-8"
+    assert captured["kwargs"]["input"].encode("utf-8").startswith(b"\xef\xbb\xbf") is False
+    assert captured["command"][0][-2:] == ("--body-file", "-")
+
+
+def test_console_output_is_configured_as_utf8_without_bom():
+    class Stream:
+        def __init__(self):
+            self.options = None
+
+        def reconfigure(self, **options):
+            self.options = options
+
+    stdout = Stream()
+    stderr = Stream()
+
+    git_pr.configure_utf8_console(stdout, stderr)
+
+    assert stdout.options == {"encoding": "utf-8", "errors": "strict"}
+    assert stderr.options == {"encoding": "utf-8", "errors": "strict"}
