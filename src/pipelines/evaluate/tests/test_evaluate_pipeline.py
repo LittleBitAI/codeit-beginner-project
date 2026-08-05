@@ -16,10 +16,53 @@ from conftest import IMAGE_RECORDS, write_json, write_jsonl
 
 RESULT_KEYS = {"status", "artifacts", "summary", "message"}
 ARTIFACT_KEYS = {"run_id", "metrics_uri", "predictions_uri"}
+COMPETITION_THRESHOLDS = [0.75, 0.80, 0.85, 0.90, 0.95]
 
 
 def _read_json(repository_root: Path, uri: str) -> dict:
     return json.loads((repository_root / uri).read_text(encoding="utf-8"))
+
+
+def _add_test_manifest(base_config: dict, repository_root: Path) -> None:
+    write_json(
+        repository_root / "data/test/instances.json",
+        {
+            "images": [
+                {"id": 20, "file_name": "0020.jpg", "width": 100, "height": 100},
+                {"id": 10, "file_name": "0010.jpg", "width": 100, "height": 100},
+            ],
+            "annotations": [],
+            "categories": [{"id": 3, "name": "pill-a"}, {"id": 7, "name": "pill-b"}],
+        },
+    )
+    base_config["inputs"]["data"]["test_manifest_uri"] = "data/test/instances.json"
+
+
+def _normalised_validation_predictions() -> list[dict]:
+    raw_predictions = [
+        {"image_id": "img-1", "category_id": 1, "bbox": [10, 10, 20, 20], "score": 0.95},
+        {"image_id": "img-1", "category_id": 2, "bbox": [50, 50, 20, 20], "score": 0.90},
+        {"image_id": "img-2", "category_id": 1, "bbox": [30, 30, 10, 10], "score": 0.80},
+    ]
+    return [
+        dict(prediction, image_key=str(prediction["image_id"]))
+        for prediction in raw_predictions
+    ]
+
+
+def _test_prediction(
+    image_id: int,
+    category_id: int,
+    bbox_x: float,
+    score: float,
+) -> dict:
+    return {
+        "image_id": image_id,
+        "image_key": str(image_id),
+        "category_id": category_id,
+        "bbox": [bbox_x, 2.0, 3.0, 4.0],
+        "score": score,
+    }
 
 
 def test_public_run_is_the_pipeline_entry_point():
@@ -110,6 +153,151 @@ def test_score_threshold_and_top_k_are_applied(base_config: dict, repository_roo
     assert result["status"] == "ok", result["message"]
     assert result["summary"]["prediction_count"] == 2
     assert result["summary"]["max_detections_per_image"] == 4
+
+
+def test_competition_run_reuses_one_checkpoint_and_writes_submission(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from src.pipelines.evaluate import pipeline
+
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"].pop("predictions_input_uri")
+    calls = []
+
+    def fake_predict_groups(store, record_groups, *, checkpoint_uri, device, seed):
+        calls.append([[record["image_id"] for record in records] for records in record_groups])
+        return [
+            _normalised_validation_predictions(),
+            [
+                _test_prediction(20, 7, 0.123456789012345, 0.9),
+                _test_prediction(10, 7, 2.0, 0.8),
+                _test_prediction(10, 3, 1.0, 0.8),
+                _test_prediction(10, 7, 3.0, 0.95),
+                _test_prediction(10, 3, 4.0, 0.7),
+                _test_prediction(10, 3, 5.0, 0.6),
+                _test_prediction(20, 3, 6.0, 0.0),
+            ],
+        ]
+
+    monkeypatch.setattr(pipeline, "predict_record_groups_with_checkpoint", fake_predict_groups)
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    assert calls == [
+        [
+            ["img-1", "img-2"],
+            [20, 10],
+        ]
+    ]
+    assert set(result["artifacts"]) == ARTIFACT_KEYS | {"submission_uri"}
+    assert result["artifacts"]["submission_uri"] == (
+        "submissions/evaluate-0001/submission.csv"
+    )
+    rows = (repository_root / result["artifacts"]["submission_uri"]).read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert rows == [
+        "annotation_id,image_id,category_id,bbox_x,bbox_y,bbox_w,bbox_h,score",
+        "1,10,7,3.0,2.0,3.0,4.0,0.95",
+        "2,10,3,1.0,2.0,3.0,4.0,0.8",
+        "3,10,7,2.0,2.0,3.0,4.0,0.8",
+        "4,10,3,4.0,2.0,3.0,4.0,0.7",
+        "5,20,7,0.123456789012345,2.0,3.0,4.0,0.9",
+        "6,20,3,6.0,2.0,3.0,4.0,0.0",
+    ]
+    metrics = _read_json(repository_root, result["artifacts"]["metrics_uri"])
+    assert metrics["iou_thresholds"] == COMPETITION_THRESHOLDS
+    assert metrics["metrics"]["mAP50"] is None
+    assert result["summary"]["score_threshold"] == 0.0
+    assert result["summary"]["max_detections_per_image"] == 4
+    assert "test_metrics" not in result["summary"]
+
+
+def test_existing_submission_stops_before_inference(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from src.pipelines.evaluate import pipeline
+
+    _add_test_manifest(base_config, repository_root)
+    submission_path = repository_root / "submissions/evaluate-0001/submission.csv"
+    submission_path.parent.mkdir(parents=True, exist_ok=True)
+    submission_path.write_text("keep\n", encoding="utf-8", newline="\n")
+
+    def unexpected_inference(*args, **kwargs):
+        pytest.fail("preflight 뒤에는 inference가 호출되면 안 됩니다.")
+
+    monkeypatch.setattr(pipeline, "predict_record_groups_with_checkpoint", unexpected_inference)
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert submission_path.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_failed_metrics_write_removes_new_submission(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from src.pipelines.evaluate import pipeline, storage_io
+
+    _add_test_manifest(base_config, repository_root)
+    monkeypatch.setattr(
+        pipeline,
+        "predict_record_groups_with_checkpoint",
+        lambda *args, **kwargs: [[]],
+    )
+    original_write_json = storage_io.ArtifactStore.write_json
+
+    def fail_metrics(self, uri, value, *, overwrite=False):
+        if uri.endswith("metrics.json"):
+            raise storage_io.ArtifactWriteError("의도한 저장 실패")
+        return original_write_json(self, uri, value, overwrite=overwrite)
+
+    monkeypatch.setattr(storage_io.ArtifactStore, "write_json", fail_metrics)
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert not (repository_root / "submissions/evaluate-0001/submission.csv").exists()
+    assert not (repository_root / "artifacts/evaluate/evaluate-0001/predictions.json").exists()
+
+
+def test_test_manifest_requires_checkpoint_even_with_validation_predictions(
+    base_config: dict, repository_root: Path
+):
+    _add_test_manifest(base_config, repository_root)
+    base_config["inputs"]["train"].pop("best_checkpoint_uri")
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "test image 추론에는 checkpoint" in result["message"]
+
+
+def test_competition_thresholds_cannot_drift(
+    base_config: dict, repository_root: Path
+):
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"]["iou_thresholds"] = [0.5]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "competition iou_thresholds" in result["message"]
+
+
+def test_submission_path_outside_repository_is_rejected(
+    base_config: dict, repository_root: Path
+):
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"]["submission_uri"] = "../outside/submission.csv"
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "저장소 root 밖의 local 경로" in result["message"]
+    assert not (repository_root.parent / "outside/submission.csv").exists()
 
 
 def test_missing_manifest_returns_error(base_config: dict, repository_root: Path):

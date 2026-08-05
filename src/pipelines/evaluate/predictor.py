@@ -103,20 +103,25 @@ def load_predictions(
     return parse_predictions(store.read_json(uri), source=uri, known_image_keys=known_image_keys)
 
 
-def _import_torch() -> tuple[Any, Any]:
+def _import_torch() -> Any:
     try:
         import torch
+    except ImportError as error:  # pragma: no cover - dependency는 requirements에 고정되어 있습니다.
+        raise PredictionError("checkpoint 추론에는 requirements.txt의 torch가 필요합니다.") from error
+    return torch
+
+
+def _import_torchvision() -> Any:
+    try:
         import torchvision
     except ImportError as error:  # pragma: no cover - dependency는 requirements에 고정되어 있습니다.
         raise PredictionError(
-            "checkpoint 추론에는 requirements.txt의 torch와 torchvision이 필요합니다."
+            "이미지 추론에는 requirements.txt의 torchvision이 필요합니다."
         ) from error
-    return torch, torchvision
+    return torchvision
 
 
 def _build_model(checkpoint: Mapping[str, Any], *, source: str) -> Any:
-    _, torchvision = _import_torch()
-
     architecture = checkpoint.get("architecture")
     num_classes = checkpoint.get("num_classes")
     state_dict = checkpoint.get("state_dict", checkpoint.get("model_state_dict"))
@@ -128,6 +133,7 @@ def _build_model(checkpoint: Mapping[str, Any], *, source: str) -> Any:
     if not isinstance(state_dict, Mapping):
         raise PredictionError(f"{source}: checkpoint에 state_dict가 필요합니다.")
 
+    torchvision = _import_torchvision()
     builder = getattr(torchvision.models.detection, architecture.strip(), None)
     if not callable(builder):
         raise PredictionError(
@@ -146,7 +152,7 @@ def _build_model(checkpoint: Mapping[str, Any], *, source: str) -> Any:
 
 def load_checkpoint_document(store: ArtifactStore, uri: str, *, device: str) -> Mapping[str, Any]:
     """Checkpoint를 local로 가져와 읽습니다."""
-    torch, _ = _import_torch()
+    torch = _import_torch()
 
     with tempfile.TemporaryDirectory(prefix="pill-evaluate-checkpoint-") as directory:
         checkpoint_path = store.ensure_local_file(uri, directory)
@@ -171,7 +177,25 @@ def predict_with_checkpoint(
     seed: int = 0,
 ) -> list[dict[str, Any]]:
     """Checkpoint를 불러와 manifest의 모든 이미지에 대해 추론합니다."""
-    torch, _ = _import_torch()
+    return predict_record_groups_with_checkpoint(
+        store,
+        [records],
+        checkpoint_uri=checkpoint_uri,
+        device=device,
+        seed=seed,
+    )[0]
+
+
+def predict_record_groups_with_checkpoint(
+    store: ArtifactStore,
+    record_groups: Sequence[Sequence[Mapping[str, Any]]],
+    *,
+    checkpoint_uri: str,
+    device: str = "cpu",
+    seed: int = 0,
+) -> list[list[dict[str, Any]]]:
+    """Checkpoint와 model을 한 번만 준비해 여러 manifest를 차례로 추론합니다."""
+    torch = _import_torch()
     checkpoint = load_checkpoint_document(store, checkpoint_uri, device=device)
     model = _build_model(checkpoint, source=checkpoint_uri)
 
@@ -190,16 +214,19 @@ def predict_with_checkpoint(
     ):
         raise PredictionError(f"{checkpoint_uri}: category_ids는 정수 list여야 합니다.")
 
-    predictions: list[dict[str, Any]] = []
+    predictions_by_group: list[list[dict[str, Any]]] = []
     with tempfile.TemporaryDirectory(prefix="pill-evaluate-images-") as directory:
-        for record in records:
-            image_tensor = _load_image_tensor(store, record, directory)
-            with torch.no_grad():
-                outputs = model([image_tensor.to(resolved_device)])
-            predictions.extend(
-                _outputs_to_predictions(outputs[0], record=record, category_ids=category_ids)
-            )
-    return predictions
+        for records in record_groups:
+            predictions: list[dict[str, Any]] = []
+            for record in records:
+                image_tensor = _load_image_tensor(store, record, directory)
+                with torch.no_grad():
+                    outputs = model([image_tensor.to(resolved_device)])
+                predictions.extend(
+                    _outputs_to_predictions(outputs[0], record=record, category_ids=category_ids)
+                )
+            predictions_by_group.append(predictions)
+    return predictions_by_group
 
 
 def _load_image_tensor(
@@ -207,7 +234,7 @@ def _load_image_tensor(
     record: Mapping[str, Any],
     download_dir: str | Path,
 ) -> Any:
-    _, torchvision = _import_torch()
+    torchvision = _import_torchvision()
     try:
         from PIL import Image
     except ImportError as error:  # pragma: no cover - dependency는 requirements에 고정되어 있습니다.
@@ -264,5 +291,6 @@ __all__ = [
     "load_checkpoint_document",
     "load_predictions",
     "parse_predictions",
+    "predict_record_groups_with_checkpoint",
     "predict_with_checkpoint",
 ]

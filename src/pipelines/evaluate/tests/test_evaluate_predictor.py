@@ -10,6 +10,7 @@ from src.pipelines.evaluate.errors import InputArtifactError, PredictionError
 from src.pipelines.evaluate.predictor import (
     load_checkpoint_document,
     parse_predictions,
+    predict_record_groups_with_checkpoint,
     predict_with_checkpoint,
 )
 from src.pipelines.evaluate.storage_io import ArtifactStore
@@ -87,7 +88,13 @@ def test_load_checkpoint_document_reports_broken_file(repository_root: Path):
         load_checkpoint_document(store, "checkpoints/best.pt", device="cpu")
 
 
-def test_predict_with_checkpoint_reports_unknown_architecture(repository_root: Path):
+def test_predict_with_checkpoint_reports_unknown_architecture(
+    repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from types import SimpleNamespace
+
+    from src.pipelines.evaluate import predictor
+
     torch = pytest.importorskip("torch")
     checkpoint_path = repository_root / "checkpoints/best.pt"
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -96,6 +103,10 @@ def test_predict_with_checkpoint_reports_unknown_architecture(repository_root: P
         checkpoint_path,
     )
     store = ArtifactStore()
+    fake_torchvision = SimpleNamespace(
+        models=SimpleNamespace(detection=SimpleNamespace())
+    )
+    monkeypatch.setattr(predictor, "_import_torchvision", lambda: fake_torchvision)
 
     with pytest.raises(PredictionError, match="제공하지 않는 architecture"):
         predict_with_checkpoint(store, [], checkpoint_uri="checkpoints/best.pt")
@@ -110,6 +121,77 @@ def test_predict_with_checkpoint_reports_missing_state_dict(repository_root: Pat
 
     with pytest.raises(PredictionError, match="state_dict가 필요합니다"):
         predict_with_checkpoint(store, [], checkpoint_uri="checkpoints/best.pt")
+
+
+def test_record_groups_reuse_one_checkpoint_and_infer_every_image(
+    repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.pipelines.evaluate import predictor
+
+    calls = {"checkpoint": 0, "model": 0}
+
+    class FakeModel:
+        def to(self, device):
+            return self
+
+        def __call__(self, images):
+            return [{}]
+
+    class FakeTensor:
+        def to(self, device):
+            return self
+
+    fake_torch = SimpleNamespace(
+        manual_seed=lambda seed: None,
+        device=lambda device: device,
+        no_grad=nullcontext,
+    )
+
+    def load_checkpoint(*args, **kwargs):
+        calls["checkpoint"] += 1
+        return {"category_ids": [0, 3, 7]}
+
+    def build_model(*args, **kwargs):
+        calls["model"] += 1
+        return FakeModel()
+
+    monkeypatch.setattr(predictor, "_import_torch", lambda: fake_torch)
+    monkeypatch.setattr(predictor, "load_checkpoint_document", load_checkpoint)
+    monkeypatch.setattr(predictor, "_build_model", build_model)
+    monkeypatch.setattr(predictor, "_load_image_tensor", lambda *args: FakeTensor())
+    monkeypatch.setattr(
+        predictor,
+        "_outputs_to_predictions",
+        lambda output, *, record, category_ids: [
+            {
+                "image_id": record["image_id"],
+                "image_key": record["image_key"],
+                "category_id": 3,
+                "bbox": [1.0, 2.0, 3.0, 4.0],
+                "score": 0.5,
+            }
+        ],
+    )
+    groups = [
+        [{"image_id": "validation", "image_key": "validation", "image_uri": "v.jpg"}],
+        [
+            {"image_id": 20, "image_key": "20", "image_uri": "20.jpg"},
+            {"image_id": 10, "image_key": "10", "image_uri": "10.jpg"},
+        ],
+    ]
+
+    predictions = predict_record_groups_with_checkpoint(
+        ArtifactStore(), groups, checkpoint_uri="checkpoints/best.pt"
+    )
+
+    assert calls == {"checkpoint": 1, "model": 1}
+    assert [[entry["image_id"] for entry in group] for group in predictions] == [
+        ["validation"],
+        [20, 10],
+    ]
 
 
 def test_predict_with_checkpoint_runs_on_cpu(repository_root: Path):
