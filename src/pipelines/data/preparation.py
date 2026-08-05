@@ -1,16 +1,17 @@
-"""S3 원본에서 학습용 artifact 4개를 만들어 storage에 저장합니다.
+"""S3 원본에서 학습·평가용 artifact 5개를 만들어 storage에 저장합니다.
 
 `config["data"]["prepare"]`가 `true`일 때만 동작하는 준비 경로입니다. 원본
-`train_images/`와 `train_annotations/`만 읽고, 합친 COCO dataset을 train과
-validation으로 나눈 뒤 아래 네 file을 저장합니다.
+`train_images/`와 `train_annotations/`로 train/validation을 만들고,
+`test_images/`의 크기만 decode해 아래 다섯 file을 저장합니다.
 
 - `train_manifest.json`, `validation_manifest.json`: COCO 형식 manifest
+- `test_manifest.json`: annotation이 없는 COCO 형식 test manifest
 - `class_map.json`: `{"<category id>": "<category name>"}`
 - `dataset_summary.json`: 원본 위치, 비율, seed, 분포를 담은 요약
 
 Storage 접근은 `src/common/storage.py`의 `create_storage(config)`로만 합니다.
 개별 pipeline은 `boto3`를 직접 쓰지 않습니다. competition 평가용 `test_images/`는
-어떤 split에도 넣지 않습니다.
+test manifest에만 기록하고 어떤 학습 split에도 넣지 않습니다.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from src.common import LocalStorage, Storage, StorageError, create_storage
 from .coco import ConsolidatedDataset, consolidate
 from .errors import DatasetPreparationError
 from .split import SplitResult, split_images
+from .test_manifest import build_test_manifest
 
 
 __all__ = [
@@ -64,11 +66,13 @@ ARTIFACT_FILE_NAMES: dict[str, str] = {
     "validation_manifest_uri": "validation_manifest.json",
     "class_map_uri": "class_map.json",
     "dataset_summary_uri": "dataset_summary.json",
+    "test_manifest_uri": "test_manifest.json",
 }
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 TRAIN_IMAGE_MARKER = "train_images/"
 TRAIN_ANNOTATION_MARKER = "train_annotations/"
+TEST_IMAGE_MARKER = "test_images/"
 # competition 평가용 원본입니다. 학습·검증 어디에도 들어가면 안 됩니다.
 FORBIDDEN_MARKERS = ("test_images/", "test_annotations/")
 MAX_READ_WORKERS = 16
@@ -198,11 +202,12 @@ def _normalized(location: Any) -> str:
     return str(location).replace("\\", "/")
 
 
-def _raw_objects(storage: Storage, raw_prefix: str) -> tuple[list[str], list[str]]:
-    """원본 prefix에서 train 이미지와 train annotation 위치를 고릅니다.
+def _raw_objects(
+    storage: Storage, raw_prefix: str
+) -> tuple[list[str], list[str], list[str]]:
+    """원본 prefix에서 train/test 이미지와 train annotation 위치를 고릅니다.
 
-    `test_images/` 등 competition 평가용 경로는 여기서 제외되어 이후 단계로
-    전달되지 않습니다.
+    `test_annotations/`는 어떤 경우에도 읽을 대상에 넣지 않습니다.
     """
 
     entries = sorted(str(entry) for entry in storage.list(raw_prefix))
@@ -223,12 +228,20 @@ def _raw_objects(storage: Storage, raw_prefix: str) -> tuple[list[str], list[str
         if TRAIN_ANNOTATION_MARKER in _normalized(entry)
         and _normalized(entry).lower().endswith(".json")
     ]
-    if not image_locations or not annotation_locations:
+    test_image_locations = [
+        entry
+        for entry in entries
+        if TEST_IMAGE_MARKER in _normalized(entry)
+        and _normalized(entry).lower().endswith(IMAGE_EXTENSIONS)
+    ]
+    if not image_locations or not annotation_locations or not test_image_locations:
         raise DatasetPreparationError(
-            "원본 prefix에서 train_images와 train_annotations를 모두 찾지 못했습니다. "
-            f"(이미지 {len(image_locations)}개, annotation {len(annotation_locations)}개)"
+            "원본 prefix에서 train_images, train_annotations, test_images를 모두 "
+            "찾지 못했습니다. "
+            f"(train image {len(image_locations)}개, annotation "
+            f"{len(annotation_locations)}개, test image {len(test_image_locations)}개)"
         )
-    return image_locations, annotation_locations
+    return image_locations, annotation_locations, test_image_locations
 
 
 def _read_documents(
@@ -364,6 +377,7 @@ def _dataset_summary(
     manifests: Mapping[str, dict[str, Any]],
     artifact_uris: Mapping[str, str],
     raw_image_count: int,
+    test_image_count: int,
     annotation_document_count: int,
     generated_at: str,
 ) -> dict[str, Any]:
@@ -387,6 +401,7 @@ def _dataset_summary(
         },
         "raw": {
             "listed_train_images": raw_image_count,
+            "listed_test_images": test_image_count,
             "annotation_documents": annotation_document_count,
             "unreferenced_train_images": dataset.unreferenced_image_count,
             "test_images_used": 0,
@@ -448,7 +463,7 @@ def _utc_now() -> str:
 
 
 def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
-    """원본을 읽어 artifact 4개를 저장하고 URI와 요약을 돌려줍니다."""
+    """원본을 읽어 artifact 5개를 저장하고 URI와 요약을 돌려줍니다."""
 
     settings = resolve_settings(config)
     # URI 변환기를 먼저 만들어, 내보낼 수 없는 위치라면 아무것도 쓰기 전에
@@ -456,7 +471,9 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
     publisher = build_publisher(storage, settings)
     _guard_existing(storage, settings)
 
-    image_locations, annotation_locations = _raw_objects(storage, settings.raw_prefix)
+    image_locations, annotation_locations, test_image_locations = _raw_objects(
+        storage, settings.raw_prefix
+    )
     documents = _read_documents(storage, annotation_locations)
     dataset = consolidate(documents, image_locations)
     split_result = split_images(
@@ -483,12 +500,21 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
     class_map = {
         str(category["id"]): category["name"] for category in dataset.categories
     }
+    # 같은 class_map 객체를 그대로 저장하고 test manifest에도 넘겨 두 산출물의
+    # category source가 달라질 수 없게 합니다.
+    test_manifest = build_test_manifest(
+        storage,
+        test_image_locations,
+        class_map,
+        publish_file_name=publisher.image_file_name,
+    )
 
     artifacts: dict[str, str] = {}
     for key, value in (
         ("train_manifest_uri", manifests["train"]),
         ("validation_manifest_uri", manifests["validation"]),
         ("class_map_uri", class_map),
+        ("test_manifest_uri", test_manifest),
     ):
         artifacts[key] = publisher.artifact_uri(
             storage.write_json(
@@ -505,6 +531,7 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         manifests=manifests,
         artifact_uris=artifacts,
         raw_image_count=len(image_locations),
+        test_image_count=len(test_image_locations),
         annotation_document_count=len(annotation_locations),
         generated_at=_utc_now(),
     )
@@ -530,11 +557,12 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         "excluded_images": len(dataset.excluded_images),
         "category_count": len(dataset.categories),
         "test_images_used": 0,
+        "test_manifest_images": len(test_manifest["images"]),
     }
     message = (
         f"원본 '{settings.raw_prefix}'에서 split_ratio {settings.split_ratio}"
         f"(validation {settings.validation_ratio}), seed {settings.seed}로 "
-        f"artifact 4개를 만들어 '{settings.processed_prefix}'에 저장했습니다. "
+        f"artifact 5개를 만들어 '{settings.processed_prefix}'에 저장했습니다. "
         f"train {summary['train_images']}장, validation {summary['validation_images']}장."
     )
     return {

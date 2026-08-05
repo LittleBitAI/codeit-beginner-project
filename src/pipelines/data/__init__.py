@@ -3,7 +3,7 @@
 실행 경로는 세 가지입니다.
 
 1. `execution.mode == "dummy"`: 기존 dummy 결과를 그대로 반환합니다.
-2. `data.prepare == true`: S3 원본에서 artifact 4개를 만들어 저장하고 그 위치를
+2. `data.prepare == true`: 원본에서 artifact 5개를 만들어 저장하고 그 위치를
    공개합니다(`preparation.py`).
 3. 그 외: `config["inputs"]["data"]`에 사전 제공된 URI 4개를 검증해 공개합니다.
 """
