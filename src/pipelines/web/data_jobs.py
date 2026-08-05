@@ -81,8 +81,11 @@ class PreparationRunner:
                 self._state.update(
                     status=STATUS_FAILED,
                     finished_at=datasets._now_text(),
+                    # type만 남기면 원인을 찾을 수 없습니다. 경로와 credential은
+                    # sanitize_line이 가리므로 내용까지 담습니다.
                     message=sanitize_line(
-                        f"데이터 준비 중 예기치 못한 오류가 났습니다: {type(error).__name__}"
+                        f"데이터 준비 중 예기치 못한 오류가 났습니다: "
+                        f"{type(error).__name__}: {error}"
                     ),
                 )
             return

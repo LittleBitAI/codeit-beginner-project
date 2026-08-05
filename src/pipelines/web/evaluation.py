@@ -238,8 +238,11 @@ class EvaluationRunner:
                 self._state.update(
                     status=STATUS_FAILED,
                     finished_at=utc_now_text(),
+                    # type만 남기면 원인을 찾을 수 없습니다. 실제로 "ValueError"만 보고
+                    # 무엇이 잘못됐는지 알 수 없던 적이 있어 내용까지 담습니다.
+                    # 경로와 credential은 sanitize_line이 가립니다.
                     message=sanitize_line(
-                        f"평가 중 예기치 못한 오류가 났습니다: {type(error).__name__}"
+                        f"평가 중 예기치 못한 오류가 났습니다: {type(error).__name__}: {error}"
                     ),
                 )
             return

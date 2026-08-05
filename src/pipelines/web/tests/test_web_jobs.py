@@ -132,11 +132,17 @@ def test_build_argv_ignores_user_strings(hostile, isolated_repo, data_inputs):
     assert argv[5:] == ["--only", "train"]
 
 
-def test_build_argv_supports_the_data_stage():
-    assert runner.build_argv("artifacts/web/configs/abc.json", "data")[-2:] == ["--only", "data"]
+@pytest.mark.parametrize("stage", ("train", "data", "evaluate"))
+def test_build_argv_supports_every_stage_the_gui_can_run(stage):
+    """GUI가 부를 수 있는 stage는 모두 argv를 만들 수 있어야 합니다.
+
+    evaluate 기능을 만들고 이 목록에 추가하지 않아 실행이 통째로 실패한 적이 있습니다.
+    """
+
+    assert runner.build_argv("artifacts/web/configs/abc.json", stage)[-2:] == ["--only", stage]
 
 
-@pytest.mark.parametrize("stage", ("evaluate", "registry", "web", "", "train; rm -rf /", None))
+@pytest.mark.parametrize("stage", ("registry", "web", "", "train; rm -rf /", None, "EVALUATE"))
 def test_build_argv_rejects_stages_outside_the_allowlist(stage):
     """--only에 들어갈 수 있는 값을 못 박아 둡니다."""
 
