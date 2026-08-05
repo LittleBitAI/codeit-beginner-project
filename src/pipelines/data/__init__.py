@@ -1,9 +1,24 @@
-"""Data pipeline의 기존 artifact를 다음 pipeline에 연결합니다."""
+"""Data pipeline의 artifact를 만들거나 기존 artifact를 다음 pipeline에 연결합니다.
+
+실행 경로는 세 가지입니다.
+
+1. `execution.mode == "dummy"`: 기존 dummy 결과를 그대로 반환합니다.
+2. `data.prepare == true`: S3 원본에서 artifact 4개를 만들어 저장하고 그 위치를
+   공개합니다(`preparation.py`).
+3. 그 외: `config["inputs"]["data"]`에 사전 제공된 URI 4개를 검증해 공개합니다.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+
+from .errors import DatasetPreparationError
+from .preparation import (
+    preparation_error_result,
+    preparation_requested,
+    run_preparation,
+)
 
 
 __all__ = ["run"]
@@ -73,10 +88,17 @@ def _validated_artifacts(config: Any) -> dict[str, str] | None:
 
 
 def run(config: dict) -> dict:
-    """Dummy를 유지하거나 사전 제공된 data artifact URI를 공개합니다."""
+    """Dummy를 유지하거나, 원본에서 artifact를 만들거나, 기존 URI를 공개합니다."""
 
     if isinstance(config, Mapping) and _is_dummy(config):
         return _dummy_result()
+
+    try:
+        requested = preparation_requested(config)
+    except DatasetPreparationError as error:
+        return preparation_error_result(str(error), config)
+    if requested:
+        return run_preparation(config)
 
     artifacts = _validated_artifacts(config)
     if artifacts is None:
