@@ -1,0 +1,53 @@
+{
+  "scenario": "same-dataset-hyperparameter-comparison",
+  "dataset": {
+    "train_manifest_uri": "artifacts/e2e/pills/train_manifest.json",
+    "validation_manifest_uri": "artifacts/e2e/pills/validation_manifest.json",
+    "class_map_uri": "artifacts/e2e/pills/class_map.json",
+    "dataset_summary_uri": "artifacts/e2e/pills/dataset_summary.json"
+  },
+  "experiments": [
+    {
+      "run_id": "e2e-baseline",
+      "train": {
+        "seed": 42,
+        "epochs": 2,
+        "batch_size": 1,
+        "num_workers": 0,
+        "learning_rate": 0.005,
+        "momentum": 0.9,
+        "weight_decay": 0.0005,
+        "device": "cpu",
+        "pretrained": false
+      },
+      "summary": {
+        "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
+        "best_epoch": 1,
+        "best_validation_loss": 0.72
+      }
+    },
+    {
+      "run_id": "e2e-tuned",
+      "train": {
+        "seed": 7,
+        "epochs": 3,
+        "batch_size": 2,
+        "num_workers": 0,
+        "learning_rate": 0.001,
+        "momentum": 0.85,
+        "weight_decay": 0.0001,
+        "device": "cpu",
+        "pretrained": true
+      },
+      "summary": {
+        "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
+        "best_epoch": 3,
+        "best_validation_loss": 0.48
+      }
+    }
+  ],
+  "expectation": {
+    "dataset_relationship": "same",
+    "best_run_id": "e2e-tuned"
+  }
+}
