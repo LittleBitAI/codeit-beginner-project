@@ -12,13 +12,20 @@ import { ExperimentComparison } from './screens/ExperimentComparison';
 import { LiveMonitor } from './screens/LiveMonitor';
 import { NewExperiment } from './screens/NewExperiment';
 import { TrainingOverview } from './screens/TrainingOverview';
+import { TeamActivity } from './screens/TeamActivity';
 import { DraftProvider, useDraft } from './state/DraftContext';
+import { TeamGate } from './team/TeamGate';
+import { TeamProvider } from './team/TeamContext';
 
 export function App() {
   return (
-    <DraftProvider>
-      <Shell />
-    </DraftProvider>
+    <TeamProvider>
+      <TeamGate>
+        <DraftProvider>
+          <Shell />
+        </DraftProvider>
+      </TeamGate>
+    </TeamProvider>
   );
 }
 
@@ -90,6 +97,7 @@ function Shell() {
         <Route path="/monitor" element={<LiveMonitor listing={listing.data} />} />
         <Route path="/monitor/:jobId" element={<LiveMonitor listing={listing.data} />} />
         <Route path="/compare" element={<ExperimentComparison />} />
+        <Route path="/team" element={<TeamActivity />} />
       </Routes>
     </AppShell>
   );

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,6 +23,7 @@ from ..masking import sanitize_line
 from ..paths import REPOSITORY_ROOT
 from ..progress import ProgressState, consume_line, snapshot
 from ..train_config import config_relative_path, read_runtime_config
+from .. import team_sync
 from . import runner, store
 from .model import (
     ACTIVE_STATUSES,
@@ -83,6 +85,7 @@ class JobManager:
                     record.finished_at = record.finished_at or utc_now_text()
                     record.message = "서버가 다시 시작되어 실행 상태를 잃었습니다."
                     try:
+                        team_sync.get_team_sync().enqueue_update(record)
                         store.save_record(record)
                     except OSError:
                         pass
@@ -116,7 +119,7 @@ class JobManager:
 
     # ------------------------------------------------------------------ 실행
 
-    def start(self, config_id: str) -> JobRecord:
+    def start(self, config_id: str, *, access_token: str | None = None) -> JobRecord:
         """저장된 설정으로 학습을 시작합니다. 이미 실행 중이면 거부합니다."""
 
         self.load()
@@ -134,6 +137,13 @@ class JobManager:
                 )
 
             job_id = uuid4().hex
+            cloud_run_id = team_sync.get_team_sync().create_run(
+                access_token=access_token,
+                local_job_id=job_id,
+                run_id=run_id,
+                settings=settings,
+                data_inputs=data_inputs,
+            )
             record = JobRecord(
                 job_id=job_id,
                 config_id=config_id,
@@ -142,6 +152,7 @@ class JobManager:
                 started_at=utc_now_text(),
                 settings=settings,
                 data_inputs=data_inputs,
+                cloud_run_id=cloud_run_id,
             )
             self._records[job_id] = record
             self._active_job_id = job_id
@@ -150,13 +161,36 @@ class JobManager:
             self._sequence = 0
             self._stdout_chunks = []
             record.progress = snapshot(self._progress)
+            team_sync.get_team_sync().enqueue_update(record)
 
         store.save_record(record)
         thread = threading.Thread(
             target=self._run, args=(job_id, config_id), name=f"train-job-{job_id[:8]}", daemon=True
         )
         thread.start()
+        if cloud_run_id:
+            threading.Thread(
+                target=self._heartbeat,
+                args=(job_id,),
+                name=f"team-heartbeat-{job_id[:8]}",
+                daemon=True,
+            ).start()
         return record
+
+    def _heartbeat(self, job_id: str) -> None:
+        """긴 epoch 중에도 다른 팀원에게 이 PC가 살아 있음을 알립니다."""
+
+        while True:
+            time.sleep(30)
+            with self._lock:
+                record = self._records.get(job_id)
+                if record is None or record.status not in ACTIVE_STATUSES:
+                    return
+                team_sync.get_team_sync().enqueue_update(record)
+                try:
+                    store.save_record(record)
+                except OSError:
+                    pass
 
     def _open_log(self, job_id: str) -> None:
         directory = store.job_directory(job_id)
@@ -185,6 +219,7 @@ class JobManager:
         record = self._records.get(job_id)
         if record is not None:
             record.log_lines = self._sequence
+            team_sync.get_team_sync().enqueue_log(record, entry)
         if self._log_handle is None:
             return
         try:
@@ -213,6 +248,7 @@ class JobManager:
                         record = self._records.get(job_id)
                         if record is not None and state is not None:
                             record.progress = snapshot(state)
+                            team_sync.get_team_sync().enqueue_update(record)
         except (OSError, ValueError):
             pass  # process가 죽으면서 pipe가 닫히는 것은 정상입니다.
         finally:
@@ -278,6 +314,7 @@ class JobManager:
         record.status = STATUS_CANCELLED
         record.finished_at = utc_now_text()
         record.message = "학습을 시작하기 전에 취소했습니다."
+        team_sync.get_team_sync().enqueue_update(record)
         try:
             store.save_record(record)
         except OSError:
@@ -349,6 +386,7 @@ class JobManager:
                 "info" if record.status == STATUS_SUCCEEDED else "error",
                 f"학습이 {record.status} 상태로 끝났습니다(exit code {exit_code}).",
             )
+            team_sync.get_team_sync().enqueue_update(record)
             # 상태가 종료로 바뀌는 순간에는 이미 디스크에 남아 있어야 합니다. 저장을
             # lock 밖으로 빼면, 종료 상태를 본 쪽이 아직 기록되지 않은 job을 읽습니다.
             try:
@@ -367,6 +405,7 @@ class JobManager:
                 f"학습 process를 시작하지 못했습니다: {type(error).__name__}"
             )
             self._emit(job_id, "system", "error", record.message)
+            team_sync.get_team_sync().enqueue_update(record)
             try:
                 store.save_record(record)
             except OSError:

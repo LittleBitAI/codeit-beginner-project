@@ -1,0 +1,100 @@
+scalar AWSJSON
+scalar AWSDateTime
+
+enum RunStatus {
+  starting
+  running
+  succeeded
+  failed
+  cancelled
+  interrupted
+}
+
+type TeamRun @aws_cognito_user_pools @aws_iam {
+  teamId: ID!
+  cloudRunId: ID!
+  localJobId: ID!
+  runId: String!
+  actorSub: ID!
+  actorName: String!
+  status: RunStatus!
+  settings: AWSJSON!
+  dataInputs: AWSJSON!
+  progress: AWSJSON!
+  summary: AWSJSON!
+  artifacts: AWSJSON!
+  message: String
+  createdAt: AWSDateTime!
+  startedAt: AWSDateTime
+  finishedAt: AWSDateTime
+  heartbeatAt: AWSDateTime!
+  revision: Int!
+}
+
+type LogBatch @aws_cognito_user_pools @aws_iam {
+  teamId: ID!
+  cloudRunId: ID!
+  startSeq: Int!
+  endSeq: Int!
+  lines: AWSJSON!
+  createdAt: AWSDateTime!
+}
+
+input CreateRunInput {
+  cloudRunId: ID!
+  localJobId: ID!
+  runId: String!
+  settings: AWSJSON!
+  dataInputs: AWSJSON!
+}
+
+input RunUpdateInput {
+  eventId: ID!
+  cloudRunId: ID!
+  revision: Int!
+  status: RunStatus!
+  startedAt: AWSDateTime
+  finishedAt: AWSDateTime
+  message: String
+  progress: AWSJSON!
+  summary: AWSJSON!
+  artifacts: AWSJSON!
+  heartbeatAt: AWSDateTime!
+}
+
+input LogBatchInput {
+  eventId: ID!
+  cloudRunId: ID!
+  startSeq: Int!
+  endSeq: Int!
+  lines: AWSJSON!
+  expiresAt: Int!
+}
+
+type Query {
+  teamRuns(teamId: ID!, limit: Int = 50): [TeamRun!]! @aws_cognito_user_pools
+  run(teamId: ID!, cloudRunId: ID!): TeamRun @aws_cognito_user_pools
+  runLogs(teamId: ID!, cloudRunId: ID!, afterSeq: Int = 0, limit: Int = 100): [LogBatch!]!
+    @aws_cognito_user_pools
+}
+
+type Mutation {
+  createRun(teamId: ID!, input: CreateRunInput!): TeamRun! @aws_cognito_user_pools
+  publishRunUpdate(teamId: ID!, input: RunUpdateInput!): TeamRun! @aws_iam
+  publishLogBatch(teamId: ID!, input: LogBatchInput!): LogBatch! @aws_iam
+}
+
+type Subscription {
+  onTeamRunChanged(teamId: ID!): TeamRun
+    @aws_subscribe(mutations: ["createRun", "publishRunUpdate"])
+    @aws_cognito_user_pools
+  onRunLogBatch(teamId: ID!, cloudRunId: ID!): LogBatch
+    @aws_subscribe(mutations: ["publishLogBatch"])
+    @aws_cognito_user_pools
+}
+
+schema {
+  query: Query
+  mutation: Mutation
+  subscription: Subscription
+}

@@ -1,0 +1,347 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Pill training team realtime synchronization
+
+Parameters:
+  TeamId:
+    Type: String
+    Default: pill-team
+    AllowedPattern: '[A-Za-z0-9_-]+'
+  CognitoDomainPrefix:
+    Type: String
+    Description: Globally unique Cognito hosted UI domain prefix
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+Resources:
+  TeamUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${AWS::StackName}-users'
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+
+  TeamUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref TeamUserPool
+      ClientName: training-gui
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      CallbackURLs:
+        - http://127.0.0.1:8000/
+        - http://localhost:8000/
+        - http://127.0.0.1:5173/
+        - http://localhost:5173/
+      LogoutURLs:
+        - http://127.0.0.1:8000/
+        - http://localhost:8000/
+        - http://127.0.0.1:5173/
+        - http://localhost:5173/
+      SupportedIdentityProviders: [COGNITO]
+
+  TeamUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref CognitoDomainPrefix
+      UserPoolId: !Ref TeamUserPool
+
+  TeamGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: train-team
+      Description: Members allowed to see team training runs
+      UserPoolId: !Ref TeamUserPool
+
+  TeamTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  ResolverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: python3.11
+      Handler: handler.handler
+      CodeUri: .
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TeamTable
+          TEAM_GROUP: train-team
+          TEAM_ID: !Ref TeamId
+          LOG_RETENTION_DAYS: !Ref LogRetentionDays
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TeamTable
+
+  GraphQLApi:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      Name: !Sub '${AWS::StackName}-api'
+      AuthenticationType: AMAZON_COGNITO_USER_POOLS
+      UserPoolConfig:
+        AwsRegion: !Ref AWS::Region
+        AppIdClientRegex: !Sub '^${TeamUserPoolClient}$'
+        DefaultAction: ALLOW
+        UserPoolId: !Ref TeamUserPool
+      AdditionalAuthenticationProviders:
+        - AuthenticationType: AWS_IAM
+      XrayEnabled: true
+
+  GraphQLSchema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      Definition: |
+        scalar AWSJSON
+        scalar AWSDateTime
+        enum RunStatus { starting running succeeded failed cancelled interrupted }
+        type TeamRun @aws_cognito_user_pools @aws_iam {
+          teamId: ID!
+          cloudRunId: ID!
+          localJobId: ID!
+          runId: String!
+          actorSub: ID!
+          actorName: String!
+          status: RunStatus!
+          settings: AWSJSON!
+          dataInputs: AWSJSON!
+          progress: AWSJSON!
+          summary: AWSJSON!
+          artifacts: AWSJSON!
+          message: String
+          createdAt: AWSDateTime!
+          startedAt: AWSDateTime
+          finishedAt: AWSDateTime
+          heartbeatAt: AWSDateTime!
+          revision: Int!
+        }
+        type LogBatch @aws_cognito_user_pools @aws_iam {
+          teamId: ID!
+          cloudRunId: ID!
+          startSeq: Int!
+          endSeq: Int!
+          lines: AWSJSON!
+          createdAt: AWSDateTime!
+        }
+        input CreateRunInput {
+          cloudRunId: ID!
+          localJobId: ID!
+          runId: String!
+          settings: AWSJSON!
+          dataInputs: AWSJSON!
+        }
+        input RunUpdateInput {
+          eventId: ID!
+          cloudRunId: ID!
+          revision: Int!
+          status: RunStatus!
+          startedAt: AWSDateTime
+          finishedAt: AWSDateTime
+          message: String
+          progress: AWSJSON!
+          summary: AWSJSON!
+          artifacts: AWSJSON!
+          heartbeatAt: AWSDateTime!
+        }
+        input LogBatchInput {
+          eventId: ID!
+          cloudRunId: ID!
+          startSeq: Int!
+          endSeq: Int!
+          lines: AWSJSON!
+          expiresAt: Int!
+        }
+        type Query {
+          teamRuns(teamId: ID!, limit: Int = 50): [TeamRun!]! @aws_cognito_user_pools
+          run(teamId: ID!, cloudRunId: ID!): TeamRun @aws_cognito_user_pools
+          runLogs(teamId: ID!, cloudRunId: ID!, afterSeq: Int = 0, limit: Int = 100): [LogBatch!]! @aws_cognito_user_pools
+        }
+        type Mutation {
+          createRun(teamId: ID!, input: CreateRunInput!): TeamRun! @aws_cognito_user_pools
+          publishRunUpdate(teamId: ID!, input: RunUpdateInput!): TeamRun! @aws_iam
+          publishLogBatch(teamId: ID!, input: LogBatchInput!): LogBatch! @aws_iam
+        }
+        type Subscription {
+          onTeamRunChanged(teamId: ID!): TeamRun
+            @aws_subscribe(mutations: ["createRun", "publishRunUpdate"])
+            @aws_cognito_user_pools
+          onRunLogBatch(teamId: ID!, cloudRunId: ID!): LogBatch
+            @aws_subscribe(mutations: ["publishLogBatch"])
+            @aws_cognito_user_pools
+        }
+        schema { query: Query mutation: Mutation subscription: Subscription }
+
+  AppSyncInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: appsync.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeResolver
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt ResolverFunction.Arn
+
+  LambdaDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      Name: TeamResolver
+      Type: AWS_LAMBDA
+      LambdaConfig:
+        LambdaFunctionArn: !GetAtt ResolverFunction.Arn
+      ServiceRoleArn: !GetAtt AppSyncInvokeRole.Arn
+
+  TeamPublisherPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Allows a local training backend to publish only run updates and logs
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: appsync:GraphQL
+            Resource:
+              - !Sub 'arn:${AWS::Partition}:appsync:${AWS::Region}:${AWS::AccountId}:apis/${GraphQLApi.ApiId}/types/Mutation/fields/publishRunUpdate'
+              - !Sub 'arn:${AWS::Partition}:appsync:${AWS::Region}:${AWS::AccountId}:apis/${GraphQLApi.ApiId}/types/Mutation/fields/publishLogBatch'
+
+  TeamRunsResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt LambdaDataSource.Name
+      TypeName: Query
+      FieldName: teamRuns
+      RequestMappingTemplate: '{"version":"2018-05-29","operation":"Invoke","payload":$util.toJson($ctx)}'
+      ResponseMappingTemplate: '#if($ctx.error)$util.error($ctx.error.message,$ctx.error.type)#end$util.toJson($ctx.result)'
+
+  RunResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt LambdaDataSource.Name
+      TypeName: Query
+      FieldName: run
+      RequestMappingTemplate: '{"version":"2018-05-29","operation":"Invoke","payload":$util.toJson($ctx)}'
+      ResponseMappingTemplate: '#if($ctx.error)$util.error($ctx.error.message,$ctx.error.type)#end$util.toJson($ctx.result)'
+
+  RunLogsResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt LambdaDataSource.Name
+      TypeName: Query
+      FieldName: runLogs
+      RequestMappingTemplate: '{"version":"2018-05-29","operation":"Invoke","payload":$util.toJson($ctx)}'
+      ResponseMappingTemplate: '#if($ctx.error)$util.error($ctx.error.message,$ctx.error.type)#end$util.toJson($ctx.result)'
+
+  CreateRunResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt LambdaDataSource.Name
+      TypeName: Mutation
+      FieldName: createRun
+      RequestMappingTemplate: '{"version":"2018-05-29","operation":"Invoke","payload":$util.toJson($ctx)}'
+      ResponseMappingTemplate: '#if($ctx.error)$util.error($ctx.error.message,$ctx.error.type)#end$util.toJson($ctx.result)'
+
+  PublishRunResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt LambdaDataSource.Name
+      TypeName: Mutation
+      FieldName: publishRunUpdate
+      RequestMappingTemplate: '{"version":"2018-05-29","operation":"Invoke","payload":$util.toJson($ctx)}'
+      ResponseMappingTemplate: '#if($ctx.error)$util.error($ctx.error.message,$ctx.error.type)#end$util.toJson($ctx.result)'
+
+  PublishLogResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt LambdaDataSource.Name
+      TypeName: Mutation
+      FieldName: publishLogBatch
+      RequestMappingTemplate: '{"version":"2018-05-29","operation":"Invoke","payload":$util.toJson($ctx)}'
+      ResponseMappingTemplate: '#if($ctx.error)$util.error($ctx.error.message,$ctx.error.type)#end$util.toJson($ctx.result)'
+
+  RunChangedSubscriptionResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt LambdaDataSource.Name
+      TypeName: Subscription
+      FieldName: onTeamRunChanged
+      RequestMappingTemplate: '{"version":"2018-05-29","operation":"Invoke","payload":$util.toJson($ctx)}'
+      ResponseMappingTemplate: '#if($ctx.error)$util.error($ctx.error.message,$ctx.error.type)#end$util.toJson($ctx.result)'
+
+  RunLogsSubscriptionResolver:
+    Type: AWS::AppSync::Resolver
+    DependsOn: GraphQLSchema
+    Properties:
+      ApiId: !GetAtt GraphQLApi.ApiId
+      DataSourceName: !GetAtt LambdaDataSource.Name
+      TypeName: Subscription
+      FieldName: onRunLogBatch
+      RequestMappingTemplate: '{"version":"2018-05-29","operation":"Invoke","payload":$util.toJson($ctx)}'
+      ResponseMappingTemplate: '#if($ctx.error)$util.error($ctx.error.message,$ctx.error.type)#end$util.toJson($ctx.result)'
+
+Outputs:
+  AppSyncUrl:
+    Value: !GetAtt GraphQLApi.GraphQLUrl
+  UserPoolId:
+    Value: !Ref TeamUserPool
+  UserPoolClientId:
+    Value: !Ref TeamUserPoolClient
+  CognitoDomain:
+    Value: !Sub '${CognitoDomainPrefix}.auth.${AWS::Region}.amazoncognito.com'
+  TeamId:
+    Value: !Ref TeamId
+  PublisherPolicyArn:
+    Value: !Ref TeamPublisherPolicy

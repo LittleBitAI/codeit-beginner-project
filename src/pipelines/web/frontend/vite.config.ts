@@ -16,6 +16,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        // Cognito/AppSync client는 크기가 커서 화면 code와 분리해 browser cache를 재사용합니다.
+        manualChunks: { amplify: ['aws-amplify'] },
+      },
+    },
   },
   test: {
     environment: 'jsdom',

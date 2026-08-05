@@ -8,6 +8,7 @@ import { IconCheck } from '../components/Icon';
 import { color, font, radius } from '../design/tokens';
 import { describeRun, diffAgainstDefaults } from '../lib/describeRun';
 import { useDraft } from '../state/DraftContext';
+import { useTeam } from '../team/TeamContext';
 
 export function ConfigReview({
   defaults,
@@ -20,6 +21,7 @@ export function ConfigReview({
 }) {
   const navigate = useNavigate();
   const { saved } = useDraft();
+  const team = useTeam();
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,7 +59,7 @@ export function ConfigReview({
     setStarting(true);
     setError(null);
     try {
-      const job = await api.startJob(saved!.config_id);
+      const job = await api.startJob(saved!.config_id, await team.getAccessToken());
       onStarted();
       navigate(`/monitor/${job.job_id}`);
     } catch (caught) {

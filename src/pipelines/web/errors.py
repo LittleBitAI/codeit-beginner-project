@@ -10,6 +10,8 @@ __all__ = [
     "FieldError",
     "JobConflictError",
     "JobNotFoundError",
+    "TeamSyncAuthError",
+    "TeamSyncError",
     "WebError",
     "WebPathError",
     "WebValidationError",
@@ -65,6 +67,14 @@ class JobConflictError(WebError):
 
 class JobNotFoundError(WebError):
     """요청한 job 또는 config를 찾지 못했을 때 발생합니다."""
+
+
+class TeamSyncError(WebError):
+    """팀 동기화 설정, 연결 또는 원격 API 호출에 실패했습니다."""
+
+
+class TeamSyncAuthError(TeamSyncError):
+    """팀 동기화에 필요한 사용자 인증이 없거나 만료됐습니다."""
 
 
 def collect(errors: list[FieldError], field: str, message: str) -> None:
