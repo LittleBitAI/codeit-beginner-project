@@ -8,6 +8,7 @@ from tools import git_pr
     (
         "pipeline/data/prepare-sample",
         "pipeline/web/onboarding-workflow",
+        "pipeline/docs/instruction-role-split",
         "onboarding/octocat",
         "onboarding/LittleBitAI",
         f"onboarding/{'a' * 39}",
@@ -21,6 +22,8 @@ def test_allowed_pull_request_branch_names(branch):
     "branch",
     (
         "main",
+        "pipeline/design/new-screen",
+        "pipeline/docs/",
         "onboarding/",
         "onboarding/-octocat",
         "onboarding/octocat-",

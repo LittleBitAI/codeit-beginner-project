@@ -1,69 +1,63 @@
 # 알약 객체 탐지 프로젝트
 
-## 프로젝트 목적
+이미지에서 알약을 찾아 class, bounding box, confidence score를 예측하는 object detection 모델과, 재현 가능한 실험 관리 기반을 만드는 팀 프로젝트입니다. 과제는 이미지 한 장당 최대 4개의 알약을 예측하는 것입니다. 결과는 모델 실험과 competition 검증을 위한 것이며, 의약품 식별의 정확성이나 복약·의료 안전을 보장하지 않습니다.
 
-이 프로젝트는 이미지에서 알약 객체를 찾고, 각 객체의 class, bounding box, confidence score를 함께 예측하는 object detection 모델 및 재현 가능한 실험 관리 기반을 만드는 팀 프로젝트입니다. 현재 프로젝트 자료에서 정의한 과제는 이미지 한 장당 최대 4개의 알약을 예측하는 것입니다. 결과는 모델 실험과 competition 검증을 위한 것이며, 의약품 식별의 정확성이나 복약·의료 안전을 보장하지 않습니다.
+## 문서 지도
 
-## 저장소 아키텍처
+문서마다 역할이 다릅니다. 찾는 내용에 맞는 문서 하나만 보면 됩니다.
 
-팀 pipeline guide가 정의한 구조에 따라 최소 dummy pipeline, 공용 config·contract, test skeleton이 준비되어 있습니다. 실제 data processing, training, evaluation, API, AWS, frontend logic은 아직 구현하지 않았습니다.
+| 문서 | 누가 읽나 | 무엇이 있나 |
+| --- | --- | --- |
+| `README.md` (이 문서) | 팀원·팀장 | 프로젝트가 무엇이고 어떻게 실행하는지 |
+| `CLAUDE.md` / `AGENTS.md` | AI 도구 | **어떻게 일하는가** — 코드 작성법, TDD 절차, PR 규칙 |
+| `src/pipelines/<area>/CLAUDE.md` / `AGENTS.md` | AI 도구 | **그 디렉터리에서 무엇을 해도 되는가** |
+| `contracts/README.md` | 전원 | pipeline 사이의 공용 계약 |
+| `docs/shared-files.md` | 전원 | 여러 명이 동시에 건드리면 부딪히는 파일 |
+| `docs/testing.md` | 전원 | 어떤 test를 남기고 어떤 test를 지우는가 |
+| `onboarding/docs/onboarding.md` | 신규 팀원 | 환경 설치와 dependency 확인 |
+
+`CLAUDE.md`와 `AGENTS.md`는 **내용이 같은 파일**입니다. Claude Code는 `CLAUDE.md`만, Codex는 `AGENTS.md`만 읽습니다. 두 파일은 항상 같이 고칩니다. 모든 문서는 5,000자 이내로 유지합니다.
+
+## 저장소 구조
 
 ```
 .
-├── README.md
-├── CLAUDE.md
-├── AGENTS.md
-├── .github/                 # GitHub 협업 규칙과 소유권
 ├── configs/                 # 공용 실행 설정
 ├── contracts/               # pipeline 간 공용 계약
+├── docs/                    # 저장소 전체에 걸친 문서
 ├── src/
 │   ├── main_pipeline.py     # 지정된 통합 진입점
-│   ├── common/              # 승인된 공용 코드
-│   └── pipelines/
-│       ├── data/
-│       ├── train/
-│       ├── evaluate/
-│       ├── registry/
-│       └── web/
-└── data/, artifacts/        # Git에 저장하지 않는 데이터와 대용량 산출물
+│   ├── common/              # 승인된 공용 코드 (storage, contract, config)
+│   └── pipelines/           # data / train / evaluate / registry / web
+└── data/, artifacts/        # Git에 저장하지 않는 데이터와 산출물
 ```
 
-`src/pipelines/<area>/`는 담당자가 소유하는 독립 작업 구역입니다. 다른 담당자는 그 경계를 넘어서 직접 수정하지 않고 이슈와 review로 변경을 요청합니다. 공용 영역과 통합 파일은 명시적으로 배정된 담당자만 변경합니다.
+`src/pipelines/<area>/`는 담당자가 소유하는 독립 작업 구역입니다. 다른 담당자는 그 경계를 넘어 직접 수정하지 않고 Pull Request로 변경을 요청합니다.
 
-각 pipeline은 다른 pipeline의 내부 모듈을 알거나 직접 호출하지 않습니다. 외부에는 공통 `run(config)` interface만 제공하고, pipeline 실행 순서와 연결은 지정된 통합 진입점만 담당합니다. 구체적인 입력·출력 schema와 artifact 계약은 향후 `contracts/`에서 확정합니다.
+각 pipeline은 다른 pipeline의 내부 모듈을 알거나 직접 호출하지 않습니다. 외부에는 `run(config)` interface만 제공하고, 실행 순서와 연결은 `src/main_pipeline.py`만 담당합니다.
+
+## 실행
+
+저장소 root에서 실행해야 합니다. `src`는 설치된 package가 아니라서 다른 위치에서 실행하면 import가 깨집니다.
+
+```powershell
+python -m src.main_pipeline --config configs/base.json   # 전체 연결 확인
+python -m src.main_pipeline --only train                 # 한 pipeline만
+python -m pytest -q                                      # 공통 test
+```
 
 ## 저장·실행 역할
 
-- GitHub: code, 가벼운 config, contract, metadata, 작은 sample, 문서를 관리하고 branch review와 Pull Request merge의 기준점으로 사용합니다.
-- 외부 artifact 저장소: 공통 storage interface를 통해 local filesystem 또는 Amazon S3에 dataset, checkpoint, weight, training log, 대량 prediction 등 Git에 넣지 않는 파일을 보관합니다. 개별 pipeline은 `boto3`를 직접 사용하지 않습니다.
-- 로컬 또는 Colab: 같은 Git revision과 config를 기준으로 pipeline을 실행하는 환경입니다. 현재는 외부 runtime dependency가 없는 dummy pipeline만 제공합니다.
-- Kaggle: competition 규칙에 따른 최종 검증과 제출에 사용합니다. 제출 형식, 제한, 평가 규칙은 실제 competition 명세 확인 전까지 확정하지 않습니다.
-
-## 기본 dummy 실행
-
-전체 pipeline 연결을 확인합니다.
-
-```
-python -m src.main_pipeline --config configs/base.json
-```
-
-하나의 pipeline만 확인할 때는 `--only`를 사용합니다.
-
-```
-python -m src.main_pipeline --only train
-```
-
-공통 test는 다음 명령으로 실행합니다.
-
-```
-python -m pytest -q
-```
+- **GitHub** — code, 가벼운 config·contract·metadata, 작은 sample, 문서. Pull Request review의 기준점입니다.
+- **외부 artifact 저장소** — 공통 storage interface를 통해 local filesystem 또는 Amazon S3에 dataset, checkpoint, weight, training log, 대량 prediction을 보관합니다. 개별 pipeline은 `boto3`를 직접 쓰지 않습니다.
+- **로컬 또는 Colab** — 같은 Git revision과 config로 pipeline을 실행합니다.
+- **Kaggle** — competition 규칙에 따른 최종 검증과 제출. 제출 형식과 평가 규칙은 competition 명세 확인 전까지 확정하지 않습니다.
 
 ## Local 및 Amazon S3 storage
 
-`src/common/storage.py`의 `create_storage(config)`는 local 또는 S3 backend를 같은 interface로 제공합니다. 지원 작업은 file upload/download, JSON read/write, 존재 확인, prefix listing이며 기존 대상은 `overwrite=True`를 명시하지 않으면 덮어쓰지 않습니다. 현재 dummy pipeline에는 storage를 연결하지 않았습니다.
+`src/common/storage.py`의 `create_storage(config)`가 local과 S3 backend를 같은 interface로 제공합니다. 기존 대상은 `overwrite=True`를 명시하지 않으면 덮어쓰지 않습니다.
 
-Backend는 config 또는 환경 변수로 선택하며 환경 변수가 우선합니다.
+Backend는 config 또는 환경 변수로 고르며 환경 변수가 우선합니다.
 
 | 환경 변수 | 용도 |
 | --- | --- |
@@ -71,105 +65,35 @@ Backend는 config 또는 환경 변수로 선택하며 환경 변수가 우선�
 | `PILL_STORAGE_LOCAL_ROOT` | local artifact root |
 | `PILL_STORAGE_S3_BUCKET` | S3 bucket 이름 |
 | `PILL_STORAGE_S3_PREFIX` | 선택적 공통 S3 key prefix |
-| `AWS_PROFILE` | AWS CLI/SDK profile 이름 |
-| `AWS_REGION` | AWS region |
-| `AWS_DEFAULT_REGION` | `AWS_REGION`이 없을 때 region fallback |
+| `AWS_PROFILE`, `AWS_REGION` | AWS profile과 region |
 
-AWS account, bucket, IAM Identity Center와 권한은 repository 밖에서 준비합니다. `aws sso login --profile <profile-name>`으로 임시 credential을 받은 뒤 실제 값을 shell 환경 또는 commit하지 않는 `.env`에 설정합니다. Access Key나 SSO cache를 repository에 저장하지 않습니다. Config key는 `storage.backend`, `storage.local.root`, `storage.s3.bucket`, `storage.s3.prefix`, `storage.s3.profile`, `storage.s3.region`입니다.
+AWS account, bucket, 권한은 저장소 밖에서 준비합니다. `aws sso login --profile <profile-name>`으로 임시 credential을 받은 뒤 실제 값을 shell 환경이나 commit하지 않는 `.env`에 넣습니다. S3 object는 `datasets/`, `experiments/{uploading,completed,failed}/`, `registry/`, `submissions/`, `final-models/` prefix를 씁니다.
 
-S3 object는 다음 logical prefix를 사용합니다.
-
-- `datasets/`
-- `experiments/uploading/`
-- `experiments/completed/`
-- `experiments/failed/`
-- `registry/`
-- `submissions/`
-- `final-models/`
-
-Dependency를 설치하고 AWS 환경 변수를 설정한 뒤, 별도 승인을 받은 경우에만 다음 smoke test를 실행합니다.
+별도 승인을 받은 경우에만 연결을 확인하는 smoke test를 실행합니다. 작은 임시 object 하나를 올리고 내려받아 확인한 뒤 지웁니다.
 
 ```powershell
 python scripts/s3_smoke_test.py --config configs/env.aws.json
 ```
 
-저장소를 clone한 뒤 한 번만 다음 명령으로 local Git alias를 설치하면 `git s3-smoke`로도 실행할 수 있습니다.
+## Git 협업
+
+모든 변경은 Pull Request로 반영하며 `main`에 직접 commit하지 않습니다. 작업 branch는 `pipeline/<area>/<task-summary>` 형식이고, `<area>`는 `data`, `train`, `evaluate`, `registry`, `web`, 저장소 전체 문서 작업은 `docs`입니다. 한 branch에는 한 가지 변경만 담고, merge 후 branch를 지웁니다. commit message는 한국어로 씁니다.
+
+clone 후 한 번만 alias를 설치합니다. `git pr`은 GitHub CLI 설치와 `gh auth login`이 먼저 필요합니다.
 
 ```powershell
-python scripts/s3_smoke_test.py --install
-git s3-smoke --config configs/env.aws.json
+python tools/git_update_main.py --install   # git update-main
+python tools/git_pr.py --install            # git pr
 ```
 
-Smoke test는 `experiments/uploading/smoke-tests/`에 고유한 작은 임시 JSON object 하나를 업로드하고, 다운로드 내용과 prefix listing을 확인한 뒤 그 object를 삭제합니다. 삭제 후 실제로 사라졌는지까지 확인하며, 검증이 중간에 실패해도 업로드된 임시 object는 정리합니다. 남겨서 직접 확인하려면 `--keep`을 사용합니다.
+`git update-main`은 clean working tree를 확인하고 `main`에서 `git pull --ff-only`를 실행합니다. `git pr`은 branch 이름과 clean working tree를 확인한 뒤 push하고 `main` 대상 draft Pull Request를 만듭니다. `git pr --dry-run`으로 먼저 계획만 확인할 수 있습니다.
 
-버전 관리를 켠 bucket에서는 업로드한 object의 `VersionId`를 확보해 **그 version을 정확히 삭제**합니다. version 없이 삭제하면 delete marker만 생기고 실제 data는 남기 때문에, 삭제 확인도 key가 아니라 해당 version을 직접 조회해서 판단합니다. 버전 관리를 켜지 않은 bucket은 `VersionId` 없이 삭제합니다.
-
-삭제에 실패하면 검증 결과를 가리지 않고 `status`가 `warning`이 되며, 종료 코드 1과 함께 남은 object URI와 `VersionId`를 알려줍니다. **검증과 정리가 모두 실패하면** `SmokeTestCleanupError`로 원래 검증 오류, 정리 실패 내용, 남은 object URI를 한 번에 보고합니다. Bucket·IAM·공개 접근 설정은 변경하지 않고, 이 smoke test가 만든 object 외에는 삭제하지 않습니다.
-
-## Git 협업 규칙
-
-모든 변경은 Pull Request로 반영하며 `main`에 직접 commit하지 않습니다. Pull Request에는 변경을 담을 임시 작업 branch가 필요하지만, 장기간 유지하는 개인 branch를 추가로 만들 필요는 없습니다. merge가 끝난 작업 branch는 삭제합니다.
-
-1. `main`에서 일반 작업은 `pipeline/<area>/<task-summary>`, 역할 배정 전 onboarding 상태 확인은 `onboarding/<github-username>` 형식의 임시 작업 branch를 만듭니다.
-2. 한 branch에는 한 가지에 집중한 변경만 commit합니다.
-3. `git pr`로 branch를 push하고 `main` 대상 draft Pull Request를 만듭니다.
-4. Pull Request template과 검증 결과를 작성하고 담당자 review를 받습니다.
-5. 승인을 받은 Pull Request만 merge하고 작업 branch를 삭제합니다.
-
-`<area>`는 담당 pipeline 이름인 `data`, `train`, `evaluate`, `registry`, `web` 중 하나를 사용합니다. repository-wide 문서나 공용 파일처럼 어느 area에도 속하지 않는 변경은 임의의 값을 만들지 말고 팀장에게 branch 이름을 확인합니다.
-
-`onboarding/<github-username>`은 역할 배정 전 onboarding 상태 확인에만 사용하는 예외입니다. 이 branch의 Pull Request는 `onboarding/docs/onboarding-status.md`에서 본인의 상태 한 줄만 변경해야 합니다.
-
-commit은 요청된 변경만 담고, message는 한국어로 작성합니다. 표준 기술 용어는 English로 남길 수 있습니다.
-
-예: `프로젝트 공통 문서와 AI 작업 규칙 추가`, `README에 Git 협업 규칙 정리`
-
-### `git update-main`으로 main 업데이트하기
-
-저장소를 clone한 뒤 한 번만 다음 명령으로 local Git alias를 설치합니다.
-
-```
-python tools/git_update_main.py --install
-```
-
-작업을 시작하거나 Pull Request가 merge된 뒤 다음 명령으로 최신 `origin/main`을 가져옵니다.
-
-```
-git update-main
-```
-
-이 명령은 clean working tree를 확인하고 `main`으로 이동한 뒤 `git pull --ff-only origin main`을 실행합니다. 수정 중인 파일이 있거나 fast-forward가 불가능하면 변경을 숨기거나 history를 강제로 바꾸지 않고 중단합니다. 기존 작업 branch는 삭제하지 않으며, 완료 후 최신 commit과 Git 상태를 출력합니다.
-
-### `git pr`로 Pull Request 만들기
-
-저장소를 clone한 뒤 한 번만 다음 명령으로 local Git alias를 설치합니다. GitHub CLI 설치와 `gh auth login` 인증이 먼저 필요합니다.
-
-```
-python tools/git_pr.py --install
-```
-
-작업 branch에서 변경을 commit한 뒤 `git pr`을 실행합니다.
-
-```
-git pr
-```
-
-이 명령은 branch 이름과 clean working tree를 확인하고, 현재 branch를 `origin`에 push한 다음 `main` 대상 draft Pull Request를 만듭니다. 같은 branch에 열린 Pull Request가 있으면 새로 만들지 않고 push된 commit으로 기존 Pull Request를 갱신합니다. `pipeline/<area>/<task-summary>`와 `onboarding/<github-username>` 외의 branch 또는 `main`에서는 실행되지 않습니다.
-
-외부 변경 없이 동작 조건과 실행 계획만 확인하려면 `git pr --dry-run`을 사용합니다. draft 생성 후 Pull Request template을 작성하고 검증 결과를 확인한 다음 review를 요청합니다.
-
-## 저장소 공통 정책
-
-- 모든 text file은 UTF-8 without BOM과 LF line ending을 사용합니다.
-- 일반 Git history에는 raw/processed dataset, model checkpoint·weight, TensorBoard event, training run, 대량 prediction, local environment·cache, `.env`를 포함하지 않습니다.
-- Git에는 code, 가벼운 config·contract·metadata, 작은 sample, 문서만 저장합니다.
-- Git LFS 또는 GitHub Release 사용은 팀이 별도로 확정하기 전까지 선택 사항입니다.
-- AWS, Kaggle, API credential과 기타 secret은 commit하거나 문서·log에 노출하지 않습니다. 환경 변수나 승인된 secret store를 사용하며 실제 값은 저장소 밖에서 관리합니다.
+자세한 작업 규칙은 `CLAUDE.md`(또는 `AGENTS.md`)에 있습니다.
 
 ## 알려진 제한 및 TODO
 
-- TODO: 실제 pipeline 구현에 필요한 dependency와 환경별 설치 방법을 구현 시점에 확정합니다.
-- TODO: GitHub approval, CODEOWNERS 보호 규칙을 설정하고 실제 담당자 계정을 등록합니다.
-- TODO: 실제 pipeline별 S3 artifact schema와 lifecycle 정책은 각 담당자 협의 후 확정합니다.
-- TODO: 실제 dataset·class 정의, Kaggle 제출 형식·제한·평가 규칙을 competition 원문으로 확인합니다.
-- TODO: 기존 design handoff의 mock data와 가정값을 실제 계약과 명확히 구분합니다.
+- 실제 pipeline 구현에 필요한 dependency와 환경별 설치 방법을 구현 시점에 확정합니다.
+- `.github/CODEOWNERS`의 담당자를 실제 GitHub 계정으로 교체하고 approval 보호 규칙을 설정합니다.
+- pipeline별 S3 artifact schema와 lifecycle 정책을 담당자 협의 후 확정합니다.
+- 실제 dataset·class 정의, Kaggle 제출 형식·제한·평가 규칙을 competition 원문으로 확인합니다.
+- `design_handoff_pill_detect_platform/`의 mock data와 가정값을 실제 계약과 구분합니다.

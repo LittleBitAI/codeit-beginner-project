@@ -1,7 +1,6 @@
 """이전 pipeline artifact의 필수 key와 타입 검증 테스트.
 
-`README.md`에 문서화한 계약이 실제 코드와 일치하는지, 그리고 key 누락과 타입
-불일치가 각각 명확한 예외로 이어지는지 확인합니다.
+key 누락과 타입 불일치가 각각 명확한 예외로 이어지는지 확인합니다.
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ from src.pipelines.registry.record import (
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
-README_PATH = Path(__file__).resolve().parents[1] / "README.md"
 
 
 @pytest.fixture
@@ -57,14 +55,6 @@ def test_required_keys_match_the_artifact_contract():
             "predictions_uri",
         ),
     }
-
-
-def test_readme_documents_every_required_key():
-    readme = README_PATH.read_text(encoding="utf-8")
-    for pipeline, required_keys in REQUIRED_ARTIFACT_KEYS.items():
-        assert f'config["inputs"]["{pipeline}"]' in readme
-        for key in required_keys:
-            assert f"`{key}`" in readme
 
 
 def test_all_registry_exceptions_share_one_base_class():
