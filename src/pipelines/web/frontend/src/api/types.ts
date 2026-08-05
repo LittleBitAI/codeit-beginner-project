@@ -103,6 +103,49 @@ export interface JobListing {
   active_job_id: string | null;
 }
 
+export interface ExperimentSummary {
+  experiment_id: string;
+  run_id: string;
+  status: JobStatus;
+  status_label: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  elapsed_seconds: number | null;
+  dataset: {
+    identity: string | null;
+    identity_source: 'dataset_id' | 'artifact_set' | 'unknown';
+    artifacts_complete: boolean;
+  };
+  model: {
+    architecture: string | null;
+    pretrained: boolean | null;
+  };
+  optimizer: {
+    name: string | null;
+    learning_rate: number | null;
+    momentum: number | null;
+    weight_decay: number | null;
+  };
+  training: {
+    device: string | null;
+    epochs: number | null;
+    batch_size: number | null;
+    num_workers: number | null;
+    seed: number | null;
+  };
+  metrics: {
+    best_epoch: number | null;
+    best_validation_loss: number | null;
+    map: number | null;
+    map50: number | null;
+  };
+}
+
+export interface ExperimentListing {
+  experiments: ExperimentSummary[];
+}
+
 export interface LogLine {
   seq: number;
   stream: 'stdout' | 'stderr' | 'system';

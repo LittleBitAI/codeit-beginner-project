@@ -8,6 +8,7 @@ import { AlertRow } from './components/primitives';
 import { usePolling } from './hooks/usePolling';
 import { sourceKeyOf } from './lib/dataSource';
 import { ConfigReview } from './screens/ConfigReview';
+import { ExperimentComparison } from './screens/ExperimentComparison';
 import { LiveMonitor } from './screens/LiveMonitor';
 import { NewExperiment } from './screens/NewExperiment';
 import { TrainingOverview } from './screens/TrainingOverview';
@@ -88,6 +89,7 @@ function Shell() {
         />
         <Route path="/monitor" element={<LiveMonitor listing={listing.data} />} />
         <Route path="/monitor/:jobId" element={<LiveMonitor listing={listing.data} />} />
+        <Route path="/compare" element={<ExperimentComparison />} />
       </Routes>
     </AppShell>
   );

@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { to: '/new', label: '새 실험', end: false },
   { to: '/review', label: '설정 검토', end: false },
   { to: '/monitor', label: '라이브 모니터', end: false },
+  { to: '/compare', label: '실험 비교', end: false },
 ];
 
 const PAGE_TITLES: Record<string, string> = {
@@ -16,6 +17,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/new': '새 실험',
   '/review': '설정 검토',
   '/monitor': '라이브 모니터',
+  '/compare': '실험 비교',
 };
 
 function pageTitle(pathname: string): string {

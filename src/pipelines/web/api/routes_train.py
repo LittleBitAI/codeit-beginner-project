@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from ..errors import FieldError, JobConflictError, WebValidationError
 from ..evaluation import DEFAULT_MAX_DETECTIONS, get_evaluation_runner
+from ..experiments import experiment_summary
 from ..gpu import cuda_is_available
 from ..jobs import get_manager
 from ..jobs.model import TERMINAL_STATUSES, JobRecord
@@ -114,6 +115,14 @@ def list_jobs(status: str | None = Query(default=None)) -> dict[str, Any]:
         "jobs": [public_record(record) for record in records],
         "active_job_id": active.job_id if active else None,
     }
+
+
+@router.get("/experiments")
+def list_experiments() -> dict[str, Any]:
+    """저장된 학습 기록을 비교 화면에 필요한 최소 형태로 돌려줍니다."""
+
+    records = get_manager().list_jobs()
+    return {"experiments": [experiment_summary(record) for record in records]}
 
 
 @router.post("/jobs", status_code=201)
