@@ -55,7 +55,22 @@ def preparation_runner(isolated_repo, monkeypatch):
 
 
 @pytest.fixture
-def client(manager, preparation_runner):
+def evaluation_runner(isolated_repo, monkeypatch):
+    """평가도 background thread에서 돌므로 test마다 새로 두고 정리합니다."""
+
+    from src.pipelines.web import evaluation
+
+    fresh = evaluation.EvaluationRunner()
+    monkeypatch.setattr(evaluation, "_RUNNER", fresh)
+    yield fresh
+
+    deadline = time.monotonic() + 10
+    while fresh.status().get("status") == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
+@pytest.fixture
+def client(manager, preparation_runner, evaluation_runner):
     """Frontend 없이 API만 올린 TestClient."""
 
     from fastapi.testclient import TestClient

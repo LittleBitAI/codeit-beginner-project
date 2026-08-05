@@ -183,6 +183,38 @@ export interface PreparationState {
   selected?: boolean;
 }
 
+/** evaluate가 만드는 detection metric. 계산하지 않은 값은 null입니다. */
+export interface DetectionMetrics {
+  mAP?: number | null;
+  mAP50?: number | null;
+  mAP75?: number | null;
+  precision50?: number | null;
+  recall50?: number | null;
+}
+
+export interface EvaluationState {
+  status: 'idle' | 'running' | 'succeeded' | 'failed';
+  job_id?: string | null;
+  run_id?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  message?: string;
+  exit_code?: number | null;
+  device?: string | null;
+  score_threshold?: number;
+  artifacts?: Record<string, string>;
+  summary?: {
+    metrics?: DetectionMetrics;
+    image_count?: number;
+    prediction_count?: number;
+    annotation_count?: number;
+    evaluated_class_count?: number;
+    [key: string]: unknown;
+  };
+  /** 다른 학습의 평가가 돌고 있으면 그 job id */
+  busy_with?: string | null;
+}
+
 export interface StorageEnvironment {
   bucket: string | null;
   bucket_configured: boolean;

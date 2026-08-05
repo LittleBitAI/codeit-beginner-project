@@ -431,6 +431,59 @@ def test_directory_traversal_is_rejected(client, bad):
         assert response.status_code == 400, f"{path} 가 {bad} 를 받아들였습니다"
 
 
+def test_evaluate_requires_a_succeeded_training(client, valid_payload, monkeypatch, fake_process_factory):
+    """checkpoint가 없으면 평가할 것이 없습니다."""
+
+    import time
+
+    monkeypatch.setattr(
+        runner, "spawn", lambda *a, **k: fake_process_factory(stdout="깨짐", exit_code=1)
+    )
+    config_id = create_config(client, valid_payload)
+    job_id = client.post("/api/train/jobs", json={"config_id": config_id}).json()["job_id"]
+    for _ in range(500):
+        if client.get(f"/api/train/jobs/{job_id}").json()["status"] not in ("queued", "running"):
+            break
+        time.sleep(0.02)
+
+    response = client.post(f"/api/train/jobs/{job_id}/evaluate", json={})
+
+    assert response.status_code == 409
+    assert "성공으로 끝난 학습만" in response.json()["message"]
+
+
+@pytest.mark.parametrize("bad", TRAVERSAL_IDS)
+def test_evaluate_rejects_traversal_job_id(client, bad):
+    assert client.get(f"/api/train/jobs/{bad}/evaluate").status_code == 404
+    assert client.post(f"/api/train/jobs/{bad}/evaluate", json={}).status_code == 404
+
+
+def test_evaluate_status_starts_idle(client, valid_payload, monkeypatch, fake_process_factory):
+    import time
+
+    stdout = json.dumps(
+        {
+            "status": "ok",
+            "artifacts": {"train": {"run_id": "r", "best_checkpoint_uri": "artifacts/b.pt"}},
+            "summary": {"train": {}},
+            "message": "완료",
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: fake_process_factory(stdout=stdout))
+    config_id = create_config(client, valid_payload)
+    job_id = client.post("/api/train/jobs", json={"config_id": config_id}).json()["job_id"]
+    for _ in range(500):
+        if client.get(f"/api/train/jobs/{job_id}").json()["status"] not in ("queued", "running"):
+            break
+        time.sleep(0.02)
+
+    body = client.get(f"/api/train/jobs/{job_id}/evaluate").json()
+
+    assert body["evaluation"]["status"] == "idle"
+
+
 def test_verify_accepts_artifact_uris_directly(client, monkeypatch):
     """준비 결과는 S3에 있을 수 있어 위치를 다시 훑을 수 없습니다."""
 

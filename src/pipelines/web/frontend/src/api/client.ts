@@ -3,6 +3,7 @@ import type {
   DataSource,
   DataVerification,
   Defaults,
+  EvaluationState,
   GpuStatus,
   JobListing,
   JobRecord,
@@ -98,6 +99,18 @@ export const api = {
     request<LogPage>(`/api/train/jobs/${jobId}/logs?after=${after}&limit=${limit}`),
 
   gpu: () => request<GpuStatus>('/api/gpu/status'),
+
+  evaluationStatus: (jobId: string) =>
+    request<{ evaluation: EvaluationState }>(`/api/train/jobs/${jobId}/evaluate`),
+
+  startEvaluation: (
+    jobId: string,
+    body: { score_threshold?: number; max_detections_per_image?: number; overwrite?: boolean; device?: string },
+  ) =>
+    request<{ evaluation: EvaluationState }>(`/api/train/jobs/${jobId}/evaluate`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   inspectDirectory: (directory: string) =>
     request<DataSource>('/api/data/inspect', {

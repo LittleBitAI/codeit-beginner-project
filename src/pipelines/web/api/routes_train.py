@@ -8,8 +8,10 @@ from typing import Any, Iterator
 
 from fastapi import APIRouter, Body, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
-from ..errors import FieldError, WebValidationError
+from ..errors import FieldError, JobConflictError, WebValidationError
+from ..evaluation import DEFAULT_MAX_DETECTIONS, get_evaluation_runner
 from ..gpu import cuda_is_available
 from ..jobs import get_manager
 from ..jobs.model import TERMINAL_STATUSES, JobRecord
@@ -164,6 +166,39 @@ def _event_stream(job_id: str) -> Iterator[str]:
         if time.monotonic() - started > SSE_MAX_SECONDS:
             break
         time.sleep(SSE_POLL_SECONDS)
+
+
+class EvaluateRequest(BaseModel):
+    """평가 실행 설정. 값은 evaluate pipeline이 정한 규칙을 그대로 씁니다."""
+
+    device: str | None = Field(default=None)
+    score_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+    max_detections_per_image: int = Field(default=DEFAULT_MAX_DETECTIONS, ge=1, le=1000)
+    overwrite: bool = Field(default=False)
+
+
+@router.get("/jobs/{job_id}/evaluate")
+def evaluation_status(job_id: str) -> dict[str, Any]:
+    """이 학습에 대한 평가 상태입니다."""
+
+    get_manager().get(job_id)  # 없는 job이면 404
+    return {"evaluation": get_evaluation_runner().status(job_id)}
+
+
+@router.post("/jobs/{job_id}/evaluate", status_code=202)
+def start_evaluation(job_id: str, payload: EvaluateRequest = Body(...)) -> dict[str, Any]:
+    """끝난 학습의 checkpoint로 evaluate pipeline을 부릅니다.
+
+    ``python -m src.main_pipeline --config <config> --only evaluate``
+
+    학습이 만드는 값은 loss뿐이라 mAP 같은 detection metric은 여기서 처음 나옵니다.
+    이미지마다 추론을 돌리므로 시작만 시키고 상태는 따로 확인합니다.
+    """
+
+    record = get_manager().get(job_id)
+    if record.status != "succeeded":
+        raise JobConflictError("성공으로 끝난 학습만 평가할 수 있습니다.")
+    return {"evaluation": get_evaluation_runner().start(record, payload.model_dump())}
 
 
 @router.get("/jobs/{job_id}/events")
