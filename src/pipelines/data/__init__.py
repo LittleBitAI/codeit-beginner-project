@@ -3,8 +3,8 @@
 실행 경로는 세 가지입니다.
 
 1. `execution.mode == "dummy"`: 기존 dummy 결과를 그대로 반환합니다.
-2. `data.prepare == true`: 원본에서 artifact 5개를 만들어 저장하고 그 위치를
-   공개합니다(`preparation.py`).
+2. `data.prepare == true`: 원본에서 artifact 5개를 만들거나, 이전 버전의 기존
+   artifact 4개가 모두 있으면 누락된 test manifest만 보충합니다(`preparation.py`).
 3. 그 외: `config["inputs"]["data"]`에 사전 제공된 URI 4개를 검증해 공개합니다.
 """
 
@@ -88,7 +88,7 @@ def _validated_artifacts(config: Any) -> dict[str, str] | None:
 
 
 def run(config: dict) -> dict:
-    """Dummy를 유지하거나, 원본에서 artifact를 만들거나, 기존 URI를 공개합니다."""
+    """Dummy 유지, artifact 준비·백필 또는 기존 URI 공개를 실행합니다."""
 
     if isinstance(config, Mapping) and _is_dummy(config):
         return _dummy_result()

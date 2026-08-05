@@ -9,7 +9,8 @@ Turns raw sources into five dataset artifacts for downstream training and evalua
 Three execution paths, chosen in `__init__.py`:
 
 1. `execution.mode == "dummy"` — return the dummy result untouched.
-2. `data.prepare == true` — build five artifacts from raw sources (`preparation.py`).
+2. `data.prepare == true` — build five artifacts from raw sources, or add only a missing
+   test manifest when all four legacy artifacts already exist (`preparation.py`).
 3. otherwise — validate the four URIs already in `config["inputs"]["data"]` and republish them.
 
 ## Boundaries
@@ -29,6 +30,10 @@ The dummy result is unchanged. With `prepare == false`, legacy pass-through stil
 Prepared artifacts land under the processed dataset prefix, in a directory whose name encodes the split ratio and the seed, so an 8:2 run and a 9:1 run can never overwrite each other. Local URIs come back repository-relative; S3 URIs are passed through unchanged. Nothing is overwritten unless `overwrite` is set.
 
 `test_manifest.json` is generated from decoded `test_images/` dimensions and the same class-map object written to `class_map.json`. It has no annotations. Test images never enter train/validation, and `test_annotations/` is never read.
+
+With `overwrite == false`, an exact legacy set of four artifacts is a safe backfill case:
+the pipeline reads its class map and writes only the missing test manifest. Any other
+partial set still fails, and an existing file is never replaced.
 
 ## Run and Test
 

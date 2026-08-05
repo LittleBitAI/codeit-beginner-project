@@ -2,7 +2,8 @@
 
 `config["data"]["prepare"]`가 `true`일 때만 동작하는 준비 경로입니다. 원본
 `train_images/`와 `train_annotations/`로 train/validation을 만들고,
-`test_images/`의 크기만 decode해 아래 다섯 file을 저장합니다.
+`test_images/`의 크기만 decode해 아래 다섯 file을 저장합니다. 이전 버전이 만든
+네 artifact만 정확히 남아 있으면 그 파일들은 보존하고 test manifest만 보충합니다.
 
 - `train_manifest.json`, `validation_manifest.json`: COCO 형식 manifest
 - `test_manifest.json`: annotation이 없는 COCO 형식 test manifest
@@ -68,6 +69,14 @@ ARTIFACT_FILE_NAMES: dict[str, str] = {
     "dataset_summary_uri": "dataset_summary.json",
     "test_manifest_uri": "test_manifest.json",
 }
+LEGACY_ARTIFACT_KEYS = frozenset(
+    {
+        "train_manifest_uri",
+        "validation_manifest_uri",
+        "class_map_uri",
+        "dataset_summary_uri",
+    }
+)
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 TRAIN_IMAGE_MARKER = "train_images/"
@@ -202,6 +211,17 @@ def _normalized(location: Any) -> str:
     return str(location).replace("\\", "/")
 
 
+def _select_test_images(entries: Sequence[str]) -> list[str]:
+    """나열된 원본 중 test image만 고릅니다. test annotation은 읽지 않습니다."""
+
+    return [
+        entry
+        for entry in entries
+        if TEST_IMAGE_MARKER in _normalized(entry)
+        and _normalized(entry).lower().endswith(IMAGE_EXTENSIONS)
+    ]
+
+
 def _raw_objects(
     storage: Storage, raw_prefix: str
 ) -> tuple[list[str], list[str], list[str]]:
@@ -228,12 +248,7 @@ def _raw_objects(
         if TRAIN_ANNOTATION_MARKER in _normalized(entry)
         and _normalized(entry).lower().endswith(".json")
     ]
-    test_image_locations = [
-        entry
-        for entry in entries
-        if TEST_IMAGE_MARKER in _normalized(entry)
-        and _normalized(entry).lower().endswith(IMAGE_EXTENSIONS)
-    ]
+    test_image_locations = _select_test_images(entries)
     if not image_locations or not annotation_locations or not test_image_locations:
         raise DatasetPreparationError(
             "원본 prefix에서 train_images, train_annotations, test_images를 모두 "
@@ -440,26 +455,116 @@ def _dataset_summary(
     }
 
 
-def _guard_existing(storage: Storage, settings: PreparationSettings) -> None:
+def _existing_artifact_keys(
+    storage: Storage, settings: PreparationSettings
+) -> frozenset[str]:
+    """처리 경로에 정확히 어떤 Data artifact가 이미 있는지 확인합니다."""
+
+    return frozenset(
+        key
+        for key, file_name in ARTIFACT_FILE_NAMES.items()
+        if storage.exists(f"{settings.processed_prefix}{file_name}")
+    )
+
+
+def _guard_existing(
+    settings: PreparationSettings, existing_keys: frozenset[str]
+) -> None:
     """이미 있는 산출물을 말없이 덮어쓰지 않도록 먼저 확인합니다."""
 
     if settings.overwrite:
         return
-    existing = [
-        file_name
-        for file_name in ARTIFACT_FILE_NAMES.values()
-        if storage.exists(f"{settings.processed_prefix}{file_name}")
-    ]
-    if existing:
+    if existing_keys:
+        existing_files = [ARTIFACT_FILE_NAMES[key] for key in existing_keys]
         raise DatasetPreparationError(
             f"'{settings.processed_prefix}'에 산출물이 이미 있습니다: "
-            f"{', '.join(sorted(existing))}. 다시 만들려면 "
+            f"{', '.join(sorted(existing_files))}. 다시 만들려면 "
             "config['data']['overwrite']를 true로 설정하세요."
         )
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _existing_artifact_uris(
+    storage: Storage,
+    settings: PreparationSettings,
+    publisher: LocationPublisher,
+) -> dict[str, str]:
+    """기존 artifact의 실제 URI를 저장소 목록에서 복원합니다."""
+
+    entries = [_normalized(entry) for entry in storage.list(settings.processed_prefix)]
+    artifacts: dict[str, str] = {}
+    for key in LEGACY_ARTIFACT_KEYS:
+        logical_location = f"{settings.processed_prefix}{ARTIFACT_FILE_NAMES[key]}"
+        matches = [
+            entry
+            for entry in entries
+            if entry == logical_location or entry.endswith(f"/{logical_location}")
+        ]
+        if len(matches) != 1:
+            raise DatasetPreparationError(
+                f"기존 {ARTIFACT_FILE_NAMES[key]} 위치를 하나로 확인하지 못했습니다."
+            )
+        artifacts[key] = publisher.artifact_uri(matches[0])
+    return artifacts
+
+
+def _backfill_test_manifest(
+    storage: Storage,
+    settings: PreparationSettings,
+    publisher: LocationPublisher,
+) -> dict[str, Any]:
+    """기존 네 artifact를 보존하고 누락된 test manifest만 만듭니다."""
+
+    artifacts = _existing_artifact_uris(storage, settings, publisher)
+    class_map_location = (
+        f"{settings.processed_prefix}{ARTIFACT_FILE_NAMES['class_map_uri']}"
+    )
+    class_map = storage.read_json(class_map_location)
+    test_image_locations = _select_test_images(
+        sorted(str(entry) for entry in storage.list(settings.raw_prefix))
+    )
+    if not test_image_locations:
+        raise DatasetPreparationError("원본 prefix에서 test_images를 찾지 못했습니다.")
+
+    test_manifest = build_test_manifest(
+        storage,
+        test_image_locations,
+        class_map,
+        publish_file_name=publisher.image_file_name,
+    )
+    test_location = storage.write_json(
+        f"{settings.processed_prefix}{ARTIFACT_FILE_NAMES['test_manifest_uri']}",
+        test_manifest,
+        overwrite=False,
+    )
+    artifacts["test_manifest_uri"] = publisher.artifact_uri(test_location)
+
+    summary = {
+        "pipeline": "data",
+        "mode": "backfill_test_manifest",
+        "split_ratio": settings.split_ratio,
+        "validation_ratio": settings.validation_ratio,
+        "seed": settings.seed,
+        "source_prefix": settings.raw_prefix,
+        "processed_prefix": settings.processed_prefix,
+        "overwrite": False,
+        "preserved_artifact_keys": sorted(LEGACY_ARTIFACT_KEYS),
+        "test_images_used": 0,
+        "test_manifest_images": len(test_manifest["images"]),
+        "dataset_summary_updated": False,
+    }
+    return {
+        "status": "ok",
+        "artifacts": artifacts,
+        "summary": summary,
+        "message": (
+            f"기존 artifact 4개를 수정하지 않고 test image "
+            f"{summary['test_manifest_images']}장의 test_manifest.json만 만들었습니다."
+        ),
+    }
 
 
 def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
@@ -469,7 +574,12 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
     # URI 변환기를 먼저 만들어, 내보낼 수 없는 위치라면 아무것도 쓰기 전에
     # 실패하게 합니다.
     publisher = build_publisher(storage, settings)
-    _guard_existing(storage, settings)
+    existing_keys = (
+        frozenset() if settings.overwrite else _existing_artifact_keys(storage, settings)
+    )
+    if not settings.overwrite and existing_keys == LEGACY_ARTIFACT_KEYS:
+        return _backfill_test_manifest(storage, settings, publisher)
+    _guard_existing(settings, existing_keys)
 
     image_locations, annotation_locations, test_image_locations = _raw_objects(
         storage, settings.raw_prefix
