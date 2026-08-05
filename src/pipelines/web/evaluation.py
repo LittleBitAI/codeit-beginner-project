@@ -14,6 +14,7 @@ import json
 import subprocess
 import threading
 from typing import Any
+from urllib.parse import urlsplit
 
 from .errors import FieldError, JobConflictError, WebValidationError
 from .jobs import runner
@@ -42,8 +43,15 @@ STATUS_FAILED = "failed"
 DEFAULT_MAX_DETECTIONS = 4
 
 
-def _uses_s3(values: dict[str, str]) -> bool:
-    return any(str(value).lower().startswith("s3://") for value in values.values())
+def _first_s3_bucket(*groups: dict[str, Any]) -> str | None:
+    """학습 결과를 우선해 평가 산출물을 저장할 S3 bucket을 고릅니다."""
+
+    for values in groups:
+        for value in values.values():
+            parsed = urlsplit(str(value))
+            if parsed.scheme.lower() == "s3" and parsed.netloc:
+                return parsed.netloc
+    return None
 
 
 def build_evaluate_config(
@@ -91,13 +99,16 @@ def build_evaluate_config(
             [FieldError("max_detections_per_image", "1 이상의 정수여야 합니다.")]
         )
 
-    remote = _uses_s3(data_inputs) or _uses_s3(train_artifacts)
+    s3_bucket = _first_s3_bucket(train_artifacts, data_inputs)
     run_id = str(train_artifacts["run_id"])
-    if remote:
-        storage: dict[str, Any] = {"backend": "s3", "s3": {"prefix": ""}}
-        # 기본값 artifacts/evaluate/... 는 저장소가 정한 S3 논리 prefix 밖입니다.
-        # 학습 결과 옆에 두어 권한 설정과 정리 규칙을 그대로 따르게 합니다.
-        output_dir = f"experiments/completed/{run_id}/evaluate"
+    if s3_bucket is not None:
+        storage: dict[str, Any] = {
+            "backend": "s3",
+            "s3": {"bucket": s3_bucket, "prefix": ""},
+        }
+        # 상대 경로는 evaluate 저장 계층에서 local로 해석됩니다. S3 실행은 완전한
+        # URI를 넘겨 학습 결과와 평가 결과가 같은 bucket에 남도록 합니다.
+        output_dir = f"s3://{s3_bucket}/experiments/completed/{run_id}/evaluate"
     else:
         storage = {"backend": "local", "local": {"root": "artifacts"}}
         output_dir = f"artifacts/evaluate/{run_id}"
@@ -111,6 +122,10 @@ def build_evaluate_config(
     }
     if device:
         settings["device"] = device
+    if s3_bucket is not None and data_inputs.get("test_manifest_uri"):
+        settings["submission_uri"] = (
+            f"s3://{s3_bucket}/submissions/{run_id}/submission.csv"
+        )
 
     return {
         "project": {"name": "pill-object-detection"},

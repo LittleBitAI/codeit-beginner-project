@@ -110,12 +110,15 @@ def test_local_run_writes_next_to_other_local_artifacts():
 
 
 def test_remote_run_writes_inside_an_allowed_s3_prefix():
-    """기본값 artifacts/evaluate/... 는 저장소가 정한 S3 논리 prefix 밖입니다."""
+    """S3 실행의 출력 위치는 local 상대 경로가 아니라 완전한 S3 URI입니다."""
 
     config = evaluation.build_evaluate_config(make_record(remote=True))
 
     assert config["storage"]["backend"] == "s3"
-    assert config["evaluate"]["output_dir"] == "experiments/completed/run-1/evaluate"
+    assert config["storage"]["s3"]["bucket"] == "bucket"
+    assert config["evaluate"]["output_dir"] == (
+        "s3://bucket/experiments/completed/run-1/evaluate"
+    )
 
 
 def test_defaults_follow_the_evaluate_contract():
@@ -143,6 +146,9 @@ def test_test_manifest_can_be_attached_to_an_existing_training():
 
     assert config["inputs"]["data"]["test_manifest_uri"] == (
         "s3://bucket/datasets/test/test_manifest.json"
+    )
+    assert config["evaluate"]["submission_uri"] == (
+        "s3://bucket/submissions/run-1/submission.csv"
     )
     # 완료된 학습 기록은 증거이므로 평가 입력을 붙이더라도 바꾸지 않습니다.
     assert "test_manifest_uri" not in record.data_inputs
