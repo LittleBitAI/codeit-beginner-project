@@ -172,6 +172,7 @@ export interface PreparationState {
   split_ratio?: string;
   seed?: number;
   overwrite?: boolean;
+  backend?: string;
   started_at?: string | null;
   finished_at?: string | null;
   message?: string;
@@ -182,8 +183,19 @@ export interface PreparationState {
   selected?: boolean;
 }
 
+export interface StorageEnvironment {
+  bucket: string | null;
+  bucket_configured: boolean;
+  profile_configured: boolean;
+  region: string | null;
+  forced_backend: string | null;
+  default_backend: string;
+}
+
 export interface PreparationResponse {
   split_ratios: string[];
+  backends: string[];
+  storage: StorageEnvironment;
   preparation: PreparationState;
 }
 

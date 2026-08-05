@@ -420,6 +420,62 @@ def test_prepare_config_rejects_other_ratios(bad):
     assert error.value.errors[0].field == "split_ratio"
 
 
+def test_prepare_uses_s3_when_a_bucket_is_configured(monkeypatch):
+    """AWS 데이터를 쓰려면 backend가 s3여야 합니다. local로 고정하면 안 됩니다."""
+
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "some-bucket")
+    monkeypatch.delenv("PILL_STORAGE_BACKEND", raising=False)
+
+    config = datasets.build_prepare_config("8:2", backend="auto")
+
+    assert config["storage"]["backend"] == "s3"
+    # bucket 이름은 환경 변수에서 오므로 config 파일에 적지 않습니다.
+    assert "some-bucket" not in json.dumps(config)
+
+
+def test_prepare_falls_back_to_local_without_a_bucket(monkeypatch):
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+    monkeypatch.delenv("PILL_STORAGE_BACKEND", raising=False)
+
+    assert datasets.build_prepare_config("8:2", backend="auto")["storage"]["backend"] == "local"
+
+
+def test_prepare_can_force_local_even_with_a_bucket(monkeypatch):
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "some-bucket")
+
+    assert datasets.build_prepare_config("8:2", backend="local")["storage"]["backend"] == "local"
+
+
+def test_prepare_rejects_s3_without_a_bucket(monkeypatch):
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+
+    with pytest.raises(WebValidationError) as error:
+        datasets.build_prepare_config("8:2", backend="s3")
+
+    assert error.value.errors[0].field == "backend"
+
+
+@pytest.mark.parametrize("bad", ("aws", "S3", "", None, 1))
+def test_prepare_rejects_unknown_backend(bad):
+    with pytest.raises(WebValidationError):
+        datasets.build_prepare_config("8:2", backend=bad)
+
+
+def test_storage_environment_does_not_expose_credentials(monkeypatch):
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "some-bucket")
+    monkeypatch.setenv("AWS_PROFILE", "team")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "가짜-비밀-값")
+
+    environment = datasets.storage_environment()
+
+    assert environment["bucket_configured"] is True
+    assert environment["profile_configured"] is True
+    # profile 이름과 credential 자체는 돌려주지 않습니다.
+    serialized = json.dumps(environment, ensure_ascii=False)
+    assert "team" not in serialized
+    assert "가짜-비밀-값" not in serialized
+
+
 @pytest.mark.parametrize("bad", (-1, 2**32, "42", True, 1.5))
 def test_prepare_config_rejects_bad_seed(bad):
     with pytest.raises(WebValidationError) as error:

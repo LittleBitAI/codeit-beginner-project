@@ -57,6 +57,7 @@ class PrepareRequest(BaseModel):
     split_ratio: str = Field(description='"8:2" 또는 "9:1"')
     seed: int = Field(default=42, ge=0, lt=2**32)
     overwrite: bool = Field(default=False)
+    backend: str = Field(default="auto", description='"auto", "local", "s3"')
     raw_prefix: str | None = Field(default=None, max_length=512)
     processed_root: str | None = Field(default=None, max_length=512)
 
@@ -67,6 +68,8 @@ def prepare_status() -> dict[str, Any]:
 
     return {
         "split_ratios": list(datasets.SPLIT_RATIOS),
+        "backends": list(datasets.STORAGE_BACKENDS),
+        "storage": datasets.storage_environment(),
         "preparation": get_preparation_runner().status(),
     }
 
@@ -83,6 +86,8 @@ def start_prepare(payload: PrepareRequest = Body(...)) -> dict[str, Any]:
     runner = get_preparation_runner()
     return {
         "split_ratios": list(datasets.SPLIT_RATIOS),
+        "backends": list(datasets.STORAGE_BACKENDS),
+        "storage": datasets.storage_environment(),
         "preparation": runner.start(payload.model_dump()),
     }
 

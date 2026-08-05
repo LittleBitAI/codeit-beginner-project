@@ -593,11 +593,46 @@ SPLIT_RATIOS = ("8:2", "9:1")
 PREPARE_TIMEOUT_SECONDS = 60 * 60
 
 
+STORAGE_BACKENDS = ("auto", "local", "s3")
+
+
+def storage_environment() -> dict[str, Any]:
+    """어느 storage를 쓰게 되는지 화면에 알려 주기 위한 정보입니다.
+
+    credential 자체는 boto3의 기본 chain이 다루며 여기서 읽지도 보여 주지도 않습니다.
+    """
+
+    bucket = os.environ.get("PILL_STORAGE_S3_BUCKET", "").strip()
+    forced = os.environ.get("PILL_STORAGE_BACKEND", "").strip().lower()
+    return {
+        "bucket": bucket or None,
+        "bucket_configured": bool(bucket),
+        "profile_configured": bool(os.environ.get("AWS_PROFILE", "").strip()),
+        "region": os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or None,
+        # PILL_STORAGE_BACKEND가 있으면 config보다 우선하므로 선택이 무시됩니다.
+        "forced_backend": forced or None,
+        "default_backend": forced or ("s3" if bucket else "local"),
+    }
+
+
+def resolve_backend(backend: str) -> str:
+    """``auto``는 환경 설정을 보고 정합니다."""
+
+    if backend not in STORAGE_BACKENDS:
+        raise WebValidationError(
+            [FieldError("backend", f"{', '.join(STORAGE_BACKENDS)} 중 하나여야 합니다.")]
+        )
+    if backend != "auto":
+        return backend
+    return "s3" if storage_environment()["bucket_configured"] else "local"
+
+
 def build_prepare_config(
     split_ratio: str,
     *,
     seed: int = 42,
     overwrite: bool = False,
+    backend: str = "auto",
     raw_prefix: str | None = None,
     processed_root: str | None = None,
 ) -> dict[str, Any]:
@@ -626,11 +661,27 @@ def build_prepare_config(
     if processed_root:
         section["processed_root"] = processed_root
 
-    # storage backend는 환경 변수(PILL_STORAGE_*)가 우선하므로 여기서는 기본만 둡니다.
+    resolved = resolve_backend(backend)
+    if resolved == "s3":
+        environment = storage_environment()
+        if not environment["bucket_configured"]:
+            raise WebValidationError(
+                [
+                    FieldError(
+                        "backend",
+                        "S3를 쓰려면 PILL_STORAGE_S3_BUCKET 환경 변수가 필요합니다.",
+                    )
+                ]
+            )
+        # bucket 이름은 환경 변수에서 오므로 config 파일에 적지 않습니다.
+        storage: dict[str, Any] = {"backend": "s3", "s3": {"prefix": ""}}
+    else:
+        storage = {"backend": "local", "local": {"root": "artifacts"}}
+
     return {
         "project": {"name": "pill-object-detection"},
         "execution": {"mode": "real"},
-        "storage": {"backend": "local", "local": {"root": "artifacts"}},
+        "storage": storage,
         "data": section,
     }
 

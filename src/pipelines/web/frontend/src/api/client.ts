@@ -122,6 +122,7 @@ export const api = {
     split_ratio: string;
     seed?: number;
     overwrite?: boolean;
+    backend?: string;
   }) =>
     request<PreparationResponse>('/api/data/prepare', {
       method: 'POST',

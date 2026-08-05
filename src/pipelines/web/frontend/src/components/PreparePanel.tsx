@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { api, ApiError } from '../api/client';
-import type { PreparationState } from '../api/types';
+import type { PreparationState, StorageEnvironment } from '../api/types';
 import { color, font, radius } from '../design/tokens';
 import { usePolling } from '../hooks/usePolling';
 import { AlertRow, Button, Field, controlStyle } from './primitives';
@@ -19,6 +19,7 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
   const [ratio, setRatio] = useState('8:2');
   const [seed, setSeed] = useState('42');
   const [overwrite, setOverwrite] = useState(false);
+  const [backend, setBackend] = useState('auto');
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [lastFinished, setLastFinished] = useState<string | null>(null);
@@ -46,6 +47,7 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
         split_ratio: ratio,
         seed: Number.parseInt(seed, 10),
         overwrite,
+        backend,
       });
       status.refresh();
     } catch (caught) {
@@ -164,6 +166,13 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
         </Button>
       </div>
 
+      <StorageChoice
+        storage={status.data?.storage}
+        backend={backend}
+        onChange={setBackend}
+        disabled={running}
+      />
+
       {error && (
         <AlertRow level="error" title="시작하지 못했습니다">
           {error}
@@ -171,6 +180,96 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
       )}
 
       {state && state.status !== 'idle' && <PreparationResult state={state} />}
+    </div>
+  );
+}
+
+/** 어느 저장소의 원본을 읽을지 고릅니다. */
+function StorageChoice({
+  storage,
+  backend,
+  onChange,
+  disabled,
+}: {
+  storage: StorageEnvironment | undefined;
+  backend: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+}) {
+  if (!storage) return null;
+
+  const options: { value: string; label: string; hint: string; usable: boolean }[] = [
+    {
+      value: 'auto',
+      label: `자동 (${storage.default_backend})`,
+      hint: '환경 설정을 보고 정합니다',
+      usable: true,
+    },
+    {
+      value: 's3',
+      label: 'AWS S3',
+      hint: storage.bucket_configured
+        ? `bucket ${storage.bucket}${storage.region ? ` · ${storage.region}` : ''}`
+        : 'PILL_STORAGE_S3_BUCKET 환경 변수가 없습니다',
+      usable: storage.bucket_configured,
+    },
+    { value: 'local', label: '로컬 디스크', hint: 'artifacts/ 아래', usable: true },
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <span style={{ font: `600 11.5px/1 ${font.sans}`, color: color.textStrong }}>
+        원본을 읽을 곳
+      </span>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {options.map((option) => {
+          const active = option.value === backend;
+          return (
+            <button
+              key={option.value}
+              type="button"
+              disabled={disabled || !option.usable}
+              onClick={() => onChange(option.value)}
+              style={{
+                textAlign: 'left',
+                padding: '8px 11px',
+                borderRadius: radius.control,
+                border: `1px solid ${active ? color.primary : color.borderControl}`,
+                background: active ? color.primaryTint : color.surface,
+                opacity: option.usable ? 1 : 0.5,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 3,
+                minWidth: 150,
+              }}
+            >
+              <span
+                style={{
+                  font: `600 11.5px/1 ${font.sans}`,
+                  color: active ? color.primaryHover : color.textStrong,
+                }}
+              >
+                {option.label}
+              </span>
+              <span
+                style={{
+                  font: `400 10px/1.35 ${font.mono}`,
+                  color: color.textMuted,
+                  overflowWrap: 'anywhere',
+                }}
+              >
+                {option.hint}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {storage.forced_backend && (
+        <span style={{ font: `400 10.5px/1.5 ${font.sans}`, color: color.amber }}>
+          환경 변수 PILL_STORAGE_BACKEND={storage.forced_backend} 가 설정돼 있어 여기 선택보다
+          우선합니다.
+        </span>
+      )}
     </div>
   );
 }

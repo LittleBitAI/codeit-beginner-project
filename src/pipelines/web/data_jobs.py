@@ -38,10 +38,12 @@ class PreparationRunner:
         """준비를 시작합니다. 이미 돌고 있으면 거부합니다."""
 
         # config를 먼저 만들어, 잘못된 요청이면 thread를 띄우기 전에 거부합니다.
+        backend = request.get("backend") or "auto"
         config = datasets.build_prepare_config(
             request["split_ratio"],
             seed=request.get("seed", 42),
             overwrite=request.get("overwrite", False),
+            backend=backend,
             raw_prefix=request.get("raw_prefix"),
             processed_root=request.get("processed_root"),
         )
@@ -56,6 +58,7 @@ class PreparationRunner:
                 "split_ratio": request["split_ratio"],
                 "seed": config["data"]["seed"],
                 "overwrite": config["data"]["overwrite"],
+                "backend": config["storage"]["backend"],
                 "started_at": datasets._now_text(),
                 "finished_at": None,
                 "message": "원본을 읽어 artifact를 만들고 있습니다.",
