@@ -1,66 +1,66 @@
 # Repository-Wide AI Work Rules
 
+## Which File You Read
+
+Read **`AGENTS.md` only** — `CLAUDE.md` is the same content for another tool. In each directory read this file plus the nearest `AGENTS.md`. Every `AGENTS.md` has a twin `CLAUDE.md`, identical apart from the tool name, so always edit both together.
+
+## Document Map
+
+Korean, for the team: `README.md`, `contracts/README.md`, `docs/shared-files.md`. English, for you: this file (**how to work**, everywhere), `src/pipelines/<area>/AGENTS.md` (**what you may do there**), `docs/testing.md`.
+
+Every document stays under 5,000 characters. **Every pipeline directory carries both files and no `README.md`** (READMEs there go stale). This file never names a pipeline; a pipeline file never restates a root rule. A pipeline rule contradicting this file is not written — ask.
+
 ## Before Starting Work
 
-- Inspect the repository structure, `git status`, and all relevant files first.
-- Read and follow both the repository-root instructions and the nearest `CLAUDE.md` or `AGENTS.md` for the target files.
-- Modify only the scope specified by the user. Do not perform out-of-scope cleanup, add unrelated features, or make unrelated refactors.
-
-## Clarifying Vague Implementation Requests
-
-- If the requested implementation is only a rough idea and cannot be made concrete from the repository context, stop before implementation and ask the user to choose a direction.
-- Present a concise set of concrete, mutually exclusive choices through an interactive selector that the user can navigate with the arrow keys and confirm with Enter.
-- Explain the main outcome or tradeoff of each choice in beginner-friendly language.
-- If an arrow-key-and-Enter selector is not available in the current environment, present numbered choices and ask the user to select one before continuing.
-- Do not guess or silently expand the scope when the choice could materially change the implementation.
+Inspect the repository, `git status`, and the relevant files first. Change only what was asked: no unrelated cleanup or refactors, and never widen scope silently. If the request is only a rough idea, stop and offer concrete, mutually exclusive choices with their tradeoffs in beginner-friendly language.
 
 ## Ownership and Boundaries
 
-- Do not cross directory ownership boundaries. If another component must change, report it to the user instead of modifying it directly.
-- Do not directly import or call another pipeline's internal modules.
-- Adjust pipeline connections and execution order only at the designated integration entry point.
-- Do not modify, move, overwrite, or delete artifacts created or owned by another component.
-- Do not change shared contracts, configuration, dependencies, common code, or integration files unless they are explicitly assigned to you.
-- Follow the nearest directory-specific instructions for each pipeline's responsibilities and implementation rules; do not add those rules to the repository-root instructions.
+- `src/pipelines/<area>/` belongs to one owner. Do not edit another area.
+- Never import another pipeline's internals; a pipeline exposes only `run(config) -> dict`.
+- `src/main_pipeline.py` is the only place that orders and connects pipelines.
+- Never modify, move, or delete an artifact another component produced.
+- Files in `docs/shared-files.md` are shared: changing one takes its own single-purpose PR.
+- To request a change you do not own, write `contracts/proposals/NNN-<topic>.md`; the owner implements it.
 
-## Security and Repository Hygiene
+## How to Write Code
 
-- Do not hardcode absolute paths, including paths specific to an individual's computer.
-- Do not expose credentials, tokens, secrets, `.env` contents, or other sensitive values in code, documentation, logs, or examples.
-- Do not add raw or processed datasets, checkpoints or weights, TensorBoard events, training logs or runs, caches, local environments, or large generated files to commits.
-- Do not create a commit unless the user explicitly asks. Apply all changes through a Pull Request, and do not commit directly to `main`.
-- Pull Request branches must use the format `pipeline/<area>/<task-summary>`. Only during onboarding status checks before role assignment may you use `onboarding/<github-username>`, and then you may change only your own status line in `onboarding/docs/onboarding-status.md`. Both branch types are temporary and must be deleted after merge. Each branch and Pull Request must contain one focused change.
-- `<area>` must be the assigned pipeline name: `data`, `train`, `evaluate`, `registry`, or `web`. For repository-wide work or any task without a defined area, do not invent one; ask the user.
-- If `main` or a GitHub remote is unavailable and a Pull Request cannot be created, do not substitute a commit or local merge; ask the user.
-- When the user requests a commit, write the commit message in Korean while retaining necessary standard technical terms in English.
-- When the user explicitly requests a push and Pull Request after a commit, verify the relevant checks and a clean working tree, then use `git pr`. Do not push or create a Pull Request without an explicit request.
-- Run `git pr` only from a valid work branch. First use `git pr --dry-run` to confirm the target branch and plan, then review the generated draft Pull Request template and validation details.
-- Store text files as UTF-8 without BOM with LF line endings.
+- Python 3.11. Type hints on public functions; Korean docstrings and comments.
+- **No editable install.** `from src...` needs the repository root on `sys.path`: run from there as `python -m pytest` and `python -m src.main_pipeline`. Bare `pytest` breaks imports.
+- `run(config)` returns exactly `status`, `artifacts`, `summary`, `message`. Never raise across that boundary — return `status="error"`.
+- Raise typed internal errors (an `<Area>Error` subclass), never bare `Exception`.
+- No absolute paths; local URIs are repository-relative POSIX and stay inside the repository.
+- Never `shell=True`; build explicit argv. Default `overwrite=False` — never destroy what existed before this run.
 
-## Beginner-Friendly Implementation Report
+## TDD: red → green → refactor → prune
 
-- After completing the implementation, clearly explain what was implemented in beginner-friendly language. Do not report only filenames or say that the work is complete.
-- For every changed file, explain why that file was changed and connect the change to the user's request.
-- Describe the implementation's inputs and outputs, including important types, formats, defaults, and assumptions when relevant. If there is no direct input or output, state that explicitly.
-- Explain what happens when the implementation fails, including expected errors, fallback behavior, partial results, cleanup, and recovery steps when relevant.
-- List every test and check that was run, explain what each one verified, and report its result. If a test was not run, explain why and state the remaining risk.
-- State whether the change affects any other pipeline. Name each affected pipeline and explain the impact. If there is no cross-pipeline impact, explicitly say so.
-- Confirm that no personal-computer-specific absolute path was introduced. Such paths are prohibited; if one is found, remove it before reporting completion.
+Write the failing test, make it pass, clean up, then **prune before opening the PR** — every cycle, not a separate cleanup campaign.
 
-## Validation and Completion Reporting
+**The rule:** delete the test, then deliberately break the code it guarded. Another test fails → it was a duplicate, delete it. Nothing fails → it is the only guard, keep it.
 
-- Run and review the checks and tests relevant to the changed scope.
-- On completion, report the changed files, the tests and checks run with their results, unresolved issues or TODOs, and `git status`.
-- If any test could not be run, explain why it was skipped and describe the remaining risk.
+**Keep** contract tests, regression tests, safety tests (leakage, paths outside the repository, credential exposure, overwriting artifacts), edge and failure paths, and one happy-path smoke test per public entry point.
 
-## Situations That Require Stopping and Asking
+**Delete** self-evident assertions, tests a stronger test supersedes, implementation-detail tests, duplicate parametrize cases, and mock-only tests that never check a result.
 
-In the following situations, do not guess or expand the scope. Stop and ask the user:
+Never target a ratio. Delete in a separate PR, one at a time, rerunning the full suite, and say what now guards the deleted case. `docs/testing.md` has examples.
 
-- A shared contract or public interface must change.
-- A modification would cross a directory ownership boundary or change an integration boundary.
-- A destructive action is required, such as deletion, overwriting, or history modification.
-- Credentials or secrets are required or could be exposed.
-- The work could incur costs, such as creating or modifying paid infrastructure.
-- There is a risk of train, validation, test, or competition data leakage.
-- Competition rules are unclear in a way that could change the implementation or validation result.
+## Git, Branches, Pull Requests
+
+- Never commit unless asked, and never to `main`. Everything lands through a Pull Request.
+- Branch `pipeline/<area>/<task-summary>`; `<area>` is `data`, `train`, `evaluate`, `registry`, `web`, or `docs` for repository-wide work. Never invent one — ask.
+- `onboarding/<github-username>` only changes your own line in `onboarding/docs/onboarding-status.md`.
+- One focused change per branch and PR; delete the branch after merge.
+- Commit messages in Korean, standard technical terms in English.
+- Push and open a PR only when asked: clean tree, passing checks, `git pr --dry-run`, then `git pr`.
+
+## Stop and Ask
+
+A shared contract or public interface must change; a change crosses an ownership or integration boundary; something must be deleted, overwritten, or history-rewritten; credentials are needed or could leak; the work could cost money; train, validation, test, or competition data could leak; competition rules are unclear in a way that changes the result.
+
+## Security and Hygiene
+
+Never put credentials, tokens, `.env` contents, or secrets into code, docs, logs, or examples. Never commit datasets, checkpoints, weights, TensorBoard events, training logs, caches, environments, or large generated files.
+
+## Reporting
+
+Explain in beginner-friendly language, not just filenames: each changed file and why; inputs, outputs, defaults, assumptions, or that there are none; failure behaviour and cleanup; every check run, its result, and why any was skipped; which pipelines are affected, or that none are; that no personal absolute path was introduced; then changed files, TODOs, and `git status`.

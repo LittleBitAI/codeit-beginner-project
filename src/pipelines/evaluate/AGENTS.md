@@ -1,6 +1,6 @@
 # Evaluate Pipeline
 
-Read the repository root `CLAUDE.md` first. This file adds only what is specific to `src/pipelines/evaluate/`.
+Read the repository root `AGENTS.md` first. This file adds only what is specific to `src/pipelines/evaluate/`.
 
 ## Scope
 
