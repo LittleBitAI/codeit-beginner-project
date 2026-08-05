@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { Route, Routes } from 'react-router-dom';
 
 import { api } from './api/client';
@@ -6,6 +6,7 @@ import type { DataSource, Defaults, JobListing } from './api/types';
 import { AppShell } from './components/AppShell';
 import { AlertRow } from './components/primitives';
 import { usePolling } from './hooks/usePolling';
+import { sourceKeyOf } from './lib/dataSource';
 import { ConfigReview } from './screens/ConfigReview';
 import { LiveMonitor } from './screens/LiveMonitor';
 import { NewExperiment } from './screens/NewExperiment';
@@ -25,24 +26,27 @@ function Shell() {
   const listing = usePolling<JobListing>(() => api.listJobs(), 3000);
   const defaults = usePolling<Defaults>(() => api.defaults(), 0);
   const source = usePolling<{ source: DataSource | null }>(() => api.getDataSource(), 0);
-  const { setDataFields } = useDraft();
+  const { draft, setDataFields } = useDraft();
 
   const active =
     listing.data?.jobs.find((job) => job.job_id === listing.data?.active_job_id) ?? null;
 
-  // 전처리 데이터셋을 고르면 새 실험의 artifact 4칸을 곧바로 채웁니다.
-  const handleSourceSelected = useCallback(
-    (selected: DataSource) => {
-      setDataFields(selected.data);
-      source.refresh();
-    },
-    [setDataFields, source],
-  );
+  const selected = source.data?.source ?? null;
 
-  // 준비가 끝나면 backend가 그 결과를 이미 골라 두었으므로 다시 읽어 옵니다.
-  const handlePrepared = useCallback(() => {
-    source.refresh();
-  }, [source]);
+  // 고른 데이터셋이 바뀌면 새 실험의 artifact 4칸을 그 값으로 맞춥니다.
+  //
+  // 예전에는 빈 칸만 채웠습니다. 그래서 데이터셋을 바꿔도 이전 값이 그대로 남아,
+  // 화면에는 새 데이터셋이 보이는데 실제로는 예전 데이터로 학습되는 일이 있었습니다.
+  // 데이터셋 선택은 명시적인 행동이므로 그 값이 이깁니다.
+  const sourceKey = useMemo(() => sourceKeyOf(selected), [selected]);
+
+  useEffect(() => {
+    if (!sourceKey || !selected || draft.sourceKey === sourceKey) return;
+    setDataFields({ ...selected.data }, sourceKey);
+  }, [sourceKey, selected, draft.sourceKey, setDataFields]);
+
+  const handleSourceSelected = useCallback(() => source.refresh(), [source]);
+  const handlePrepared = useCallback(() => source.refresh(), [source]);
 
   return (
     <AppShell activeJob={active}>

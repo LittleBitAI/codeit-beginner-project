@@ -6,9 +6,11 @@ import type { CreatedConfig } from '../api/types';
 export interface Draft {
   train: Record<string, string>;
   data: Record<string, string>;
+  /** artifact 값을 어느 데이터셋에서 채웠는지. 데이터셋이 바뀐 것을 알아채는 데 씁니다. */
+  sourceKey?: string | null;
 }
 
-export const EMPTY_DRAFT: Draft = { train: {}, data: {} };
+export const EMPTY_DRAFT: Draft = { train: {}, data: {}, sourceKey: null };
 
 const STORAGE_KEY = 'pill-training-draft';
 
@@ -17,7 +19,7 @@ interface DraftContextValue {
   setTrainField: (name: string, value: string) => void;
   setDataField: (name: string, value: string) => void;
   /** 전처리 데이터셋을 고르면 4칸을 한꺼번에 채웁니다. */
-  setDataFields: (values: Record<string, string>) => void;
+  setDataFields: (values: Record<string, string>, sourceKey?: string | null) => void;
   resetDraft: () => void;
   saved: CreatedConfig | null;
   setSaved: (value: CreatedConfig | null) => void;
@@ -70,8 +72,12 @@ export function DraftProvider({ children }: { children: ReactNode }) {
   );
 
   const setDataFields = useCallback(
-    (values: Record<string, string>) => {
-      update({ ...draft, data: { ...draft.data, ...values } });
+    (values: Record<string, string>, sourceKey?: string | null) => {
+      update({
+        ...draft,
+        data: { ...draft.data, ...values },
+        sourceKey: sourceKey === undefined ? draft.sourceKey : sourceKey,
+      });
     },
     [draft, update],
   );

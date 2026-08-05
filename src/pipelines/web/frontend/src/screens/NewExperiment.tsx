@@ -14,6 +14,7 @@ import {
 } from '../components/primitives';
 import { IconShield } from '../components/Icon';
 import { color, font, radius } from '../design/tokens';
+import { dataMatchesSource } from '../lib/dataSource';
 import { messageFor, toPayload } from '../lib/draftPayload';
 import { useDraft } from '../state/DraftContext';
 
@@ -46,19 +47,10 @@ export function NewExperiment({
   const fields = defaults?.fields ?? [];
   const payload = useMemo(() => toPayload(draft, fields), [draft, fields]);
 
-  // 전처리 데이터셋을 골라 두었으면 artifact 4칸을 자동으로 채웁니다.
-  // 사용자가 직접 넣어 둔 값은 덮어쓰지 않습니다. 빈 칸만 채우므로, 한 번 채운 뒤에는
-  // 채울 것이 없어져 곧바로 멈춥니다.
-  useEffect(() => {
-    if (!source?.complete || !defaults) return;
-    const filled: Record<string, string> = {};
-    for (const spec of defaults.data_fields) {
-      const current = draft.data[spec.name] ?? '';
-      const value = source.data[spec.name];
-      if (current.trim() === '' && value) filled[spec.name] = value;
-    }
-    if (Object.keys(filled).length > 0) setDataFields(filled);
-  }, [source, defaults, draft.data, setDataFields]);
+  // 고른 데이터셋과 지금 칸의 값이 다른지 확인합니다.
+  // 실제로 화면에는 새 데이터셋이 보이는데 예전 데이터로 학습된 적이 있어서,
+  // 다르면 눈에 띄게 알리고 한 번에 맞출 수 있게 합니다.
+  const mismatched = !dataMatchesSource(draft.data, source);
 
   // 입력이 멈추면 서버에 검증을 맡깁니다. 판단 기준은 언제나 서버입니다.
   useEffect(() => {
@@ -223,6 +215,23 @@ export function NewExperiment({
                   <span style={{ font: `400 11px/1.6 ${font.sans}`, color: color.textBody }}>
                     학습 개요 화면에서 전처리 데이터셋을 고르면 이 네 칸이 자동으로 채워집니다.
                   </span>
+                )}
+                {mismatched && source && (
+                  <AlertRow
+                    level="warning"
+                    title="고른 데이터셋과 아래 값이 다릅니다"
+                    action={
+                      <Button
+                        onClick={() => setDataFields({ ...source.data }, null)}
+                        title="고른 데이터셋의 값으로 맞춥니다"
+                      >
+                        데이터셋에 맞추기
+                      </Button>
+                    }
+                  >
+                    이대로 학습하면 <b>아래 칸에 적힌 데이터</b>로 돌아갑니다. 고른 데이터셋은{' '}
+                    <code style={{ fontFamily: font.mono }}>{source.directory}</code> 입니다.
+                  </AlertRow>
                 )}
                 {defaults.data_fields.map((spec) => (
                   <Field

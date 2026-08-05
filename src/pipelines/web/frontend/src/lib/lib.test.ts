@@ -4,7 +4,9 @@ import { color, radius, type } from '../design/tokens';
 import { describeRun, diffAgainstDefaults } from './describeRun';
 import { toPayload, messageFor } from './draftPayload';
 import { duration, loss, megabytes, percent } from './format';
-import type { RuntimeConfig, FieldSpec } from '../api/types';
+import type { DataSource, RuntimeConfig, FieldSpec } from '../api/types';
+import { DATA_KEYS } from './dataKeys';
+import { dataMatchesSource, sourceKeyOf } from './dataSource';
 
 const FIELDS: FieldSpec[] = [
   { name: 'epochs', type: 'integer', default: 1, label: 'Epochs', hint: '' },
@@ -125,6 +127,61 @@ describe('diffAgainstDefaults', () => {
     const rows = diffAgainstDefaults({ epochs: 10, seed: 42 }, { epochs: 1, seed: 42 });
 
     expect(rows).toEqual([{ key: 'train.epochs', before: '1', after: '10' }]);
+  });
+});
+
+describe('데이터셋 바뀜 감지', () => {
+  const base = 's3://bucket/processed/v1-seed42-8020/';
+  const other = 'artifacts/datasets/processed/v1-seed42-8020/';
+
+  function makeSource(prefix: string, complete = true): DataSource {
+    return {
+      directory: prefix,
+      complete,
+      data: Object.fromEntries(DATA_KEYS.map((key) => [key, prefix + key + '.json'])),
+      matched: {},
+      labels: {},
+      missing: [],
+      problems: [],
+      examined: [],
+    };
+  }
+
+  it('읽을 파일이 바뀌면 다른 값이 된다', () => {
+    expect(sourceKeyOf(makeSource(base))).not.toBe(sourceKeyOf(makeSource(other)));
+  });
+
+  it('같은 데이터셋이면 같은 값이 된다', () => {
+    expect(sourceKeyOf(makeSource(base))).toBe(sourceKeyOf(makeSource(base)));
+  });
+
+  it('아직 완전하지 않은 데이터셋은 값이 없다', () => {
+    expect(sourceKeyOf(makeSource(base, false))).toBeNull();
+    expect(sourceKeyOf(null)).toBeNull();
+  });
+
+  it('칸의 값이 고른 데이터셋과 같으면 일치로 본다', () => {
+    const source = makeSource(base);
+
+    expect(dataMatchesSource(source.data, source)).toBe(true);
+  });
+
+  it('데이터셋을 바꿨는데 칸에 예전 값이 남아 있으면 잡아낸다', () => {
+    // 실제로 이것 때문에 화면에는 S3 데이터가 보이는데 로컬 표본으로 학습된 적이 있습니다.
+    const stale = makeSource(other).data;
+
+    expect(dataMatchesSource(stale, makeSource(base))).toBe(false);
+  });
+
+  it('한 칸만 달라도 잡아낸다', () => {
+    const source = makeSource(base);
+    const edited = { ...source.data, class_map_uri: 'artifacts/다른곳/class_map.json' };
+
+    expect(dataMatchesSource(edited, source)).toBe(false);
+  });
+
+  it('칸이 비어 있으면 일치가 아니다', () => {
+    expect(dataMatchesSource({}, makeSource(base))).toBe(false);
   });
 });
 

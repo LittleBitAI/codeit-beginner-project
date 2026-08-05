@@ -134,6 +134,44 @@ export function ConfigReview({
         >
           {describeRun(saved.config)}
         </p>
+
+        {/* 어떤 데이터로 도는지 시작 전에 눈으로 확인할 수 있어야 합니다. */}
+        <div
+          style={{
+            borderTop: `1px solid ${color.borderInner}`,
+            paddingTop: 12,
+            marginTop: 13,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 5,
+          }}
+        >
+          <span style={{ font: `600 11.5px/1 ${font.sans}`, color: color.textStrong }}>
+            이 학습이 읽을 데이터
+          </span>
+          {Object.entries(saved.config.inputs?.data ?? {}).map(([key, uri]) => (
+            <div key={key} style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              <span
+                style={{
+                  font: `500 10.5px/1.5 ${font.mono}`,
+                  color: color.textMuted,
+                  minWidth: 170,
+                }}
+              >
+                {key}
+              </span>
+              <span
+                style={{
+                  font: `400 11px/1.5 ${font.mono}`,
+                  color: color.textStrong,
+                  overflowWrap: 'anywhere',
+                }}
+              >
+                {String(uri)}
+              </span>
+            </div>
+          ))}
+        </div>
       </Panel>
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, alignItems: 'flex-start' }}>
