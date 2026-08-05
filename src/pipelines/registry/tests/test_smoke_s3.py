@@ -83,7 +83,7 @@ def test_smoke_test_registers_and_reads_back_record():
 
     stored = objects[expected_uri]
     assert stored["run_id"] == "smoke-fixed-id"
-    assert stored["schema_version"] == "1.0"
+    assert stored["schema_version"] == "1.1"
     storage.read_json.assert_called_once_with(expected_uri)
     storage.list.assert_called_once_with(smoke_s3.SMOKE_PREFIX)
 
@@ -151,7 +151,7 @@ def test_smoke_test_requires_s3_backend(tmp_path):
 
 def test_smoke_test_detects_record_mismatch():
     storage, _ = make_fake_s3_storage()
-    storage.read_json = Mock(return_value={"run_id": "다른-run", "schema_version": "1.0"})
+    storage.read_json = Mock(return_value={"run_id": "다른-run", "schema_version": "1.1"})
 
     with pytest.raises(StorageError, match="run_id가 다릅니다"):
         run_with_fake_storage(storage, smoke_id="fixed-id")
