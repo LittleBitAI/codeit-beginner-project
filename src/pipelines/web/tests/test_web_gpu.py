@@ -135,13 +135,16 @@ def test_nonzero_exit_does_not_leak_paths(monkeypatch, smi_available):
     assert str(REPOSITORY_ROOT) not in telemetry["message"]
 
 
-def test_nvidia_smi_inside_repository_is_refused(monkeypatch):
+def test_nvidia_smi_inside_repository_is_refused(monkeypatch, tmp_path):
     """cwd가 저장소 root라 저장소 안의 nvidia-smi.exe가 먼저 잡힐 수 있습니다."""
 
-    from src.pipelines.web.paths import REPOSITORY_ROOT
+    from src.pipelines.web import paths
 
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    monkeypatch.setattr(paths, "REPOSITORY_ROOT", repository)
     monkeypatch.setattr(
-        gpu.shutil, "which", lambda name: str(REPOSITORY_ROOT / "nvidia-smi.exe")
+        gpu.shutil, "which", lambda name: str(repository / "nvidia-smi.exe")
     )
 
     assert gpu._resolve_nvidia_smi() is None
@@ -149,8 +152,22 @@ def test_nvidia_smi_inside_repository_is_refused(monkeypatch):
 
 
 def test_nvidia_smi_outside_repository_is_accepted(monkeypatch, tmp_path):
-    executable = tmp_path / "nvidia-smi"
+    """저장소와 무관한 위치의 실행 파일이어야 씁니다.
+
+    pytest --basetemp이 저장소 안을 가리켜도 결과가 달라지지 않도록, 저장소 root와
+    실행 파일 위치를 test 안에서 명시적으로 갈라 둡니다.
+    """
+
+    from src.pipelines.web import paths
+
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    executable = elsewhere / "nvidia-smi"
     executable.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(paths, "REPOSITORY_ROOT", repository)
     monkeypatch.setattr(gpu.shutil, "which", lambda name: str(executable))
 
     assert gpu._resolve_nvidia_smi() == str(executable)

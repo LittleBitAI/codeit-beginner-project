@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .masking import sanitize_line
-from .paths import REPOSITORY_ROOT
+
+# REPOSITORY_ROOT를 값으로 가져오면 import 시점에 고정됩니다. 항상 함수로 물어봅니다.
+from .paths import repository_root
 
 
 __all__ = ["cuda_is_available", "probe", "run_nvidia_smi"]
@@ -76,7 +78,7 @@ def _resolve_nvidia_smi() -> str | None:
     try:
         from pathlib import Path
 
-        Path(resolved).resolve().relative_to(REPOSITORY_ROOT)
+        Path(resolved).resolve().relative_to(repository_root())
     except ValueError:
         return resolved  # 저장소 밖 -> 정상
     except OSError:
