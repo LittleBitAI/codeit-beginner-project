@@ -106,11 +106,12 @@ gh auth status
 python tools/git_pr.py --install
 ```
 
-먼저 외부 변경 없이 계획을 확인한 뒤 `git pr`을 실행합니다.
+먼저 외부 변경 없이 계획을 확인한 뒤 같은 설명으로 `git pr`을 실행합니다. 요약은 무엇을
+바꿨는지, 이유는 기존에 무엇이 불편했는지를 서로 다르게 한국어로 적습니다.
 
 ```text
-git pr --dry-run
-git pr
+git pr --dry-run --summary "내 온보딩 확인 상태를 완료로 바꿨습니다." --reason "담당자가 환경 준비 여부를 확인할 수 있게 하기 위해서입니다." --check "python onboarding/scripts/verify_onboarding.py --profile cpu → PASSED"
+git pr --summary "내 온보딩 확인 상태를 완료로 바꿨습니다." --reason "담당자가 환경 준비 여부를 확인할 수 있게 하기 위해서입니다." --check "python onboarding/scripts/verify_onboarding.py --profile cpu → PASSED"
 ```
 
 `git pr`은 `onboarding/<github-username>` branch를 `origin`에 push하고 `main` 대상 draft Pull Request를 만듭니다. Pull Request에는 `onboarding/docs/onboarding-status.md`의 자신의 상태 한 줄만 포함되어야 합니다.

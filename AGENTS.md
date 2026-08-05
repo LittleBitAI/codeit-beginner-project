@@ -6,13 +6,13 @@ Read **`AGENTS.md` only** — `CLAUDE.md` is the same content for another tool. 
 
 ## Document Map
 
-Korean, for the team: `README.md`, `contracts/README.md`, `docs/shared-files.md`. English, for you: this file (**how to work**, everywhere), `src/pipelines/<area>/AGENTS.md` (**what you may do there**), `docs/testing.md`.
+Korean team docs: `README.md`, `contracts/README.md`, `docs/shared-files.md`. English instructions: this file, `src/pipelines/<area>/AGENTS.md`, `docs/testing.md`.
 
-Every document stays under 5,000 characters. **Every pipeline directory carries both files and no `README.md`** (READMEs there go stale). This file never names a pipeline; a pipeline file never restates a root rule. A pipeline rule contradicting this file is not written — ask.
+Keep every document under 5,000 characters. **Every pipeline has both instruction files and no `README.md`.** Root rules never name a pipeline; pipeline rules do not repeat or contradict them. Ask on conflict.
 
 ## Before Starting Work
 
-Inspect the repository, `git status`, and the relevant files first. Change only what was asked: no unrelated cleanup or refactors, and never widen scope silently. If the request is only a rough idea, stop and offer concrete, mutually exclusive choices with their tradeoffs in beginner-friendly language.
+Inspect the repository, `git status`, and relevant files first. Change only what was asked; never widen scope silently. For a rough idea, stop and offer concrete, mutually exclusive choices with beginner-friendly tradeoffs.
 
 ## Ownership and Boundaries
 
@@ -26,6 +26,7 @@ Inspect the repository, `git status`, and the relevant files first. Change only 
 ## How to Write Code
 
 - Python 3.11. Type hints on public functions; Korean docstrings and comments.
+- Save every text file as UTF-8 without BOM.
 - **No editable install.** `from src...` needs the repository root on `sys.path`: run from there as `python -m pytest` and `python -m src.main_pipeline`. Bare `pytest` breaks imports.
 - `run(config)` returns exactly `status`, `artifacts`, `summary`, `message`. Never raise across that boundary — return `status="error"`.
 - Raise typed internal errors (an `<Area>Error` subclass), never bare `Exception`.
@@ -34,15 +35,13 @@ Inspect the repository, `git status`, and the relevant files first. Change only 
 
 ## TDD: red → green → refactor → prune
 
-Write the failing test, make it pass, clean up, then **prune before opening the PR** — every cycle, not a separate cleanup campaign.
-
-**The rule:** delete the test, then deliberately break the code it guarded. Another test fails → it was a duplicate, delete it. Nothing fails → it is the only guard, keep it.
+Write the failing test, make it pass, clean up, then **prune before opening the PR** — every cycle. To prune, delete one test and break the code it guarded. Another test fails → delete the duplicate. Nothing fails → restore the only guard.
 
 **Keep** contract tests, regression tests, safety tests (leakage, paths outside the repository, credential exposure, overwriting artifacts), edge and failure paths, and one happy-path smoke test per public entry point.
 
 **Delete** self-evident assertions, tests a stronger test supersedes, implementation-detail tests, duplicate parametrize cases, and mock-only tests that never check a result.
 
-Never target a ratio. Delete in a separate PR, one at a time, rerunning the full suite, and say what now guards the deleted case. `docs/testing.md` has examples.
+Never target a ratio. Test-only deletion gets a separate PR; delete one at a time, rerun the full suite, and name the remaining guard. See `docs/testing.md`.
 
 ## Git, Branches, Pull Requests
 
@@ -51,7 +50,8 @@ Never target a ratio. Delete in a separate PR, one at a time, rerunning the full
 - `onboarding/<github-username>` only changes your own line in `onboarding/docs/onboarding-status.md`.
 - One focused change per branch and PR; delete the branch after merge.
 - Commit messages in Korean, standard technical terms in English.
-- Push and open a PR only when asked: clean tree, passing checks, `git pr --dry-run`, then `git pr`.
+- Before `git pr`, inspect `git diff --stat origin/main...HEAD` and the full diff. Pass Korean `--summary` and `--reason` values based on that diff: state concrete behaviour or structure changed, then the prior problem and why it was needed. Never repeat the title or commit message as the explanation; cover inputs, outputs, defaults, and failure behaviour when relevant.
+- Push and open a PR only when asked: clean tree, passing checks, `git pr --dry-run`, then `git pr`. The command rejects missing, non-Korean, or identical summaries and reasons.
 
 ## Stop and Ask
 
@@ -59,8 +59,8 @@ A shared contract or public interface must change; a change crosses an ownership
 
 ## Security and Hygiene
 
-Never put credentials, tokens, `.env` contents, or secrets into code, docs, logs, or examples. Never commit datasets, checkpoints, weights, TensorBoard events, training logs, caches, environments, or large generated files.
+Never expose credentials, tokens, `.env` contents, or secrets. Never commit datasets, checkpoints, weights, events, logs, caches, environments, or large generated files.
 
 ## Reporting
 
-Explain in beginner-friendly language, not just filenames: each changed file and why; inputs, outputs, defaults, assumptions, or that there are none; failure behaviour and cleanup; every check run, its result, and why any was skipped; which pipelines are affected, or that none are; that no personal absolute path was introduced; then changed files, TODOs, and `git status`.
+Report in beginner-friendly language: each file and why; inputs, outputs, defaults, assumptions; failures and cleanup; checks and skipped reasons; affected pipelines; no personal absolute paths; changed files, TODOs, and `git status`.
