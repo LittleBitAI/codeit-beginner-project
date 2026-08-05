@@ -14,7 +14,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 from PIL import Image
@@ -673,6 +673,55 @@ def test_dataset_summary_records_source_ratio_and_seed():
 
 
 # --- 덮어쓰기 방지 ----------------------------------------------------------
+
+
+def test_legacy_four_artifacts_backfill_only_the_missing_test_manifest():
+    """기존 학습 증거는 그대로 두고 누락된 test manifest 하나만 보충합니다."""
+
+    objects = raw_objects()
+    storage, stored = make_fake_s3_storage(objects)
+    initial = run_with_fake_storage(storage, prepare_config("8:2"))
+    test_manifest_uri = initial["artifacts"]["test_manifest_uri"]
+    del stored[test_manifest_uri]
+    before = copy.deepcopy(stored)
+    storage.read_json.reset_mock()
+    storage.write_json.reset_mock()
+    storage.download_file.reset_mock()
+
+    result = run_with_fake_storage(storage, prepare_config("8:2"))
+
+    assert result["status"] == "ok", result["message"]
+    assert result["summary"]["mode"] == "backfill_test_manifest"
+    assert result["summary"]["test_manifest_images"] == 5
+    assert set(result["artifacts"]) == set(preparation.ARTIFACT_FILE_NAMES)
+    assert result["artifacts"] == initial["artifacts"]
+    assert {uri: value for uri, value in stored.items() if uri != test_manifest_uri} == before
+    assert stored[test_manifest_uri]["annotations"] == []
+    class_map_location = (
+        f"datasets/pill_detection/processed/v1-seed42-8020/"
+        f"{preparation.ARTIFACT_FILE_NAMES['class_map_uri']}"
+    )
+    storage.read_json.assert_has_calls([call(class_map_location)])
+    # train annotation과 기존 manifest/summary는 백필에서 읽지도 수정하지도 않습니다.
+    assert storage.read_json.call_count == 1
+    storage.write_json.assert_called_once()
+    assert storage.write_json.call_args.kwargs["overwrite"] is False
+
+
+def test_incomplete_legacy_artifacts_are_not_mistaken_for_a_safe_backfill():
+    objects = raw_objects()
+    storage, stored = make_fake_s3_storage(objects)
+    initial = run_with_fake_storage(storage, prepare_config("8:2"))
+    del stored[initial["artifacts"]["test_manifest_uri"]]
+    del stored[initial["artifacts"]["validation_manifest_uri"]]
+    before = copy.deepcopy(stored)
+
+    result = run_with_fake_storage(storage, prepare_config("8:2"))
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert "이미 있습니다" in result["message"]
+    assert stored == before
 
 
 def test_existing_artifacts_are_not_overwritten_silently():
