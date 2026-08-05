@@ -196,6 +196,7 @@ class EvaluateRequest(BaseModel):
     score_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     max_detections_per_image: int = Field(default=DEFAULT_MAX_DETECTIONS, ge=1, le=1000)
     overwrite: bool = Field(default=False)
+    test_manifest_uri: str | None = Field(default=None)
 
 
 @router.get("/jobs/{job_id}/evaluate")

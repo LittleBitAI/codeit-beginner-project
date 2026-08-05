@@ -18,15 +18,23 @@ from src.pipelines.web.jobs.model import JobRecord
 from src.pipelines.web.train_config import DATA_ARTIFACT_KEYS
 
 
-def make_record(*, remote: bool = False, artifacts: dict | None = None) -> JobRecord:
+def make_record(
+    *,
+    remote: bool = False,
+    artifacts: dict | None = None,
+    with_test_manifest: bool = False,
+) -> JobRecord:
     base = "s3://bucket/datasets/p/" if remote else "artifacts/datasets/p/"
     checkpoint_base = "s3://bucket/experiments/completed/run-1/" if remote else "artifacts/x/"
+    data_inputs = {key: base + f"{key}.json" for key in DATA_ARTIFACT_KEYS}
+    if with_test_manifest:
+        data_inputs["test_manifest_uri"] = base + "test_manifest.json"
     return JobRecord(
         job_id="a" * 32,
         config_id="b" * 32,
         run_id="run-1",
         status="succeeded",
-        data_inputs={key: base + f"{key}.json" for key in DATA_ARTIFACT_KEYS},
+        data_inputs=data_inputs,
         artifacts=artifacts
         if artifacts is not None
         else {
@@ -38,7 +46,14 @@ def make_record(*, remote: bool = False, artifacts: dict | None = None) -> JobRe
     )
 
 
-def completed(ok: bool = True, returncode: int = 0):
+def completed(ok: bool = True, returncode: int = 0, *, with_submission: bool = False):
+    evaluate_artifacts = {
+        "run_id": "run-1",
+        "metrics_uri": "artifacts/evaluate/run-1/metrics.json",
+        "predictions_uri": "artifacts/evaluate/run-1/predictions.json",
+    }
+    if with_submission:
+        evaluate_artifacts["submission_uri"] = "submissions/run-1/submission.csv"
     return subprocess.CompletedProcess(
         [],
         returncode,
@@ -46,11 +61,7 @@ def completed(ok: bool = True, returncode: int = 0):
             {
                 "status": "ok" if ok else "error",
                 "artifacts": {
-                    "evaluate": {
-                        "run_id": "run-1",
-                        "metrics_uri": "artifacts/evaluate/run-1/metrics.json",
-                        "predictions_uri": "artifacts/evaluate/run-1/predictions.json",
-                    }
+                    "evaluate": evaluate_artifacts
                 },
                 "summary": {
                     "evaluate": {
@@ -58,6 +69,9 @@ def completed(ok: bool = True, returncode: int = 0):
                         "image_count": 46,
                         "prediction_count": 120,
                         "evaluated_class_count": 56,
+                        "iou_thresholds": [0.75, 0.8, 0.85, 0.9, 0.95]
+                        if with_submission
+                        else [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
                         "metrics": {
                             "mAP": 0.3123,
                             "mAP50": 0.5512,
@@ -111,6 +125,38 @@ def test_defaults_follow_the_evaluate_contract():
     assert config["max_detections_per_image"] == 4
     assert config["score_threshold"] == 0.0
     assert config["overwrite"] is False
+
+
+def test_test_manifest_is_forwarded_for_submission_generation():
+    config = evaluation.build_evaluate_config(make_record(with_test_manifest=True))
+
+    assert config["inputs"]["data"]["test_manifest_uri"].endswith("test_manifest.json")
+
+
+def test_test_manifest_can_be_attached_to_an_existing_training():
+    record = make_record(remote=True)
+
+    config = evaluation.build_evaluate_config(
+        record,
+        test_manifest_uri="s3://bucket/datasets/test/test_manifest.json",
+    )
+
+    assert config["inputs"]["data"]["test_manifest_uri"] == (
+        "s3://bucket/datasets/test/test_manifest.json"
+    )
+    # 완료된 학습 기록은 증거이므로 평가 입력을 붙이더라도 바꾸지 않습니다.
+    assert "test_manifest_uri" not in record.data_inputs
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ("../test_manifest.json", "https://example.com/test_manifest.json", "s3://bucket"),
+)
+def test_attached_test_manifest_uses_the_data_uri_safety_rules(bad):
+    with pytest.raises(WebValidationError) as error:
+        evaluation.build_evaluate_config(make_record(), test_manifest_uri=bad)
+
+    assert error.value.errors[0].field == "inputs.data.test_manifest_uri"
 
 
 @pytest.mark.parametrize("missing", ("run_id", "best_checkpoint_uri"))
@@ -238,6 +284,51 @@ def test_successful_evaluation_records_metrics(runner_slot, monkeypatch):
     assert state["status"] == "succeeded"
     assert state["summary"]["metrics"]["mAP"] == 0.3123
     assert state["artifacts"]["predictions_uri"].endswith("predictions.json")
+
+
+def test_submission_request_and_artifact_are_visible_in_status(runner_slot, monkeypatch):
+    monkeypatch.setattr(
+        evaluation.runner,
+        "run_stage",
+        lambda *a, **k: completed(with_submission=True),
+    )
+
+    started = runner_slot.start(make_record(with_test_manifest=True), {})
+    state = wait_done(runner_slot)
+
+    assert started["submission_requested"] is True
+    assert state["submission_requested"] is True
+    assert state["artifacts"]["submission_uri"].endswith("submission.csv")
+    assert state["summary"]["iou_thresholds"] == [0.75, 0.8, 0.85, 0.9, 0.95]
+
+
+def test_runner_marks_a_manifest_attached_at_evaluation_time(runner_slot, monkeypatch):
+    captured = {}
+
+    def fake_run(config):
+        captured.update(config)
+        result = completed(with_submission=True)
+        return {
+            "ok": True,
+            "exit_code": result.returncode,
+            "artifacts": {"submission_uri": "submissions/run-1/submission.csv"},
+            "summary": {"iou_thresholds": [0.75, 0.8, 0.85, 0.9, 0.95]},
+            "message": "완료",
+        }
+
+    monkeypatch.setattr(evaluation, "run_evaluation", fake_run)
+
+    started = runner_slot.start(
+        make_record(),
+        {"test_manifest_uri": "artifacts/data/test_manifest.json"},
+    )
+    state = wait_done(runner_slot)
+
+    assert started["submission_requested"] is True
+    assert captured["inputs"]["data"]["test_manifest_uri"] == (
+        "artifacts/data/test_manifest.json"
+    )
+    assert state["artifacts"]["submission_uri"].endswith("submission.csv")
 
 
 def test_second_evaluation_is_rejected_while_running(runner_slot, monkeypatch):

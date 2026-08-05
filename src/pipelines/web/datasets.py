@@ -1,4 +1,4 @@
-"""전처리 결과 폴더 하나에서 train이 요구하는 artifact 4개를 찾아냅니다.
+"""전처리 결과에서 Train 필수 artifact 4개와 선택 test manifest를 찾습니다.
 
 이 저장소에는 아직 data artifact의 표준 위치도, 정해진 file 이름도 없습니다
 (``contracts/README.md``는 pipeline별 산출물 schema를 각 담당 directory에서 정한다고
@@ -43,7 +43,7 @@ from .paths import (
     to_repo_relative_posix,
     web_state_dir,
 )
-from .train_config import DATA_ARTIFACT_KEYS
+from .train_config import DATA_ARTIFACT_KEYS, OPTIONAL_DATA_ARTIFACT_KEYS
 
 
 __all__ = [
@@ -71,6 +71,7 @@ _INTEGER_TEXT = re.compile(r"^\d+$")
 # 학습용/검증용을 가르는 file 이름 힌트입니다. 앞쪽이 먼저 매칭됩니다.
 _VALIDATION_HINTS = ("validation", "valid", "val", "dev", "eval")
 _TRAIN_HINTS = ("train", "training", "trn")
+_TEST_HINTS = ("test",)
 
 # 클래스 맵과 데이터셋 요약은 둘 다 "이름: 숫자" 형태일 수 있습니다.
 # 예: {"pill": 1} 과 {"train_images": 1, "validation_images": 1}
@@ -83,7 +84,10 @@ _LABELS = {
     "validation_manifest_uri": "검증 manifest",
     "class_map_uri": "클래스 맵",
     "dataset_summary_uri": "데이터셋 요약",
+    "test_manifest_uri": "테스트 manifest",
 }
+
+_ALL_DATA_ARTIFACT_KEYS = DATA_ARTIFACT_KEYS + OPTIONAL_DATA_ARTIFACT_KEYS
 
 
 def _looks_like_class_map(document: Any) -> bool:
@@ -168,13 +172,16 @@ def _read_kind(path: Path) -> tuple[str, str | None]:
 
 
 def _split_role(name: str) -> str | None:
-    """file 이름으로 학습용/검증용을 가릅니다."""
+    """file 이름으로 학습용/검증용/test용을 가릅니다."""
 
     lowered = name.lower()
     # 검증을 먼저 봅니다. "validation"에는 "val"이 들어 있어 순서가 중요합니다.
     for hint in _VALIDATION_HINTS:
         if hint in lowered:
             return "validation"
+    for hint in _TEST_HINTS:
+        if hint in lowered:
+            return "test"
     for hint in _TRAIN_HINTS:
         if hint in lowered:
             return "train"
@@ -229,10 +236,16 @@ def _pick_class_map_and_summary(
 
 def _pick_manifests(
     manifests: list[dict[str, Any]],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[str]]:
+) -> tuple[
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    list[str],
+]:
     problems: list[str] = []
     train_side = [entry for entry in manifests if _split_role(entry["name"]) == "train"]
     validation_side = [entry for entry in manifests if _split_role(entry["name"]) == "validation"]
+    test_side = [entry for entry in manifests if _split_role(entry["name"]) == "test"]
     unlabelled = [entry for entry in manifests if _split_role(entry["name"]) is None]
 
     if not train_side and not validation_side and len(unlabelled) == 2:
@@ -240,20 +253,23 @@ def _pick_manifests(
         problems.append(
             "manifest 2개를 찾았지만 file 이름만으로는 학습용과 검증용을 가릴 수 없습니다."
         )
-        return None, None, problems
+        return None, None, None, problems
 
     if len(train_side) > 1:
         problems.append("학습용으로 보이는 manifest가 여러 개입니다.")
     if len(validation_side) > 1:
         problems.append("검증용으로 보이는 manifest가 여러 개입니다.")
+    if len(test_side) > 1:
+        problems.append("테스트용으로 보이는 manifest가 여러 개입니다.")
 
     train_entry = train_side[0] if len(train_side) == 1 else None
     validation_entry = validation_side[0] if len(validation_side) == 1 else None
-    return train_entry, validation_entry, problems
+    test_entry = test_side[0] if len(test_side) == 1 else None
+    return train_entry, validation_entry, test_entry, problems
 
 
 def inspect_directory(directory: object) -> dict[str, Any]:
-    """위치 하나를 살펴 artifact 4개를 찾습니다. 읽기만 합니다.
+    """위치 하나를 살펴 필수 4개와 선택 test manifest를 찾습니다. 읽기만 합니다.
 
     ``s3://bucket/prefix/`` 를 주면 S3에서, 그 밖에는 저장소 안 폴더에서 찾습니다.
     이미 S3에 준비돼 있는 산출물을 그대로 쓸 수 있어야 하기 때문입니다.
@@ -302,14 +318,14 @@ def inspect_directory(directory: object) -> dict[str, Any]:
 
 
 def _assemble(location: str, examined: list[dict[str, Any]], *, empty: bool) -> dict[str, Any]:
-    """살펴본 파일 목록에서 artifact 4개를 골라 결과를 만듭니다."""
+    """살펴본 파일 목록에서 필수 4개와 선택 test manifest를 골라 결과를 만듭니다."""
 
     manifests = [entry for entry in examined if entry["kind"] == "manifest"]
     class_maps = [entry for entry in examined if entry["kind"] == "class_map"]
     summaries = [entry for entry in examined if entry["kind"] == "summary"]
 
     problems: list[str] = []
-    train_entry, validation_entry, manifest_problems = _pick_manifests(manifests)
+    train_entry, validation_entry, test_entry, manifest_problems = _pick_manifests(manifests)
     problems.extend(manifest_problems)
 
     class_map_entry, summary_entry, role_problems = _pick_class_map_and_summary(
@@ -323,6 +339,7 @@ def _assemble(location: str, examined: list[dict[str, Any]], *, empty: bool) -> 
         "validation_manifest_uri": validation_entry,
         "class_map_uri": class_map_entry,
         "dataset_summary_uri": summary_entry,
+        "test_manifest_uri": test_entry,
     }
     missing: list[str] = []
     for key in DATA_ARTIFACT_KEYS:
@@ -330,6 +347,10 @@ def _assemble(location: str, examined: list[dict[str, Any]], *, empty: bool) -> 
         if entry is None:
             missing.append(key)
         else:
+            resolved_uris[key] = entry["uri"]
+    for key in OPTIONAL_DATA_ARTIFACT_KEYS:
+        entry = matched[key]
+        if entry is not None:
             resolved_uris[key] = entry["uri"]
 
     if empty:
@@ -345,7 +366,7 @@ def _assemble(location: str, examined: list[dict[str, Any]], *, empty: bool) -> 
                 if matched[key] is None
                 else {"name": matched[key]["name"], "uri": matched[key]["uri"]}
             )
-            for key in DATA_ARTIFACT_KEYS
+            for key in _ALL_DATA_ARTIFACT_KEYS
         },
         "labels": dict(_LABELS),
         "missing": missing,
@@ -360,7 +381,7 @@ MAX_S3_FILES = 40
 
 
 def inspect_s3_prefix(location: str) -> dict[str, Any]:
-    """``s3://bucket/prefix/`` 아래에서 artifact 4개를 찾습니다. 읽기만 합니다."""
+    """S3 prefix 아래에서 필수 4개와 선택 test manifest를 찾습니다. 읽기만 합니다."""
 
     prefix = location.strip()
     if not prefix.lower().startswith("s3://"):
@@ -420,7 +441,7 @@ def _selection_path() -> Path:
 
 
 def _common_parent(data: Mapping[str, str]) -> str | None:
-    """artifact 4개가 모두 같은 directory에 있으면 그 위치를 돌려줍니다."""
+    """선택된 artifact가 모두 같은 directory에 있으면 그 위치를 돌려줍니다."""
 
     parents = {str(value).rsplit("/", 1)[0] for value in data.values() if "/" in str(value)}
     if len(parents) != 1:
@@ -436,18 +457,23 @@ def _prepared_selection(stored: dict[str, Any]) -> dict[str, Any] | None:
     """
 
     data = stored.get("data")
-    if not isinstance(data, dict) or set(data) != set(DATA_ARTIFACT_KEYS):
+    if not isinstance(data, dict) or not set(DATA_ARTIFACT_KEYS).issubset(data):
         return None
+    selected = {key: str(data[key]) for key in _ALL_DATA_ARTIFACT_KEYS if key in data}
     return {
         "origin": "prepared",
         # artifact URI에서 직접 뽑습니다. pipeline이 알려 준 prefix에는 s3://bucket/ 이
         # 빠져 있어서, 그대로 두면 화면에 반쪽짜리 위치가 나오고 다시 조회할 수도 없습니다.
-        "directory": _common_parent(data) or stored.get("processed_prefix"),
+        "directory": _common_parent(selected) or stored.get("processed_prefix"),
         "complete": True,
-        "data": dict(data),
+        "data": selected,
         "matched": {
-            key: {"name": str(data[key]).rsplit("/", 1)[-1], "uri": data[key]}
-            for key in DATA_ARTIFACT_KEYS
+            key: (
+                {"name": selected[key].rsplit("/", 1)[-1], "uri": selected[key]}
+                if key in selected
+                else None
+            )
+            for key in _ALL_DATA_ARTIFACT_KEYS
         },
         "labels": dict(_LABELS),
         "missing": [],
@@ -488,7 +514,7 @@ def load_selection() -> dict[str, Any] | None:
             "available": False,
             "complete": False,
             "data": {},
-            "matched": {key: None for key in DATA_ARTIFACT_KEYS},
+            "matched": {key: None for key in _ALL_DATA_ARTIFACT_KEYS},
             "labels": dict(_LABELS),
             "missing": list(DATA_ARTIFACT_KEYS),
             "problems": problems,
@@ -537,11 +563,22 @@ def save_prepared_selection(
             [FieldError("data", f"준비 결과에 {', '.join(missing)}이(가) 없습니다.")]
         )
 
+    selected = {key: str(data[key]) for key in DATA_ARTIFACT_KEYS}
+    for key in OPTIONAL_DATA_ARTIFACT_KEYS:
+        if key not in data:
+            continue
+        value = data[key]
+        if not isinstance(value, str) or not value.strip():
+            raise WebValidationError(
+                [FieldError("data", f"준비 결과의 {_LABELS[key]} 위치가 올바르지 않습니다.")]
+            )
+        selected[key] = value.strip()
+
     meta = dict(preparation or {})
     _write_selection(
         {
             "origin": "prepared",
-            "data": {key: str(data[key]) for key in DATA_ARTIFACT_KEYS},
+            "data": selected,
             "processed_prefix": meta.get("processed_prefix"),
             "preparation": meta,
             "selected_at": _now_text(),
@@ -558,7 +595,7 @@ def _now_text() -> str:
 
 
 def save_selection(directory: object) -> dict[str, Any]:
-    """전처리 데이터셋을 고릅니다. artifact 4개를 모두 찾은 경우에만 저장합니다."""
+    """전처리 데이터셋을 고릅니다. 필수 4개를 모두 찾은 경우에만 저장합니다."""
 
     result = inspect_directory(directory)
     if not result["complete"]:
@@ -786,7 +823,7 @@ def _unsupported_result(result: dict[str, Any]) -> bool:
 
 
 def prepare_dataset(config: dict[str, Any]) -> dict[str, Any]:
-    """실제 data pipeline을 불러 원본에서 artifact 4개를 만듭니다."""
+    """실제 data pipeline을 불러 원본에서 필수 4개와 test manifest를 만듭니다."""
 
     from .train_config import config_relative_path, write_runtime_config
 

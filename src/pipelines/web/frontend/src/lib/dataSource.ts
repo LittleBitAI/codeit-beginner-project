@@ -1,15 +1,15 @@
 import type { DataSource } from '../api/types';
-import { DATA_KEYS } from './dataKeys';
+import { ALL_DATA_KEYS } from './dataKeys';
 
 /**
  * 고른 데이터셋을 구별하는 값입니다.
  *
- * artifact URI 4개를 그대로 이어 붙입니다. 위치 이름이나 시각이 아니라 실제로 읽을
+ * 필수 artifact와 선택 test manifest URI를 그대로 이어 붙입니다. 위치 이름이나 시각이 아니라 실제로 읽을
  * 파일이 바뀌었는지를 기준으로 삼아야, 같은 폴더에서 다시 준비했을 때도 알아챕니다.
  */
 export function sourceKeyOf(source: DataSource | null): string | null {
   if (!source?.complete) return null;
-  return DATA_KEYS.map((key) => source.data[key] ?? '').join('|');
+  return ALL_DATA_KEYS.map((key) => source.data[key] ?? '').join('|');
 }
 
 /**
@@ -23,7 +23,7 @@ export function dataMatchesSource(
   source: DataSource | null,
 ): boolean {
   if (!source?.complete) return true;
-  return DATA_KEYS.every(
+  return ALL_DATA_KEYS.every(
     (key) => (draftData[key] ?? '').trim() === (source.data[key] ?? ''),
   );
 }

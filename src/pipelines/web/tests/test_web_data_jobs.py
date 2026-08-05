@@ -58,6 +58,21 @@ def test_successful_preparation_is_selected_automatically(runner, monkeypatch):
     assert set(selection["data"]) == set(DATA_ARTIFACT_KEYS)
 
 
+def test_successful_preparation_keeps_test_manifest_for_later_submission(runner, monkeypatch):
+    result = prepared()
+    result["artifacts"]["test_manifest_uri"] = "artifacts/p/test_manifest.json"
+    result["summary"].update(test_manifest_images=842, test_images_used=0)
+    monkeypatch.setattr(datasets, "prepare_dataset", lambda config: result)
+
+    runner.start({"split_ratio": "8:2"})
+    state = wait_until_done(runner)
+
+    assert state["selected"] is True
+    selection = datasets.load_selection()
+    assert selection["data"]["test_manifest_uri"] == "artifacts/p/test_manifest.json"
+    assert selection["preparation"]["test_manifest_images"] == 842
+
+
 def test_failed_preparation_does_not_change_the_selection(runner, monkeypatch):
     monkeypatch.setattr(datasets, "prepare_dataset", lambda config: prepared(ok=False))
 

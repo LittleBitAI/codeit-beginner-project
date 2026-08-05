@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { api } from '../api/client';
 import type { DetectionMetrics, EvaluationState, JobRecord } from '../api/types';
@@ -8,6 +8,7 @@ import { describeError } from '../lib/describeError';
 import { AlertRow, Button, Field, KpiCard, Panel, controlStyle } from './primitives';
 
 const POLL_MS = 2000;
+const COMPETITION_IOU_THRESHOLDS = [0.75, 0.8, 0.85, 0.9, 0.95];
 
 /** evaluate가 내는 지표. 계산하지 않은 값은 null로 오므로 지어내지 않고 "-"로 둡니다. */
 const METRICS: { key: keyof DetectionMetrics; label: string; note: string }[] = [
@@ -29,15 +30,28 @@ function metricText(value: number | null | undefined): string {
  * 나오므로, 학습이 성공한 뒤에만 보여 줍니다.
  */
 export function EvaluatePanel({ job }: { job: JobRecord }) {
+  const recordedTestManifest = job.data_inputs.test_manifest_uri ?? '';
   const [threshold, setThreshold] = useState('0.0');
   const [overwrite, setOverwrite] = useState(false);
+  const [testManifestUri, setTestManifestUri] = useState(recordedTestManifest);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+
+  useEffect(() => {
+    setTestManifestUri(recordedTestManifest);
+  }, [job.job_id, recordedTestManifest]);
 
   const status = usePolling(() => api.evaluationStatus(job.job_id), POLL_MS);
   const state: EvaluationState | undefined = status.data?.evaluation;
   const running = state?.status === 'running';
   const busyElsewhere = Boolean(state?.busy_with && state.busy_with !== job.job_id);
+  const attachedTestManifest = testManifestUri.trim();
+  const formRequestsSubmission = Boolean(attachedTestManifest);
+  const submissionRequested = running
+    ? (state?.submission_requested ?? formRequestsSubmission)
+    : formRequestsSubmission;
+  const resultUsedSubmission =
+    Boolean(state?.submission_requested) || Boolean(state?.artifacts?.submission_uri);
   const thresholdInvalid =
     !/^\d*\.?\d+$/.test(threshold.trim()) || Number(threshold) < 0 || Number(threshold) > 1;
 
@@ -48,6 +62,9 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
       await api.startEvaluation(job.job_id, {
         score_threshold: Number(threshold),
         overwrite,
+        ...(recordedTestManifest || !attachedTestManifest
+          ? {}
+          : { test_manifest_uri: attachedTestManifest }),
       });
       status.refresh();
     } catch (caught) {
@@ -61,9 +78,43 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
     <Panel title="평가">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <span style={{ font: `400 11.5px/1.7 ${font.sans}`, color: color.textBody }}>
-          학습이 남긴 checkpoint로 검증 이미지를 다시 추론해 성능을 잽니다. 학습 중에는 loss만
-          나오고, mAP 같은 점수는 여기서 처음 나옵니다. 학습을 다시 하지는 않습니다.
+          학습이 남긴 checkpoint로 검증 이미지를 다시 추론해 성능을 잽니다.
+          {submissionRequested
+            ? ' 대회 test 이미지도 정답 label 없이 추론해 submission.csv를 함께 만듭니다.'
+            : ''}{' '}
+          학습을 다시 하지는 않습니다.
         </span>
+
+        {recordedTestManifest ? (
+          <AlertRow level="info" title="Test manifest 연결됨">
+            <code style={{ fontFamily: font.mono, overflowWrap: 'anywhere' }}>
+              {recordedTestManifest}
+            </code>
+          </AlertRow>
+        ) : (
+          <Field
+            label="Test manifest URI"
+            hint="기존 checkpoint에 test_manifest.json을 연결합니다. 비워 두면 validation만 평가합니다."
+          >
+            <input
+              value={testManifestUri}
+              disabled={running}
+              placeholder="s3://bucket/path/test_manifest.json"
+              onChange={(event) => setTestManifestUri(event.target.value)}
+              style={controlStyle}
+            />
+          </Field>
+        )}
+
+        {!recordedTestManifest &&
+          attachedTestManifest &&
+          state?.status === 'succeeded' &&
+          !overwrite && (
+          <AlertRow level="warning" title="기존 평가 파일이 있습니다">
+            같은 run의 metrics와 predictions가 이미 있다면 ‘이미 있으면 덮어쓰기’를 체크해야
+            submission 평가를 다시 실행할 수 있습니다.
+          </AlertRow>
+        )}
 
         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <div style={{ width: 150 }}>
@@ -105,7 +156,15 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
             style={{ padding: '9px 14px', marginBottom: 9 }}
             title={busyElsewhere ? '다른 학습의 평가가 실행 중입니다.' : undefined}
           >
-            {running ? '평가 중…' : starting ? '시작하는 중…' : '평가 실행'}
+            {running
+              ? submissionRequested
+                ? '평가 및 submission 생성 중…'
+                : '평가 중…'
+              : starting
+                ? '시작하는 중…'
+                : submissionRequested
+                  ? '평가 및 submission 생성'
+                  : '평가 실행'}
           </Button>
         </div>
 
@@ -121,17 +180,25 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
           </AlertRow>
         )}
 
-        {state && state.status !== 'idle' && <EvaluationResult state={state} />}
+        {state && state.status !== 'idle' && (
+          <EvaluationResult state={state} submissionRequested={resultUsedSubmission} />
+        )}
       </div>
     </Panel>
   );
 }
 
-function EvaluationResult({ state }: { state: EvaluationState }) {
+function EvaluationResult({
+  state,
+  submissionRequested,
+}: {
+  state: EvaluationState;
+  submissionRequested: boolean;
+}) {
   if (state.status === 'running') {
     return (
       <AlertRow level="info" title="평가 중">
-        {state.message} 검증 이미지 수만큼 추론하므로 잠시 걸립니다.
+        {state.message} 검증 이미지와 test 이미지 수만큼 추론하므로 잠시 걸립니다.
       </AlertRow>
     );
   }
@@ -149,12 +216,33 @@ function EvaluationResult({ state }: { state: EvaluationState }) {
 
   const summary = state.summary ?? {};
   const metrics = summary.metrics ?? {};
+  const competitionMetric =
+    summary.iou_thresholds?.length === COMPETITION_IOU_THRESHOLDS.length &&
+    summary.iou_thresholds.every(
+      (value, index) => value === COMPETITION_IOU_THRESHOLDS[index],
+    );
+  const submissionUri = state.artifacts?.submission_uri;
+  const otherArtifacts = Object.entries(state.artifacts ?? {}).filter(
+    ([key]) => key !== 'submission_uri',
+  );
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <AlertRow level="success" title="평가 완료">
         {state.message}
       </AlertRow>
+
+      {submissionUri && (
+        <AlertRow level="success" title="대회 제출 파일 생성 완료">
+          <code style={{ fontFamily: font.mono, overflowWrap: 'anywhere' }}>{submissionUri}</code>
+        </AlertRow>
+      )}
+
+      {submissionRequested && !submissionUri && (
+        <AlertRow level="warning" title="submission 파일을 확인하지 못했습니다">
+          test manifest를 사용한 실행이지만 결과에 submission_uri가 없습니다.
+        </AlertRow>
+      )}
 
       <div
         style={{
@@ -166,7 +254,9 @@ function EvaluationResult({ state }: { state: EvaluationState }) {
         {METRICS.map((item) => (
           <KpiCard
             key={item.key}
-            label={item.label}
+            label={
+              item.key === 'mAP' && competitionMetric ? 'mAP@[0.75:0.95]' : item.label
+            }
             value={metricText(metrics[item.key])}
             compact
             valueColor={item.key === 'mAP50' ? color.tealDark : undefined}
@@ -203,7 +293,7 @@ function EvaluationResult({ state }: { state: EvaluationState }) {
           ))}
       </div>
 
-      {state.artifacts && Object.keys(state.artifacts).length > 0 && (
+      {otherArtifacts.length > 0 && (
         <div
           style={{
             borderTop: `1px solid ${color.borderInner}`,
@@ -213,7 +303,7 @@ function EvaluationResult({ state }: { state: EvaluationState }) {
             gap: 5,
           }}
         >
-          {Object.entries(state.artifacts).map(([key, uri]) => (
+          {otherArtifacts.map(([key, uri]) => (
             <div key={key} style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
               <span
                 style={{ font: `500 10.5px/1.5 ${font.mono}`, color: color.textMuted, minWidth: 130 }}

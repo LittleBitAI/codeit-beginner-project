@@ -18,7 +18,7 @@ interface DraftContextValue {
   draft: Draft;
   setTrainField: (name: string, value: string) => void;
   setDataField: (name: string, value: string) => void;
-  /** 전처리 데이터셋을 고르면 4칸을 한꺼번에 채웁니다. */
+  /** 전처리 데이터셋을 고르면 필수 4개와 선택 test manifest를 함께 채웁니다. */
   setDataFields: (values: Record<string, string>, sourceKey?: string | null) => void;
   resetDraft: () => void;
   saved: CreatedConfig | null;

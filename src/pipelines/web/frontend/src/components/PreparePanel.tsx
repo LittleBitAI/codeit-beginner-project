@@ -10,7 +10,7 @@ const RUNNING_INTERVAL_MS = 2000;
 const IDLE_INTERVAL_MS = 10000;
 
 /**
- * 원본에서 artifact 4개를 만들도록 data pipeline을 부릅니다.
+ * 원본에서 필수 artifact 4개와 선택 test manifest를 만들도록 data pipeline을 부릅니다.
  *
  * 원본을 다 읽어야 해서 오래 걸릴 수 있으므로 시작만 시키고 상태를 주기적으로
  * 확인합니다. 성공하면 그 결과가 곧바로 현재 전처리 데이터셋이 됩니다.
@@ -74,8 +74,8 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
           원본에서 직접 준비하기
         </span>
         <span style={{ font: `400 11.5px/1.6 ${font.sans}`, color: color.textBody }}>
-          이미 만들어 둔 폴더를 고르는 대신, data pipeline이 원본을 읽어 학습용 JSON 4개를
-          새로 만들게 합니다. 학습과 검증을 몇 대 몇으로 나눌지 여기서 정합니다.
+          이미 만들어 둔 폴더를 고르는 대신, data pipeline이 원본을 읽어 학습용 JSON 4개와
+          대회용 test manifest를 새로 만들게 합니다. 학습과 검증을 몇 대 몇으로 나눌지 여기서 정합니다.
         </span>
       </div>
 
@@ -307,7 +307,10 @@ function PreparationResult({ state }: { state: PreparationState }) {
     ['검증 이미지', summary.validation_images],
     ['클래스', summary.category_count],
     ['제외된 이미지', summary.excluded_images],
+    ['테스트 이미지', summary.test_manifest_images],
   ];
+  const testImages = summary.test_manifest_images;
+  const testImagesUsed = summary.test_images_used;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -329,6 +332,11 @@ function PreparationResult({ state }: { state: PreparationState }) {
             </span>
           ))}
       </div>
+      {testImages !== undefined && testImages !== null && testImagesUsed === 0 && (
+        <AlertRow level="success" title="test 분리 확인">
+          test 이미지 {String(testImages)}장을 학습과 검증에 사용하지 않았습니다.
+        </AlertRow>
+      )}
     </div>
   );
 }

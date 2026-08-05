@@ -20,6 +20,7 @@ from .jobs import runner
 from .jobs.model import JobRecord
 from .masking import sanitize_line
 from .paths import config_dir, repository_root
+from .train_config import normalize_data_inputs
 
 
 __all__ = [
@@ -52,10 +53,16 @@ def build_evaluate_config(
     score_threshold: float = 0.0,
     max_detections_per_image: int = DEFAULT_MAX_DETECTIONS,
     overwrite: bool = False,
+    test_manifest_uri: str | None = None,
 ) -> dict[str, Any]:
     """끝난 학습 기록 하나에서 evaluate 실행 config를 만듭니다."""
 
     data_inputs = dict(record.data_inputs)
+    if test_manifest_uri is not None:
+        # 과거 학습 기록은 학습 당시 입력을 증명하므로 바꾸지 않고, 이번 평가 config에만
+        # test manifest를 덧붙입니다.
+        data_inputs["test_manifest_uri"] = test_manifest_uri
+    data_inputs = normalize_data_inputs(data_inputs)
     train_artifacts = dict(record.artifacts)
 
     missing = [
@@ -203,6 +210,7 @@ class EvaluationRunner:
                 "max_detections_per_image", DEFAULT_MAX_DETECTIONS
             ),
             overwrite=options.get("overwrite", False),
+            test_manifest_uri=options.get("test_manifest_uri"),
         )
 
         with self._lock:
@@ -214,6 +222,9 @@ class EvaluationRunner:
                 "status": STATUS_RUNNING,
                 "job_id": record.job_id,
                 "run_id": record.run_id,
+                "submission_requested": bool(
+                    config["inputs"]["data"].get("test_manifest_uri")
+                ),
                 "started_at": utc_now_text(),
                 "finished_at": None,
                 "message": "checkpoint로 검증 이미지를 추론하고 있습니다.",

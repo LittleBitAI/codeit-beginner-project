@@ -265,6 +265,8 @@ export interface EvaluationState {
   exit_code?: number | null;
   device?: string | null;
   score_threshold?: number;
+  /** test manifest가 있어 submission.csv도 함께 만드는 실행인지 */
+  submission_requested?: boolean;
   artifacts?: Record<string, string>;
   summary?: {
     metrics?: DetectionMetrics;
@@ -272,6 +274,7 @@ export interface EvaluationState {
     prediction_count?: number;
     annotation_count?: number;
     evaluated_class_count?: number;
+    iou_thresholds?: number[];
     [key: string]: unknown;
   };
   /** 다른 학습의 평가가 돌고 있으면 그 job id */

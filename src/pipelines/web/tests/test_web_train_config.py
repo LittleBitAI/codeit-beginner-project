@@ -240,6 +240,30 @@ def test_accepts_s3_data_uri():
     assert resolved["class_map_uri"] == "s3://bucket/data/class_map_uri.json"
 
 
+def test_optional_test_manifest_is_preserved_in_runtime_input(data_inputs):
+    """Train에는 필수가 아니지만 이후 submission 생성까지 전달돼야 합니다."""
+
+    payload = {
+        **data_inputs,
+        "test_manifest_uri": "artifacts/data/test_manifest.json",
+    }
+
+    resolved = normalize_data_inputs(payload)
+    config = build_runtime_config(normalize_train_settings({}), resolved)
+
+    assert resolved["test_manifest_uri"] == "artifacts/data/test_manifest.json"
+    assert config["inputs"]["data"]["test_manifest_uri"] == resolved["test_manifest_uri"]
+
+
+def test_optional_test_manifest_uses_the_same_path_safety_rules(data_inputs):
+    payload = {**data_inputs, "test_manifest_uri": "../../test_manifest.json"}
+
+    with pytest.raises(WebValidationError) as error:
+        normalize_data_inputs(payload)
+
+    assert "inputs.data.test_manifest_uri" in fields_of(error.value)
+
+
 @pytest.mark.parametrize("value", ("s3://bucket", "s3:///key.json", "s3://bucket/key?x=1"))
 def test_rejects_malformed_s3_uri(data_inputs, value):
     payload = dict(data_inputs)
