@@ -90,7 +90,7 @@ def run_smoke_test(config_path: str, *, smoke_id: str | None = None) -> dict:
     fetched = storage.read_json(written_uri)
     if fetched.get("run_id") != run_id:
         raise StorageError("등록한 record와 조회한 record의 run_id가 다릅니다.")
-    if fetched.get("schema_version") != "1.0":
+    if fetched.get("schema_version") != "1.1":
         raise StorageError("조회한 record의 schema_version이 예상과 다릅니다.")
     if not storage.exists(written_uri):
         raise StorageError("등록한 record를 exists()로 확인하지 못했습니다.")

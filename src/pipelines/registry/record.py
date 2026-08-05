@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 # 각 pipeline이 registry에 넘겨야 하는 artifact key입니다. 값은 모두 str이며,
 # `*_uri`로 끝나는 key만 실제 artifact 파일을 가리킵니다.
@@ -38,6 +38,13 @@ REQUIRED_ARTIFACT_KEYS: dict[str, tuple[str, ...]] = {
         "metrics_uri",
         "predictions_uri",
     ),
+}
+
+# Competition 실행에서만 생기는 artifact입니다. 기존 실행과의 호환성을 위해
+# 없어도 되며, 있으면 선언 순서대로 검증하고 record에 기록합니다.
+OPTIONAL_ARTIFACT_KEYS: dict[str, tuple[str, ...]] = {
+    "data": ("test_manifest_uri",),
+    "evaluate": ("submission_uri",),
 }
 
 # config snapshot에 그대로 남기면 안 되는 값의 key 조각입니다.
@@ -133,7 +140,13 @@ def validate_inputs(inputs: Any) -> dict[str, dict[str, str]]:
             )
 
         entry: dict[str, str] = {}
-        for key in required_keys:
+        artifact_keys = list(required_keys)
+        artifact_keys.extend(
+            key
+            for key in OPTIONAL_ARTIFACT_KEYS.get(pipeline, ())
+            if key in artifacts
+        )
+        for key in artifact_keys:
             value = artifacts[key]
             if not isinstance(value, str):
                 raise InvalidSchemaError(

@@ -18,6 +18,8 @@ Consumers must not import you either. They read records through `read_experiment
 
 It reads `config["inputs"]["data"]`, `["train"]`, and `["evaluate"]`. Every consumed value must be a non-empty string; booleans, numbers, lists, and nested objects are rejected. When no upstream artifacts are present at all, the run is treated as a dummy run.
 
+Schema 1.1 keeps every required artifact unchanged. It additionally accepts optional `data.test_manifest_uri` and `evaluate.submission_uri`; when present, they follow the same URI safety, verification, provenance, and hashing rules as required artifact URIs.
+
 `verify_artifacts` (default on) additionally confirms the referenced artifacts exist and match their checksums. **URI shape is validated even when verification is turned off** — turning it off must never turn off safety.
 
 ## Outputs

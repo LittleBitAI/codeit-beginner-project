@@ -42,6 +42,15 @@ def materialize_local_artifacts(inputs: dict, repo_root: Path) -> None:
             )
 
 
+def add_competition_artifacts(inputs: dict) -> None:
+    """Schema 1.1의 선택 competition artifact URI를 입력에 추가합니다."""
+
+    inputs["data"]["test_manifest_uri"] = "artifacts/data/test_manifest.json"
+    inputs["evaluate"]["submission_uri"] = (
+        "artifacts/evaluate/exp-0001/submission.csv"
+    )
+
+
 def make_config(repo_root: Path, inputs: dict, **registry_options) -> dict:
     """저장소 밖을 건드리지 않는 local storage config를 만듭니다."""
 
@@ -100,7 +109,7 @@ def test_run_returns_exact_contract_keys(local_run):
     assert isinstance(result["artifacts"]["experiment_record_uri"], str)
 
 
-def test_creates_experiment_record_with_checksums(local_run):
+def test_legacy_run_without_optional_artifacts_still_succeeds(local_run):
     repo_root, inputs = local_run
 
     result = registry.run(make_config(repo_root, inputs))
@@ -110,7 +119,7 @@ def test_creates_experiment_record_with_checksums(local_run):
     assert record_uri == "artifacts/registry/exp-0001/experiment_record.json"
 
     record = json.loads((repo_root / record_uri).read_text(encoding="utf-8"))
-    assert record["schema_version"] == "1.0"
+    assert record["schema_version"] == "1.1"
     assert record["run_id"] == "exp-0001"
     assert record["seed"] == 42
     assert set(record["pipelines"]) == {"data", "train", "evaluate"}
@@ -124,6 +133,51 @@ def test_creates_experiment_record_with_checksums(local_run):
     assert metrics["verified"] is True
     assert record["verification"]["artifacts_hashed"] == 9
     assert record["pipelines"]["train"]["run_id"] == "exp-0001"
+    assert "test_manifest_uri" not in record["pipelines"]["data"]
+    assert "submission_uri" not in record["pipelines"]["evaluate"]
+
+
+def test_records_and_hashes_optional_artifacts_deterministically(tmp_path: Path):
+    inputs = load_fixture("inputs_local.json")
+    add_competition_artifacts(inputs)
+    materialize_local_artifacts(inputs, tmp_path)
+
+    result = registry.run(make_config(tmp_path, inputs))
+
+    assert set(result) == RETURN_KEYS
+    assert set(result["artifacts"]) == {"run_id", "experiment_record_uri"}
+    record = json.loads(
+        (tmp_path / result["artifacts"]["experiment_record_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert list(record["pipelines"]["data"]) == [
+        "train_manifest_uri",
+        "validation_manifest_uri",
+        "class_map_uri",
+        "dataset_summary_uri",
+        "test_manifest_uri",
+    ]
+    assert list(record["pipelines"]["evaluate"]) == [
+        "run_id",
+        "metrics_uri",
+        "predictions_uri",
+        "submission_uri",
+    ]
+    for pipeline, key in (
+        ("data", "test_manifest_uri"),
+        ("evaluate", "submission_uri"),
+    ):
+        entry = record["pipelines"][pipeline][key]
+        expected = hashlib.sha256(
+            (tmp_path / inputs[pipeline][key]).read_bytes()
+        ).hexdigest()
+        assert entry["uri"] == inputs[pipeline][key]
+        assert entry["sha256"] == expected
+        assert entry["size_bytes"] == (tmp_path / inputs[pipeline][key]).stat().st_size
+        assert entry["verified"] is True
+    assert record["verification"]["artifacts_checked"] == 11
+    assert record["verification"]["artifacts_hashed"] == 11
 
 
 def test_record_uri_is_repository_relative(local_run):
@@ -235,6 +289,27 @@ def test_wrong_artifact_value_type_returns_error(local_run):
     assert "class_map_uri" in result["message"]
 
 
+@pytest.mark.parametrize(
+    ("pipeline", "key", "value"),
+    [
+        ("data", "test_manifest_uri", None),
+        ("evaluate", "submission_uri", ""),
+    ],
+)
+def test_invalid_optional_artifact_value_returns_typed_error(
+    local_run, pipeline, key, value
+):
+    repo_root, inputs = local_run
+    inputs[pipeline][key] = value
+
+    result = registry.run(make_config(repo_root, inputs))
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert result["summary"]["error"] == "InvalidSchemaError"
+    assert key in result["message"]
+
+
 def test_missing_local_artifact_file_returns_error(local_run):
     repo_root, inputs = local_run
     (repo_root / inputs["evaluate"]["predictions_uri"]).unlink()
@@ -244,6 +319,20 @@ def test_missing_local_artifact_file_returns_error(local_run):
     assert result["status"] == "error"
     assert "predictions" in result["message"]
     assert result["artifacts"] == {}
+
+
+def test_missing_optional_artifact_file_returns_typed_error(local_run):
+    repo_root, inputs = local_run
+    inputs["evaluate"]["submission_uri"] = (
+        "artifacts/evaluate/exp-0001/missing-submission.csv"
+    )
+
+    result = registry.run(make_config(repo_root, inputs))
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert result["summary"]["error"] == "CorruptedArtifactError"
+    assert "missing-submission.csv" in result["message"]
 
 
 def test_run_id_mismatch_returns_error(local_run):
@@ -301,6 +390,28 @@ def test_bad_local_uri_is_rejected_even_when_verification_is_off(local_run, uri)
 
     assert result["status"] == "error"
     assert result["artifacts"] == {}
+    assert not list((repo_root / "artifacts" / "registry").rglob("*.json"))
+
+
+@pytest.mark.parametrize(
+    ("pipeline", "key"),
+    [
+        ("data", "test_manifest_uri"),
+        ("evaluate", "submission_uri"),
+    ],
+)
+def test_optional_artifact_cannot_bypass_uri_safety_when_verification_is_off(
+    local_run, pipeline, key
+):
+    repo_root, inputs = local_run
+    inputs[pipeline][key] = "../outside/competition-artifact.json"
+
+    result = registry.run(make_config(repo_root, inputs, verify_artifacts=False))
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert result["summary"]["error"] == "InvalidSchemaError"
+    assert "competition-artifact.json" in result["message"]
     assert not list((repo_root / "artifacts" / "registry").rglob("*.json"))
 
 

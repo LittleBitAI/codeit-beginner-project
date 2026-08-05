@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from src.pipelines.registry.record import (
+    OPTIONAL_ARTIFACT_KEYS,
     REQUIRED_ARTIFACT_KEYS,
     CorruptedArtifactError,
     InvalidSchemaError,
@@ -54,6 +55,13 @@ def test_required_keys_match_the_artifact_contract():
             "metrics_uri",
             "predictions_uri",
         ),
+    }
+
+
+def test_optional_keys_match_the_competition_artifact_contract():
+    assert OPTIONAL_ARTIFACT_KEYS == {
+        "data": ("test_manifest_uri",),
+        "evaluate": ("submission_uri",),
     }
 
 
