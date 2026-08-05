@@ -39,6 +39,7 @@ from .paths import (
 
 __all__ = [
     "DATA_ARTIFACT_KEYS",
+    "OPTIONAL_DATA_ARTIFACT_KEYS",
     "build_runtime_config",
     "field_specs",
     "normalize_data_inputs",
@@ -59,6 +60,10 @@ DATA_ARTIFACT_KEYS = (
     "class_map_uri",
     "dataset_summary_uri",
 )
+
+# Train은 읽지 않지만, 성공한 학습 뒤 Evaluate가 대회 submission을 만들 때 씁니다.
+# 기존 데이터셋에는 없어도 되므로 필수 4개와 분리합니다.
+OPTIONAL_DATA_ARTIFACT_KEYS = ("test_manifest_uri",)
 
 DEFAULT_OUTPUT_DIR = "artifacts/experiments/completed"
 DEFAULT_OUTPUT_PREFIX = "experiments/completed"
@@ -96,6 +101,7 @@ _DATA_LABELS = {
     "validation_manifest_uri": "검증 manifest",
     "class_map_uri": "클래스 맵",
     "dataset_summary_uri": "데이터셋 요약",
+    "test_manifest_uri": "테스트 manifest",
 }
 
 
@@ -330,7 +336,7 @@ def _normalize_data_uri(value: Any, key: str, errors: list[FieldError]) -> str:
 
 
 def normalize_data_inputs(raw: Any) -> dict[str, str]:
-    """``config["inputs"]["data"]``의 artifact URI 4개를 검증합니다."""
+    """필수 artifact 4개와 선택 test manifest URI를 검증합니다."""
 
     errors: list[FieldError] = []
     if raw is None:
@@ -345,8 +351,13 @@ def normalize_data_inputs(raw: Any) -> dict[str, str]:
             continue
         resolved[key] = _normalize_data_uri(raw[key], key, errors)
 
+    for key in OPTIONAL_DATA_ARTIFACT_KEYS:
+        if key in raw:
+            resolved[key] = _normalize_data_uri(raw[key], key, errors)
+
     raise_if_any(errors)
-    return {key: resolved[key] for key in DATA_ARTIFACT_KEYS}
+    ordered_keys = DATA_ARTIFACT_KEYS + OPTIONAL_DATA_ARTIFACT_KEYS
+    return {key: resolved[key] for key in ordered_keys if key in resolved}
 
 
 def uses_s3(data_inputs: dict[str, str]) -> bool:

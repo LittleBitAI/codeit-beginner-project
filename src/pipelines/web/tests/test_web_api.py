@@ -484,6 +484,43 @@ def test_evaluate_status_starts_idle(client, valid_payload, monkeypatch, fake_pr
     assert body["evaluation"]["status"] == "idle"
 
 
+def test_evaluate_route_forwards_an_attached_test_manifest(client, monkeypatch):
+    """과거 학습에 없던 test manifest도 이번 평가 요청으로 전달합니다."""
+
+    from src.pipelines.web.api import routes_train
+    from src.pipelines.web.jobs.model import JobRecord
+
+    record = JobRecord(
+        job_id="a" * 32,
+        config_id="b" * 32,
+        run_id="run-1",
+        status="succeeded",
+    )
+    captured = {}
+
+    class Manager:
+        def get(self, job_id):
+            assert job_id == record.job_id
+            return record
+
+    class Evaluation:
+        def start(self, received_record, options):
+            assert received_record is record
+            captured.update(options)
+            return {"status": "running", "submission_requested": True}
+
+    monkeypatch.setattr(routes_train, "get_manager", lambda: Manager())
+    monkeypatch.setattr(routes_train, "get_evaluation_runner", lambda: Evaluation())
+
+    response = client.post(
+        f"/api/train/jobs/{record.job_id}/evaluate",
+        json={"test_manifest_uri": "s3://bucket/test/test_manifest.json"},
+    )
+
+    assert response.status_code == 202
+    assert captured["test_manifest_uri"] == "s3://bucket/test/test_manifest.json"
+
+
 def test_verify_accepts_artifact_uris_directly(client, monkeypatch):
     """준비 결과는 S3에 있을 수 있어 위치를 다시 훑을 수 없습니다."""
 

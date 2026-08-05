@@ -22,6 +22,11 @@ MANIFEST = {
 }
 CLASS_MAP = {"pill": 1}
 SUMMARY = {"train_images": 1, "validation_images": 1}
+TEST_MANIFEST = {
+    "images": [{"id": 2, "file_name": "2.png", "width": 16, "height": 12}],
+    "annotations": [],
+    "categories": [{"id": 7, "name": "pill", "supercategory": "pill"}],
+}
 
 
 def write(directory, name, document) -> None:
@@ -86,6 +91,22 @@ def test_finds_artifacts_with_unconventional_names(isolated_repo):
     assert result["matched"]["validation_manifest_uri"]["name"] == "coco_val_split.json"
     assert result["matched"]["class_map_uri"]["name"] == "labels.json"
     assert result["matched"]["dataset_summary_uri"]["name"] == "dataset_stats.json"
+
+
+def test_finds_optional_test_manifest_without_making_it_a_train_requirement(isolated_repo):
+    directory = isolated_repo / "artifacts" / "competition"
+    write(directory, "train.json", MANIFEST)
+    write(directory, "validation.json", MANIFEST)
+    write(directory, "test_manifest.json", TEST_MANIFEST)
+    write(directory, "class_map.json", CLASS_MAP)
+    write(directory, "summary.json", SUMMARY)
+
+    result = datasets.inspect_directory("artifacts/competition")
+
+    assert result["complete"] is True
+    assert result["missing"] == []
+    assert result["data"]["test_manifest_uri"] == "artifacts/competition/test_manifest.json"
+    assert result["matched"]["test_manifest_uri"]["name"] == "test_manifest.json"
 
 
 def test_validation_hint_wins_over_train_hint(isolated_repo):
@@ -681,6 +702,21 @@ def test_prepared_selection_round_trips(isolated_repo):
     # s3 산출물이라 폴더를 훑을 수 없습니다. 기록해 둔 값을 그대로 씁니다.
     assert loaded["available"] is True
     assert loaded["preparation"]["split_ratio"] == "9:1"
+
+
+def test_prepared_selection_preserves_optional_test_manifest(isolated_repo):
+    data = {key: f"s3://bucket/processed/{key}.json" for key in DATA_ARTIFACT_KEYS}
+    data["test_manifest_uri"] = "s3://bucket/processed/test_manifest.json"
+
+    saved = datasets.save_prepared_selection(
+        data,
+        {"test_manifest_images": 842, "test_images_used": 0},
+    )
+
+    assert saved["complete"] is True
+    assert saved["data"]["test_manifest_uri"] == data["test_manifest_uri"]
+    assert saved["matched"]["test_manifest_uri"]["name"] == "test_manifest.json"
+    assert datasets.load_selection()["data"]["test_manifest_uri"] == data["test_manifest_uri"]
 
 
 def test_prepared_selection_directory_comes_from_the_artifact_uris(isolated_repo):

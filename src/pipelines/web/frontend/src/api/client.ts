@@ -108,7 +108,13 @@ export const api = {
 
   startEvaluation: (
     jobId: string,
-    body: { score_threshold?: number; max_detections_per_image?: number; overwrite?: boolean; device?: string },
+    body: {
+      score_threshold?: number;
+      max_detections_per_image?: number;
+      overwrite?: boolean;
+      device?: string;
+      test_manifest_uri?: string;
+    },
   ) =>
     request<{ evaluation: EvaluationState }>(`/api/train/jobs/${jobId}/evaluate`, {
       method: 'POST',

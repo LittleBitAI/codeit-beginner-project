@@ -2,7 +2,7 @@ import { useState } from 'react';
 
 import { api } from '../api/client';
 import type { DataSource, DataVerification } from '../api/types';
-import { DATA_KEYS } from '../lib/dataKeys';
+import { DATA_KEYS, OPTIONAL_DATA_KEYS } from '../lib/dataKeys';
 import { describeError } from '../lib/describeError';
 import { color, font, radius } from '../design/tokens';
 import { IconCheck, IconError, IconWarning } from './Icon';
@@ -10,7 +10,7 @@ import { PreparePanel } from './PreparePanel';
 import { AlertRow, Button, Panel, controlStyle, invalidControlStyle } from './primitives';
 
 /**
- * 전처리 결과 폴더를 한 번 고르면 artifact 4개를 찾아 기억합니다.
+ * 전처리 결과 폴더를 한 번 고르면 필수 artifact와 선택 test manifest를 찾아 기억합니다.
  *
  * 실험마다 경로 4개를 손으로 넣지 않도록, 데이터셋을 실험 단위가 아니라 프로젝트
  * 단위 설정으로 둡니다. 고르고 나면 새 실험 화면의 4칸이 자동으로 채워집니다.
@@ -96,8 +96,8 @@ export function DataSourcePanel({
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <span style={{ font: `400 12px/1.7 ${font.sans}`, color: color.textBody }}>
           data pipeline이 만든 결과가 있는 위치를 한 번만 고르면, 그 안에서 학습에 필요한
-          JSON 4개를 찾아 기억합니다. 새 실험을 만들 때 자동으로 채워집니다. 로컬 폴더와 S3
-          위치를 모두 받고, 파일 이름이 달라도 내용을 보고 찾습니다.
+          JSON 4개와 선택 test manifest를 찾아 기억합니다. 새 실험을 만들 때 자동으로 채워집니다.
+          로컬 폴더와 S3 위치를 모두 받고, 파일 이름이 달라도 내용을 보고 찾습니다.
         </span>
 
         {source && !editing ? (
@@ -109,8 +109,8 @@ export function DataSourcePanel({
                   {verifying ? 'data pipeline 실행 중…' : 'data pipeline으로 검증'}
                 </Button>
                 <span style={{ font: `400 10.5px/1.5 ${font.sans}`, color: color.textMuted }}>
-                  python -m src.main_pipeline --only data 를 실제로 실행해, 이 4개가 train으로
-                  넘어갈 수 있는지 확인합니다.
+                  python -m src.main_pipeline --only data 를 실제로 실행해, 필수 4개와 선택 test
+                  manifest가 다음 단계로 넘어갈 수 있는지 확인합니다.
                 </span>
               </div>
             )}
@@ -178,7 +178,7 @@ export function DataSourcePanel({
             {verification.ok && (
               <>
                 {' '}
-                artifact 4개가 train으로 넘어갈 수 있습니다. data pipeline은 파일을 만들지 않고
+                필수 artifact 4개가 train으로 넘어갈 수 있습니다. data pipeline은 파일을 만들지 않고
                 넘긴 위치를 검증해 그대로 넘겨줍니다.
               </>
             )}
@@ -200,6 +200,8 @@ function SelectedSummary({ source }: { source: DataSource }) {
       </AlertRow>
     );
   }
+  const recognizedCount =
+    DATA_KEYS.length + OPTIONAL_DATA_KEYS.filter((key) => Boolean(source.data[key])).length;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -222,7 +224,7 @@ function SelectedSummary({ source }: { source: DataSource }) {
             padding: '4px 6px',
           }}
         >
-          4개 인식됨
+          {recognizedCount}개 인식됨
         </span>
       </div>
       <MatchTable source={source} heading={null} />
@@ -231,6 +233,12 @@ function SelectedSummary({ source }: { source: DataSource }) {
 }
 
 function MatchTable({ source, heading }: { source: DataSource; heading: string | null }) {
+  const displayedKeys = [
+    ...DATA_KEYS,
+    ...OPTIONAL_DATA_KEYS.filter(
+      (key) => Boolean(source.data[key]) || Boolean(source.matched[key]),
+    ),
+  ];
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       {heading && (
@@ -243,7 +251,7 @@ function MatchTable({ source, heading }: { source: DataSource; heading: string |
           overflow: 'hidden',
         }}
       >
-        {DATA_KEYS.map((key, index) => {
+        {displayedKeys.map((key, index) => {
           const entry = source.matched[key];
           return (
             <div

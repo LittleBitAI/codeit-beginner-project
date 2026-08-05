@@ -1,7 +1,7 @@
 """전처리 데이터셋 선택 route.
 
-새 실험마다 artifact 경로 4개를 손으로 넣는 대신, 전처리 결과 폴더를 한 번 고르면
-그 안에서 4개를 찾아 기억합니다.
+새 실험마다 artifact 경로를 손으로 넣는 대신, 전처리 결과 폴더를 한 번 고르면
+필수 4개와 선택 test manifest를 찾아 기억합니다.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def get_source() -> dict[str, Any]:
 
 @router.post("/source")
 def set_source(payload: DirectoryRequest = Body(...)) -> dict[str, Any]:
-    """전처리 데이터셋을 고릅니다. 4개를 모두 찾은 경우에만 저장됩니다."""
+    """전처리 데이터셋을 고릅니다. 필수 4개를 모두 찾은 경우에만 저장됩니다."""
 
     return {"source": datasets.save_selection(payload.directory)}
 
@@ -78,7 +78,7 @@ def prepare_status() -> dict[str, Any]:
 
 @router.post("/prepare", status_code=202)
 def start_prepare(payload: PrepareRequest = Body(...)) -> dict[str, Any]:
-    """원본에서 artifact 4개를 만들도록 data pipeline을 부릅니다.
+    """원본에서 필수 4개와 선택 test manifest를 만들도록 data pipeline을 부릅니다.
 
     원본을 다 읽어야 해서 오래 걸릴 수 있으므로 시작만 시키고 바로 응답합니다.
     상태는 ``GET /api/data/prepare``로 확인합니다. 성공하면 그 결과가 곧바로 현재
@@ -107,7 +107,7 @@ def verify(payload: VerifyRequest = Body(...)) -> dict[str, Any]:
 
     ``python -m src.main_pipeline --config <config> --only data``
 
-    data pipeline은 파일을 만들지 않습니다. 넘긴 URI 4개가 다음 pipeline으로 넘어갈 수
+    data pipeline은 파일을 만들지 않습니다. 넘긴 필수 URI와 선택 test URI가 다음 pipeline으로 넘어갈 수
     있는지 검증해서 그대로 돌려줄 뿐입니다. 그래서 이 검사는 학습 전에 data → train
     연결이 성립하는지를 실제 pipeline 경로로 확인하는 용도입니다.
 
