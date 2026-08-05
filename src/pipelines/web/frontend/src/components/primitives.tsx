@@ -54,6 +54,7 @@ export function Panel({
 /* -------------------------------------------------------------- Badge */
 
 const STATUS_STYLE: Record<JobStatus, { fg: string; bg: string }> = {
+  starting: { fg: color.primaryHover, bg: color.primaryTint },
   running: { fg: color.tealDark, bg: color.tealTint },
   queued: { fg: color.textBody, bg: '#F1F4F8' },
   succeeded: { fg: color.greenDark, bg: color.greenTint },

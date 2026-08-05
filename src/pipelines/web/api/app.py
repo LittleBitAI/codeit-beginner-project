@@ -14,12 +14,14 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from ..errors import (
     JobConflictError,
     JobNotFoundError,
+    TeamSyncAuthError,
+    TeamSyncError,
     WebError,
     WebPathError,
     WebValidationError,
     error_payload,
 )
-from . import routes_data, routes_gpu, routes_meta, routes_train
+from . import routes_data, routes_gpu, routes_meta, routes_team, routes_train
 
 
 __all__ = ["ALLOWED_ORIGINS", "create_app"]
@@ -97,6 +99,14 @@ def _register_error_handlers(app: FastAPI) -> None:
     def _conflict(_: Request, error: JobConflictError) -> JSONResponse:
         return JSONResponse(status_code=409, content=error_payload(error))
 
+    @app.exception_handler(TeamSyncAuthError)
+    def _team_auth(_: Request, error: TeamSyncAuthError) -> JSONResponse:
+        return JSONResponse(status_code=401, content=error_payload(error))
+
+    @app.exception_handler(TeamSyncError)
+    def _team_sync(_: Request, error: TeamSyncError) -> JSONResponse:
+        return JSONResponse(status_code=503, content=error_payload(error))
+
     @app.exception_handler(WebError)
     def _generic(_: Request, error: WebError) -> JSONResponse:
         return JSONResponse(status_code=500, content=error_payload(error))
@@ -116,13 +126,14 @@ def create_app(*, serve_frontend: bool = True) -> FastAPI:
         allow_origin_regex=ALLOWED_ORIGIN_REGEX,
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "Authorization"],
     )
     _register_error_handlers(app)
     app.include_router(routes_meta.router)
     app.include_router(routes_train.router)
     app.include_router(routes_data.router)
     app.include_router(routes_gpu.router)
+    app.include_router(routes_team.router)
 
     if serve_frontend and _FRONTEND_DIST.is_dir():
         # 빌드된 frontend가 있으면 같은 origin에서 함께 제공합니다.

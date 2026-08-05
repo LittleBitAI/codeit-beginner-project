@@ -66,6 +66,8 @@ class JobRecord:
     progress: dict[str, Any] = field(default_factory=dict)
     log_lines: int = 0
     orphan_note: str | None = None
+    cloud_run_id: str | None = None
+    sync_revision: int = 0
 
     def is_active(self) -> bool:
         return self.status in ACTIVE_STATUSES
@@ -103,6 +105,8 @@ class JobRecord:
             "progress": dict(self.progress),
             "log_lines": self.log_lines,
             "orphan_note": self.orphan_note,
+            "cloud_run_id": self.cloud_run_id,
+            "sync_revision": self.sync_revision,
         }
 
     @classmethod
@@ -124,4 +128,6 @@ class JobRecord:
             progress=dict(payload.get("progress") or {}),
             log_lines=int(payload.get("log_lines") or 0),
             orphan_note=payload.get("orphan_note"),
+            cloud_run_id=payload.get("cloud_run_id"),
+            sync_revision=int(payload.get("sync_revision") or 0),
         )

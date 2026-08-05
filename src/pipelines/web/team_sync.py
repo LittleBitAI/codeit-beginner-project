@@ -1,0 +1,411 @@
+"""로컬 학습 상태를 AWS AppSync로 안전하게 전달합니다.
+
+동기화는 명시적으로 켰을 때만 동작합니다. 전송할 event는 먼저 저장소 안의 outbox에
+기록하므로 browser나 network가 끊겨도 다음 실행에서 이어 보낼 수 있습니다.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
+from uuid import uuid4
+
+import boto3
+import httpx
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
+
+from .errors import TeamSyncAuthError, TeamSyncError
+from .masking import redact
+from .paths import web_state_dir
+
+
+__all__ = ["TeamSync", "TeamSyncConfig", "get_team_sync", "reset_team_sync"]
+
+
+CREATE_RUN = """
+mutation CreateRun($teamId: ID!, $input: CreateRunInput!) {
+  createRun(teamId: $teamId, input: $input) { cloudRunId status revision }
+}
+"""
+
+PUBLISH_UPDATE = """
+mutation PublishRunUpdate($teamId: ID!, $input: RunUpdateInput!) {
+  publishRunUpdate(teamId: $teamId, input: $input) { cloudRunId status revision }
+}
+"""
+
+PUBLISH_LOGS = """
+mutation PublishLogBatch($teamId: ID!, $input: LogBatchInput!) {
+  publishLogBatch(teamId: $teamId, input: $input) { cloudRunId startSeq endSeq }
+}
+"""
+
+MAX_BATCH_LINES = 100
+MAX_BATCH_BYTES = 64 * 1024
+
+
+def _required(environment: Mapping[str, str], name: str) -> str:
+    value = environment.get(name, "").strip()
+    if not value:
+        raise TeamSyncError(f"팀 동기화 환경 변수 {name}이 필요합니다.")
+    return value
+
+
+@dataclass(frozen=True)
+class TeamSyncConfig:
+    """팀 동기화의 공개·서버 설정입니다. credential은 포함하지 않습니다."""
+
+    enabled: bool
+    team_id: str | None = None
+    endpoint: str | None = None
+    region: str = "ap-northeast-2"
+    user_pool_id: str | None = None
+    user_pool_client_id: str | None = None
+    cognito_domain: str | None = None
+
+    @classmethod
+    def from_environment(cls, environment: Mapping[str, str] | None = None) -> "TeamSyncConfig":
+        source = os.environ if environment is None else environment
+        enabled = source.get("PILL_TEAM_SYNC_ENABLED", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not enabled:
+            return cls(enabled=False)
+        return cls(
+            enabled=True,
+            team_id=_required(source, "PILL_TEAM_ID"),
+            endpoint=_required(source, "PILL_TEAM_APPSYNC_URL"),
+            region=source.get("AWS_REGION", "ap-northeast-2").strip() or "ap-northeast-2",
+            user_pool_id=_required(source, "PILL_TEAM_COGNITO_USER_POOL_ID"),
+            user_pool_client_id=_required(source, "PILL_TEAM_COGNITO_CLIENT_ID"),
+            cognito_domain=_required(source, "PILL_TEAM_COGNITO_DOMAIN"),
+        )
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "team_id": self.team_id,
+            "appsync_url": self.endpoint,
+            "region": self.region,
+            "user_pool_id": self.user_pool_id,
+            "user_pool_client_id": self.user_pool_client_id,
+            "cognito_domain": self.cognito_domain,
+        }
+
+
+class GraphQLTransport:
+    """Cognito token 또는 AWS SigV4로 AppSync GraphQL을 호출합니다."""
+
+    def __init__(self, config: TeamSyncConfig) -> None:
+        self.config = config
+
+    def execute(
+        self,
+        query: str,
+        variables: dict[str, Any],
+        *,
+        access_token: str | None = None,
+        iam: bool = False,
+    ) -> dict[str, Any]:
+        if not self.config.endpoint:
+            raise TeamSyncError("AppSync endpoint가 설정되지 않았습니다.")
+        body = json.dumps(
+            {"query": query, "variables": variables},
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if access_token:
+            headers["Authorization"] = access_token
+        elif iam:
+            credentials = boto3.Session(region_name=self.config.region).get_credentials()
+            if credentials is None:
+                raise TeamSyncAuthError(
+                    "AWS credential을 찾지 못했습니다. AWS SSO login 또는 profile을 확인하세요."
+                )
+            request = AWSRequest(
+                method="POST", url=self.config.endpoint, data=body, headers=headers
+            )
+            SigV4Auth(credentials.get_frozen_credentials(), "appsync", self.config.region).add_auth(
+                request
+            )
+            headers = dict(request.headers.items())
+        else:
+            raise TeamSyncAuthError("팀 학습을 시작하려면 먼저 로그인해야 합니다.")
+
+        try:
+            response = httpx.post(self.config.endpoint, content=body, headers=headers, timeout=15.0)
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as error:
+            raise TeamSyncError("AWS 팀 동기화 API에 연결하지 못했습니다.") from error
+        if payload.get("errors"):
+            message = str(payload["errors"][0].get("message", "원격 요청이 거부되었습니다."))
+            raise TeamSyncError(f"AWS 팀 동기화 요청이 실패했습니다: {message}")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise TeamSyncError("AWS 팀 동기화 응답 형식이 올바르지 않습니다.")
+        return data
+
+
+class TeamSync:
+    """영속 outbox와 background publisher를 소유합니다."""
+
+    def __init__(
+        self,
+        config: TeamSyncConfig | None = None,
+        *,
+        transport: GraphQLTransport | None = None,
+    ) -> None:
+        self.config = config or TeamSyncConfig.from_environment()
+        self.transport = transport or GraphQLTransport(self.config)
+        self._lock = threading.RLock()
+        self._wake = threading.Event()
+        self._worker: threading.Thread | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.config.enabled
+
+    def _directory(self) -> Path:
+        return web_state_dir() / "team-sync"
+
+    def _outbox_path(self) -> Path:
+        return self._directory() / "outbox.jsonl"
+
+    def _cursor_path(self) -> Path:
+        return self._directory() / "cursor.txt"
+
+    def create_run(
+        self,
+        *,
+        access_token: str | None,
+        local_job_id: str,
+        run_id: str,
+        settings: dict[str, Any],
+        data_inputs: dict[str, Any],
+    ) -> str | None:
+        if not self.enabled:
+            return None
+        if not access_token:
+            raise TeamSyncAuthError("팀 학습을 시작하려면 먼저 로그인해야 합니다.")
+        cloud_run_id = uuid4().hex
+        data = self.transport.execute(
+            CREATE_RUN,
+            {
+                "teamId": self.config.team_id,
+                "input": {
+                    "cloudRunId": cloud_run_id,
+                    "localJobId": local_job_id,
+                    "runId": run_id,
+                    "settings": json.dumps(redact(settings), ensure_ascii=False, allow_nan=False),
+                    "dataInputs": json.dumps(
+                        redact(data_inputs), ensure_ascii=False, allow_nan=False
+                    ),
+                },
+            },
+            access_token=access_token,
+        )
+        created = data.get("createRun")
+        if not isinstance(created, dict) or created.get("cloudRunId") != cloud_run_id:
+            raise TeamSyncError("AWS가 만든 학습 ID를 확인하지 못했습니다.")
+        return cloud_run_id
+
+    def enqueue_update(self, record: Any) -> None:
+        if not self.enabled or not getattr(record, "cloud_run_id", None):
+            return
+        record.sync_revision += 1
+        public = redact(record.to_dict())
+        self._append(
+            {
+                "kind": "update",
+                "event_id": f"{record.job_id}:update:{record.sync_revision}",
+                "payload": {
+                    "eventId": f"{record.job_id}:update:{record.sync_revision}",
+                    "cloudRunId": record.cloud_run_id,
+                    "revision": record.sync_revision,
+                    "status": record.status,
+                    "startedAt": record.started_at,
+                    "finishedAt": record.finished_at,
+                    "message": record.message,
+                    "progress": json.dumps(public["progress"], ensure_ascii=False, allow_nan=False),
+                    "summary": json.dumps(public["summary"], ensure_ascii=False, allow_nan=False),
+                    "artifacts": json.dumps(public["artifacts"], ensure_ascii=False, allow_nan=False),
+                    "heartbeatAt": public.get("updated_at") or _utc_now(),
+                },
+            }
+        )
+
+    def enqueue_log(self, record: Any, entry: dict[str, Any]) -> None:
+        if not self.enabled or not getattr(record, "cloud_run_id", None):
+            return
+        safe = redact(entry)
+        self._append(
+            {
+                "kind": "log",
+                "event_id": f"{record.job_id}:log:{safe['seq']}",
+                "cloud_run_id": record.cloud_run_id,
+                "line": safe,
+            }
+        )
+
+    def _append(self, event: dict[str, Any]) -> None:
+        encoded = (
+            json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        with self._lock:
+            path = self._outbox_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("ab") as stream:
+                stream.write(encoded)
+                stream.flush()
+            self._ensure_worker()
+            self._wake.set()
+
+    def _ensure_worker(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            return
+        self._worker = threading.Thread(
+            target=self._worker_loop, name="team-sync-publisher", daemon=True
+        )
+        self._worker.start()
+
+    def _read_cursor(self) -> int:
+        try:
+            value = int(self._cursor_path().read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return 0
+        return max(0, value)
+
+    def _write_cursor(self, value: int) -> None:
+        path = self._cursor_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(str(value), encoding="ascii")
+        os.replace(temporary, path)
+
+    def _next_batch(self) -> tuple[dict[str, Any], int] | None:
+        path = self._outbox_path()
+        if not path.is_file():
+            return None
+        offset = self._read_cursor()
+        with path.open("rb") as stream:
+            stream.seek(offset)
+            raw = stream.readline()
+            if not raw:
+                return None
+            try:
+                first = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return {"kind": "skip"}, stream.tell()
+            end = stream.tell()
+            if first.get("kind") != "log":
+                return first, end
+
+            lines = [first["line"]]
+            encoded_size = len(raw)
+            cloud_run_id = first.get("cloud_run_id")
+            while len(lines) < MAX_BATCH_LINES and encoded_size < MAX_BATCH_BYTES:
+                checkpoint = stream.tell()
+                candidate_raw = stream.readline()
+                if not candidate_raw:
+                    break
+                try:
+                    candidate = json.loads(candidate_raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    break
+                if candidate.get("kind") != "log" or candidate.get("cloud_run_id") != cloud_run_id:
+                    stream.seek(checkpoint)
+                    break
+                if encoded_size + len(candidate_raw) > MAX_BATCH_BYTES:
+                    stream.seek(checkpoint)
+                    break
+                lines.append(candidate["line"])
+                encoded_size += len(candidate_raw)
+                end = stream.tell()
+            return {
+                "kind": "log_batch",
+                "event_id": f"{first['event_id']}:{lines[-1]['seq']}",
+                "payload": {
+                    "eventId": first["event_id"] + f":{lines[-1]['seq']}",
+                    "cloudRunId": cloud_run_id,
+                    "startSeq": lines[0]["seq"],
+                    "endSeq": lines[-1]["seq"],
+                    "lines": json.dumps(lines, ensure_ascii=False, allow_nan=False),
+                    "expiresAt": int(time.time()) + 30 * 24 * 60 * 60,
+                },
+            }, end
+
+    def publish_pending(self, *, limit: int = 100) -> int:
+        if not self.enabled:
+            return 0
+        sent = 0
+        with self._lock:
+            while sent < limit:
+                item = self._next_batch()
+                if item is None:
+                    break
+                event, end = item
+                kind = event.get("kind")
+                if kind == "update":
+                    self.transport.execute(
+                        PUBLISH_UPDATE,
+                        {"teamId": self.config.team_id, "input": event["payload"]},
+                        iam=True,
+                    )
+                elif kind == "log_batch":
+                    self.transport.execute(
+                        PUBLISH_LOGS,
+                        {"teamId": self.config.team_id, "input": event["payload"]},
+                        iam=True,
+                    )
+                self._write_cursor(end)
+                sent += 1
+        return sent
+
+    def _worker_loop(self) -> None:
+        delay = 1.0
+        while True:
+            try:
+                sent = self.publish_pending()
+                delay = 1.0
+                if sent == 0:
+                    self._wake.wait(timeout=30.0)
+                    self._wake.clear()
+            except TeamSyncError:
+                self._wake.wait(timeout=delay)
+                self._wake.clear()
+                delay = min(delay * 2, 30.0)
+
+
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+_TEAM_SYNC: TeamSync | None = None
+
+
+def get_team_sync() -> TeamSync:
+    global _TEAM_SYNC
+    if _TEAM_SYNC is None:
+        _TEAM_SYNC = TeamSync()
+    return _TEAM_SYNC
+
+
+def reset_team_sync() -> None:
+    """Test와 설정 재로딩을 위해 singleton 참조만 비웁니다."""
+
+    global _TEAM_SYNC
+    _TEAM_SYNC = None

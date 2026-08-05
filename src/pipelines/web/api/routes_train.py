@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any, Iterator
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Header, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -138,8 +138,13 @@ def list_experiments() -> dict[str, Any]:
 
 
 @router.post("/jobs", status_code=201)
-def start_job(payload: StartJobRequest = Body(...)) -> dict[str, Any]:
-    record = get_manager().start(payload.config_id)
+def start_job(
+    payload: StartJobRequest = Body(...), authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    record = get_manager().start(payload.config_id, access_token=token)
     return public_record(record)
 
 

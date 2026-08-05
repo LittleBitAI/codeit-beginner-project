@@ -11,6 +11,7 @@ import type {
   LogPage,
   PreparationResponse,
   RuntimeConfig,
+  TeamConfig,
   ValidationResult,
 } from './types';
 
@@ -89,11 +90,14 @@ export const api = {
   getJobConfig: (jobId: string) =>
     request<{ config: RuntimeConfig }>(`/api/train/jobs/${jobId}/config`),
 
-  startJob: (configId: string) =>
+  startJob: (configId: string, accessToken?: string | null) =>
     request<JobRecord>('/api/train/jobs', {
       method: 'POST',
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
       body: JSON.stringify({ config_id: configId }),
     }),
+
+  teamConfig: () => request<TeamConfig>('/api/team/config'),
 
   cancelJob: (jobId: string) =>
     request<JobRecord>(`/api/train/jobs/${jobId}/cancel`, { method: 'POST' }),

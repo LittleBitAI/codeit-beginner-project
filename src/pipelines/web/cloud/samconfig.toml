@@ -1,0 +1,15 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "pill-team-sync"
+resolve_s3 = true
+s3_prefix = "pill-team-sync"
+region = "ap-northeast-2"
+profile = "pill-team"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "TeamId=\"pill-team\" CognitoDomainPrefix=\"codeit-pill-team-20260805\" LogRetentionDays=\"30\""
+image_repositories = []
+
+[default.global.parameters]
+region = "ap-northeast-2"

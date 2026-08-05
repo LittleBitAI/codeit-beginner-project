@@ -1,6 +1,7 @@
 /** Backend 응답 형태. src/pipelines/web/api 의 route와 짝을 이룹니다. */
 
 export type JobStatus =
+  | 'starting'
   | 'queued'
   | 'running'
   | 'succeeded'
@@ -114,6 +115,48 @@ export interface JobRecord {
   progress: Progress;
   log_lines: number;
   orphan_note: string | null;
+  cloud_run_id?: string | null;
+  sync_revision?: number;
+}
+
+export interface TeamConfig {
+  enabled: boolean;
+  team_id: string | null;
+  appsync_url: string | null;
+  region: string;
+  user_pool_id: string | null;
+  user_pool_client_id: string | null;
+  cognito_domain: string | null;
+}
+
+export interface TeamRun {
+  teamId: string;
+  cloudRunId: string;
+  localJobId: string;
+  runId: string;
+  actorSub: string;
+  actorName: string;
+  status: JobStatus;
+  settings: Record<string, unknown>;
+  dataInputs: Record<string, unknown>;
+  progress: Record<string, unknown>;
+  summary: Record<string, unknown>;
+  artifacts: Record<string, unknown>;
+  message: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  heartbeatAt: string;
+  revision: number;
+}
+
+export interface TeamLogBatch {
+  teamId: string;
+  cloudRunId: string;
+  startSeq: number;
+  endSeq: number;
+  lines: LogLine[];
+  createdAt: string;
 }
 
 export interface JobListing {

@@ -1,8 +1,9 @@
-import type { ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 
 import { color, font, radius } from '../design/tokens';
 import type { JobRecord } from '../api/types';
+import { useTeam } from '../team/TeamContext';
 
 const NAV_ITEMS = [
   { to: '/', label: '학습 개요', end: true },
@@ -10,6 +11,7 @@ const NAV_ITEMS = [
   { to: '/review', label: '설정 검토', end: false },
   { to: '/monitor', label: '라이브 모니터', end: false },
   { to: '/compare', label: '실험 비교', end: false },
+  { to: '/team', label: '팀 활동', end: false },
 ];
 
 const PAGE_TITLES: Record<string, string> = {
@@ -18,6 +20,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/review': '설정 검토',
   '/monitor': '라이브 모니터',
   '/compare': '실험 비교',
+  '/team': '팀 활동',
 };
 
 function pageTitle(pathname: string): string {
@@ -65,7 +68,16 @@ export function AppShell({
   activeJob: JobRecord | null;
 }) {
   const location = useLocation();
+  const team = useTeam();
+  const [toast, setToast] = useState(team.latestEvent);
   const running = activeJob?.status === 'running' || activeJob?.status === 'queued';
+
+  useEffect(() => {
+    if (!team.latestEvent || team.latestEvent.actorSub === team.user?.userId) return;
+    setToast(team.latestEvent);
+    const timer = window.setTimeout(() => setToast(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [team.latestEvent, team.user?.userId]);
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: color.surfacePage }}>
@@ -154,9 +166,40 @@ export function AppShell({
           ) : (
             <Badge tone="neutral">실행 중인 학습 없음</Badge>
           )}
+          {team.config.enabled && team.user && (
+            <ButtonLike onClick={() => void team.logout()}>{team.user.username} · 로그아웃</ButtonLike>
+          )}
         </header>
         <main style={{ flex: 1, padding: '18px 22px 60px', minWidth: 0 }}>{children}</main>
       </div>
+      {toast && (
+        <div
+          role="status"
+          style={{
+            position: 'fixed',
+            right: 18,
+            bottom: 18,
+            zIndex: 50,
+            width: 320,
+            padding: '12px 14px',
+            border: `1px solid ${color.borderControl}`,
+            borderRadius: 6,
+            background: color.surface,
+            color: color.text,
+            font: `500 12px/1.5 ${font.sans}`,
+          }}
+        >
+          {toast.actorName}님의 {toast.runId} 학습이 {toast.status === 'running' ? '시작됐습니다.' : `${toast.status} 상태가 됐습니다.`}
+        </div>
+      )}
     </div>
+  );
+}
+
+function ButtonLike({ children, onClick }: { children: ReactNode; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: color.textBody, font: `500 11px/1 ${font.sans}`, cursor: 'pointer' }}>
+      {children}
+    </button>
   );
 }
