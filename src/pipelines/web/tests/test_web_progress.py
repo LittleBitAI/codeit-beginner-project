@@ -231,6 +231,66 @@ def test_snapshot_is_json_serializable_without_nan():
     json.dumps(snapshot(state), allow_nan=False, ensure_ascii=False)
 
 
+# --- 진행률 표시 줄 접기 -----------------------------------------------------
+
+
+def test_download_percentages_are_collapsed():
+    """터미널에선 한 줄이지만 pipe로 받으면 갱신마다 새 줄이 됩니다.
+
+    실제로 모델 가중치 한 번 내려받는 데 598줄 중 590줄이 퍼센트였습니다.
+    """
+
+    state = ProgressState()
+    kept = [consume_line(state, f"{value / 10:.1f}%") for value in range(2, 1001, 2)]
+    kept = [entry for entry in kept if entry is not None]
+
+    assert len(kept) <= 8  # 500줄이 몇 줄로 줄어듭니다
+    assert kept[0]["text"] == "0.2%"  # 시작은 남깁니다
+    assert kept[-1]["text"] == "100.0%"  # 끝도 남깁니다
+    assert state.suppressed_lines > 400
+    assert snapshot(state)["suppressed_lines"] == state.suppressed_lines
+
+
+def test_new_download_restarts_the_collapsing():
+    state = ProgressState()
+    for value in (10, 50, 100):
+        consume_line(state, f"{value}%")
+
+    # 두 번째 내려받기가 시작되면 다시 남깁니다.
+    entry = consume_line(state, "1%")
+
+    assert entry is not None
+    assert entry["text"] == "1%"
+
+
+def test_ordinary_lines_are_never_collapsed():
+    state = ProgressState()
+    consume_line(state, "10%")
+
+    warning = consume_line(state, "UserWarning: 조심하세요")
+    after = consume_line(state, "12%")
+
+    assert warning is not None
+    # 퍼센트가 아닌 줄이 끼면 접기 상태가 초기화되어 다음 퍼센트도 남습니다.
+    assert after is not None
+
+
+@pytest.mark.parametrize("text", ("100%", " 100.0 % ", "0%"))
+def test_percentage_shapes_are_recognised(text):
+    state = ProgressState()
+
+    assert consume_line(state, text) is not None
+    assert state.last_percent is not None
+
+
+@pytest.mark.parametrize("text", ("100%%", "진행 50%", "50% 완료", "abc%"))
+def test_lines_that_only_contain_a_percentage_elsewhere_are_kept(text):
+    state = ProgressState()
+
+    assert consume_line(state, text)["text"] == text.strip()
+    assert state.last_percent is None
+
+
 def test_log_text_is_masked():
     state = ProgressState()
 

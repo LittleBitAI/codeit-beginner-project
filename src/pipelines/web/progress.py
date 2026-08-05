@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 from .masking import sanitize_line
@@ -23,6 +24,14 @@ SUPPORTED_MAJOR = "1"
 _WARNING_MARKERS = ("[w]", "warning", "warn:", "userwarning", "futurewarning", "deprecat")
 _ERROR_MARKERS = ("[e]", "error", "traceback", "exception", "failed", "cuda out of memory")
 
+# ``12.3%``처럼 숫자와 퍼센트만 있는 줄입니다. 터미널에서는 한 줄에서 숫자만 바뀌지만,
+# pipe로 받으면 갱신마다 새 줄이 되어 수백 줄이 쌓입니다. 실제로 모델 가중치를 한 번
+# 내려받는 데 598줄 중 590줄이 이것이었습니다.
+_PERCENT_ONLY = re.compile(r"^\s*(\d{1,3}(?:\.\d+)?)\s*%\s*$")
+
+# 이만큼 진행했을 때만 한 줄 남깁니다.
+PERCENT_STEP = 20.0
+
 
 class ProgressState:
     """한 job의 진행 상태. 순수 데이터만 담습니다."""
@@ -34,15 +43,19 @@ class ProgressState:
         "device",
         "epochs",
         "epochs_by_number",
+        "last_percent",
         "malformed_lines",
         "run_id",
         "saw_progress",
+        "suppressed_lines",
         "train_images",
         "validation_images",
     )
 
     def __init__(self) -> None:
         self.saw_progress = False
+        self.last_percent: float | None = None
+        self.suppressed_lines = 0
         self.run_id: str | None = None
         self.architecture: str | None = None
         self.device: str | None = None
@@ -170,6 +183,38 @@ _HANDLERS = {
 }
 
 
+def _consume_plain_line(state: ProgressState, text: str) -> dict[str, Any] | None:
+    """진행률 표시만 있는 줄은 일정 간격으로만 남깁니다.
+
+    한 번의 내려받기가 수백 줄이 되면 정작 중요한 경고와 오류가 묻힙니다.
+    처음, 마지막(100%), 그리고 ``PERCENT_STEP``만큼 나아갔을 때만 남깁니다.
+    """
+
+    match = _PERCENT_ONLY.match(text)
+    if match is None:
+        state.last_percent = None
+        return _log(text)
+
+    try:
+        value = float(match.group(1))
+    except ValueError:
+        state.last_percent = None
+        return _log(text)
+
+    previous = state.last_percent
+    state.last_percent = value
+    keep = (
+        previous is None  # 시작을 알림
+        or value >= 100.0  # 끝을 알림
+        or value < previous  # 새 내려받기가 시작됨
+        or value - previous >= PERCENT_STEP
+    )
+    if keep:
+        return _log(text, level="info")
+    state.suppressed_lines += 1
+    return None
+
+
 def consume_line(state: ProgressState, line: str) -> dict[str, Any] | None:
     """한 줄을 해석해 상태를 갱신하고, 화면에 남길 log 항목을 돌려줍니다.
 
@@ -183,7 +228,7 @@ def consume_line(state: ProgressState, line: str) -> dict[str, Any] | None:
     if not text.strip():
         return None
     if not text.lstrip().startswith("{"):
-        return _log(text)
+        return _consume_plain_line(state, text)
 
     try:
         event = json.loads(text)
@@ -243,6 +288,7 @@ def snapshot(state: ProgressState) -> dict[str, Any]:
             "total_epochs": None,
             "current_epoch": None,
             "eta_seconds": None,
+            "suppressed_lines": state.suppressed_lines,
         }
 
     ordered = [state.epochs_by_number[key] for key in sorted(state.epochs_by_number)]
@@ -275,4 +321,5 @@ def snapshot(state: ProgressState) -> dict[str, Any]:
         "epochs": ordered,
         "best": best,
         "malformed_lines": state.malformed_lines,
+        "suppressed_lines": state.suppressed_lines,
     }
