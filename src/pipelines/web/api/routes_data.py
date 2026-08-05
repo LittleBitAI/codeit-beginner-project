@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 
 from .. import datasets
 from ..data_jobs import get_preparation_runner
+from ..errors import FieldError, WebValidationError
+from ..train_config import normalize_data_inputs
 
 
 router = APIRouter(prefix="/api/data", tags=["data"])
@@ -92,8 +94,15 @@ def start_prepare(payload: PrepareRequest = Body(...)) -> dict[str, Any]:
     }
 
 
+class VerifyRequest(BaseModel):
+    """검증할 대상. artifact URI를 직접 주거나, 위치를 줘서 찾게 할 수 있습니다."""
+
+    data: dict[str, str] | None = Field(default=None, description="artifact URI 4개")
+    directory: str | None = Field(default=None, max_length=512)
+
+
 @router.post("/verify")
-def verify(payload: DirectoryRequest = Body(...)) -> dict[str, Any]:
+def verify(payload: VerifyRequest = Body(...)) -> dict[str, Any]:
     """실제 data pipeline을 공개 CLI로 불러 계약이 성립하는지 확인합니다.
 
     ``python -m src.main_pipeline --config <config> --only data``
@@ -101,7 +110,19 @@ def verify(payload: DirectoryRequest = Body(...)) -> dict[str, Any]:
     data pipeline은 파일을 만들지 않습니다. 넘긴 URI 4개가 다음 pipeline으로 넘어갈 수
     있는지 검증해서 그대로 돌려줄 뿐입니다. 그래서 이 검사는 학습 전에 data → train
     연결이 성립하는지를 실제 pipeline 경로로 확인하는 용도입니다.
+
+    이미 artifact URI를 알고 있으면 그대로 검증합니다. 위치를 다시 훑지 않는 이유는,
+    준비로 만들어진 산출물이 S3에 있을 수 있어 폴더 조회가 성립하지 않기 때문입니다.
     """
+
+    if payload.data:
+        data_inputs = normalize_data_inputs(payload.data)
+        return {"inspected": None, "verification": datasets.verify_with_pipeline(data_inputs)}
+
+    if not payload.directory:
+        raise WebValidationError(
+            [FieldError("data", "검증할 artifact URI나 위치가 필요합니다.")]
+        )
 
     inspected = datasets.inspect_directory(payload.directory)
     if not inspected["complete"]:
@@ -109,8 +130,9 @@ def verify(payload: DirectoryRequest = Body(...)) -> dict[str, Any]:
             "inspected": inspected,
             "verification": {
                 "ok": False,
+                "supported": True,
                 "exit_code": None,
-                "message": "artifact 4개를 모두 찾은 폴더만 검증할 수 있습니다.",
+                "message": "artifact 4개를 모두 찾은 위치만 검증할 수 있습니다.",
                 "artifacts": {},
                 "summary": {},
             },

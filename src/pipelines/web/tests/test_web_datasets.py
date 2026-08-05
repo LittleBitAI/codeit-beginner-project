@@ -683,6 +683,32 @@ def test_prepared_selection_round_trips(isolated_repo):
     assert loaded["preparation"]["split_ratio"] == "9:1"
 
 
+def test_prepared_selection_directory_comes_from_the_artifact_uris(isolated_repo):
+    """pipeline이 알려 준 prefix에는 s3://bucket/ 이 빠져 있습니다.
+
+    그 값을 그대로 쓰면 화면에 반쪽짜리 위치가 나오고 다시 조회할 수도 없습니다.
+    """
+
+    base = "s3://bucket/datasets/pill_detection/processed/v1-seed42-8020/"
+    data = {key: base + f"{key}.json" for key in DATA_ARTIFACT_KEYS}
+
+    saved = datasets.save_prepared_selection(
+        data, {"processed_prefix": "datasets/pill_detection/processed/v1-seed42-8020/"}
+    )
+
+    assert saved["directory"] == base
+    assert datasets.load_selection()["directory"] == base
+
+
+def test_prepared_selection_keeps_reported_prefix_when_uris_differ(isolated_repo):
+    data = {key: f"s3://bucket/somewhere/{key}/{key}.json" for key in DATA_ARTIFACT_KEYS}
+
+    saved = datasets.save_prepared_selection(data, {"processed_prefix": "reported/"})
+
+    # 네 개가 서로 다른 directory에 있으면 공통 위치를 만들 수 없습니다.
+    assert saved["directory"] == "reported/"
+
+
 def test_prepared_selection_rejects_incomplete_data(isolated_repo):
     with pytest.raises(WebValidationError):
         datasets.save_prepared_selection({"train_manifest_uri": "a"})

@@ -419,6 +419,15 @@ def _selection_path() -> Path:
     return web_state_dir() / "data_source.json"
 
 
+def _common_parent(data: Mapping[str, str]) -> str | None:
+    """artifact 4개가 모두 같은 directory에 있으면 그 위치를 돌려줍니다."""
+
+    parents = {str(value).rsplit("/", 1)[0] for value in data.values() if "/" in str(value)}
+    if len(parents) != 1:
+        return None
+    return parents.pop() + "/"
+
+
 def _prepared_selection(stored: dict[str, Any]) -> dict[str, Any] | None:
     """data pipeline이 준비해 준 산출물을 고른 경우입니다.
 
@@ -431,7 +440,9 @@ def _prepared_selection(stored: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "origin": "prepared",
-        "directory": stored.get("processed_prefix"),
+        # artifact URI에서 직접 뽑습니다. pipeline이 알려 준 prefix에는 s3://bucket/ 이
+        # 빠져 있어서, 그대로 두면 화면에 반쪽짜리 위치가 나오고 다시 조회할 수도 없습니다.
+        "directory": _common_parent(data) or stored.get("processed_prefix"),
         "complete": True,
         "data": dict(data),
         "matched": {

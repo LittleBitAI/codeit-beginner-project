@@ -129,9 +129,10 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  verifyDataSource: (directory: string) =>
-    request<{ inspected: DataSource; verification: DataVerification }>('/api/data/verify', {
-      method: 'POST',
-      body: JSON.stringify({ directory }),
-    }),
+  /** artifact URI를 알고 있으면 그대로, 아니면 위치를 넘겨 찾게 합니다. */
+  verifyDataSource: (target: { data?: Record<string, string>; directory?: string }) =>
+    request<{ inspected: DataSource | null; verification: DataVerification }>(
+      '/api/data/verify',
+      { method: 'POST', body: JSON.stringify(target) },
+    ),
 };

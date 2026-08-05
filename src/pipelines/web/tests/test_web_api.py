@@ -431,6 +431,45 @@ def test_directory_traversal_is_rejected(client, bad):
         assert response.status_code == 400, f"{path} 가 {bad} 를 받아들였습니다"
 
 
+def test_verify_accepts_artifact_uris_directly(client, monkeypatch):
+    """준비 결과는 S3에 있을 수 있어 위치를 다시 훑을 수 없습니다."""
+
+    from src.pipelines.web import datasets
+
+    seen = {}
+
+    def fake_verify(data_inputs):
+        seen.update(data_inputs)
+        return {"ok": True, "supported": True, "exit_code": 0, "artifacts": {},
+                "summary": {}, "message": "완료"}
+
+    monkeypatch.setattr(datasets, "verify_with_pipeline", fake_verify)
+    data = {key: f"s3://bucket/p/{key}.json" for key in DATA_ARTIFACT_KEYS}
+
+    body = client.post("/api/data/verify", json={"data": data}).json()
+
+    assert body["verification"]["ok"] is True
+    assert body["inspected"] is None  # 위치를 훑지 않습니다
+    assert seen == data
+
+
+def test_verify_rejects_incomplete_artifact_uris(client):
+    response = client.post(
+        "/api/data/verify", json={"data": {"train_manifest_uri": "artifacts/a.json"}}
+    )
+
+    assert response.status_code == 400
+    fields = {item["field"] for item in response.json()["errors"]}
+    assert "inputs.data.class_map_uri" in fields
+
+
+def test_verify_without_a_target_is_rejected(client):
+    response = client.post("/api/data/verify", json={})
+
+    assert response.status_code == 400
+    assert response.json()["errors"]
+
+
 def test_prepare_status_starts_idle_and_lists_ratios(client):
     body = client.get("/api/data/prepare").json()
 

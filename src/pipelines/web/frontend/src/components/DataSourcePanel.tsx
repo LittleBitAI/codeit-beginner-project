@@ -1,8 +1,9 @@
 import { useState } from 'react';
 
-import { api, ApiError } from '../api/client';
+import { api } from '../api/client';
 import type { DataSource, DataVerification } from '../api/types';
 import { DATA_KEYS } from '../lib/dataKeys';
+import { describeError } from '../lib/describeError';
 import { color, font, radius } from '../design/tokens';
 import { IconCheck, IconError, IconWarning } from './Icon';
 import { PreparePanel } from './PreparePanel';
@@ -52,14 +53,14 @@ export function DataSourcePanel({
       }
     } catch (caught) {
       setPreview(null);
-      setError(caught instanceof ApiError ? caught.message : '폴더를 확인하지 못했습니다.');
+      setError(describeError(caught, '위치를 확인하지 못했습니다.'));
     } finally {
       setBusy(false);
     }
   }
 
   /** 실제 data pipeline을 불러 계약이 성립하는지 확인합니다. */
-  async function verify(target: string) {
+  async function verify(target: { data?: Record<string, string>; directory?: string }) {
     setVerifying(true);
     setError(null);
     try {
@@ -67,7 +68,7 @@ export function DataSourcePanel({
       setVerification(result.verification);
     } catch (caught) {
       setVerification(null);
-      setError(caught instanceof ApiError ? caught.message : 'data pipeline을 부르지 못했습니다.');
+      setError(describeError(caught, 'data pipeline을 부르지 못했습니다.'));
     } finally {
       setVerifying(false);
     }
@@ -104,7 +105,7 @@ export function DataSourcePanel({
             <SelectedSummary source={source} />
             {source.available !== false && source.complete && (
               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <Button onClick={() => void verify(source.directory)} disabled={verifying}>
+                <Button onClick={() => void verify({ data: source.data })} disabled={verifying}>
                   {verifying ? 'data pipeline 실행 중…' : 'data pipeline으로 검증'}
                 </Button>
                 <span style={{ font: `400 10.5px/1.5 ${font.sans}`, color: color.textMuted }}>
