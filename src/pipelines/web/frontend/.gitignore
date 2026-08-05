@@ -1,0 +1,12 @@
+# Node 의존성과 빌드 산출물은 Git에 넣지 않습니다.
+# 저장소 root의 .gitignore는 root 기준으로만 적용되므로 여기에 따로 둡니다.
+node_modules/
+dist/
+coverage/
+.vite/
+# TypeScript 증분 빌드 캐시
+*.tsbuildinfo
+*.local
+.env
+.env.*
+!.env.example

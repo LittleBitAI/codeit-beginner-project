@@ -1,0 +1,541 @@
+"""Train 설정 검증과 runtime config 생성.
+
+이 module은 ``src/pipelines/train/pipeline.py``의 검증 규칙을 그대로 따라 합니다.
+train을 import하지 않고 규칙만 복제하므로, GUI가 GPU 시간을 쓰기 전에 같은 이유로
+같은 값을 거부합니다. 여기서 추가로 거부하는 것은 train보다 **먼저** 막는 경우뿐이고,
+train이 거부하는 값을 여기서 통과시키지 않습니다.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+from .errors import (
+    FieldError,
+    JobNotFoundError,
+    WebPathError,
+    WebValidationError,
+    collect,
+    raise_if_any,
+)
+from .gpu import cuda_is_available
+from .masking import redact
+from .paths import (
+    CONFIG_DIRNAME,
+    config_dir,
+    normalize_relative_posix,
+    resolve_within_repo,
+)
+
+
+__all__ = [
+    "DATA_ARTIFACT_KEYS",
+    "build_runtime_config",
+    "field_specs",
+    "normalize_data_inputs",
+    "normalize_train_settings",
+    "read_runtime_config",
+    "validate_request",
+    "write_runtime_config",
+]
+
+
+# train/pipeline.py:32 와 동일
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+# train/pipeline.py:26-31 과 동일한 4개. 화면 표시 순서를 위해 tuple로 둡니다.
+DATA_ARTIFACT_KEYS = (
+    "train_manifest_uri",
+    "validation_manifest_uri",
+    "class_map_uri",
+    "dataset_summary_uri",
+)
+
+DEFAULT_OUTPUT_DIR = "artifacts/experiments/completed"
+DEFAULT_OUTPUT_PREFIX = "experiments/completed"
+
+# (이름, 기본값, 최소값)
+_INTEGER_FIELDS = (
+    ("seed", 42, 0),
+    ("epochs", 1, 1),
+    ("batch_size", 1, 1),
+    ("num_workers", 0, 0),
+)
+_FLOAT_FIELDS = (
+    ("learning_rate", 0.005, 0.0),
+    ("momentum", 0.9, 0.0),
+    ("weight_decay", 0.0005, 0.0),
+)
+
+_FIELD_LABELS = {
+    "run_id": ("실행 이름", "실행 결과가 저장되는 directory 이름으로 그대로 쓰입니다."),
+    "seed": ("Random seed", "같은 seed와 같은 데이터면 같은 결과가 나옵니다."),
+    "epochs": ("Epochs", "전체 학습 데이터를 몇 번 반복할지 정합니다."),
+    "batch_size": ("Batch size", "한 번에 처리할 이미지 수. GPU 메모리에 가장 큰 영향을 줍니다."),
+    "num_workers": ("DataLoader workers", "이미지를 읽어 오는 보조 process 수. 0이면 주 process가 직접 읽습니다."),
+    "learning_rate": ("Learning rate", "한 번에 얼마나 크게 배울지 정합니다. 너무 크면 발산합니다."),
+    "momentum": ("Momentum", "SGD가 이전 방향을 얼마나 유지할지 정합니다."),
+    "weight_decay": ("Weight decay", "과적합을 억제하는 정규화 강도입니다."),
+    "device": ("Device", "학습을 CPU에서 할지 CUDA GPU에서 할지 정합니다."),
+    "pretrained": ("Pretrained 가중치", "COCO로 미리 학습된 가중치에서 시작할지 정합니다."),
+    "output_dir": ("Local 출력 directory", "저장소 기준 상대 경로여야 합니다."),
+    "output_prefix": ("S3 출력 prefix", "S3 backend를 쓸 때 checkpoint를 올릴 위치입니다."),
+}
+
+_DATA_LABELS = {
+    "train_manifest_uri": "학습 manifest",
+    "validation_manifest_uri": "검증 manifest",
+    "class_map_uri": "클래스 맵",
+    "dataset_summary_uri": "데이터셋 요약",
+}
+
+
+def _utc_now() -> datetime:
+    """테스트에서 고정할 수 있도록 현재 시각을 한 곳에서만 읽습니다."""
+
+    return datetime.now(timezone.utc)
+
+
+def generate_run_id() -> str:
+    """GUI가 만든 실행임을 알 수 있는 run_id를 만듭니다.
+
+    train의 기본값은 ``train-`` 접두사를 쓰므로, CLI로 돌린 실행과 구분됩니다.
+    """
+
+    return _utc_now().strftime("web-%Y%m%dT%H%M%S%fZ")
+
+
+def field_specs() -> list[dict[str, Any]]:
+    """새 실험 화면이 form을 그릴 때 쓰는 필드 정의입니다."""
+
+    specs: list[dict[str, Any]] = []
+    label, hint = _FIELD_LABELS["run_id"]
+    specs.append(
+        {
+            "name": "run_id",
+            "type": "string",
+            "default": None,
+            "label": label,
+            "hint": hint,
+            "pattern": RUN_ID_PATTERN.pattern,
+            "placeholder": "비워 두면 자동으로 만듭니다",
+        }
+    )
+    for name, default, minimum in _INTEGER_FIELDS:
+        label, hint = _FIELD_LABELS[name]
+        specs.append(
+            {
+                "name": name,
+                "type": "integer",
+                "default": default,
+                "minimum": minimum,
+                "label": label,
+                "hint": hint,
+            }
+        )
+    for name, default, minimum in _FLOAT_FIELDS:
+        label, hint = _FIELD_LABELS[name]
+        specs.append(
+            {
+                "name": name,
+                "type": "number",
+                "default": default,
+                "minimum": minimum,
+                "label": label,
+                "hint": hint,
+            }
+        )
+    label, hint = _FIELD_LABELS["device"]
+    specs.append(
+        {
+            "name": "device",
+            "type": "enum",
+            "default": "cpu",
+            "choices": ["cpu", "cuda"],
+            "label": label,
+            "hint": hint,
+        }
+    )
+    label, hint = _FIELD_LABELS["pretrained"]
+    specs.append(
+        {"name": "pretrained", "type": "boolean", "default": False, "label": label, "hint": hint}
+    )
+    for name, default in (
+        ("output_dir", DEFAULT_OUTPUT_DIR),
+        ("output_prefix", DEFAULT_OUTPUT_PREFIX),
+    ):
+        label, hint = _FIELD_LABELS[name]
+        specs.append(
+            {"name": name, "type": "string", "default": default, "label": label, "hint": hint}
+        )
+    return specs
+
+
+def data_field_specs() -> list[dict[str, Any]]:
+    """Data pipeline artifact 입력 칸 정의입니다."""
+
+    return [
+        {
+            "name": key,
+            "type": "uri",
+            "label": _DATA_LABELS[key],
+            "hint": "저장소 기준 상대 경로 또는 s3://bucket/key 형식입니다.",
+            "required": True,
+        }
+        for key in DATA_ARTIFACT_KEYS
+    ]
+
+
+def _normalize_integer(
+    raw: Any, name: str, default: int, minimum: int, errors: list[FieldError]
+) -> int:
+    value = raw.get(name, default)
+    # train은 bool을 int 자리에서 명시적으로 거부합니다.
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        collect(errors, f"train.{name}", f"{minimum} 이상의 정수여야 합니다.")
+        return default
+    return value
+
+
+def _normalize_float(
+    raw: Any, name: str, default: float, minimum: float, errors: list[FieldError]
+) -> float:
+    value = raw.get(name, default)
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(float(value))
+        or float(value) < minimum
+    ):
+        collect(errors, f"train.{name}", f"{minimum} 이상의 유한한 숫자여야 합니다.")
+        return default
+    return float(value)
+
+
+def normalize_train_settings(raw: Any) -> dict[str, Any]:
+    """``config["train"]`` 후보를 train과 같은 규칙으로 정규화합니다.
+
+    문제를 하나 발견하면 멈추지 않고 모두 모아서 한 번에 보고합니다. 화면에서 여러
+    칸의 오류를 동시에 보여줘야 하기 때문입니다.
+    """
+
+    errors: list[FieldError] = []
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise WebValidationError([FieldError("train", "train 설정은 object여야 합니다.")])
+
+    device = raw.get("device", "cpu")
+    if not isinstance(device, str) or device not in {"cpu", "cuda"}:
+        collect(errors, "train.device", "'cpu' 또는 'cuda'여야 합니다.")
+        device = "cpu"
+    elif device == "cuda" and not cuda_is_available():
+        collect(errors, "train.device", "CUDA를 사용할 수 없는 환경입니다.")
+
+    pretrained = raw.get("pretrained", False)
+    if not isinstance(pretrained, bool):
+        collect(errors, "train.pretrained", "true 또는 false여야 합니다.")
+        pretrained = False
+
+    run_id = raw.get("run_id") or generate_run_id()
+    if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
+        collect(
+            errors,
+            "train.run_id",
+            "영문/숫자로 시작하고 영문·숫자·마침표·밑줄·붙임표만 쓸 수 있습니다(최대 128자).",
+        )
+        run_id = generate_run_id()
+
+    output_dir = raw.get("output_dir", DEFAULT_OUTPUT_DIR)
+    if not isinstance(output_dir, str) or not output_dir.strip():
+        collect(errors, "train.output_dir", "비어 있지 않은 저장소 기준 상대 경로여야 합니다.")
+        output_dir = DEFAULT_OUTPUT_DIR
+    else:
+        try:
+            output_dir = normalize_relative_posix(output_dir, label="출력 directory")
+            resolve_within_repo(output_dir, label="출력 directory")
+        except WebPathError as error:
+            collect(errors, "train.output_dir", str(error))
+            output_dir = DEFAULT_OUTPUT_DIR
+
+    output_prefix = raw.get("output_prefix", DEFAULT_OUTPUT_PREFIX)
+    if not isinstance(output_prefix, str) or not output_prefix.strip():
+        collect(errors, "train.output_prefix", "비어 있지 않은 S3 prefix여야 합니다.")
+        output_prefix = DEFAULT_OUTPUT_PREFIX
+
+    settings: dict[str, Any] = {
+        "run_id": run_id,
+        "device": device,
+        "pretrained": pretrained,
+        "output_dir": output_dir,
+        "output_prefix": output_prefix.strip("/"),
+    }
+    for name, default, minimum in _INTEGER_FIELDS:
+        settings[name] = _normalize_integer(raw, name, default, minimum, errors)
+    for name, default, minimum in _FLOAT_FIELDS:
+        settings[name] = _normalize_float(raw, name, default, minimum, errors)
+
+    raise_if_any(errors)
+    # train이 읽는 순서와 같게 정렬해 config를 읽기 쉽게 만듭니다.
+    return {
+        "run_id": settings["run_id"],
+        "seed": settings["seed"],
+        "epochs": settings["epochs"],
+        "batch_size": settings["batch_size"],
+        "num_workers": settings["num_workers"],
+        "learning_rate": settings["learning_rate"],
+        "momentum": settings["momentum"],
+        "weight_decay": settings["weight_decay"],
+        "device": settings["device"],
+        "pretrained": settings["pretrained"],
+        "output_dir": settings["output_dir"],
+        "output_prefix": settings["output_prefix"],
+    }
+
+
+def _normalize_data_uri(value: Any, key: str, errors: list[FieldError]) -> str:
+    field = f"inputs.data.{key}"
+    if not isinstance(value, str) or not value.strip():
+        collect(errors, field, "비어 있지 않은 문자열이어야 합니다.")
+        return ""
+
+    text = value.strip()
+    lowered = text.lower()
+    if lowered.startswith("s3://"):
+        split = urlsplit(text)
+        if not split.netloc or not split.path.strip("/"):
+            collect(errors, field, "s3://bucket/key 형식이어야 합니다.")
+            return text
+        if split.query or split.fragment:
+            collect(errors, field, "s3 URI에 query나 fragment를 쓸 수 없습니다.")
+        return text
+    if "://" in text:
+        collect(errors, field, "저장소 기준 상대 경로 또는 s3:// URI만 쓸 수 있습니다.")
+        return text
+
+    try:
+        return normalize_relative_posix(text, label=_DATA_LABELS[key])
+    except WebPathError as error:
+        collect(errors, field, str(error))
+        return text
+
+
+def normalize_data_inputs(raw: Any) -> dict[str, str]:
+    """``config["inputs"]["data"]``의 artifact URI 4개를 검증합니다."""
+
+    errors: list[FieldError] = []
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise WebValidationError([FieldError("inputs.data", "data 입력은 object여야 합니다.")])
+
+    resolved: dict[str, str] = {}
+    for key in DATA_ARTIFACT_KEYS:
+        if key not in raw:
+            collect(errors, f"inputs.data.{key}", f"{_DATA_LABELS[key]} 위치가 필요합니다.")
+            continue
+        resolved[key] = _normalize_data_uri(raw[key], key, errors)
+
+    raise_if_any(errors)
+    return {key: resolved[key] for key in DATA_ARTIFACT_KEYS}
+
+
+def uses_s3(data_inputs: dict[str, str]) -> bool:
+    return any(value.lower().startswith("s3://") for value in data_inputs.values())
+
+
+def run_id_output_path(settings: dict[str, Any]) -> Path:
+    """Local backend에서 이 run이 결과를 쓸 directory입니다."""
+
+    return resolve_within_repo(settings["output_dir"], label="출력 directory") / settings["run_id"]
+
+
+def preflight_warnings(settings: dict[str, Any], data_inputs: dict[str, str]) -> list[dict[str, str]]:
+    """실행을 막지는 않지만 미리 알려 주면 좋은 것들을 모읍니다."""
+
+    warnings: list[dict[str, str]] = []
+    if not uses_s3(data_inputs):
+        for key, value in data_inputs.items():
+            try:
+                path = resolve_within_repo(value, label=_DATA_LABELS[key])
+            except WebPathError:
+                continue
+            if not path.exists():
+                warnings.append(
+                    {
+                        "field": f"inputs.data.{key}",
+                        "message": f"{_DATA_LABELS[key]} 파일이 아직 없습니다. 학습 시작 직후 실패할 수 있습니다.",
+                    }
+                )
+    if settings["device"] == "cpu":
+        warnings.append(
+            {
+                "field": "train.device",
+                "message": "CPU로 학습하면 GPU보다 매우 오래 걸립니다.",
+            }
+        )
+    if settings["num_workers"] > 0 and os.name == "nt":
+        warnings.append(
+            {
+                "field": "train.num_workers",
+                "message": "Windows에서는 worker를 늘려도 효과가 작고 메모리를 더 씁니다.",
+            }
+        )
+    return warnings
+
+
+def check_run_id_collision(settings: dict[str, Any], data_inputs: dict[str, str]) -> None:
+    """이미 같은 run_id의 결과가 있으면 시작 전에 막습니다.
+
+    train은 학습을 **끝낸 뒤** 저장 단계에서야 ``FileExistsError``를 냅니다
+    (``train/pipeline.py:154``). 몇 시간을 버리지 않도록 여기서 먼저 확인합니다.
+    """
+
+    if uses_s3(data_inputs):
+        return  # S3 존재 확인은 credential이 필요하므로 시도하지 않습니다.
+    if run_id_output_path(settings).exists():
+        raise WebValidationError(
+            [
+                FieldError(
+                    "train.run_id",
+                    f"'{settings['run_id']}' 결과가 이미 있습니다. 다른 이름을 쓰세요.",
+                )
+            ]
+        )
+
+
+def validate_request(payload: Any) -> dict[str, Any]:
+    """검증 결과를 화면이 그대로 쓸 수 있는 형태로 돌려줍니다. 아무것도 쓰지 않습니다."""
+
+    if not isinstance(payload, dict):
+        return {
+            "valid": False,
+            "errors": [{"field": "body", "message": "요청 본문은 object여야 합니다."}],
+            "warnings": [],
+            "normalized": None,
+        }
+
+    errors: list[dict[str, str]] = []
+    settings: dict[str, Any] | None = None
+    data_inputs: dict[str, str] | None = None
+
+    try:
+        settings = normalize_train_settings(payload.get("train"))
+    except WebValidationError as error:
+        errors.extend(error.as_list())
+
+    inputs = payload.get("inputs")
+    data_section = inputs.get("data") if isinstance(inputs, dict) else payload.get("data")
+    try:
+        data_inputs = normalize_data_inputs(data_section)
+    except WebValidationError as error:
+        errors.extend(error.as_list())
+
+    warnings: list[dict[str, str]] = []
+    if settings is not None and data_inputs is not None and not errors:
+        try:
+            check_run_id_collision(settings, data_inputs)
+        except WebValidationError as error:
+            errors.extend(error.as_list())
+        warnings = preflight_warnings(settings, data_inputs)
+
+    if errors:
+        return {"valid": False, "errors": errors, "warnings": warnings, "normalized": None}
+    return {
+        "valid": True,
+        "errors": [],
+        "warnings": warnings,
+        "normalized": build_runtime_config(settings, data_inputs),
+    }
+
+
+def build_runtime_config(
+    settings: dict[str, Any], data_inputs: dict[str, str]
+) -> dict[str, Any]:
+    """``--only train``에 넘길 완결된 config를 만듭니다.
+
+    ``src/common/config.py``의 ``load_config``는 파일 하나만 읽고 병합하지 않으므로
+    이 결과는 그 자체로 완전해야 합니다.
+    """
+
+    if uses_s3(data_inputs):
+        # bucket 이름은 환경 변수(PILL_STORAGE_S3_BUCKET)에서 오므로 config에 넣지 않습니다.
+        storage: dict[str, Any] = {"backend": "s3", "s3": {"prefix": ""}}
+    else:
+        storage = {"backend": "local", "local": {"root": "artifacts"}}
+
+    return {
+        "project": {"name": "pill-object-detection"},
+        # configs/base.json은 execution.mode가 "dummy"입니다. 그 값이 들어오면 train이
+        # 학습을 건너뛰고 dummy 결과만 돌려주므로, 여기서 항상 명시적으로 덮어씁니다.
+        "execution": {"mode": "real"},
+        "storage": storage,
+        "train": dict(settings),
+        "inputs": {"data": dict(data_inputs)},
+    }
+
+
+def _config_path(config_id: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{32}", config_id):
+        raise JobNotFoundError("설정을 찾을 수 없습니다.")
+    return config_dir() / f"{config_id}.json"
+
+
+def write_runtime_config(config: dict[str, Any]) -> str:
+    """Runtime config를 gitignore된 위치에 원자적으로 기록하고 id를 돌려줍니다."""
+
+    directory = config_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    config_id = uuid4().hex
+    destination = directory / f"{config_id}.json"
+    payload = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
+
+    handle, temporary_name = tempfile.mkstemp(dir=directory, prefix=f".{config_id}-", suffix=".tmp")
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(payload)
+        os.replace(temporary, destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return config_id
+
+
+def read_runtime_config(config_id: str) -> dict[str, Any]:
+    """저장해 둔 runtime config를 읽습니다."""
+
+    path = _config_path(config_id)
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise JobNotFoundError("설정을 찾을 수 없습니다.") from error
+    try:
+        config = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise JobNotFoundError("저장된 설정을 읽을 수 없습니다.") from error
+    if not isinstance(config, dict):
+        raise JobNotFoundError("저장된 설정 형식이 올바르지 않습니다.")
+    return config
+
+
+def config_relative_path(config_id: str) -> str:
+    """subprocess ``--config`` 인자로 넘길 저장소 기준 상대 경로입니다."""
+
+    _config_path(config_id)  # id 형식 검증
+    return f"{CONFIG_DIRNAME}/{config_id}.json"
+
+
+def public_config(config: dict[str, Any]) -> dict[str, Any]:
+    """화면에 돌려줄 때 credential처럼 보이는 값을 가립니다."""
+
+    return redact(config)

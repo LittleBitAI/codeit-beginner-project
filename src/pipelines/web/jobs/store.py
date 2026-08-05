@@ -1,0 +1,167 @@
+"""Job 기록과 log를 gitignore된 위치에 보관합니다.
+
+중앙 index 파일은 두지 않습니다. 여러 곳에서 같은 파일을 고치면 깨질 위험이 있어서,
+job마다 자기 directory만 쓰고 목록은 시작할 때 훑어서 만듭니다.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import tempfile
+from pathlib import Path
+from typing import Any, Iterable
+
+from ..errors import JobNotFoundError
+from ..masking import redact, sanitize_line
+from ..paths import jobs_dir
+from .model import JobRecord
+
+
+__all__ = [
+    "append_log",
+    "job_directory",
+    "load_all_records",
+    "load_record",
+    "read_logs",
+    "save_record",
+]
+
+
+_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+_RECORD_NAME = "record.json"
+_LOG_NAME = "log.jsonl"
+
+
+def _validate_id(job_id: str) -> str:
+    """경로 조작을 막기 위해 디스크에 닿기 전에 형식을 확인합니다."""
+
+    if not isinstance(job_id, str) or not _ID_PATTERN.fullmatch(job_id):
+        raise JobNotFoundError("학습 기록을 찾을 수 없습니다.")
+    return job_id
+
+
+def job_directory(job_id: str) -> Path:
+    return jobs_dir() / _validate_id(job_id)
+
+
+def _write_atomic(destination: Path, payload: str) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary_name = tempfile.mkstemp(
+        dir=destination.parent, prefix=f".{destination.name}-", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(payload)
+        os.replace(temporary, destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def save_record(record: JobRecord) -> None:
+    """기록을 저장합니다. 저장 전에 마스킹해 비밀이 디스크에도 닿지 않게 합니다."""
+
+    payload = redact(record.to_dict())
+    _write_atomic(
+        job_directory(record.job_id) / _RECORD_NAME,
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+    )
+
+
+def load_record(job_id: str) -> JobRecord:
+    path = job_directory(job_id) / _RECORD_NAME
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise JobNotFoundError("학습 기록을 찾을 수 없습니다.") from error
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise JobNotFoundError("학습 기록을 읽을 수 없습니다.") from error
+    if not isinstance(payload, dict) or "job_id" not in payload:
+        raise JobNotFoundError("학습 기록 형식이 올바르지 않습니다.")
+    return JobRecord.from_dict(payload)
+
+
+def load_all_records() -> list[JobRecord]:
+    """저장된 모든 job을 최신순으로 읽습니다. 깨진 기록은 건너뜁니다."""
+
+    root = jobs_dir()
+    if not root.is_dir():
+        return []
+
+    records: list[JobRecord] = []
+    for entry in root.iterdir():
+        if not entry.is_dir() or not _ID_PATTERN.fullmatch(entry.name):
+            continue
+        try:
+            records.append(load_record(entry.name))
+        except JobNotFoundError:
+            continue  # 손상된 기록 하나가 목록 전체를 막지 않게 합니다.
+    records.sort(key=lambda record: record.created_at, reverse=True)
+    return records
+
+
+def append_log(job_id: str, entries: Iterable[dict[str, Any]]) -> None:
+    """Log 줄을 JSONL로 덧붙입니다."""
+
+    materialized = list(entries)
+    if not materialized:
+        return
+    directory = job_directory(job_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / _LOG_NAME).open("a", encoding="utf-8", newline="\n") as stream:
+        for entry in materialized:
+            stream.write(json.dumps(entry, ensure_ascii=False, allow_nan=False) + "\n")
+
+
+def read_logs(job_id: str, *, after: int = 0, limit: int = 500) -> dict[str, Any]:
+    """``after``보다 큰 seq의 log를 최대 ``limit``개 읽습니다."""
+
+    path = job_directory(job_id) / _LOG_NAME
+    lines: list[dict[str, Any]] = []
+    highest = after
+    if not path.is_file():
+        return {"lines": [], "next": after, "complete": True}
+
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            for raw in stream:
+                if not raw.strip():
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                sequence = entry.get("seq")
+                if not isinstance(sequence, int) or sequence <= after:
+                    continue
+                highest = max(highest, sequence)
+                if len(lines) < limit:
+                    lines.append(entry)
+    except OSError as error:
+        raise JobNotFoundError("학습 log를 읽을 수 없습니다.") from error
+
+    next_cursor = lines[-1]["seq"] if lines else after
+    return {
+        "lines": lines,
+        "next": next_cursor,
+        "complete": next_cursor >= highest,
+    }
+
+
+def make_log_entry(sequence: int, stream_name: str, level: str, text: str, timestamp: str) -> dict[str, Any]:
+    """저장·전송 직전에 마스킹과 길이 제한을 적용한 log 항목을 만듭니다."""
+
+    return {
+        "seq": sequence,
+        "stream": stream_name,
+        "level": level,
+        "text": sanitize_line(text),
+        "ts": timestamp,
+    }
