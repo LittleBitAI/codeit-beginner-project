@@ -13,18 +13,22 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .errors import ArtifactWriteError, ConfigurationError, EvaluateError
-from .manifest import load_class_map, load_manifest
+from .manifest import load_class_map, load_manifest, load_test_manifest
 from .metrics import DEFAULT_IOU_THRESHOLDS, evaluate_detections, filter_predictions
-from .predictor import load_predictions, predict_with_checkpoint
+from .predictor import load_predictions, predict_record_groups_with_checkpoint
 from .storage_io import ArtifactStore, join_uri
+from .submission import render_submission_csv
 
 
 DEFAULT_OUTPUT_ROOT = "artifacts/evaluate"
 DEFAULT_METRICS_FILENAME = "metrics.json"
 DEFAULT_PREDICTIONS_FILENAME = "predictions.json"
+DEFAULT_SUBMISSION_ROOT = "submissions"
+DEFAULT_SUBMISSION_FILENAME = "submission.csv"
 DEFAULT_MAX_DETECTIONS_PER_IMAGE = 4
 DEFAULT_DEVICE = "cpu"
 DEFAULT_SEED = 0
+COMPETITION_IOU_THRESHOLDS = (0.75, 0.80, 0.85, 0.90, 0.95)
 
 
 def _utc_now() -> str:
@@ -37,11 +41,13 @@ class Settings:
 
     run_id: str
     validation_manifest_uri: str
+    test_manifest_uri: str | None
     class_map_uri: str | None
     checkpoint_uri: str | None
     predictions_input_uri: str | None
     metrics_uri: str
     predictions_uri: str
+    submission_uri: str | None
     iou_thresholds: tuple[float, ...]
     score_threshold: float
     max_detections_per_image: int | None
@@ -146,6 +152,14 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
             "inputs.data.validation_manifest_uri가 필요합니다."
         )
 
+    test_manifest_uri = _resolve_uri(
+        settings,
+        inputs,
+        key="test_manifest_uri",
+        stage="data",
+        stage_key="test_manifest_uri",
+    )
+
     class_map_uri = _resolve_uri(
         settings, inputs, key="class_map_uri", stage="data", stage_key="class_map_uri"
     )
@@ -159,6 +173,11 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         raise ConfigurationError(
             "예측을 만들 수 없습니다. evaluate.predictions_input_uri 또는 "
             "inputs.train.best_checkpoint_uri(evaluate.checkpoint_uri)가 필요합니다."
+        )
+    if test_manifest_uri is not None and checkpoint_uri is None:
+        raise ConfigurationError(
+            "test image 추론에는 checkpoint가 필요합니다. evaluate.checkpoint_uri 또는 "
+            "inputs.train.best_checkpoint_uri를 설정하세요."
         )
 
     output_dir = _optional_uri(settings.get("output_dir"), "evaluate.output_dir") or join_uri(
@@ -198,15 +217,44 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
             f"evaluate.metrics_filename과 evaluate.predictions_filename을 다르게 두세요: {metrics_uri}"
         )
 
+    configured_submission_uri = _optional_uri(
+        settings.get("submission_uri"), "evaluate.submission_uri"
+    )
+    if configured_submission_uri is not None and test_manifest_uri is None:
+        raise ConfigurationError("evaluate.submission_uri에는 test_manifest_uri가 필요합니다.")
+    submission_uri = None
+    if test_manifest_uri is not None:
+        submission_uri = configured_submission_uri or join_uri(
+            join_uri(DEFAULT_SUBMISSION_ROOT, resolved_run_id),
+            DEFAULT_SUBMISSION_FILENAME,
+        )
+    if submission_uri is not None and submission_uri in {metrics_uri, predictions_uri}:
+        raise ConfigurationError(
+            "metrics, predictions, submission은 같은 위치에 저장할 수 없습니다."
+        )
+
+    iou_thresholds = _resolve_iou_thresholds(settings.get("iou_thresholds"))
+    if test_manifest_uri is not None:
+        if (
+            settings.get("iou_thresholds") is not None
+            and iou_thresholds != COMPETITION_IOU_THRESHOLDS
+        ):
+            raise ConfigurationError(
+                "competition iou_thresholds는 [0.75, 0.80, 0.85, 0.90, 0.95]여야 합니다."
+            )
+        iou_thresholds = COMPETITION_IOU_THRESHOLDS
+
     return Settings(
         run_id=resolved_run_id,
         validation_manifest_uri=manifest_uri,
+        test_manifest_uri=test_manifest_uri,
         class_map_uri=class_map_uri,
         checkpoint_uri=checkpoint_uri,
         predictions_input_uri=predictions_input_uri,
         metrics_uri=metrics_uri,
         predictions_uri=predictions_uri,
-        iou_thresholds=_resolve_iou_thresholds(settings.get("iou_thresholds")),
+        submission_uri=submission_uri,
+        iou_thresholds=iou_thresholds,
         score_threshold=float(score_threshold),
         max_detections_per_image=_resolve_max_detections(settings.get("max_detections_per_image")),
         device=device,
@@ -266,7 +314,10 @@ def run(config: dict) -> dict:
         random.seed(settings.seed)
         store = ArtifactStore(config)
 
-        for uri in (settings.metrics_uri, settings.predictions_uri):
+        output_uris = [settings.metrics_uri, settings.predictions_uri]
+        if settings.submission_uri is not None:
+            output_uris.append(settings.submission_uri)
+        for uri in output_uris:
             if not settings.overwrite and store.exists(uri):
                 raise ArtifactWriteError(
                     f"artifact가 이미 있습니다. evaluate.overwrite를 true로 두어야 덮어씁니다: "
@@ -279,18 +330,41 @@ def run(config: dict) -> dict:
         )
         image_keys = {record["image_key"] for record in records}
 
+        test_records: list[dict[str, Any]] | None = None
+        test_category_ids: frozenset[int] = frozenset()
+        if settings.test_manifest_uri is not None:
+            test_records, test_category_ids = load_test_manifest(
+                store, settings.test_manifest_uri
+            )
+
         if settings.predictions_input_uri is not None:
             raw_predictions = load_predictions(
                 store, settings.predictions_input_uri, known_image_keys=image_keys
             )
         else:
-            raw_predictions = predict_with_checkpoint(
+            raw_predictions = []
+
+        inference_groups: list[list[dict[str, Any]]] = []
+        validation_group_index: int | None = None
+        test_group_index: int | None = None
+        if settings.predictions_input_uri is None:
+            validation_group_index = len(inference_groups)
+            inference_groups.append(records)
+        if test_records is not None:
+            test_group_index = len(inference_groups)
+            inference_groups.append(test_records)
+
+        generated_groups: list[list[dict[str, Any]]] = []
+        if inference_groups:
+            generated_groups = predict_record_groups_with_checkpoint(
                 store,
-                records,
+                inference_groups,
                 checkpoint_uri=str(settings.checkpoint_uri),
                 device=settings.device,
                 seed=settings.seed,
             )
+        if validation_group_index is not None:
+            raw_predictions = generated_groups[validation_group_index]
 
         predictions = filter_predictions(
             raw_predictions,
@@ -303,6 +377,18 @@ def run(config: dict) -> dict:
             iou_thresholds=settings.iou_thresholds,
             class_names=class_map,
         )
+
+        submission_text: str | None = None
+        if test_group_index is not None:
+            test_predictions = filter_predictions(
+                generated_groups[test_group_index],
+                score_threshold=settings.score_threshold,
+                max_detections_per_image=settings.max_detections_per_image,
+            )
+            submission_text = render_submission_csv(
+                test_predictions,
+                category_ids=test_category_ids,
+            )
 
         finished_at = _utc_now()
         common_fields = {
@@ -327,6 +413,15 @@ def run(config: dict) -> dict:
             "bbox_format": "xywh",
             "predictions": [_public_prediction(prediction) for prediction in predictions],
         }
+        submission_uri: str | None = None
+        if settings.submission_uri is not None and submission_text is not None:
+            submission_existed = store.exists(settings.submission_uri)
+            submission_uri = store.write_text(
+                settings.submission_uri, submission_text, overwrite=settings.overwrite
+            )
+            if not submission_existed:
+                created_uris.append(settings.submission_uri)
+
         predictions_existed = store.exists(settings.predictions_uri)
         predictions_uri = store.write_json(
             settings.predictions_uri, predictions_document, overwrite=settings.overwrite
@@ -347,13 +442,17 @@ def run(config: dict) -> dict:
                 store.remove_local(uri)
         return _error_result(str(error))
 
+    artifacts = {
+        "run_id": settings.run_id,
+        "metrics_uri": metrics_uri,
+        "predictions_uri": predictions_uri,
+    }
+    if submission_uri is not None:
+        artifacts["submission_uri"] = submission_uri
+
     return {
         "status": "ok",
-        "artifacts": {
-            "run_id": settings.run_id,
-            "metrics_uri": metrics_uri,
-            "predictions_uri": predictions_uri,
-        },
+        "artifacts": artifacts,
         "summary": {
             "pipeline": "evaluate",
             "run_id": settings.run_id,

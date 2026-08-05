@@ -328,6 +328,63 @@ def load_manifest(store: ArtifactStore, uri: str) -> list[dict[str, Any]]:
     return parse_manifest(store.read_text(uri), source=uri, store=store)
 
 
+def parse_test_manifest(
+    text: str,
+    *,
+    source: str,
+    store: ArtifactStore | None = None,
+) -> tuple[list[dict[str, Any]], frozenset[int]]:
+    """라벨 없는 competition COCO test manifest를 검증합니다."""
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise InputArtifactError(f"{source}: 유효한 COCO JSON이 아닙니다.") from error
+    if not isinstance(document, Mapping):
+        raise InputArtifactError(f"{source}: test manifest는 COCO object여야 합니다.")
+    if document.get("annotations") != []:
+        raise InputArtifactError(
+            f"{source}: test manifest는 label 없이 annotations=[]여야 합니다."
+        )
+
+    records = _parse_coco_manifest(document, source=source, store=store)
+    if not document["categories"]:
+        raise InputArtifactError(f"{source}: test manifest categories가 비어 있습니다.")
+    seen_file_names: set[str] = set()
+    seen_numeric_stems: set[int] = set()
+    for index, image in enumerate(document["images"]):
+        file_name = str(image["file_name"]).replace("\\", "/")
+        stem = posixpath.splitext(posixpath.basename(file_name))[0]
+        if not stem.isdecimal():
+            raise InputArtifactError(
+                f"{source}#images[{index}]: 숫자 file_name이 필요합니다: {file_name!r}"
+            )
+        numeric_stem = int(stem)
+        if file_name in seen_file_names:
+            raise InputArtifactError(
+                f"{source}#images[{index}]: file_name이 중복되었습니다: {file_name}"
+            )
+        if numeric_stem in seen_numeric_stems:
+            raise InputArtifactError(
+                f"{source}#images[{index}]: file_name 숫자 stem이 중복되었습니다: {stem}"
+            )
+        if numeric_stem != image["id"]:
+            raise InputArtifactError(
+                f"{source}#images[{index}]: file_name 숫자 stem과 image id가 다릅니다: "
+                f"{stem} != {image['id']}"
+            )
+        seen_file_names.add(file_name)
+        seen_numeric_stems.add(numeric_stem)
+    return records, frozenset(int(category["id"]) for category in document["categories"])
+
+
+def load_test_manifest(
+    store: ArtifactStore,
+    uri: str,
+) -> tuple[list[dict[str, Any]], frozenset[int]]:
+    """Competition test manifest artifact를 읽고 검증합니다."""
+    return parse_test_manifest(store.read_text(uri), source=uri, store=store)
+
+
 def parse_class_map(document: Any, *, source: str) -> dict[int, str]:
     """class map 문서를 {category_id: name} 형태로 정규화합니다.
 
@@ -368,7 +425,9 @@ def load_class_map(store: ArtifactStore, uri: str) -> dict[int, str]:
 __all__ = [
     "load_class_map",
     "load_manifest",
+    "load_test_manifest",
     "normalize_image_key",
     "parse_class_map",
     "parse_manifest",
+    "parse_test_manifest",
 ]

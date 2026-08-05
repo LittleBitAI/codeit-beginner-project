@@ -155,6 +155,38 @@ class ArtifactStore:
             raise ArtifactWriteError(f"artifact를 저장하지 못했습니다 ({uri}): {error}") from error
         return self.normalize_uri(path)
 
+    def write_text(self, uri: str, value: str, *, overwrite: bool = False) -> str:
+        """Text artifact를 UTF-8 without BOM, LF로 저장합니다."""
+        if is_remote_uri(uri):
+            with tempfile.TemporaryDirectory(prefix="pill-evaluate-upload-") as directory:
+                source = Path(directory) / Path(uri.split("/")[-1] or "artifact.txt").name
+                try:
+                    source.write_text(value, encoding="utf-8", newline="\n")
+                    return self.storage.upload_file(source, uri, overwrite=overwrite)
+                except StorageError as error:
+                    raise ArtifactWriteError(
+                        f"artifact를 저장하지 못했습니다 ({uri}): {error}"
+                    ) from error
+                except OSError as error:
+                    raise ArtifactWriteError(
+                        f"임시 text artifact를 만들지 못했습니다 ({uri}): {error}"
+                    ) from error
+
+        path = self.local_path(uri)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            mode = "w" if overwrite else "x"
+            with path.open(mode, encoding="utf-8", newline="\n") as output:
+                output.write(value)
+        except FileExistsError as error:
+            raise ArtifactWriteError(
+                "artifact가 이미 있습니다. overwrite를 허용해야 덮어씁니다: "
+                f"{self.normalize_uri(uri)}"
+            ) from error
+        except OSError as error:
+            raise ArtifactWriteError(f"artifact를 저장하지 못했습니다 ({uri}): {error}") from error
+        return self.normalize_uri(path)
+
     def remove_local(self, uri: str) -> None:
         """이번 실행에서 만든 local artifact만 정리합니다. S3 object는 삭제하지 않습니다."""
         if is_remote_uri(uri):

@@ -72,6 +72,19 @@ def test_write_json_writes_utf8_without_bom_and_lf(repository_root: Path):
     assert "타이레놀" in raw.decode("utf-8")
 
 
+def test_write_text_writes_utf8_without_bom_and_refuses_overwrite(repository_root: Path):
+    store = ArtifactStore()
+    store.write_text("submissions/run/submission.csv", "이름,value\n약,1\n")
+
+    raw = (repository_root / "submissions/run/submission.csv").read_bytes()
+
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    assert b"\r\n" not in raw
+    assert "약,1\n" in raw.decode("utf-8")
+    with pytest.raises(ArtifactWriteError, match="이미 있습니다"):
+        store.write_text("submissions/run/submission.csv", "replacement\n")
+
+
 def test_remove_local_ignores_paths_outside_the_repository(repository_root: Path):
     """정리 과정에서 저장소 밖 file을 지우지 않는지 확인합니다."""
     outside = repository_root.parent / "keep-me.json"

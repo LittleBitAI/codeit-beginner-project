@@ -8,7 +8,7 @@ from copy import deepcopy
 import pytest
 
 from src.pipelines.evaluate.errors import InputArtifactError
-from src.pipelines.evaluate.manifest import parse_class_map, parse_manifest
+from src.pipelines.evaluate.manifest import parse_class_map, parse_manifest, parse_test_manifest
 
 
 VALID_RECORD = {
@@ -27,6 +27,14 @@ VALID_COCO = {
         {"id": 10, "image_id": 1, "category_id": 7, "bbox": [10, 5, 20, 30]}
     ],
     "categories": [{"id": 7, "name": "pill"}],
+}
+
+VALID_TEST_COCO = {
+    "images": [
+        {"id": 12, "file_name": "images/0012.jpg", "width": 100, "height": 80}
+    ],
+    "annotations": [],
+    "categories": [{"id": 3, "name": "pill-a"}, {"id": 7, "name": "pill-b"}],
 }
 
 
@@ -118,6 +126,66 @@ def test_parse_manifest_resolves_coco_image_relative_to_s3_manifest():
     )
 
     assert records[0]["image_uri"] == "s3://pill-data/validation/images/img-1.jpg"
+
+
+def test_parse_test_manifest_accepts_unlabelled_coco_and_preserves_category_ids():
+    records, category_ids = parse_test_manifest(
+        json.dumps(VALID_TEST_COCO), source="data/test/instances.json"
+    )
+
+    assert records[0]["image_id"] == 12
+    assert records[0]["annotations"] == []
+    assert category_ids == frozenset({3, 7})
+
+
+def test_parse_test_manifest_rejects_labels_and_non_numeric_filename():
+    labelled = deepcopy(VALID_TEST_COCO)
+    labelled["annotations"] = [
+        {"id": 1, "image_id": 12, "category_id": 3, "bbox": [1, 1, 2, 2]}
+    ]
+    named = deepcopy(VALID_TEST_COCO)
+    named["images"][0]["file_name"] = "images/pill.jpg"
+
+    with pytest.raises(InputArtifactError, match=r"annotations=\[\]"):
+        parse_test_manifest(json.dumps(labelled), source="test.json")
+    with pytest.raises(InputArtifactError, match="숫자 file_name"):
+        parse_test_manifest(json.dumps(named), source="test.json")
+
+
+def test_parse_test_manifest_rejects_empty_categories():
+    document = deepcopy(VALID_TEST_COCO)
+    document["categories"] = []
+
+    with pytest.raises(InputArtifactError, match="categories가 비어"):
+        parse_test_manifest(json.dumps(document), source="test.json")
+
+
+def test_parse_test_manifest_rejects_filename_stem_that_does_not_match_image_id():
+    document = deepcopy(VALID_TEST_COCO)
+    document["images"][0]["file_name"] = "images/0013.jpg"
+
+    with pytest.raises(InputArtifactError, match="file_name 숫자 stem과 image id가 다릅니다"):
+        parse_test_manifest(json.dumps(document), source="test.json")
+
+
+def test_parse_test_manifest_rejects_duplicate_filename():
+    document = deepcopy(VALID_TEST_COCO)
+    document["images"].append(
+        {"id": 13, "file_name": "images/0012.jpg", "width": 100, "height": 80}
+    )
+
+    with pytest.raises(InputArtifactError, match="file_name이 중복"):
+        parse_test_manifest(json.dumps(document), source="test.json")
+
+
+def test_parse_test_manifest_rejects_duplicate_numeric_stem():
+    document = deepcopy(VALID_TEST_COCO)
+    document["images"].append(
+        {"id": 13, "file_name": "other/0012.png", "width": 100, "height": 80}
+    )
+
+    with pytest.raises(InputArtifactError, match="숫자 stem이 중복"):
+        parse_test_manifest(json.dumps(document), source="test.json")
 
 
 @pytest.mark.parametrize(
