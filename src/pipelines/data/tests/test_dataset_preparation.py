@@ -7,6 +7,7 @@ in-memory S3 storage 대역을 써서 준비 경로의 흐름과 산출물을 �
 from __future__ import annotations
 
 import copy
+import io
 import json
 import re
 import shutil
@@ -16,11 +17,14 @@ from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
+from PIL import Image
 
 from src.common import LocalStorage, StorageError, validate_pipeline_result
 from src.common.storage import S3Storage
 from src.pipelines.data import preparation, run
+from src.pipelines.data.errors import DataError
 from src.pipelines.data.preparation import REPOSITORY_ROOT
+from src.pipelines.data.test_manifest import build_test_manifest
 
 
 BUCKET = "test-bucket"
@@ -57,8 +61,23 @@ def make_fake_s3_storage(objects: dict[str, Any] | None = None) -> tuple[S3Stora
             raise StorageError(f"S3 object가 없습니다: {uri}")
         return copy.deepcopy(stored[uri])
 
+    def download_file(source, destination, *, overwrite=False):
+        uri = uri_of(source)
+        destination_path = Path(destination)
+        if uri not in stored:
+            raise StorageError(f"S3 object가 없습니다: {uri}")
+        if destination_path.exists() and not overwrite:
+            raise StorageError(f"download 대상이 이미 있습니다: {destination_path.name}")
+        value = stored[uri]
+        if not isinstance(value, bytes):
+            raise StorageError(f"image object가 bytes가 아닙니다: {uri}")
+        destination_path.parent.mkdir(parents=True, exist_ok=True)
+        destination_path.write_bytes(value)
+        return destination_path
+
     storage.write_json = Mock(side_effect=write_json)
     storage.read_json = Mock(side_effect=read_json)
+    storage.download_file = Mock(side_effect=download_file)
     storage.exists = Mock(side_effect=lambda location: uri_of(location) in stored)
     storage.list = Mock(
         side_effect=lambda prefix="": sorted(
@@ -97,6 +116,14 @@ def annotation_document(image_index: int, category_ids: list[int]) -> dict[str, 
     }
 
 
+def image_bytes(width: int, height: int, *, image_format: str = "PNG") -> bytes:
+    """Fake storage에 넣을 실제 image bytes를 만듭니다."""
+
+    output = io.BytesIO()
+    Image.new("RGB", (width, height), color="white").save(output, format=image_format)
+    return output.getvalue()
+
+
 def raw_objects(
     categories_by_image: dict[int, list[int]] | None = None,
     *,
@@ -123,9 +150,9 @@ def raw_objects(
         objects[image_uri] = {"placeholder": "image bytes"}
         objects[annotation_uri] = annotation_document(index, category_ids)
     for index in range(1, test_image_count + 1):
-        objects[f"s3://{BUCKET}/{RAW_PREFIX}test_images/test_{index:03d}.jpg"] = {
-            "placeholder": "image bytes"
-        }
+        objects[f"s3://{BUCKET}/{RAW_PREFIX}test_images/{index:03d}.png"] = image_bytes(
+            30 + index, 40 + index
+        )
     return objects
 
 
@@ -231,9 +258,9 @@ def test_two_options_are_stored_in_different_locations():
         assert uri != second["artifacts"][key]
     assert "8020" in first["summary"]["processed_prefix"]
     assert "9010" in second["summary"]["processed_prefix"]
-    # 원본은 그대로 두고, 두 옵션의 산출물 4개씩만 새로 생겼습니다.
+    # 원본은 그대로 두고, 두 옵션의 산출물 5개씩만 새로 생겼습니다.
     processed = sorted(uri for uri in stored if "/processed/" in uri)
-    assert len(processed) == 8
+    assert len(processed) == 10
     assert set(first["artifacts"].values()) | set(second["artifacts"].values()) == set(
         processed
     )
@@ -249,7 +276,12 @@ def test_same_input_seed_and_ratio_produce_the_same_split():
     second, second_stored = prepare(prepare_config("8:2"), objects)
 
     assert first["artifacts"] == second["artifacts"]
-    for key in ("train_manifest_uri", "validation_manifest_uri", "class_map_uri"):
+    for key in (
+        "train_manifest_uri",
+        "validation_manifest_uri",
+        "class_map_uri",
+        "test_manifest_uri",
+    ):
         assert artifact_document(first_stored, first, key) == artifact_document(
             second_stored, second, key
         )
@@ -294,16 +326,27 @@ def test_test_images_never_enter_any_split():
     assert summary_document["raw"]["test_images_used"] == 0
 
 
-def test_test_images_are_never_read_from_storage():
-    storage, _ = make_fake_s3_storage(raw_objects())
+def test_only_test_image_bytes_are_read_and_test_annotations_are_never_read():
+    objects = raw_objects()
+    objects[f"s3://{BUCKET}/{RAW_PREFIX}test_annotations/secret.json"] = {
+        "must_not_be_read": True
+    }
+    storage, _ = make_fake_s3_storage(objects)
 
     result = run_with_fake_storage(storage, prepare_config("8:2"))
 
     assert result["status"] == "ok"
+    storage.list.assert_called_once_with(RAW_PREFIX)
     read_locations = [str(call.args[0]) for call in storage.read_json.call_args_list]
     assert read_locations
     assert all("test_images/" not in location for location in read_locations)
     assert all("/train_annotations/" in location for location in read_locations)
+    downloaded_locations = [
+        str(call.args[0]) for call in storage.download_file.call_args_list
+    ]
+    assert len(downloaded_locations) == 5
+    assert all("/test_images/" in location for location in downloaded_locations)
+    assert all("test_annotations/" not in location for location in read_locations)
 
 
 @pytest.mark.parametrize("split_ratio", ["8:2", "9:1"])
@@ -339,6 +382,205 @@ def test_category_present_in_only_one_image_is_rejected():
 
 
 # --- 산출물 형식 ------------------------------------------------------------
+
+
+def test_build_test_manifest_converts_two_images_and_unsorted_class_map():
+    image_ten = f"s3://{BUCKET}/{RAW_PREFIX}test_images/10.png"
+    image_two = f"s3://{BUCKET}/{RAW_PREFIX}test_images/2.png"
+    storage, _ = make_fake_s3_storage(
+        {
+            image_ten: image_bytes(31, 41),
+            image_two: image_bytes(12, 22),
+        }
+    )
+
+    manifest = build_test_manifest(
+        storage,
+        [image_ten, image_two],
+        {"10": "pill_ten", 2: "pill_two"},
+        publish_file_name=str,
+    )
+
+    assert manifest == {
+        "info": {
+            "description": "Pill detection test COCO manifest",
+            "split": "test",
+        },
+        "images": [
+            {
+                "id": 2,
+                "file_name": image_two,
+                "width": 12,
+                "height": 22,
+            },
+            {
+                "id": 10,
+                "file_name": image_ten,
+                "width": 31,
+                "height": 41,
+            },
+        ],
+        "annotations": [],
+        "categories": [
+            {"id": 2, "name": "pill_two", "supercategory": "pill"},
+            {"id": 10, "name": "pill_ten", "supercategory": "pill"},
+        ],
+    }
+
+
+def test_prepare_generates_test_manifest_from_decoded_images():
+    result, stored = prepare(prepare_config("8:2"))
+
+    assert result["status"] == "ok", result["message"]
+    assert set(result["artifacts"]) == {
+        "train_manifest_uri",
+        "validation_manifest_uri",
+        "class_map_uri",
+        "dataset_summary_uri",
+        "test_manifest_uri",
+    }
+    manifest = artifact_document(stored, result, "test_manifest_uri")
+    class_map = artifact_document(stored, result, "class_map_uri")
+    assert manifest["annotations"] == []
+    assert manifest["images"] == [
+        {
+            "id": index,
+            "file_name": f"s3://{BUCKET}/{RAW_PREFIX}test_images/{index:03d}.png",
+            "width": 30 + index,
+            "height": 40 + index,
+        }
+        for index in range(1, 6)
+    ]
+    assert manifest["categories"] == [
+        {"id": int(category_id), "name": name, "supercategory": "pill"}
+        for category_id, name in sorted(class_map.items(), key=lambda item: int(item[0]))
+    ]
+
+
+def test_empty_test_image_listing_is_rejected_before_publishing():
+    result, stored = prepare(
+        prepare_config("8:2"), raw_objects(test_image_count=0)
+    )
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert "test_images" in result["message"]
+    assert not [uri for uri in stored if "/processed/" in uri]
+
+
+def test_nonnumeric_test_image_stem_is_rejected_before_publishing():
+    objects = raw_objects(test_image_count=1)
+    source = f"s3://{BUCKET}/{RAW_PREFIX}test_images/001.png"
+    objects[f"s3://{BUCKET}/{RAW_PREFIX}test_images/image-1.png"] = objects.pop(source)
+
+    result, stored = prepare(prepare_config("8:2"), objects)
+
+    assert result["status"] == "error"
+    assert "stem 전체가 숫자" in result["message"]
+    assert not [uri for uri in stored if "/processed/" in uri]
+
+
+def test_duplicate_numeric_test_ids_are_rejected_before_publishing():
+    objects = raw_objects(test_image_count=1)
+    objects[f"s3://{BUCKET}/{RAW_PREFIX}test_images/1.jpg"] = image_bytes(9, 9)
+
+    result, stored = prepare(prepare_config("8:2"), objects)
+
+    assert result["status"] == "error"
+    assert "숫자 id가 중복" in result["message"]
+    assert "001.png" in result["message"] and "1.jpg" in result["message"]
+    assert not [uri for uri in stored if "/processed/" in uri]
+
+
+def test_duplicate_test_filenames_are_rejected_before_publishing():
+    objects = raw_objects(test_image_count=1)
+    objects[f"s3://{BUCKET}/{RAW_PREFIX}test_images/copy/001.png"] = image_bytes(9, 9)
+
+    result, stored = prepare(prepare_config("8:2"), objects)
+
+    assert result["status"] == "error"
+    assert "file 이름이 중복" in result["message"]
+    assert not [uri for uri in stored if "/processed/" in uri]
+
+
+def test_unreadable_test_image_is_rejected_before_publishing():
+    objects = raw_objects(test_image_count=1)
+    objects[f"s3://{BUCKET}/{RAW_PREFIX}test_images/001.png"] = b"not an image"
+
+    result, stored = prepare(prepare_config("8:2"), objects)
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert "읽을 수 없습니다" in result["message"]
+    assert "001.png" in result["message"]
+    assert not [uri for uri in stored if "/processed/" in uri]
+
+
+@pytest.mark.parametrize(
+    "class_map",
+    [None, {}, {"not-an-id": "pill_a"}, {1: "   "}],
+)
+def test_missing_or_invalid_class_map_raises_typed_data_error(class_map):
+    storage, _ = make_fake_s3_storage()
+
+    with pytest.raises(DataError, match="category"):
+        build_test_manifest(
+            storage,
+            [],
+            class_map,
+            publish_file_name=str,
+        )
+
+
+def test_duplicate_numeric_class_map_ids_raise_typed_data_error():
+    storage, _ = make_fake_s3_storage()
+
+    with pytest.raises(DataError, match="숫자 id가 중복"):
+        build_test_manifest(
+            storage,
+            [],
+            {"1": "pill_a", 1: "pill_b"},
+            publish_file_name=str,
+        )
+
+
+def test_duplicate_class_map_names_raise_typed_data_error():
+    storage, _ = make_fake_s3_storage()
+
+    with pytest.raises(DataError, match="name이 중복"):
+        build_test_manifest(
+            storage,
+            [],
+            {1: "pill", 2: "pill"},
+            publish_file_name=str,
+        )
+
+
+def test_same_basename_in_train_and_test_keeps_the_split_paths_separate():
+    objects = raw_objects(test_image_count=1)
+    train_source = f"s3://{BUCKET}/{RAW_PREFIX}train_images/img_001.jpg"
+    train_location = f"s3://{BUCKET}/{RAW_PREFIX}train_images/001.png"
+    objects[train_location] = objects.pop(train_source)
+    annotation_location = (
+        f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/img_001.json"
+    )
+    objects[annotation_location]["images"][0]["file_name"] = "001.png"
+
+    result, stored = prepare(prepare_config("8:2"), objects)
+
+    assert result["status"] == "ok", result["message"]
+    test_manifest = artifact_document(stored, result, "test_manifest_uri")
+    assert test_manifest["images"][0]["file_name"] == (
+        f"s3://{BUCKET}/{RAW_PREFIX}test_images/001.png"
+    )
+    train_images = [
+        image
+        for key in ("train_manifest_uri", "validation_manifest_uri")
+        for image in artifact_document(stored, result, key)["images"]
+    ]
+    assert next(image for image in train_images if image["id"] == 1)["file_name"] == (
+        train_location
+    )
 
 
 def test_manifest_matches_the_format_the_train_pipeline_reads():
@@ -420,11 +662,13 @@ def test_dataset_summary_records_source_ratio_and_seed():
         "seed": 11,
     }
     assert summary_document["raw"]["listed_train_images"] == 40
+    assert summary_document["raw"]["listed_test_images"] == 5
     assert summary_document["raw"]["annotation_documents"] == 40
     assert set(summary_document["artifacts"]) == {
         "train_manifest_uri",
         "validation_manifest_uri",
         "class_map_uri",
+        "test_manifest_uri",
     }
 
 
@@ -456,7 +700,7 @@ def test_overwrite_option_replaces_existing_artifacts():
     assert second["status"] == "ok"
     assert second["artifacts"] == first["artifacts"]
     assert second["summary"]["overwrite"] is True
-    assert len([uri for uri in stored if "/processed/" in uri]) == 4
+    assert len([uri for uri in stored if "/processed/" in uri]) == 5
 
 
 # --- 잘못된 config와 storage 실패 -------------------------------------------
@@ -609,7 +853,7 @@ def build_local_raw(root: Path, image_count: int = 20) -> None:
     test_images = root / RAW_PREFIX / "test_images"
     for directory in (images, annotations, test_images):
         directory.mkdir(parents=True, exist_ok=True)
-    (test_images / "test_001.jpg").write_bytes(b"never read")
+    (test_images / "1.png").write_bytes(image_bytes(17, 19))
     for index in range(1, image_count + 1):
         (images / f"img_{index:03d}.jpg").write_bytes(b"fake image bytes")
         document = annotation_document(index, [(index - 1) % 2 + 1])
@@ -684,6 +928,30 @@ def test_local_backend_manifest_images_resolve_from_the_manifest_directory(
             assert resolved.relative_to(REPOSITORY_ROOT)
             assert "/train_images/" in resolved.as_posix()
             assert "test_images" not in resolved.as_posix()
+
+    test_manifest_path = (REPOSITORY_ROOT / result["artifacts"]["test_manifest_uri"]).resolve()
+    test_manifest = json.loads(test_manifest_path.read_text(encoding="utf-8"))
+    assert test_manifest["annotations"] == []
+    for image in test_manifest["images"]:
+        resolved = (test_manifest_path.parent / image["file_name"]).resolve()
+        assert resolved.is_file()
+        assert "/test_images/" in resolved.as_posix()
+
+
+def test_local_test_manifest_json_uses_utf8_without_bom_and_lf(
+    local_storage_root, clean_storage_environment
+):
+    build_local_raw(local_storage_root)
+
+    result = run(local_config(local_storage_root))
+
+    assert result["status"] == "ok", result["message"]
+    manifest_path = (REPOSITORY_ROOT / result["artifacts"]["test_manifest_uri"]).resolve()
+    payload = manifest_path.read_bytes()
+    assert not payload.startswith(b"\xef\xbb\xbf")
+    assert b"\r" not in payload
+    assert payload.endswith(b"\n")
+    assert json.loads(payload.decode("utf-8"))["annotations"] == []
 
 
 def test_local_backend_image_paths_are_relative_to_the_manifest_not_the_root(

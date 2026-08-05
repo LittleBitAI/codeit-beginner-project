@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 
-__all__ = ["DatasetPreparationError"]
+__all__ = ["DataError", "DatasetPreparationError"]
 
 
-class DatasetPreparationError(RuntimeError):
+class DataError(RuntimeError):
+    """Data pipeline 내부에서 예상 가능한 실패를 나타내는 기본 예외입니다."""
+
+
+class DatasetPreparationError(DataError):
     """사용자가 config나 원본 data를 고쳐야 하는 준비 실패입니다.
 
     이 예외의 message는 그대로 `run()` 결과의 `message`가 되므로, credential이나
