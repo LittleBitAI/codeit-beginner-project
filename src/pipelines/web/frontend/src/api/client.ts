@@ -4,6 +4,7 @@ import type {
   DataVerification,
   Defaults,
   EvaluationState,
+  ExperimentListing,
   GpuStatus,
   JobListing,
   JobRecord,
@@ -80,6 +81,8 @@ export const api = {
     }),
 
   listJobs: () => request<JobListing>('/api/train/jobs'),
+
+  listExperiments: () => request<ExperimentListing>('/api/train/experiments'),
 
   getJob: (jobId: string) => request<JobRecord>(`/api/train/jobs/${jobId}`),
 
