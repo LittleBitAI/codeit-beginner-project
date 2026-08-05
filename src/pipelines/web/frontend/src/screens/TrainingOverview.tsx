@@ -32,10 +32,12 @@ export function TrainingOverview({
   listing,
   source,
   onSourceSelected,
+  onPrepared,
 }: {
   listing: JobListing | null;
   source: DataSource | null;
   onSourceSelected: (source: DataSource) => void;
+  onPrepared: () => void;
 }) {
   const navigate = useNavigate();
   const [filter, setFilter] = useState('all');
@@ -111,7 +113,11 @@ export function TrainingOverview({
         />
       </div>
 
-      <DataSourcePanel source={source} onSelected={onSourceSelected} />
+      <DataSourcePanel
+        source={source}
+        onSelected={onSourceSelected}
+        onPrepared={onPrepared}
+      />
 
       <Panel
         title="학습 실행"

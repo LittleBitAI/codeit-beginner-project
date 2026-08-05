@@ -161,6 +161,30 @@ export interface DataSource {
   examined: ExaminedFile[];
   available?: boolean;
   selected_at?: string | null;
+  /** 폴더를 직접 골랐는지, data pipeline이 준비해 준 것인지 */
+  origin?: 'folder' | 'prepared';
+  preparation?: Record<string, unknown> | null;
+}
+
+/** 원본에서 artifact를 만드는 준비 실행의 상태. */
+export interface PreparationState {
+  status: 'idle' | 'running' | 'succeeded' | 'failed';
+  split_ratio?: string;
+  seed?: number;
+  overwrite?: boolean;
+  started_at?: string | null;
+  finished_at?: string | null;
+  message?: string;
+  supported?: boolean;
+  exit_code?: number | null;
+  artifacts?: Record<string, string>;
+  summary?: Record<string, unknown>;
+  selected?: boolean;
+}
+
+export interface PreparationResponse {
+  split_ratios: string[];
+  preparation: PreparationState;
 }
 
 /** 실제 data pipeline(--only data)을 불러 받은 결과. */

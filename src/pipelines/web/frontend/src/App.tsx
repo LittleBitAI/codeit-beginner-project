@@ -39,6 +39,11 @@ function Shell() {
     [setDataFields, source],
   );
 
+  // 준비가 끝나면 backend가 그 결과를 이미 골라 두었으므로 다시 읽어 옵니다.
+  const handlePrepared = useCallback(() => {
+    source.refresh();
+  }, [source]);
+
   return (
     <AppShell activeJob={active}>
       {listing.error && (
@@ -57,6 +62,7 @@ function Shell() {
               listing={listing.data}
               source={source.data?.source ?? null}
               onSourceSelected={handleSourceSelected}
+              onPrepared={handlePrepared}
             />
           }
         />

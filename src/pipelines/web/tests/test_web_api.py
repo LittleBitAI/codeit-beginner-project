@@ -431,6 +431,50 @@ def test_directory_traversal_is_rejected(client, bad):
         assert response.status_code == 400, f"{path} 가 {bad} 를 받아들였습니다"
 
 
+def test_prepare_status_starts_idle_and_lists_ratios(client):
+    body = client.get("/api/data/prepare").json()
+
+    assert body["split_ratios"] == ["8:2", "9:1"]
+    assert body["preparation"]["status"] == "idle"
+
+
+@pytest.mark.parametrize("ratio", ("8:2", "9:1"))
+def test_prepare_can_be_started_for_each_ratio(client, monkeypatch, ratio):
+    from src.pipelines.web import datasets
+
+    monkeypatch.setattr(
+        datasets,
+        "prepare_dataset",
+        lambda config: {
+            "ok": True,
+            "supported": True,
+            "exit_code": 0,
+            "artifacts": {key: f"artifacts/p/{key}.json" for key in DATA_ARTIFACT_KEYS},
+            "summary": {"mode": "prepare", "split_ratio": ratio},
+            "message": "준비 완료",
+        },
+    )
+
+    response = client.post("/api/data/prepare", json={"split_ratio": ratio})
+
+    assert response.status_code == 202
+    assert response.json()["preparation"]["split_ratio"] == ratio
+
+
+@pytest.mark.parametrize("bad", ("7:3", "80:20", "", "0.2"))
+def test_prepare_rejects_other_ratios(client, bad):
+    response = client.post("/api/data/prepare", json={"split_ratio": bad})
+
+    assert response.status_code == 400
+    assert any(item["field"] == "split_ratio" for item in response.json()["errors"])
+
+
+def test_prepare_rejects_out_of_range_seed(client):
+    assert client.post(
+        "/api/data/prepare", json={"split_ratio": "8:2", "seed": -1}
+    ).status_code == 422
+
+
 def test_app_does_not_start_jobs_on_import(client, isolated_repo):
     assert client.get("/api/train/jobs").json()["jobs"] == []
     assert client.get("/api/train/jobs").json()["active_job_id"] is None

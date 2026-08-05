@@ -20,17 +20,16 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import tempfile
+from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import os
-import tempfile
-from datetime import datetime, timezone
-
 from .errors import FieldError, WebPathError, WebValidationError
-import subprocess
-
 from .jobs import runner
 from .masking import sanitize_line
 
@@ -343,11 +342,40 @@ def _selection_path() -> Path:
     return web_state_dir() / "data_source.json"
 
 
+def _prepared_selection(stored: dict[str, Any]) -> dict[str, Any] | None:
+    """data pipeline이 준비해 준 산출물을 고른 경우입니다.
+
+    폴더를 훑어 찾은 것이 아니라 pipeline이 위치를 알려 준 것이므로 다시 살피지 않고
+    기록해 둔 URI를 그대로 씁니다. S3 산출물일 수도 있어 폴더 검사가 성립하지 않습니다.
+    """
+
+    data = stored.get("data")
+    if not isinstance(data, dict) or set(data) != set(DATA_ARTIFACT_KEYS):
+        return None
+    return {
+        "origin": "prepared",
+        "directory": stored.get("processed_prefix"),
+        "complete": True,
+        "data": dict(data),
+        "matched": {
+            key: {"name": str(data[key]).rsplit("/", 1)[-1], "uri": data[key]}
+            for key in DATA_ARTIFACT_KEYS
+        },
+        "labels": dict(_LABELS),
+        "missing": [],
+        "problems": [],
+        "examined": [],
+        "available": True,
+        "selected_at": stored.get("selected_at"),
+        "preparation": stored.get("preparation"),
+    }
+
+
 def load_selection() -> dict[str, Any] | None:
     """지금 고른 전처리 데이터셋을 돌려줍니다. 없으면 ``None``입니다.
 
-    저장해 둔 경로의 내용이 그 사이에 바뀌었을 수 있으므로, 돌려주기 전에 폴더를 다시
-    살펴 최신 상태를 함께 담습니다.
+    폴더를 직접 고른 경우에는 그 사이 내용이 바뀌었을 수 있으므로 다시 살펴 최신 상태를
+    담습니다. data pipeline이 준비해 준 경우에는 기록해 둔 URI를 그대로 씁니다.
     """
 
     path = _selection_path()
@@ -355,14 +383,18 @@ def load_selection() -> dict[str, Any] | None:
         stored = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(stored, dict) or not isinstance(stored.get("directory"), str):
+    if not isinstance(stored, dict):
+        return None
+    if stored.get("origin") == "prepared":
+        return _prepared_selection(stored)
+    if not isinstance(stored.get("directory"), str):
         return None
 
-    try:
-        current = inspect_directory(stored["directory"])
-    except WebValidationError as error:
-        # 폴더가 사라졌거나 접근할 수 없게 된 경우입니다. 선택은 남겨 두되 사실대로 알립니다.
+    def unavailable(problems: list[str]) -> dict[str, Any]:
+        """선택은 남겨 두되 지금 쓸 수 없다는 사실을 그대로 알립니다."""
+
         return {
+            "origin": "folder",
             "directory": stored["directory"],
             "selected_at": stored.get("selected_at"),
             "available": False,
@@ -371,33 +403,28 @@ def load_selection() -> dict[str, Any] | None:
             "matched": {key: None for key in DATA_ARTIFACT_KEYS},
             "labels": dict(_LABELS),
             "missing": list(DATA_ARTIFACT_KEYS),
-            "problems": [item["message"] for item in error.as_list()],
+            "problems": problems,
             "examined": [],
         }
 
+    try:
+        current = inspect_directory(stored["directory"])
+    except WebValidationError as error:
+        # 폴더가 사라졌거나 접근할 수 없게 된 경우입니다.
+        return unavailable([item["message"] for item in error.as_list()])
+    except (OSError, ValueError):
+        # 선택 조회가 예외로 터지면 화면 전체가 멈춥니다. 어떤 경우에도 값을 돌려줍니다.
+        return unavailable(["저장해 둔 폴더 경로를 해석할 수 없습니다."])
+
+    current["origin"] = "folder"
     current["available"] = True
     current["selected_at"] = stored.get("selected_at")
     return current
 
 
-def save_selection(directory: object) -> dict[str, Any]:
-    """전처리 데이터셋을 고릅니다. artifact 4개를 모두 찾은 경우에만 저장합니다."""
-
-    result = inspect_directory(directory)
-    if not result["complete"]:
-        missing = ", ".join(_LABELS[key] for key in result["missing"])
-        raise WebValidationError(
-            [FieldError("directory", f"이 폴더에서 {missing}을(를) 찾지 못했습니다.")]
-        )
-
+def _write_selection(payload: dict[str, Any]) -> None:
     target = _selection_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "directory": result["directory"],
-        "selected_at": datetime.now(timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z"),
-    }
     handle, temporary_name = tempfile.mkstemp(
         dir=target.parent, prefix=".data_source-", suffix=".tmp"
     )
@@ -410,8 +437,55 @@ def save_selection(directory: object) -> dict[str, Any]:
         temporary.unlink(missing_ok=True)
         raise
 
+
+def save_prepared_selection(
+    data: Mapping[str, str], preparation: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """data pipeline이 준비해 준 artifact를 현재 데이터셋으로 고릅니다."""
+
+    missing = [key for key in DATA_ARTIFACT_KEYS if not str(data.get(key, "")).strip()]
+    if missing:
+        raise WebValidationError(
+            [FieldError("data", f"준비 결과에 {', '.join(missing)}이(가) 없습니다.")]
+        )
+
+    meta = dict(preparation or {})
+    _write_selection(
+        {
+            "origin": "prepared",
+            "data": {key: str(data[key]) for key in DATA_ARTIFACT_KEYS},
+            "processed_prefix": meta.get("processed_prefix"),
+            "preparation": meta,
+            "selected_at": _now_text(),
+        }
+    )
+    selection = load_selection()
+    if selection is None:  # 저장 직후에는 항상 읽혀야 합니다.
+        raise WebValidationError([FieldError("data", "준비 결과를 저장하지 못했습니다.")])
+    return selection
+
+
+def _now_text() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def save_selection(directory: object) -> dict[str, Any]:
+    """전처리 데이터셋을 고릅니다. artifact 4개를 모두 찾은 경우에만 저장합니다."""
+
+    result = inspect_directory(directory)
+    if not result["complete"]:
+        missing = ", ".join(_LABELS[key] for key in result["missing"])
+        raise WebValidationError(
+            [FieldError("directory", f"이 폴더에서 {missing}을(를) 찾지 못했습니다.")]
+        )
+
+    selected_at = _now_text()
+    _write_selection(
+        {"origin": "folder", "directory": result["directory"], "selected_at": selected_at}
+    )
+    result["origin"] = "folder"
     result["available"] = True
-    result["selected_at"] = payload["selected_at"]
+    result["selected_at"] = selected_at
     return result
 
 
@@ -507,6 +581,123 @@ def verify_with_pipeline(data_inputs: dict[str, str]) -> dict[str, Any]:
         "message": sanitize_line(str(result.get("message") or "")),
         "artifacts": _unwrap_stage(stage_artifacts),
         "summary": _unwrap_stage(stage_summary),
+    }
+
+
+# ---------------------------------------------------- 원본에서 준비 실행
+
+# data pipeline이 지원하는 분할 비율. 값은 data 담당이 정한 것을 그대로 씁니다.
+SPLIT_RATIOS = ("8:2", "9:1")
+
+# 원본을 다 읽어야 하므로 검증보다 훨씬 오래 걸릴 수 있습니다.
+PREPARE_TIMEOUT_SECONDS = 60 * 60
+
+
+def build_prepare_config(
+    split_ratio: str,
+    *,
+    seed: int = 42,
+    overwrite: bool = False,
+    raw_prefix: str | None = None,
+    processed_root: str | None = None,
+) -> dict[str, Any]:
+    """``--only data``로 원본에서 artifact를 만들게 하는 config를 만듭니다."""
+
+    if split_ratio not in SPLIT_RATIOS:
+        allowed = ", ".join(SPLIT_RATIOS)
+        raise WebValidationError(
+            [FieldError("split_ratio", f"{allowed} 중 하나여야 합니다.")]
+        )
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < 2**32:
+        raise WebValidationError(
+            [FieldError("seed", "0 이상 2**32 미만의 정수여야 합니다.")]
+        )
+    if not isinstance(overwrite, bool):
+        raise WebValidationError([FieldError("overwrite", "true 또는 false여야 합니다.")])
+
+    section: dict[str, Any] = {
+        "prepare": True,
+        "split_ratio": split_ratio,
+        "seed": seed,
+        "overwrite": overwrite,
+    }
+    if raw_prefix:
+        section["raw_prefix"] = raw_prefix
+    if processed_root:
+        section["processed_root"] = processed_root
+
+    # storage backend는 환경 변수(PILL_STORAGE_*)가 우선하므로 여기서는 기본만 둡니다.
+    return {
+        "project": {"name": "pill-object-detection"},
+        "execution": {"mode": "real"},
+        "storage": {"backend": "local", "local": {"root": "artifacts"}},
+        "data": section,
+    }
+
+
+def _unsupported_result(result: dict[str, Any]) -> bool:
+    """설치된 data pipeline이 준비 기능을 갖고 있지 않은 경우입니다.
+
+    준비를 요청했는데 응답의 ``summary.mode``가 ``"prepare"``가 아니면, 그 pipeline은
+    ``data.prepare``를 아예 모르고 기존 pass-through 경로로 떨어진 것입니다.
+    """
+
+    summary = result.get("summary")
+    return not (isinstance(summary, Mapping) and summary.get("mode") == "prepare")
+
+
+def prepare_dataset(config: dict[str, Any]) -> dict[str, Any]:
+    """실제 data pipeline을 불러 원본에서 artifact 4개를 만듭니다."""
+
+    from .train_config import config_relative_path, write_runtime_config
+
+    config_id = write_runtime_config(config)
+    try:
+        completed = runner.run_stage(
+            config_relative_path(config_id),
+            "data",
+            cwd=repository_root(),
+            timeout=PREPARE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "supported": True, "exit_code": None, "artifacts": {},
+                "summary": {}, "message": "데이터 준비가 시간 안에 끝나지 않았습니다."}
+    except OSError as error:
+        return {"ok": False, "supported": True, "exit_code": None, "artifacts": {},
+                "summary": {},
+                "message": f"data pipeline을 실행하지 못했습니다({type(error).__name__})."}
+    finally:
+        (config_dir() / f"{config_id}.json").unlink(missing_ok=True)
+
+    result = _parse_result(completed.stdout)
+    if result is None:
+        lines = (completed.stderr or "").strip().splitlines()
+        detail = sanitize_line(lines[-1]) if lines else ""
+        return {"ok": False, "supported": True, "exit_code": completed.returncode,
+                "artifacts": {}, "summary": {},
+                "message": f"data pipeline 결과를 해석하지 못했습니다. {detail}".strip()}
+
+    stage_summary = _unwrap_stage(result.get("summary"))
+    if _unsupported_result({"summary": stage_summary}):
+        return {
+            "ok": False,
+            "supported": False,
+            "exit_code": completed.returncode,
+            "artifacts": {},
+            "summary": stage_summary,
+            "message": (
+                "설치된 data pipeline이 아직 원본에서 데이터를 준비하는 기능을 "
+                "지원하지 않습니다. 준비 기능이 들어간 뒤 다시 시도해 주세요."
+            ),
+        }
+
+    return {
+        "ok": completed.returncode == 0 and result.get("status") == "ok",
+        "supported": True,
+        "exit_code": completed.returncode,
+        "artifacts": _unwrap_stage(result.get("artifacts")),
+        "summary": stage_summary,
+        "message": sanitize_line(str(result.get("message") or "")),
     }
 
 

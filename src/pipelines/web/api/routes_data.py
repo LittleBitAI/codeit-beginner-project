@@ -12,6 +12,7 @@ from fastapi import APIRouter, Body
 from pydantic import BaseModel, Field
 
 from .. import datasets
+from ..data_jobs import get_preparation_runner
 
 
 router = APIRouter(prefix="/api/data", tags=["data"])
@@ -48,6 +49,42 @@ def set_source(payload: DirectoryRequest = Body(...)) -> dict[str, Any]:
 def clear_source() -> dict[str, Any]:
     datasets.clear_selection()
     return {"source": None}
+
+
+class PrepareRequest(BaseModel):
+    """원본에서 artifact를 만들 때 쓰는 설정."""
+
+    split_ratio: str = Field(description='"8:2" 또는 "9:1"')
+    seed: int = Field(default=42, ge=0, lt=2**32)
+    overwrite: bool = Field(default=False)
+    raw_prefix: str | None = Field(default=None, max_length=512)
+    processed_root: str | None = Field(default=None, max_length=512)
+
+
+@router.get("/prepare")
+def prepare_status() -> dict[str, Any]:
+    """지금 돌고 있거나 마지막으로 끝난 준비 실행의 상태입니다."""
+
+    return {
+        "split_ratios": list(datasets.SPLIT_RATIOS),
+        "preparation": get_preparation_runner().status(),
+    }
+
+
+@router.post("/prepare", status_code=202)
+def start_prepare(payload: PrepareRequest = Body(...)) -> dict[str, Any]:
+    """원본에서 artifact 4개를 만들도록 data pipeline을 부릅니다.
+
+    원본을 다 읽어야 해서 오래 걸릴 수 있으므로 시작만 시키고 바로 응답합니다.
+    상태는 ``GET /api/data/prepare``로 확인합니다. 성공하면 그 결과가 곧바로 현재
+    전처리 데이터셋으로 선택됩니다.
+    """
+
+    runner = get_preparation_runner()
+    return {
+        "split_ratios": list(datasets.SPLIT_RATIOS),
+        "preparation": runner.start(payload.model_dump()),
+    }
 
 
 @router.post("/verify")

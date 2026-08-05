@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import threading
+import time
 
 import pytest
 
@@ -35,7 +36,26 @@ def manager(isolated_repo, monkeypatch):
 
 
 @pytest.fixture
-def client(manager):
+def preparation_runner(isolated_repo, monkeypatch):
+    """Test마다 새 준비 runner를 쓰고, 남은 thread가 다음 test로 넘어가지 않게 합니다.
+
+    준비는 background thread에서 돌기 때문에, 정리하지 않으면 다음 test가 바꾼
+    저장소 root를 그 thread가 보게 됩니다.
+    """
+
+    from src.pipelines.web import data_jobs
+
+    fresh = data_jobs.PreparationRunner()
+    monkeypatch.setattr(data_jobs, "_RUNNER", fresh)
+    yield fresh
+
+    deadline = time.monotonic() + 10
+    while fresh.status().get("status") == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
+@pytest.fixture
+def client(manager, preparation_runner):
     """Frontend 없이 API만 올린 TestClient."""
 
     from fastapi.testclient import TestClient

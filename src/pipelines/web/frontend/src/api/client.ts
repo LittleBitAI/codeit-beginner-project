@@ -7,6 +7,7 @@ import type {
   JobListing,
   JobRecord,
   LogPage,
+  PreparationResponse,
   RuntimeConfig,
   ValidationResult,
 } from './types';
@@ -114,6 +115,18 @@ export const api = {
 
   clearDataSource: () =>
     request<{ source: null }>('/api/data/source', { method: 'DELETE' }),
+
+  prepareStatus: () => request<PreparationResponse>('/api/data/prepare'),
+
+  startPreparation: (body: {
+    split_ratio: string;
+    seed?: number;
+    overwrite?: boolean;
+  }) =>
+    request<PreparationResponse>('/api/data/prepare', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   verifyDataSource: (directory: string) =>
     request<{ inspected: DataSource; verification: DataVerification }>('/api/data/verify', {

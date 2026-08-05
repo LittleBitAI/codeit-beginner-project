@@ -5,6 +5,7 @@ import type { DataSource, DataVerification } from '../api/types';
 import { DATA_KEYS } from '../lib/dataKeys';
 import { color, font, radius } from '../design/tokens';
 import { IconCheck, IconError, IconWarning } from './Icon';
+import { PreparePanel } from './PreparePanel';
 import { AlertRow, Button, Panel, controlStyle, invalidControlStyle } from './primitives';
 
 /**
@@ -16,9 +17,11 @@ import { AlertRow, Button, Panel, controlStyle, invalidControlStyle } from './pr
 export function DataSourcePanel({
   source,
   onSelected,
+  onPrepared,
 }: {
   source: DataSource | null;
   onSelected: (source: DataSource) => void;
+  onPrepared: () => void;
 }) {
   const [directory, setDirectory] = useState('');
   const [preview, setPreview] = useState<DataSource | null>(null);
@@ -156,6 +159,8 @@ export function DataSourcePanel({
         )}
 
         {preview && <MatchTable source={preview} heading="찾은 파일" />}
+
+        <PreparePanel onPrepared={onPrepared} />
 
         {verification && (
           <AlertRow

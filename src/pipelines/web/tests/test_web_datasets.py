@@ -395,6 +395,157 @@ def test_verify_handles_unparsable_output_without_leaking_paths(isolated_repo, m
     assert str(REPOSITORY_ROOT) not in result["message"]
 
 
+# --- 원본에서 준비 실행 -------------------------------------------------------
+
+
+@pytest.mark.parametrize("ratio", ("8:2", "9:1"))
+def test_prepare_config_carries_the_chosen_ratio(ratio):
+    config = datasets.build_prepare_config(ratio, seed=7, overwrite=True)
+
+    assert config["data"] == {
+        "prepare": True,
+        "split_ratio": ratio,
+        "seed": 7,
+        "overwrite": True,
+    }
+    # dummy면 data가 준비를 건너뛰고 dummy 결과만 돌려줍니다.
+    assert config["execution"] == {"mode": "real"}
+
+
+@pytest.mark.parametrize("bad", ("7:3", "80:20", "0.2", "", "8:2 ", None, 0.2, True))
+def test_prepare_config_rejects_other_ratios(bad):
+    with pytest.raises(WebValidationError) as error:
+        datasets.build_prepare_config(bad)
+
+    assert error.value.errors[0].field == "split_ratio"
+
+
+@pytest.mark.parametrize("bad", (-1, 2**32, "42", True, 1.5))
+def test_prepare_config_rejects_bad_seed(bad):
+    with pytest.raises(WebValidationError) as error:
+        datasets.build_prepare_config("8:2", seed=bad)
+
+    assert error.value.errors[0].field == "seed"
+
+
+def completed_prepare(status: str = "ok", mode: str = "prepare", returncode: int = 0):
+    import subprocess
+
+    return subprocess.CompletedProcess(
+        [],
+        returncode,
+        json.dumps(
+            {
+                "status": status,
+                "artifacts": {"data": {key: f"artifacts/p/{key}.json" for key in DATA_ARTIFACT_KEYS}},
+                "summary": {
+                    "data": {
+                        "pipeline": "data",
+                        "mode": mode,
+                        "split_ratio": "8:2",
+                        "train_images": 8,
+                        "validation_images": 2,
+                    }
+                },
+                "message": "준비 완료",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        "",
+    )
+
+
+def test_prepare_runs_only_data_stage(isolated_repo, monkeypatch):
+    captured = {}
+
+    def fake_run_stage(path, stage, *, cwd, timeout):
+        captured["stage"] = stage
+        captured["timeout"] = timeout
+        return completed_prepare()
+
+    monkeypatch.setattr(datasets.runner, "run_stage", fake_run_stage)
+
+    result = datasets.prepare_dataset(datasets.build_prepare_config("8:2"))
+
+    assert captured["stage"] == "data"
+    assert captured["timeout"] == datasets.PREPARE_TIMEOUT_SECONDS
+    assert result["ok"] is True
+    assert result["supported"] is True
+    assert set(result["artifacts"]) == set(DATA_ARTIFACT_KEYS)
+    assert result["summary"]["train_images"] == 8
+
+
+def test_prepare_detects_a_pipeline_without_the_feature(isolated_repo, monkeypatch):
+    """준비를 요청했는데 mode가 prepare가 아니면 그 pipeline은 이 기능을 모릅니다."""
+
+    monkeypatch.setattr(
+        datasets.runner,
+        "run_stage",
+        lambda *a, **k: completed_prepare(status="error", mode="integration", returncode=1),
+    )
+
+    result = datasets.prepare_dataset(datasets.build_prepare_config("8:2"))
+
+    assert result["ok"] is False
+    assert result["supported"] is False
+    assert "지원하지 않습니다" in result["message"]
+
+
+def test_prepare_removes_the_temporary_config(isolated_repo, monkeypatch):
+    monkeypatch.setattr(datasets.runner, "run_stage", lambda *a, **k: completed_prepare())
+
+    datasets.prepare_dataset(datasets.build_prepare_config("9:1"))
+
+    assert list((isolated_repo / "artifacts" / "web" / "configs").glob("*.json")) == []
+
+
+def test_prepare_handles_timeout(isolated_repo, monkeypatch):
+    import subprocess
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
+
+    monkeypatch.setattr(datasets.runner, "run_stage", timeout)
+
+    result = datasets.prepare_dataset(datasets.build_prepare_config("8:2"))
+
+    assert result["ok"] is False
+    assert "시간 안에 끝나지 않았습니다" in result["message"]
+
+
+# --- 준비 결과를 데이터셋으로 고르기 -----------------------------------------
+
+
+def test_prepared_selection_round_trips(isolated_repo):
+    data = {key: f"s3://bucket/processed/{key}.json" for key in DATA_ARTIFACT_KEYS}
+
+    saved = datasets.save_prepared_selection(data, {"split_ratio": "9:1", "processed_prefix": "p/"})
+
+    assert saved["origin"] == "prepared"
+    assert saved["complete"] is True
+    assert saved["data"] == data
+
+    loaded = datasets.load_selection()
+    assert loaded["origin"] == "prepared"
+    assert loaded["data"] == data
+    # s3 산출물이라 폴더를 훑을 수 없습니다. 기록해 둔 값을 그대로 씁니다.
+    assert loaded["available"] is True
+    assert loaded["preparation"]["split_ratio"] == "9:1"
+
+
+def test_prepared_selection_rejects_incomplete_data(isolated_repo):
+    with pytest.raises(WebValidationError):
+        datasets.save_prepared_selection({"train_manifest_uri": "a"})
+
+
+def test_folder_selection_still_reports_its_origin(isolated_repo, dataset_dir):
+    saved = datasets.save_selection(dataset_dir)
+
+    assert saved["origin"] == "folder"
+    assert datasets.load_selection()["origin"] == "folder"
+
+
 def test_corrupt_selection_file_is_ignored(isolated_repo):
     path = isolated_repo / "artifacts" / "web" / "data_source.json"
     path.parent.mkdir(parents=True, exist_ok=True)
