@@ -2,7 +2,11 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import type { Defaults, TeamRun } from '../api/types';
 
-const state = vi.hoisted(() => ({ latestEvent: null as TeamRun | null }));
+const state = vi.hoisted(() => ({
+  latestEvent: null as TeamRun | null,
+  actor: null as string | null,
+  user: { username: 'a' } as { username: string } | null,
+}));
 const cloud = vi.hoisted(() => ({
   listRuns: vi.fn(),
   listLogs: vi.fn(),
@@ -12,7 +16,8 @@ const cloud = vi.hoisted(() => ({
 vi.mock('../team/cloud', () => cloud);
 vi.mock('../team/TeamContext', () => ({
   useTeam: () => ({
-    config: { enabled: true, team_id: 'pill-team' },
+    config: { enabled: true, team_id: 'pill-team', actor: state.actor },
+    user: state.user,
     latestEvent: state.latestEvent,
   }),
 }));
@@ -90,6 +95,8 @@ const { TeamActivity } = await import('./TeamActivity');
 
 beforeEach(() => {
   state.latestEvent = null;
+  state.actor = null;
+  state.user = { username: 'a' };
   cloud.listRuns.mockResolvedValue([run('a', '1')]);
   cloud.listLogs.mockResolvedValue([
     {
@@ -139,6 +146,18 @@ test('로그인이 확인해 준 이름과 직접 적은 이름을 구분해 보
   render(<TeamActivity defaults={defaults} />);
   await waitFor(() => expect(screen.getAllByText('a-run').length).toBeGreaterThan(0));
   expect(screen.getAllByText('이름 직접 입력')).toHaveLength(1);
+});
+
+test('로그인할 수 없는 환경에서는 왜 팀 기록이 안 보이는지 말해 준다', async () => {
+  // Colab입니다. 쓰기는 되지만 읽기는 로그인이 필요합니다. 빈 목록을 보여 주면
+  // 설정이 잘못된 줄 알고 헤매게 됩니다.
+  state.user = null;
+  state.actor = '지현 (Colab)';
+  render(<TeamActivity defaults={defaults} />);
+
+  expect(await screen.findByText('이 환경에서는 팀 기록을 볼 수 없습니다')).toBeInTheDocument();
+  expect(screen.getByText('지현 (Colab)')).toBeInTheDocument();
+  expect(cloud.listRuns).not.toHaveBeenCalled();
 });
 
 test('완료 결과를 JSON이 아니라 한글 label로 보여준다', async () => {

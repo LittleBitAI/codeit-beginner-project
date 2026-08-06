@@ -94,16 +94,16 @@ os.environ["PILL_TEAM_ACTOR"] = "이름 (Colab)"   # 팀 화면에 이렇게 남
 # 나머지 PILL_TEAM_* 값은 팀에서 받은 것을 그대로 넣습니다
 subprocess.Popen(["python", "-m", "src.pipelines.web.server"])
 time.sleep(8)
-output.serve_kernel_port_as_window(8000)
+output.serve_kernel_port_as_iframe(8000, height=900)   # 창 방식은 브라우저 보안 변경으로 막혔습니다
 ```
 
 `PILL_TEAM_ACTOR`를 넣으면 **로그인 없이도 이 학습이 팀 활동에 올라갑니다.** 다른 팀원이 자기 PC에서 `/team` 화면을 열면 진행 상황과 로그가 실시간으로 보입니다.
 
 이 이름은 Cognito가 확인해 주는 값이 아니라 직접 적는 값이라, 팀 화면에는 `이름 직접 입력`이라고 함께 표시됩니다. 본인 이름을 정확히 적어 주세요.
 
-`PILL_TEAM_ACTOR`를 넣지 않으면 예전처럼 로그인을 요구하고, 로그인을 못 하므로 학습이 시작되지 않습니다. 팀 공유가 필요 없으면 `PILL_TEAM_SYNC_ENABLED=false`로 두세요.
+**`PILL_TEAM_ACTOR`를 반드시 넣으세요.** 넣지 않으면 화면이 로그인부터 요구하는데, Colab 주소는 세션마다 바뀌어 Cognito에 등록할 수 없으므로 그 벽을 넘을 수 없습니다. 팀 공유가 필요 없으면 `PILL_TEAM_SYNC_ENABLED=false`로 두면 로그인 없이 열립니다.
 
-**Colab 화면에서는 `/team` 탭이 열리지 않습니다.** 팀 기록을 *읽는* 것은 로그인이 필요한데, Cognito에 등록된 주소는 `localhost:8000`뿐이고 Colab 주소는 세션마다 바뀌어 등록할 수 없습니다. 쓰기만 IAM으로 열려 있습니다. 팀 활동은 각자 PC의 GUI에서 보세요.
+**Colab에서 `/team` 탭은 "이 환경에서는 팀 기록을 볼 수 없습니다"만 보여 줍니다.** 팀 기록을 *읽는* 것은 로그인이 필요하고, 이 주소로는 로그인할 수 없기 때문입니다. 쓰기만 IAM으로 열려 있어서 여기서 시작한 학습은 팀에 잘 올라갑니다. 팀 활동은 로그인이 되는 PC의 화면에서 보세요.
 
 ## 자주 막히는 곳
 

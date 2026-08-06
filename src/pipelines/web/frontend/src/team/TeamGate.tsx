@@ -9,7 +9,10 @@ export function TeamGate({ children }: { children: ReactNode }) {
   if (!team.ready) {
     return <div style={{ padding: 32, fontFamily: font.sans }}>팀 설정을 확인하고 있습니다…</div>;
   }
-  if (!team.config.enabled || team.user) return <>{children}</>;
+  // actor가 있으면 서버가 "여기는 로그인할 수 없는 환경"이라고 알려 준 것입니다.
+  // Colab 주소는 세션마다 바뀌어 Cognito redirect에 등록할 수 없으므로, 막으면
+  // 화면을 아예 못 씁니다. 학습은 그 이름으로 팀에 기록됩니다.
+  if (!team.config.enabled || team.user || team.config.actor) return <>{children}</>;
   return (
     <main
       style={{
