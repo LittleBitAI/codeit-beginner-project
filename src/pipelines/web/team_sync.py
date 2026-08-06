@@ -133,6 +133,9 @@ class TeamSyncConfig:
             "user_pool_id": self.user_pool_id,
             "user_pool_client_id": self.user_pool_client_id,
             "cognito_domain": self.cognito_domain,
+            # 화면이 로그인 관문을 열지 말지 정할 때 씁니다. 비밀이 아니고 팀
+            # 목록에도 그대로 보이는 이름입니다.
+            "actor": self.actor_name,
         }
 
 

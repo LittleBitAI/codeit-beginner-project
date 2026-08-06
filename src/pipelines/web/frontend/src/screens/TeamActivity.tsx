@@ -107,6 +107,9 @@ function ValueGrid({ rows }: { rows: [string, string][] }) {
 export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
   const team = useTeam();
   const teamId = team.config.team_id;
+  // 팀 기록 조회는 Cognito 로그인만 받습니다. 로그인할 수 없는 환경에서 부르면
+  // 반드시 실패하므로 아예 보내지 않습니다.
+  const canRead = !team.config.actor || Boolean(team.user);
   const [runs, setRuns] = useState<TeamRun[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [lines, setLines] = useState<LogLine[]>([]);
@@ -118,14 +121,14 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
   );
 
   const refresh = useCallback(async () => {
-    if (!teamId) return;
+    if (!teamId || !canRead) return;
     try {
       setRuns(await cloud.listRuns(teamId));
       setError(null);
     } catch (problem) {
       setError(problem instanceof Error ? problem.message : '팀 기록을 읽지 못했습니다.');
     }
-  }, [teamId]);
+  }, [teamId, canRead]);
 
   useEffect(() => {
     void refresh();
@@ -136,7 +139,7 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
   }, [team.latestEvent]);
 
   useEffect(() => {
-    if (!teamId || !selected) return;
+    if (!teamId || !selected || !canRead) return;
     let active = true;
     let cursor = 0;
     setLines([]);
@@ -172,6 +175,19 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
     return (
       <AlertRow level="info" title="팀 동기화가 꺼져 있습니다">
         AWS stack 출력값을 서버 환경 변수에 넣고 PILL_TEAM_SYNC_ENABLED=true로 설정하세요.
+      </AlertRow>
+    );
+  }
+
+  // 팀 기록을 읽으려면 로그인이 필요합니다. Colab처럼 로그인할 수 없는 환경에서는
+  // 쓰기만 IAM으로 열려 있어 이 화면을 채울 수 없습니다. 빈 목록이나 원문 오류를
+  // 보여 주면 설정이 잘못된 줄 알고 헤매게 됩니다.
+  if (!team.user && team.config.actor) {
+    return (
+      <AlertRow level="info" title="이 환경에서는 팀 기록을 볼 수 없습니다">
+        여기서 시작한 학습은 <strong>{team.config.actor}</strong> 이름으로 팀에 공유됩니다.
+        다만 팀 기록을 읽으려면 로그인이 필요한데 이 주소는 Cognito에 등록할 수 없습니다.
+        팀 활동은 로그인이 되는 PC의 화면에서 보세요.
       </AlertRow>
     );
   }

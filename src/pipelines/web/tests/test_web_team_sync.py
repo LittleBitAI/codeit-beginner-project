@@ -221,8 +221,21 @@ def test_public_config_never_contains_credentials():
         "user_pool_id",
         "user_pool_client_id",
         "cognito_domain",
+        "actor",
     }
     assert not any("secret" in key or "credential" in key for key in public)
+
+
+def test_actor_reaches_the_browser_so_the_gui_can_skip_login():
+    # 화면이 이 값을 봐야 로그인 관문을 열어 줍니다. 비밀이 아니고 팀 목록에도
+    # 그대로 보이는 이름입니다.
+    without = enabled_config().public_dict()
+    with_actor = TeamSyncConfig(
+        **{**enabled_config().__dict__, "actor_name": "지현 (Colab)"}
+    ).public_dict()
+
+    assert without["actor"] is None
+    assert with_actor["actor"] == "지현 (Colab)"
 
 
 def test_team_config_endpoint_is_disabled_by_default(client):
@@ -236,6 +249,7 @@ def test_team_config_endpoint_is_disabled_by_default(client):
         "user_pool_id": None,
         "user_pool_client_id": None,
         "cognito_domain": None,
+        "actor": None,
     }
 
 

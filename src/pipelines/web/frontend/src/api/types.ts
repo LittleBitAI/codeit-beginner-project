@@ -130,6 +130,8 @@ export interface TeamConfig {
   user_pool_id: string | null;
   user_pool_client_id: string | null;
   cognito_domain: string | null;
+  /** 설정되어 있으면 로그인 없이 이 이름으로 팀에 기록하는 환경입니다. */
+  actor: string | null;
 }
 
 export interface TeamRun {

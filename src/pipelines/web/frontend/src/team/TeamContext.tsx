@@ -26,6 +26,7 @@ const DISABLED: TeamConfig = {
   user_pool_id: null,
   user_pool_client_id: null,
   cognito_domain: null,
+  actor: null,
 };
 
 const TeamContext = createContext<TeamState>({
