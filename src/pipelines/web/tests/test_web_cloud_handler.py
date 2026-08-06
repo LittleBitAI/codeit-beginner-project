@@ -1,14 +1,18 @@
-"""AWS Lambda resolver의 팀 권한과 상태 전이 test."""
+"""AWS Lambda resolver의 팀 권한과 상태 전이, 그리고 배포되는 schema의 drift test."""
 
 from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 
 import pytest
 from boto3.dynamodb.types import TypeSerializer
 
 from src.pipelines.web.cloud import handler as cloud
+
+
+CLOUD_DIR = Path(__file__).resolve().parents[1] / "cloud"
 
 
 class FakeTable:
@@ -209,6 +213,35 @@ def test_rejects_a_different_team_before_reading_table(table):
             ),
             None,
         )
+
+
+def _comparable(schema: str) -> str:
+    """주석을 걷어내고 공백을 하나로 줄여 형식 차이를 무시합니다."""
+
+    without_comments = [line.split("#", 1)[0] for line in schema.splitlines()]
+    return " ".join(" ".join(without_comments).split())
+
+
+def _inline_definition() -> str:
+    """template.yaml 안에 인라인으로 박혀 있는 AppSync schema만 떼어 옵니다."""
+
+    lines = (CLOUD_DIR / "template.yaml").read_text(encoding="utf-8").splitlines()
+    start = next(index for index, line in enumerate(lines) if line.strip() == "Definition: |")
+    body_indent = len(lines[start]) - len(lines[start].lstrip()) + 2
+    body = []
+    for line in lines[start + 1 :]:
+        if line.strip() and len(line) - len(line.lstrip()) < body_indent:
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
+def test_deployed_schema_matches_the_reference_file():
+    # AppSync에 실제로 올라가는 것은 template.yaml의 인라인 schema이고
+    # schema.graphql은 읽기 좋으라고 둔 사본입니다. 사본만 고치고 배포하면
+    # 아무것도 바뀌지 않은 채 성공합니다.
+    reference = (CLOUD_DIR / "schema.graphql").read_text(encoding="utf-8")
+    assert _comparable(_inline_definition()) == _comparable(reference)
 
 
 def test_subscription_connection_also_requires_group(table):
