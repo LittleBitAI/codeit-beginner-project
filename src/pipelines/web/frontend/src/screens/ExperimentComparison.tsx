@@ -37,8 +37,9 @@ function relationLabel(experiments: ExperimentSummary[]): string {
 function DatasetNotice({ experiments }: { experiments: ExperimentSummary[] }) {
   if (experiments.length < 2) {
     return (
-      <AlertRow level="info" title="비교할 실험을 2개 이상 선택해 주세요">
-        선택하면 같은 dataset 입력끼리 비교 중인지 이 자리에 표시됩니다.
+      <AlertRow level="info" title="dataset 동일 여부는 실험 2개부터 판정합니다">
+        하나를 고르면 그 실험의 설정과 결과만 보여 주고, 2개 이상이면 같은 dataset 입력끼리
+        비교 중인지 이 자리에 표시됩니다.
       </AlertRow>
     );
   }
@@ -147,7 +148,9 @@ function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) 
       values: experiments.map((experiment) => loss(experiment.metrics.best_validation_loss)),
     },
     {
-      label: 'mAP',
+      // evaluate가 내는 `mAP`는 IoU 0.75~0.95 평균입니다. 이름만 mAP로 적으면
+      // 흔한 mAP@0.5로 읽혀 값이 낮아 보입니다.
+      label: 'mAP@[0.75:0.95]',
       values: experiments.map((experiment) => metric(experiment.metrics.map)),
     },
     {
@@ -241,7 +244,9 @@ export function ExperimentComparison() {
   );
 
   useEffect(() => {
-    if (selectedRunIds.length < 2) {
+    // 목록은 registry index만 읽어 모델과 하이퍼파라미터가 비어 있습니다. 하나만
+    // 골라도 record를 읽어 채워 줍니다.
+    if (selectedRunIds.length === 0) {
       setCompared([]);
       setCompareError(null);
       return;
@@ -281,7 +286,8 @@ export function ExperimentComparison() {
           { term: '판정 불가', meaning: '이전 기록에 dataset 정보가 일부 빠진 경우입니다' },
         ]}
       >
-        비교할 실험을 2개 이상 고르세요. 기록에 없는 값은 추정하지 않고 - 로 표시합니다.
+        하나만 골라도 그 실험의 설정과 결과가 열리고, 2개 이상이면 나란히 비교합니다. 기록에
+        없는 값은 추정하지 않고 - 로 표시합니다.
       </ScreenIntro>
 
       {listing.error && (
@@ -357,9 +363,9 @@ export function ExperimentComparison() {
       <DatasetNotice experiments={compared} />
 
       <Panel title="비교표" bodyStyle={{ padding: 0 }}>
-        {selectedIds.length < 2 ? (
-          <EmptyState message="위에서 실험을 2개 이상 선택하면 비교표가 열립니다." />
-        ) : compared.length < 2 ? (
+        {selectedIds.length === 0 ? (
+          <EmptyState message="위에서 실험을 선택하면 설정과 결과가 열립니다. 2개 이상이면 나란히 비교합니다." />
+        ) : compared.length === 0 ? (
           <EmptyState message="선택한 실험의 상세 기록을 불러오고 있습니다." />
         ) : (
           <ComparisonTable experiments={compared} />
