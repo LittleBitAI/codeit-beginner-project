@@ -156,6 +156,49 @@ def test_appsync_parsed_awsjson_is_stored_as_json_text(table):
     assert json.loads(batch["lines"]) == [{"seq": 1, "loss": 0.5}]
 
 
+def test_evaluation_is_kept_when_a_later_update_omits_it(table):
+    created = cloud.handler(
+        event(
+            "createRun",
+            {"teamId": "pill-team", "input": create_input()},
+            groups=["train-team"],
+        ),
+        None,
+    )
+    assert created["evaluation"] == "{}"
+
+    def update(revision, **extra):
+        payload = {
+            "eventId": f"event-{revision}",
+            "cloudRunId": "c" * 32,
+            "revision": revision,
+            "status": "succeeded",
+            "startedAt": created["createdAt"],
+            "finishedAt": "2026-08-05T00:01:00.000Z",
+            "message": None,
+            "progress": "{}",
+            "summary": "{}",
+            "artifacts": "{}",
+            "heartbeatAt": "2026-08-05T00:01:00.000Z",
+            **extra,
+        }
+        return cloud.handler(
+            event("publishRunUpdate", {"teamId": "pill-team", "input": payload}), None
+        )
+
+    # 이 배포 전에 만들어진 기록에는 evaluation 속성이 아예 없습니다.
+    del table.items[(cloud._pk("pill-team"), cloud._run_sk("c" * 32))]["evaluation"]
+    legacy = update(1)
+    assert legacy["status"] == "succeeded"
+
+    stored = update(2, evaluation={"status": "succeeded", "metrics": {"mAP": 0.73}})
+    assert json.loads(stored["evaluation"])["metrics"]["mAP"] == 0.73
+
+    # 30초마다 오는 heartbeat는 evaluation을 싣지 않습니다. 지우면 안 됩니다.
+    heartbeat = update(3)
+    assert json.loads(heartbeat["evaluation"])["metrics"]["mAP"] == 0.73
+
+
 def test_rejects_a_different_team_before_reading_table(table):
     with pytest.raises(PermissionError, match="다른 teamId"):
         cloud.handler(

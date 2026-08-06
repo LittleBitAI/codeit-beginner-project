@@ -23,6 +23,9 @@ type TeamRun @aws_cognito_user_pools @aws_iam {
   progress: AWSJSON!
   summary: AWSJSON!
   artifacts: AWSJSON!
+  # 이 field가 생기기 전에 만들어진 기록에는 값이 없습니다. nullable로 두지 않으면
+  # 옛 학습 한 건 때문에 teamRuns query 전체가 실패합니다.
+  evaluation: AWSJSON
   message: String
   createdAt: AWSDateTime!
   startedAt: AWSDateTime
@@ -59,6 +62,9 @@ input RunUpdateInput {
   progress: AWSJSON!
   summary: AWSJSON!
   artifacts: AWSJSON!
+  # 30초마다 오는 heartbeat는 이 값을 싣지 않습니다. 빠져 있으면 저장된 값을
+  # 그대로 둡니다.
+  evaluation: AWSJSON
   heartbeatAt: AWSDateTime!
 }
 

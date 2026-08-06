@@ -103,6 +103,71 @@ def test_outbox_batches_logs_and_masks_sensitive_values(isolated_repo, monkeypat
     assert variables["input"]["expiresAt"] > 0
 
 
+def test_update_payload_carries_metrics_without_local_paths(isolated_repo, monkeypatch):
+    transport = FakeTransport()
+    sync = TeamSync(enabled_config(), transport=transport)
+    monkeypatch.setattr(sync, "_ensure_worker", lambda: None)
+    record = JobRecord(
+        job_id="a" * 32,
+        config_id="b" * 32,
+        run_id="run-a",
+        status="succeeded",
+        cloud_run_id="c" * 32,
+    )
+    # 평가 기록 전체에는 로컬 경로와 storage 설정이 들어 있습니다. 팀에게는 지표만
+    # 보내야 합니다.
+    record.evaluation = {
+        "status": "succeeded",
+        "finished_at": "2026-08-05T00:02:00.000Z",
+        "message": "평가를 마쳤습니다.",
+        "exit_code": 0,
+        "artifacts": {"metrics_uri": r"C:\Users\person\artifacts\metrics.json"},
+        "summary": {
+            "metrics": {
+                "mAP": 0.7348,
+                "mAP50": None,
+                "mAP75": 0.9726,
+                "precision50": None,
+                "recall50": None,
+            }
+        },
+        "settings": {"checkpoint_uri": r"C:\Users\person\best.pt"},
+        "storage": {"backend": "s3", "s3": {"secret_access_key": "very-secret"}},
+    }
+    record.registration = {"status": "succeeded"}
+
+    sync.enqueue_update(record)
+
+    assert sync.publish_pending() == 1
+    payload = transport.calls[-1]["variables"]["input"]
+    evaluation = json.loads(payload["evaluation"])
+    assert evaluation["status"] == "succeeded"
+    assert evaluation["registration_status"] == "succeeded"
+    assert evaluation["metrics"]["mAP"] == 0.7348
+    assert evaluation["metrics"]["mAP50"] is None
+    encoded = json.dumps(evaluation)
+    assert "C:\\Users\\person" not in encoded
+    assert "very-secret" not in encoded
+
+
+def test_update_payload_omits_evaluation_before_it_exists(isolated_repo, monkeypatch):
+    transport = FakeTransport()
+    sync = TeamSync(enabled_config(), transport=transport)
+    monkeypatch.setattr(sync, "_ensure_worker", lambda: None)
+    record = JobRecord(
+        job_id="a" * 32,
+        config_id="b" * 32,
+        run_id="run-a",
+        cloud_run_id="c" * 32,
+    )
+
+    sync.enqueue_update(record)
+
+    assert sync.publish_pending() == 1
+    # 빈 값을 실어 보내면 나중에 도착한 heartbeat가 평가 지표를 덮어씁니다.
+    assert "evaluation" not in transport.calls[-1]["variables"]["input"]
+
+
 def test_public_config_never_contains_credentials():
     public = enabled_config().public_dict()
     assert set(public) == {

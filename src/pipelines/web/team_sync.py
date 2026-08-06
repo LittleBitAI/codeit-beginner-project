@@ -49,6 +49,35 @@ mutation PublishLogBatch($teamId: ID!, $input: LogBatchInput!) {
 MAX_BATCH_LINES = 100
 MAX_BATCH_BYTES = 64 * 1024
 
+# Evaluate가 metrics.json에 쓰는 이름을 그대로 씁니다. 이름을 한 번 더 번역하면
+# 어느 쪽이 진짜인지 알기 어려워집니다. "mAP"가 곧 mAP@[0.75:0.95]입니다.
+SHARED_METRIC_KEYS = ("mAP", "mAP50", "mAP75", "precision50", "recall50")
+
+
+def _team_evaluation(public: dict[str, Any]) -> dict[str, Any]:
+    """평가 기록에서 팀 화면이 쓸 지표만 추립니다.
+
+    기록 전체에는 작성자 PC의 경로와 storage 설정이 들어 있어 그대로 보내면
+    안 됩니다. 평가를 아직 돌리지 않았으면 빈 dict입니다.
+    """
+
+    evaluation = public.get("evaluation")
+    if not isinstance(evaluation, dict) or not evaluation:
+        return {}
+    summary = evaluation.get("summary")
+    metrics = summary.get("metrics") if isinstance(summary, dict) else None
+    values = metrics if isinstance(metrics, dict) else {}
+    registration = public.get("registration")
+    return {
+        "status": evaluation.get("status"),
+        "finished_at": evaluation.get("finished_at"),
+        "message": evaluation.get("message"),
+        "metrics": {key: values.get(key) for key in SHARED_METRIC_KEYS},
+        "registration_status": (
+            registration.get("status") if isinstance(registration, dict) else None
+        ),
+    }
+
 
 def _required(environment: Mapping[str, str], name: str) -> str:
     value = environment.get(name, "").strip()
@@ -226,25 +255,27 @@ class TeamSync:
             return
         record.sync_revision += 1
         public = redact(record.to_dict())
-        self._append(
-            {
-                "kind": "update",
-                "event_id": f"{record.job_id}:update:{record.sync_revision}",
-                "payload": {
-                    "eventId": f"{record.job_id}:update:{record.sync_revision}",
-                    "cloudRunId": record.cloud_run_id,
-                    "revision": record.sync_revision,
-                    "status": record.status,
-                    "startedAt": record.started_at,
-                    "finishedAt": record.finished_at,
-                    "message": record.message,
-                    "progress": json.dumps(public["progress"], ensure_ascii=False, allow_nan=False),
-                    "summary": json.dumps(public["summary"], ensure_ascii=False, allow_nan=False),
-                    "artifacts": json.dumps(public["artifacts"], ensure_ascii=False, allow_nan=False),
-                    "heartbeatAt": public.get("updated_at") or _utc_now(),
-                },
-            }
-        )
+        event_id = f"{record.job_id}:update:{record.sync_revision}"
+        payload = {
+            "eventId": event_id,
+            "cloudRunId": record.cloud_run_id,
+            "revision": record.sync_revision,
+            "status": record.status,
+            "startedAt": record.started_at,
+            "finishedAt": record.finished_at,
+            "message": record.message,
+            "progress": json.dumps(public["progress"], ensure_ascii=False, allow_nan=False),
+            "summary": json.dumps(public["summary"], ensure_ascii=False, allow_nan=False),
+            "artifacts": json.dumps(public["artifacts"], ensure_ascii=False, allow_nan=False),
+            "heartbeatAt": public.get("updated_at") or _utc_now(),
+        }
+        evaluation = _team_evaluation(public)
+        # 평가 전 update에 빈 값을 실으면 나중에 도착한 heartbeat가 지표를 지웁니다.
+        if evaluation:
+            payload["evaluation"] = json.dumps(
+                evaluation, ensure_ascii=False, allow_nan=False
+            )
+        self._append({"kind": "update", "event_id": event_id, "payload": payload})
 
     def enqueue_log(self, record: Any, entry: dict[str, Any]) -> None:
         if not self.enabled or not getattr(record, "cloud_run_id", None):
