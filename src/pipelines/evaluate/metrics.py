@@ -22,6 +22,16 @@ import numpy as np
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
+from .analysis import (
+    BACKGROUND_LABEL,
+    SWEEP_THRESHOLDS,
+    best_f1_threshold,
+    build_confusion_matrix,
+    classify_false_positives,
+    per_image_breakdown,
+    summarize_matches,
+    sweep_score_thresholds,
+)
 from .errors import MetricError
 
 
@@ -98,66 +108,6 @@ def _mean_or_none(values: np.ndarray) -> float | None:
 def _ratio(numerator: int, denominator: int) -> float | None:
     """분모가 0이면 ``0.0``이 아니라 ``None``입니다."""
     return float(numerator) / float(denominator) if denominator > 0 else None
-
-
-def _f1(precision: float | None, recall: float | None) -> float | None:
-    if precision is None or recall is None or precision + recall == 0:
-        return None
-    return 2.0 * precision * recall / (precision + recall)
-
-
-def summarize_matches(
-    eval_imgs: Sequence[Any],
-    t_index: int,
-    score_threshold: float,
-    *,
-    category_id: int | None = None,
-) -> dict[str, Any]:
-    """IoU 임계값 ``t_index``, score 임계값에서의 TP/FP/FN을 집계합니다.
-
-    ``dtMatches``는 score 내림차순 greedy 매칭 결과이므로, 매칭 이후에 저score
-    예측을 걸러내는 것은 매칭 이전에 걸러내는 것과 동일합니다. (낮은 score 예측은
-    높은 score 예측이 이미 가져간 ground truth를 뺏을 수 없습니다.)
-
-    ``evalImgs``의 detection 목록은 ``evaluateImg``가 이미 maxDet으로 잘라 두었기
-    때문에 이미지당 최대 detection 수가 자동으로 반영됩니다.
-    """
-    true_positive = 0
-    false_positive = 0
-    truth_count = 0
-
-    for entry in eval_imgs:
-        if entry is None:
-            continue
-        if list(entry["aRng"]) != _AREA_RANGE_ALL:
-            continue
-        if category_id is not None and entry["category_id"] != category_id:
-            continue
-
-        gt_ignore = np.asarray(entry["gtIgnore"], dtype=bool)
-        truth_count += int((~gt_ignore).sum())
-
-        scores = np.asarray(entry["dtScores"], dtype=float)
-        if scores.size == 0:
-            continue
-        dt_ignore = np.asarray(entry["dtIgnore"], dtype=bool)
-        dt_matches = np.asarray(entry["dtMatches"], dtype=float)
-        keep = (scores >= score_threshold) & ~dt_ignore[t_index]
-        matched = dt_matches[t_index][keep]
-        true_positive += int((matched > 0).sum())
-        false_positive += int((matched == 0).sum())
-
-    false_negative = truth_count - true_positive
-    precision = _ratio(true_positive, true_positive + false_positive)
-    recall = _ratio(true_positive, true_positive + false_negative)
-    return {
-        "tp": true_positive,
-        "fp": false_positive,
-        "fn": false_negative,
-        "precision": precision,
-        "recall": recall,
-        "f1": _f1(precision, recall),
-    }
 
 
 def _image_index(records: Sequence[Mapping[str, Any]]) -> dict[str, int]:
@@ -243,20 +193,69 @@ def _prediction_counts(predictions: Sequence[Mapping[str, Any]]) -> dict[int, in
     return counts
 
 
-def _empty_analysis(truth_total: int) -> dict[str, Any]:
-    """예측이 하나도 없을 때의 보조 지표입니다."""
-    return {
-        "score_threshold": ANALYSIS_SCORE_THRESHOLD,
-        "by_iou": {
-            label: {
+def _empty_analysis(
+    records: Sequence[Mapping[str, Any]],
+    truth_counts: Mapping[int, int],
+    class_names: Mapping[int, str],
+) -> dict[str, Any]:
+    """예측이 하나도 없을 때의 보조 지표입니다.
+
+    예측이 없으면 모든 ground truth가 미탐지이므로, 값을 비우지 않고 그 사실이
+    드러나는 형태로 채웁니다. 자리표시자만 두면 "분석하지 않음"과 "분석했더니
+    전부 놓쳤음"을 구분할 수 없기 때문입니다.
+    """
+    truth_total = sum(truth_counts.values())
+    category_ids = sorted(truth_counts)
+    counts = {
+        "tp": 0,
+        "fp": 0,
+        "fn": truth_total,
+        "precision": None,
+        "recall": _ratio(0, truth_total),
+        "f1": None,
+    }
+    # 모든 ground truth가 background 열(FN)로 갑니다.
+    matrix = [[0] * (len(category_ids) + 1) for _ in range(len(category_ids) + 1)]
+    for order, category_id in enumerate(category_ids, start=1):
+        matrix[order][0] = truth_counts[category_id]
+    confusion = {
+        "labels": [BACKGROUND_LABEL]
+        + [class_names.get(category_id, str(category_id)) for category_id in category_ids],
+        "category_ids": [None, *category_ids],
+        "matrix": matrix,
+    }
+    per_image = sorted(
+        (
+            {
+                "image_id": record["image_key"],
+                "truth_count": len(record["annotations"]),
+                "prediction_count": 0,
                 "tp": 0,
                 "fp": 0,
-                "fn": truth_total,
+                "fn": len(record["annotations"]),
                 "precision": None,
-                "recall": _ratio(0, truth_total),
-                "f1": None,
+                "recall": _ratio(0, len(record["annotations"])),
+                "failure_count": len(record["annotations"]),
             }
-            for label, _ in ANALYSIS_IOU_INDICES
+            for record in records
+        ),
+        key=lambda row: (-row["failure_count"], -row["fn"], str(row["image_id"])),
+    )
+    labels = [label for label, _ in ANALYSIS_IOU_INDICES]
+    return {
+        "score_threshold": ANALYSIS_SCORE_THRESHOLD,
+        "by_iou": {label: dict(counts) for label in labels},
+        "confusion_matrix": {label: confusion for label in labels},
+        "score_sweep": {
+            label: {f"{threshold:.2f}": dict(counts) for threshold in SWEEP_THRESHOLDS}
+            for label in labels
+        },
+        # F1을 계산할 수 있는 지점이 하나도 없습니다.
+        "best_f1": {label: None for label in labels},
+        "per_image": {label: per_image for label in labels},
+        "error_breakdown": {
+            label: {"localization": 0, "classification": 0, "background": 0, "duplicate": 0}
+            for label in labels
         },
     }
 
@@ -317,7 +316,7 @@ def _report_without_predictions(
             "precision75": None,
             "recall75": zero_if_scored,
         },
-        "analysis": _empty_analysis(annotation_count),
+        "analysis": _empty_analysis(records, truth_counts, class_names),
         "per_class": per_class,
     }
 
@@ -326,7 +325,7 @@ def _run_cocoeval(
     ground_truth: Mapping[str, Any],
     detections: Sequence[Mapping[str, Any]],
     max_detections: int,
-) -> COCOeval:
+) -> tuple[COCOeval, COCOeval]:
     """COCOeval을 한 번 실행합니다.
 
     ``COCO()`` 생성자와 ``evaluate()``/``accumulate()``가 진행 상황을 표준출력으로
@@ -348,7 +347,18 @@ def _run_cocoeval(
         evaluator.params.areaRngLbl = ["all"]
         evaluator.evaluate()
         evaluator.accumulate()
-    return evaluator
+
+        # class를 무시하고 한 번 더 매칭합니다. 기본 pass는 같은 class 안에서만
+        # 매칭하므로 class를 혼동한 경우가 보이지 않기 때문입니다. confusion
+        # matrix에만 쓰이고 점수는 건드리지 않으므로 accumulate()는 필요 없습니다.
+        agnostic = COCOeval(coco_gt, coco_dt, iouType="bbox")
+        agnostic.params.iouThrs = np.asarray(COCO_IOU_THRESHOLDS, dtype=float)
+        agnostic.params.maxDets = [max_detections]
+        agnostic.params.areaRng = [list(_AREA_RANGE_ALL)]
+        agnostic.params.areaRngLbl = ["all"]
+        agnostic.params.useCats = 0
+        agnostic.evaluate()
+    return evaluator, agnostic
 
 
 def evaluate_detections(
@@ -393,7 +403,7 @@ def evaluate_detections(
     )
 
     try:
-        evaluator = _run_cocoeval(ground_truth, detections, max_detections)
+        evaluator, agnostic = _run_cocoeval(ground_truth, detections, max_detections)
     except MetricError:
         raise
     except Exception as error:  # pycocotools가 던지는 예외 유형이 다양합니다.
@@ -402,9 +412,16 @@ def evaluate_detections(
     # precision: [T, R, K, A, M] / recall: [T, K, A, M]. A와 M은 크기 1이라 0 고정.
     precision = evaluator.eval["precision"]
     evaluated_ids = list(evaluator.params.catIds)
+    coco_gt, coco_dt = evaluator.cocoGt, evaluator.cocoDt
+    original_image_ids = {value: key for key, value in image_index.items()}
 
     analysis_by_iou: dict[str, Any] = {}
     per_class_matches: dict[str, dict[int, dict[str, Any]]] = {}
+    confusion: dict[str, Any] = {}
+    sweeps: dict[str, Any] = {}
+    best_f1: dict[str, Any] = {}
+    per_image: dict[str, Any] = {}
+    error_breakdown: dict[str, Any] = {}
     for label, t_index in ANALYSIS_IOU_INDICES:
         analysis_by_iou[label] = summarize_matches(
             evaluator.evalImgs, t_index, ANALYSIS_SCORE_THRESHOLD
@@ -418,6 +435,32 @@ def evaluate_detections(
             )
             for category_id in category_ids
         }
+        confusion[label] = build_confusion_matrix(
+            agnostic.evalImgs,
+            coco_gt,
+            coco_dt,
+            category_ids,
+            t_index,
+            ANALYSIS_SCORE_THRESHOLD,
+            class_names=names,
+        )
+        sweep = sweep_score_thresholds(evaluator.evalImgs, t_index)
+        sweeps[label] = {f"{threshold:.2f}": counts for threshold, counts in sweep.items()}
+        best_f1[label] = best_f1_threshold(sweep)
+        per_image[label] = per_image_breakdown(
+            evaluator.evalImgs,
+            t_index,
+            ANALYSIS_SCORE_THRESHOLD,
+            image_ids=original_image_ids,
+        )
+        error_breakdown[label] = classify_false_positives(
+            evaluator.evalImgs,
+            coco_gt,
+            coco_dt,
+            t_index,
+            ANALYSIS_SCORE_THRESHOLD,
+            float(COCO_IOU_THRESHOLDS[t_index]),
+        )
 
     per_class: list[dict[str, Any]] = []
     for category_id in category_ids:
@@ -479,6 +522,11 @@ def evaluate_detections(
         "analysis": {
             "score_threshold": ANALYSIS_SCORE_THRESHOLD,
             "by_iou": analysis_by_iou,
+            "confusion_matrix": confusion,
+            "score_sweep": sweeps,
+            "best_f1": best_f1,
+            "per_image": per_image,
+            "error_breakdown": error_breakdown,
         },
         "per_class": per_class,
     }
