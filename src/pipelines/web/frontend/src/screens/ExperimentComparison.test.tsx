@@ -116,6 +116,24 @@ describe('ExperimentComparison', () => {
     expect(compareExperiments).toHaveBeenCalledWith(['run-a']);
   });
 
+  it('고르기 전에도 목록 각 행에 모델과 mAP 요약 한 줄을 보여 준다', async () => {
+    const filled = makeExperiment('a', 'same');
+    filled.metrics.map = 0.3125;
+    const unknown = makeExperiment('b', 'same');
+    unknown.model.architecture = null;
+    listExperiments.mockResolvedValue({ experiments: [filled, unknown] });
+    render(
+      <MemoryRouter>
+        <ExperimentComparison />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('fasterrcnn · mAP@[0.75:0.95] 0.3125')).toBeInTheDocument();
+    // 기록에 없는 값은 추정하지 않고 - 로 둡니다.
+    expect(screen.getByText('- · mAP@[0.75:0.95] -')).toBeInTheDocument();
+    expect(compareExperiments).not.toHaveBeenCalled();
+  });
+
   it('dataset 기록이 빠진 선택은 판정 불가로 알린다', async () => {
     listExperiments.mockResolvedValue({
       experiments: [makeExperiment('a', 'same'), makeExperiment('b', null)],

@@ -25,6 +25,24 @@ def registry_summary(run_id: str) -> dict:
     }
 
 
+def registry_training() -> dict:
+    return {
+        "architecture": "retinanet_resnet50_fpn_v2",
+        "pretrained": True,
+        "optimizer": "AdamW",
+        "learning_rate": 0.0001,
+        "momentum": None,
+        "weight_decay": 0.01,
+        "beta1": 0.9,
+        "beta2": 0.999,
+        "epsilon": 1e-8,
+        "device": "cuda",
+        "epochs": 50,
+        "batch_size": 4,
+        "num_workers": 0,
+    }
+
+
 def experiment_record(run_id: str) -> dict:
     return {
         "schema_version": "1.2",
@@ -181,3 +199,106 @@ def test_compare_preserves_explicit_zero_values(client, monkeypatch):
     compared = response.json()["experiments"][0]
     assert compared["optimizer"]["learning_rate"] == 0.0
     assert compared["training"]["seed"] == 0
+
+
+def test_experiment_list_fills_training_from_index_summary(client, monkeypatch):
+    summary = registry_summary("run-1")
+    summary["training"] = registry_training()
+    summary["training_source"] = "config_snapshot"
+    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
+
+    listed = client.get("/api/train/experiments").json()["experiments"][0]
+
+    assert listed["model"] == {
+        "architecture": "retinanet_resnet50_fpn_v2",
+        "pretrained": True,
+        "source": "record",
+    }
+    assert listed["optimizer"] == {
+        "name": "AdamW",
+        "source": "record",
+        "learning_rate": 0.0001,
+        "momentum": None,
+        "weight_decay": 0.01,
+        "beta1": 0.9,
+        "beta2": 0.999,
+        "epsilon": 1e-8,
+    }
+    # registry는 training 안에 seed를 넣지 않으므로 summary 최상위 seed를 그대로 씁니다.
+    assert listed["training"] == {
+        "device": "cuda",
+        "epochs": 50,
+        "batch_size": 4,
+        "num_workers": 0,
+        "seed": 42,
+    }
+
+
+def test_experiment_list_shows_nothing_for_index_without_training_key(client, monkeypatch):
+    """이 기능 이전의 옛 index는 값을 모르므로 기본값을 지어내지 않습니다."""
+
+    summary = registry_summary("old-index")
+    assert "training" not in summary
+    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
+
+    listed = client.get("/api/train/experiments").json()["experiments"][0]
+
+    assert listed["model"]["architecture"] is None
+    assert listed["optimizer"]["name"] is None
+    assert listed["optimizer"]["learning_rate"] is None
+    assert listed["training"] == {
+        "device": None,
+        "epochs": None,
+        "batch_size": None,
+        "num_workers": None,
+        "seed": 42,
+    }
+
+
+def test_experiment_list_masks_paths_like_compare_does(client, monkeypatch):
+    """목록도 비교와 같은 redact를 거쳐야 한쪽으로만 경로가 새지 않습니다."""
+
+    summary = registry_summary("leaky")
+    summary["training"] = {**registry_training(), "device": "cuda /home/someone/keys"}
+    summary["training_source"] = "config_snapshot"
+    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
+
+    response = client.get("/api/train/experiments")
+
+    assert "someone" not in response.text
+    assert response.json()["experiments"][0]["training"]["device"] != summary["training"]["device"]
+
+
+def test_experiment_list_matches_compare_for_unavailable_training(client, monkeypatch):
+    """registry가 판단해 값이 빈 index는 비교 화면과 같은 호환 기본값을 보여야 합니다."""
+
+    summary = registry_summary("legacy")
+    summary["training"] = {key: None for key in registry_training()}
+    summary["training_source"] = "unavailable"
+    record = experiment_record("legacy")
+    record["config_snapshot"]["train"] = {}
+    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
+    monkeypatch.setattr(
+        experiments,
+        "compare_experiment_summaries",
+        lambda run_ids, config: {
+            "run_ids": ["legacy"],
+            "fields": {
+                "experiment_record_uri": {
+                    "values": {"legacy": summary["experiment_record_uri"]}
+                }
+            },
+            "missing": [],
+        },
+    )
+    monkeypatch.setattr(experiments, "read_experiment_record", lambda *a, **k: record)
+
+    listed = client.get("/api/train/experiments").json()["experiments"][0]
+    compared = client.post(
+        "/api/train/experiments/compare", json={"run_ids": ["legacy"]}
+    ).json()["experiments"][0]
+
+    assert listed["model"]["source"] == "legacy_fallback"
+    assert listed["optimizer"]["name"] == "SGD"
+    for block in ("model", "optimizer", "training"):
+        assert listed[block] == compared[block]
