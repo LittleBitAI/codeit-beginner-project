@@ -7,6 +7,7 @@ in-memory S3 storage 대역을 써서 준비 경로의 흐름과 산출물을 �
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import re
@@ -180,6 +181,12 @@ def prepare(config: dict[str, Any], objects: dict[str, Any] | None = None):
 
 def artifact_document(stored: dict[str, Any], result: dict[str, Any], key: str) -> Any:
     return stored[result["artifacts"][key]]
+
+
+SPLIT_MANIFEST_FILE_NAMES = {
+    "train_manifest_uri": "train_manifest.json",
+    "validation_manifest_uri": "validation_manifest.json",
+}
 
 
 # --- 분할 비율 옵션 ---------------------------------------------------------
@@ -655,7 +662,12 @@ def test_dataset_summary_records_source_ratio_and_seed():
 
     assert summary_document["source_prefix"] == RAW_PREFIX
     assert summary_document["processed_prefix"] == result["summary"]["processed_prefix"]
-    assert summary_document["split"] == {
+    # checksums는 원본에 따라 값이 달라지므로 아래 전용 test에서 확인합니다.
+    assert {
+        key: value
+        for key, value in summary_document["split"].items()
+        if key != "checksums"
+    } == {
         "method": "deterministic_multilabel_distribution_preserving",
         "split_ratio": "9:1",
         "validation_ratio": 0.1,
@@ -1039,6 +1051,32 @@ def test_local_storage_root_outside_the_repository_is_rejected(
         assert not list((outside_root / "datasets/pill_detection/processed").glob("**/*"))
     finally:
         shutil.rmtree(outside_root, ignore_errors=True)
+
+
+# --- split manifest checksum -------------------------------------------------
+#
+# 같은 seed와 비율이어도 원본이 바뀌면 split은 달라집니다. 요약에 남긴 sha256이
+# 그 변화를 드러내는 유일한 기록이므로, 기록한 값은 실제 저장된 file의 byte와
+# 같아야 합니다. 같은 입력이 같은 결과를 내는지는
+# test_same_input_seed_and_ratio_produce_the_same_split가 이미 지킵니다.
+
+
+def test_split_checksums_match_the_written_manifest_files(
+    local_storage_root, clean_storage_environment
+):
+    """기록한 hash는 실제 file을 `sha256sum`한 값과 같아야 합니다."""
+
+    build_local_raw(local_storage_root)
+
+    result = run(local_config(local_storage_root))
+
+    assert result["status"] == "ok", result["message"]
+    summary_path = (REPOSITORY_ROOT / result["artifacts"]["dataset_summary_uri"]).resolve()
+    checksums = json.loads(summary_path.read_text(encoding="utf-8"))["split"]["checksums"]
+    for key, file_name in SPLIT_MANIFEST_FILE_NAMES.items():
+        written = (REPOSITORY_ROOT / result["artifacts"][key]).resolve().read_bytes()
+        assert checksums[file_name]["sha256"] == hashlib.sha256(written).hexdigest()
+        assert checksums[file_name]["bytes"] == len(written)
 
 
 def test_pass_through_still_works_when_preparation_is_not_requested():
