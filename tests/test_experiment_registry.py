@@ -56,7 +56,7 @@ def test_reads_registry_local_result_uri_without_duplicating_storage_root(tmp_pa
     )
 
     assert record["run_id"] == "exp-lookup"
-    assert record["schema_version"] == "1.1"
+    assert record["schema_version"] == "1.2"
 
 
 def test_reads_local_result_when_repo_root_equals_registry_named_storage_root(tmp_path):

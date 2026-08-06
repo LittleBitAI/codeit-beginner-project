@@ -26,6 +26,14 @@ def load_fixture(name: str) -> dict:
     return json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
 
 
+# 계약이 정한 header와 정렬을 지키는 최소 제출 CSV입니다. registry가 내용까지
+# 검사하므로 submission_uri에는 JSON이 아니라 이 CSV를 놓아야 합니다.
+VALID_SUBMISSION_CSV = (
+    "annotation_id,image_id,category_id,bbox_x,bbox_y,bbox_w,bbox_h,score\n"
+    "1,10,3,1.0,2.0,3.0,4.0,0.9\n"
+)
+
+
 def materialize_local_artifacts(inputs: dict, repo_root: Path) -> None:
     """fixture가 가리키는 local artifact file을 임시 저장소 안에 만듭니다."""
 
@@ -35,11 +43,14 @@ def materialize_local_artifacts(inputs: dict, repo_root: Path) -> None:
                 continue
             path = repo_root / uri
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps({"pipeline": pipeline, "artifact": key}, ensure_ascii=False),
-                encoding="utf-8",
-                newline="\n",
+            content = (
+                VALID_SUBMISSION_CSV
+                if key == "submission_uri"
+                else json.dumps(
+                    {"pipeline": pipeline, "artifact": key}, ensure_ascii=False
+                )
             )
+            path.write_text(content, encoding="utf-8", newline="\n")
 
 
 def add_competition_artifacts(inputs: dict) -> None:
@@ -119,7 +130,7 @@ def test_legacy_run_without_optional_artifacts_still_succeeds(local_run):
     assert record_uri == "artifacts/registry/exp-0001/experiment_record.json"
 
     record = json.loads((repo_root / record_uri).read_text(encoding="utf-8"))
-    assert record["schema_version"] == "1.1"
+    assert record["schema_version"] == "1.2"
     assert record["run_id"] == "exp-0001"
     assert record["seed"] == 42
     assert set(record["pipelines"]) == {"data", "train", "evaluate"}

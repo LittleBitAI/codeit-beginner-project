@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 
 # 각 pipeline이 registry에 넘겨야 하는 artifact key입니다. 값은 모두 str이며,
 # `*_uri`로 끝나는 key만 실제 artifact 파일을 가리킵니다.
@@ -86,6 +86,10 @@ class InvalidSchemaError(RegistryError):
 
 class CorruptedArtifactError(RegistryError):
     """Artifact 파일이 없거나 읽을 수 없는 경우입니다."""
+
+
+class InvalidSubmissionError(RegistryError):
+    """제출 CSV의 내용이 competition 계약과 다른 경우입니다."""
 
 
 def is_remote_uri(uri: str) -> bool:
@@ -289,6 +293,50 @@ def describe_artifact(uri: str, *, repo_root: Path, verify: bool = True) -> dict
     return entry
 
 
+def build_submission_check(
+    validated_inputs: Mapping[str, Mapping[str, str]],
+    *,
+    repo_root: Path,
+    verify: bool = True,
+) -> dict[str, Any]:
+    """제출 CSV 검사 결과를 record에 남길 형태로 만듭니다.
+
+    검사하지 않은 경우에도 같은 key를 채워 돌려주므로, 소비자는 key가 있는지
+    확인하지 않고 `checked`만 보면 됩니다. 규격 위반이면
+    :class:`InvalidSubmissionError`를 올려 record 저장 자체를 막습니다.
+    """
+
+    skipped = {
+        "checked": False,
+        "row_count": None,
+        "image_count": None,
+        "max_detections_per_image": None,
+    }
+
+    uri = validated_inputs.get("evaluate", {}).get("submission_uri")
+    if uri is None:
+        return {**skipped, "skipped_reason": "evaluate.submission_uri가 없습니다."}
+    if is_remote_uri(uri):
+        return {
+            **skipped,
+            "skipped_reason": "원격 artifact는 AWS 접근 없이 참조만 기록합니다.",
+        }
+    if not verify:
+        return {
+            **skipped,
+            "skipped_reason": (
+                "registry.verify_artifacts가 false여서 내용 검사를 건너뛰었습니다."
+            ),
+        }
+
+    # submission module이 이 file의 error 계층을 쓰기 때문에, 순환 import를 피하려고
+    # 실제로 검사할 때만 가져옵니다.
+    from .submission import check_submission_csv
+
+    counts = check_submission_csv(resolve_local_uri(uri, repo_root=repo_root))
+    return {"checked": True, **counts, "skipped_reason": None}
+
+
 def build_record(
     config: Mapping[str, Any],
     validated_inputs: Mapping[str, Mapping[str, str]],
@@ -321,6 +369,13 @@ def build_record(
             entries[key] = described
         pipelines[pipeline] = entries
 
+    # 규격을 어긴 제출물이 실험으로 등록되지 않도록, record를 저장하기 전에 검사합니다.
+    submission_check = build_submission_check(
+        validated_inputs,
+        repo_root=repo_root,
+        verify=verify,
+    )
+
     snapshot = {
         key: redact(copy.deepcopy(value))
         for key, value in config.items()
@@ -340,4 +395,5 @@ def build_record(
             "artifacts_skipped_remote": skipped_remote,
             "hash_algorithm": "sha256",
         },
+        "submission_check": submission_check,
     }
