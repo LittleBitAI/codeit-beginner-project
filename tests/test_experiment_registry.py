@@ -3,7 +3,13 @@ from unittest.mock import Mock
 import pytest
 
 import src.common.experiment_registry as experiment_registry
-from src.common import ExperimentRegistryError, read_experiment_record
+from src.common import (
+    ExperimentRegistryError,
+    compare_experiment_summaries,
+    list_experiment_summaries,
+    read_experiment_record,
+    search_experiment_summaries,
+)
 from src.common.storage import ObjectNotFoundError
 from src.pipelines import registry
 
@@ -148,3 +154,106 @@ def test_wraps_storage_error_with_public_error(monkeypatch):
     assert "SENSITIVE_URI_VALUE" not in message
     assert "SENSITIVE_STORAGE_VALUE" not in message
     assert isinstance(error.value.__cause__, ObjectNotFoundError)
+
+
+# --- 목록·검색·비교 -------------------------------------------------------
+#
+# Exact-URI 조회와 달리 index prefix만 읽는 별개 경로입니다.
+
+
+def local_config(tmp_path, **registry_options) -> dict:
+    registry_config = {
+        "repo_root": str(tmp_path),
+        "verify_artifacts": False,
+    }
+    registry_config.update(registry_options)
+    return {
+        "storage": {"backend": "local", "local": {"root": str(tmp_path / "artifacts")}},
+        "registry": registry_config,
+        "inputs": registry_inputs(),
+    }
+
+
+def register(tmp_path, run_id: str, created_at: str) -> dict:
+    """실험 하나를 실제 registry로 등록해 index까지 남깁니다."""
+
+    config = local_config(tmp_path, run_id=run_id, created_at=created_at)
+    result = registry.run(config)
+    assert result["status"] == "ok"
+    return config
+
+
+def test_lists_registered_experiments_newest_first(tmp_path):
+    register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+    config = register(tmp_path, "exp-b", "2026-08-05T00:00:00+00:00")
+
+    summaries = list_experiment_summaries(config)
+
+    assert [summary["run_id"] for summary in summaries] == ["exp-b", "exp-a"]
+    assert summaries[0]["summary_version"] == "1"
+
+
+def test_search_filters_by_run_id_and_submission(tmp_path):
+    register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+    config = register(tmp_path, "other-b", "2026-08-05T00:00:00+00:00")
+
+    assert [
+        summary["run_id"]
+        for summary in search_experiment_summaries(config, run_id_contains="exp-")
+    ] == ["exp-a"]
+    # 이 fixture에는 submission artifact가 없습니다.
+    assert search_experiment_summaries(config, has_submission=True) == []
+    assert len(search_experiment_summaries(config, has_submission=False)) == 2
+
+
+def test_compare_reports_differing_fields_and_missing_runs(tmp_path):
+    register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+    config = register(tmp_path, "exp-b", "2026-08-05T00:00:00+00:00")
+
+    comparison = compare_experiment_summaries(["exp-a", "exp-b", "없는-실험"], config)
+
+    assert comparison["run_ids"] == ["exp-a", "exp-b"]
+    assert comparison["missing"] == ["없는-실험"]
+    assert comparison["fields"]["created_at"]["differs"] is True
+    assert comparison["fields"]["schema_version"]["differs"] is False
+
+
+def test_one_unreadable_index_entry_does_not_break_the_listing(tmp_path):
+    register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+    config = register(tmp_path, "exp-b", "2026-08-05T00:00:00+00:00")
+    (tmp_path / "artifacts/registry/index/exp-a.json").write_text(
+        "{망가진 JSON", encoding="utf-8", newline="\n"
+    )
+
+    summaries = list_experiment_summaries(config)
+
+    assert [summary["run_id"] for summary in summaries] == ["exp-b"]
+
+
+def test_listing_does_not_read_records(tmp_path):
+    """목록은 index만 봅니다. record를 훑어 fallback하지 않습니다."""
+
+    config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+    (tmp_path / "artifacts/registry/index/exp-a.json").unlink()
+
+    assert list_experiment_summaries(config) == []
+
+
+def test_exact_uri_read_still_refuses_to_search(tmp_path):
+    """계약 회귀: exact-URI 조회는 목록 기능이 생겨도 listing을 하지 않습니다."""
+
+    config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+
+    with pytest.raises(ExperimentRegistryError):
+        read_experiment_record("artifacts/registry/없는-실험/experiment_record.json", config)
+
+
+def test_index_prefix_escaping_the_storage_root_is_rejected(tmp_path):
+    """안전 장치: 저장소 root 밖은 어떤 설정으로도 읽지 않습니다."""
+
+    config = local_config(tmp_path, index_prefix="../../바깥")
+
+    with pytest.raises(ExperimentRegistryError) as error:
+        list_experiment_summaries(config)
+
+    assert "바깥" not in str(error.value)
