@@ -35,6 +35,14 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _format_metric(value: float | None) -> str:
+    """계산하지 않은 metric은 숫자 대신 그대로 드러냅니다.
+
+    ground truth가 하나도 없으면 평균 낼 대상이 없어 mAP가 None입니다.
+    """
+    return "null" if value is None else f"{value:.4f}"
+
+
 @dataclass(frozen=True)
 class Settings:
     """검증이 끝난 evaluate 실행 설정입니다."""
@@ -93,7 +101,12 @@ def _resolve_uri(
     return _optional_uri(stage_artifacts.get(stage_key), f"inputs.{stage}.{stage_key}")
 
 
-def _resolve_iou_thresholds(value: Any) -> tuple[float, ...]:
+def _resolve_iou_thresholds(value: Any, *, competition: bool) -> tuple[float, ...]:
+    """메인 지표 IoU 구간을 정합니다.
+
+    이 구간은 mAP@[0.75:0.95]로 고정이며 설정으로 바꿀 수 없습니다. 설정 key가
+    있는데 조용히 무시되는 상태를 만들지 않도록, 다른 값이 오면 거절합니다.
+    """
     if value is None:
         return DEFAULT_IOU_THRESHOLDS
     if (
@@ -106,6 +119,15 @@ def _resolve_iou_thresholds(value: Any) -> tuple[float, ...]:
     thresholds = tuple(float(item) for item in value)
     if any(not 0.0 < threshold <= 1.0 for threshold in thresholds):
         raise ConfigurationError("evaluate.iou_thresholds 값은 0보다 크고 1 이하여야 합니다.")
+    if thresholds != DEFAULT_IOU_THRESHOLDS:
+        if competition:
+            raise ConfigurationError(
+                "competition iou_thresholds는 [0.75, 0.80, 0.85, 0.90, 0.95]여야 합니다."
+            )
+        raise ConfigurationError(
+            "evaluate.iou_thresholds는 지원하지 않습니다. 메인 지표 구간은 "
+            f"{list(DEFAULT_IOU_THRESHOLDS)}로 고정입니다."
+        )
     return thresholds
 
 
@@ -233,16 +255,10 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
             "metrics, predictions, submission은 같은 위치에 저장할 수 없습니다."
         )
 
-    iou_thresholds = _resolve_iou_thresholds(settings.get("iou_thresholds"))
-    if test_manifest_uri is not None:
-        if (
-            settings.get("iou_thresholds") is not None
-            and iou_thresholds != COMPETITION_IOU_THRESHOLDS
-        ):
-            raise ConfigurationError(
-                "competition iou_thresholds는 [0.75, 0.80, 0.85, 0.90, 0.95]여야 합니다."
-            )
-        iou_thresholds = COMPETITION_IOU_THRESHOLDS
+    # 메인 지표 구간은 대회 실행 여부와 무관하게 [0.75, 0.80, 0.85, 0.90, 0.95]입니다.
+    iou_thresholds = _resolve_iou_thresholds(
+        settings.get("iou_thresholds"), competition=test_manifest_uri is not None
+    )
 
     return Settings(
         run_id=resolved_run_id,
@@ -376,6 +392,7 @@ def run(config: dict) -> dict:
             predictions,
             iou_thresholds=settings.iou_thresholds,
             class_names=class_map,
+            max_detections_per_image=settings.max_detections_per_image,
         )
 
         submission_text: str | None = None
@@ -470,7 +487,7 @@ def run(config: dict) -> dict:
         },
         "message": (
             f"evaluate pipeline 실행 완료 (run_id={settings.run_id}, "
-            f"image={report['image_count']}, mAP={report['metrics']['mAP']:.4f})"
+            f"image={report['image_count']}, mAP={_format_metric(report['metrics']['mAP'])})"
         ),
     }
 

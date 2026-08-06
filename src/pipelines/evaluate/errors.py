@@ -23,10 +23,15 @@ class ArtifactWriteError(EvaluateError):
     """산출물 저장이 실패했거나 기존 artifact를 덮어써야 하는 경우입니다."""
 
 
+class MetricError(EvaluateError):
+    """지표 계산이 실패한 경우입니다."""
+
+
 __all__ = [
     "ArtifactWriteError",
     "ConfigurationError",
     "EvaluateError",
     "InputArtifactError",
+    "MetricError",
     "PredictionError",
 ]
