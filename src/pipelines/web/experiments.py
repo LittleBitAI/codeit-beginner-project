@@ -256,13 +256,25 @@ def _enrich_summary(summary: Mapping[str, Any], record: Mapping[str, Any]) -> di
     value.update(
         _training_blocks(_record_settings(record), _integer(summary.get("seed")))
     )
+    return _sanitized(value)
+
+
+def _sanitized(value: dict[str, Any]) -> dict[str, Any]:
+    """응답으로 나가기 전 credential처럼 보이는 값을 가립니다.
+
+    목록과 비교가 같은 검사를 거쳐야 나중에 경로성 field가 늘어도 한쪽만 새지 않습니다.
+    """
+
     sanitized = redact(value)
     return sanitized if isinstance(sanitized, dict) else value
 
 
 def list_registry_experiments() -> list[dict[str, Any]]:
     try:
-        return [_summary_base(item) for item in list_experiment_summaries(registry_config())]
+        return [
+            _sanitized(_summary_base(item))
+            for item in list_experiment_summaries(registry_config())
+        ]
     except ExperimentRegistryError as error:
         raise WebError(f"실험 목록을 읽지 못했습니다({type(error).__name__}).") from error
 

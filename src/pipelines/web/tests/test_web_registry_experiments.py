@@ -255,6 +255,20 @@ def test_experiment_list_shows_nothing_for_index_without_training_key(client, mo
     }
 
 
+def test_experiment_list_masks_paths_like_compare_does(client, monkeypatch):
+    """목록도 비교와 같은 redact를 거쳐야 한쪽으로만 경로가 새지 않습니다."""
+
+    summary = registry_summary("leaky")
+    summary["training"] = {**registry_training(), "device": "cuda /home/someone/keys"}
+    summary["training_source"] = "config_snapshot"
+    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
+
+    response = client.get("/api/train/experiments")
+
+    assert "someone" not in response.text
+    assert response.json()["experiments"][0]["training"]["device"] != summary["training"]["device"]
+
+
 def test_experiment_list_matches_compare_for_unavailable_training(client, monkeypatch):
     """registry가 판단해 값이 빈 index는 비교 화면과 같은 호환 기본값을 보여야 합니다."""
 
