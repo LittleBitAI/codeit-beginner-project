@@ -18,9 +18,11 @@ from typing import Any
 
 __all__ = [
     "CAPABILITY_SCHEMA_VERSION",
+    "DEFAULT_AUGMENTATION",
     "LEGACY_ARCHITECTURE",
     "LEGACY_OPTIMIZER",
     "SUPPORTED_ARCHITECTURES",
+    "SUPPORTED_AUGMENTATIONS",
     "SUPPORTED_OPTIMIZERS",
     "current_train_capability",
     "reported_train_capability",
@@ -41,6 +43,10 @@ SUPPORTED_ARCHITECTURES = (
 )
 SUPPORTED_OPTIMIZERS = ("AdamW", "SGD", "Adam")
 NEW_EXPERIMENT_OPTIMIZER = "AdamW"
+# train의 AUGMENTATION_PRESETS key와 같은 순서로 둡니다. 값 자체는 train이 갖고
+# 있으므로 여기서는 고를 수 있는 이름만 복제합니다.
+SUPPORTED_AUGMENTATIONS = ("none", "pill_basic")
+DEFAULT_AUGMENTATION = "none"
 
 _CHOICE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+\-]{0,127}$")
 

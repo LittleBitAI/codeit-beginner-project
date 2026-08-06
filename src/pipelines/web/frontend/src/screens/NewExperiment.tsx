@@ -25,7 +25,15 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
   {
     key: 'basic',
     label: '기본 정보',
-    fields: ['architecture', 'optimizer', 'run_id', 'seed', 'device', 'pretrained'],
+    fields: [
+      'architecture',
+      'optimizer',
+      'augmentation',
+      'run_id',
+      'seed',
+      'device',
+      'pretrained',
+    ],
   },
   {
     key: 'hyper',

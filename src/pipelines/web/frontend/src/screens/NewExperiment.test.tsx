@@ -43,6 +43,29 @@ describe('NewExperiment · Train capability 호환', () => {
     expect(screen.getByText('SGD')).toBeInTheDocument();
   });
 
+  it('증강 preset을 화면에서 고를 수 있다', () => {
+    // 데이터가 적을 때 과적합을 줄이는 유일한 수단인데, 화면에 칸이 없으면
+    // train의 기본값 none으로만 학습됩니다.
+    const defaults: Defaults = {
+      ...LEGACY_DEFAULTS,
+      fields: [
+        { name: 'augmentation', type: 'enum', default: 'none', choices: ['none', 'pill_basic'], label: '증강 preset', hint: '' },
+      ],
+    };
+    render(
+      <MemoryRouter>
+        <DraftProvider>
+          <NewExperiment defaults={defaults} source={null} />
+        </DraftProvider>
+      </MemoryRouter>,
+    );
+
+    const field = screen.getByLabelText('증강 preset');
+    expect(field).toHaveValue('none');
+    fireEvent.change(field, { target: { value: 'pill_basic' } });
+    expect(field).toHaveValue('pill_basic');
+  });
+
   it('모델과 optimizer를 고르고 profile에 맞는 수치만 보여 준다', () => {
     const defaults: Defaults = {
       ...LEGACY_DEFAULTS,
