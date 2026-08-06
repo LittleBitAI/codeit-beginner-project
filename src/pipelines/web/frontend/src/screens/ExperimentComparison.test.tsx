@@ -88,9 +88,32 @@ describe('ExperimentComparison', () => {
 
     expect(await screen.findByText('같은 dataset 입력으로 기록된 실험입니다')).toBeInTheDocument();
     expect(screen.getByText('BEST VAL LOSS')).toBeInTheDocument();
+    // evaluate의 `mAP`는 mAP@[0.75:0.95]입니다. 그냥 mAP라고만 적으면 오해합니다.
+    expect(screen.getByText('mAP@[0.75:0.95]')).toBeInTheDocument();
     expect(screen.getAllByText('0.4000')).toHaveLength(2);
     expect(screen.getAllByText('SGD (호환 기본값)')).toHaveLength(2);
     expect(compareExperiments).toHaveBeenCalledWith(['run-a', 'run-b']);
+  });
+
+  it('실험 하나만 골라도 모델과 하이퍼파라미터를 채워 준다', async () => {
+    listExperiments.mockResolvedValue({ experiments: [makeExperiment('a', 'same')] });
+    compareExperiments.mockResolvedValue({
+      experiments: [makeExperiment('a', 'same')],
+      missing: [],
+    });
+    render(
+      <MemoryRouter>
+        <ExperimentComparison />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByLabelText('run-a 비교 선택'));
+
+    // 목록 응답은 registry index만 읽어 모델과 optimizer가 null입니다. record를
+    // 읽는 비교 요청을 거쳐야 값이 채워집니다.
+    expect(await screen.findByText('fasterrcnn')).toBeInTheDocument();
+    expect(screen.getByText('SGD (호환 기본값)')).toBeInTheDocument();
+    expect(compareExperiments).toHaveBeenCalledWith(['run-a']);
   });
 
   it('dataset 기록이 빠진 선택은 판정 불가로 알린다', async () => {
