@@ -13,7 +13,8 @@ import type { TeamConfig, TeamLogBatch, TeamRun } from '../api/types';
 
 const RUN_FIELDS = `
   teamId cloudRunId localJobId runId actorSub actorName status settings dataInputs
-  progress summary artifacts message createdAt startedAt finishedAt heartbeatAt revision
+  progress summary artifacts evaluation message createdAt startedAt finishedAt heartbeatAt
+  revision
 `;
 const LOG_FIELDS = `teamId cloudRunId startSeq endSeq lines createdAt`;
 
@@ -101,6 +102,7 @@ function normalizeRun(raw: Record<string, unknown>): TeamRun {
     progress: parseJson(raw.progress),
     summary: parseJson(raw.summary),
     artifacts: parseJson(raw.artifacts),
+    evaluation: parseJson(raw.evaluation),
   };
 }
 

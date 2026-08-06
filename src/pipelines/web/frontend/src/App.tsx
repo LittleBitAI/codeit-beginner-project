@@ -97,7 +97,7 @@ function Shell() {
         <Route path="/monitor" element={<LiveMonitor listing={listing.data} />} />
         <Route path="/monitor/:jobId" element={<LiveMonitor listing={listing.data} />} />
         <Route path="/compare" element={<ExperimentComparison />} />
-        <Route path="/team" element={<TeamActivity />} />
+        <Route path="/team" element={<TeamActivity defaults={defaults.data} />} />
       </Routes>
     </AppShell>
   );
