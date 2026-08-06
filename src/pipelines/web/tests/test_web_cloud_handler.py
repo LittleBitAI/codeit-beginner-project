@@ -1,14 +1,18 @@
-"""AWS Lambda resolver의 팀 권한과 상태 전이 test."""
+"""AWS Lambda resolver의 팀 권한과 상태 전이, 그리고 배포되는 schema의 drift test."""
 
 from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 
 import pytest
 from boto3.dynamodb.types import TypeSerializer
 
 from src.pipelines.web.cloud import handler as cloud
+
+
+CLOUD_DIR = Path(__file__).resolve().parents[1] / "cloud"
 
 
 class FakeTable:
@@ -156,6 +160,49 @@ def test_appsync_parsed_awsjson_is_stored_as_json_text(table):
     assert json.loads(batch["lines"]) == [{"seq": 1, "loss": 0.5}]
 
 
+def test_evaluation_is_kept_when_a_later_update_omits_it(table):
+    created = cloud.handler(
+        event(
+            "createRun",
+            {"teamId": "pill-team", "input": create_input()},
+            groups=["train-team"],
+        ),
+        None,
+    )
+    assert created["evaluation"] == "{}"
+
+    def update(revision, **extra):
+        payload = {
+            "eventId": f"event-{revision}",
+            "cloudRunId": "c" * 32,
+            "revision": revision,
+            "status": "succeeded",
+            "startedAt": created["createdAt"],
+            "finishedAt": "2026-08-05T00:01:00.000Z",
+            "message": None,
+            "progress": "{}",
+            "summary": "{}",
+            "artifacts": "{}",
+            "heartbeatAt": "2026-08-05T00:01:00.000Z",
+            **extra,
+        }
+        return cloud.handler(
+            event("publishRunUpdate", {"teamId": "pill-team", "input": payload}), None
+        )
+
+    # 이 배포 전에 만들어진 기록에는 evaluation 속성이 아예 없습니다.
+    del table.items[(cloud._pk("pill-team"), cloud._run_sk("c" * 32))]["evaluation"]
+    legacy = update(1)
+    assert legacy["status"] == "succeeded"
+
+    stored = update(2, evaluation={"status": "succeeded", "metrics": {"mAP": 0.73}})
+    assert json.loads(stored["evaluation"])["metrics"]["mAP"] == 0.73
+
+    # 30초마다 오는 heartbeat는 evaluation을 싣지 않습니다. 지우면 안 됩니다.
+    heartbeat = update(3)
+    assert json.loads(heartbeat["evaluation"])["metrics"]["mAP"] == 0.73
+
+
 def test_rejects_a_different_team_before_reading_table(table):
     with pytest.raises(PermissionError, match="다른 teamId"):
         cloud.handler(
@@ -166,6 +213,35 @@ def test_rejects_a_different_team_before_reading_table(table):
             ),
             None,
         )
+
+
+def _comparable(schema: str) -> str:
+    """주석을 걷어내고 공백을 하나로 줄여 형식 차이를 무시합니다."""
+
+    without_comments = [line.split("#", 1)[0] for line in schema.splitlines()]
+    return " ".join(" ".join(without_comments).split())
+
+
+def _inline_definition() -> str:
+    """template.yaml 안에 인라인으로 박혀 있는 AppSync schema만 떼어 옵니다."""
+
+    lines = (CLOUD_DIR / "template.yaml").read_text(encoding="utf-8").splitlines()
+    start = next(index for index, line in enumerate(lines) if line.strip() == "Definition: |")
+    body_indent = len(lines[start]) - len(lines[start].lstrip()) + 2
+    body = []
+    for line in lines[start + 1 :]:
+        if line.strip() and len(line) - len(line.lstrip()) < body_indent:
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
+def test_deployed_schema_matches_the_reference_file():
+    # AppSync에 실제로 올라가는 것은 template.yaml의 인라인 schema이고
+    # schema.graphql은 읽기 좋으라고 둔 사본입니다. 사본만 고치고 배포하면
+    # 아무것도 바뀌지 않은 채 성공합니다.
+    reference = (CLOUD_DIR / "schema.graphql").read_text(encoding="utf-8")
+    assert _comparable(_inline_definition()) == _comparable(reference)
 
 
 def test_subscription_connection_also_requires_group(table):

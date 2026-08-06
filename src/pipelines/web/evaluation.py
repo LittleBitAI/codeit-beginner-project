@@ -16,6 +16,7 @@ import threading
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import team_sync
 from .errors import FieldError, JobConflictError, WebValidationError
 from .jobs import runner
 from .jobs.model import JobRecord
@@ -398,6 +399,8 @@ class EvaluationRunner:
                     **evaluation_state,
                     registration={"status": STATUS_IDLE},
                 )
+            # 로컬 상태를 먼저 맞춘 뒤 공유합니다. 공유가 실패해도 이 화면은 멀쩡합니다.
+            team_sync.get_team_sync().enqueue_update(record)
             return
 
         evaluation_state = {
@@ -426,6 +429,8 @@ class EvaluationRunner:
                 **evaluation_state,
                 registration=dict(registration),
             )
+        # mAP는 여기서 처음 나옵니다. 팀 화면이 채워지는 것도 이 시점입니다.
+        team_sync.get_team_sync().enqueue_update(record)
 
     def _register(self, record: JobRecord) -> dict[str, Any]:
         """평가 성공을 유지하면서 Registry 결과를 별도 상태로 돌려줍니다."""
@@ -464,6 +469,7 @@ class EvaluationRunner:
         with self._lock:
             if self._state.get("job_id") == record.job_id:
                 self._state["registration"] = dict(registration)
+        team_sync.get_team_sync().enqueue_update(record)
         return dict(registration)
 
 

@@ -92,6 +92,7 @@ def _create(event: dict[str, Any], team_id: str, data: dict[str, Any]) -> dict[s
         "progress": "{}",
         "summary": "{}",
         "artifacts": "{}",
+        "evaluation": "{}",
         "message": None,
         "createdAt": timestamp,
         "startedAt": None,
@@ -134,6 +135,9 @@ def _update(team_id: str, data: dict[str, Any]) -> dict[str, Any]:
             "lastEventId": data["eventId"],
         }
     )
+    # heartbeat update에는 evaluation이 없습니다. 그때 덮어쓰면 평가 결과가 사라집니다.
+    if data.get("evaluation") is not None:
+        updated["evaluation"] = _awsjson_text(data["evaluation"])
     _table().put_item(Item=updated)
     return _public(updated)
 
