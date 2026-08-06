@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
+from boto3.dynamodb.types import TypeSerializer
 
 from src.pipelines.web.cloud import handler as cloud
 
@@ -14,6 +16,9 @@ class FakeTable:
         self.items = {}
 
     def put_item(self, *, Item, ConditionExpression=None):
+        # 실제 DynamoDB resource와 같은 type 제약을 적용합니다. AppSync의 AWSJSON은
+        # Lambda에 dict/list로 들어오므로 nested float도 여기서 잡아야 합니다.
+        TypeSerializer().serialize(Item)
         key = (Item["PK"], Item["SK"])
         if ConditionExpression and key in self.items:
             raise AssertionError("이 test에서는 중복을 만들지 않습니다.")
@@ -95,6 +100,60 @@ def test_terminal_update_wins_even_after_revision_gap(table):
     )
     assert result["status"] == "interrupted"
     assert result["revision"] == 1
+
+
+def test_appsync_parsed_awsjson_is_stored_as_json_text(table):
+    create = create_input()
+    create["settings"] = {"learning_rate": 0.0001, "weight_decay": 0.01}
+    create["dataInputs"] = {"sizes": [320.0, 320.0]}
+    created = cloud.handler(
+        event(
+            "createRun",
+            {"teamId": "pill-team", "input": create},
+            groups=["train-team"],
+        ),
+        None,
+    )
+
+    update = {
+        "eventId": "event-1",
+        "cloudRunId": "c" * 32,
+        "revision": 1,
+        "status": "running",
+        "startedAt": created["createdAt"],
+        "finishedAt": None,
+        "message": None,
+        "progress": {"train_loss": 1.25},
+        "summary": {"best_validation_loss": 0.75},
+        "artifacts": {"scores": [0.9]},
+        "heartbeatAt": "2026-08-05T00:01:00.000Z",
+    }
+    updated = cloud.handler(
+        event("publishRunUpdate", {"teamId": "pill-team", "input": update}), None
+    )
+    batch = cloud.handler(
+        event(
+            "publishLogBatch",
+            {
+                "teamId": "pill-team",
+                "input": {
+                    "eventId": "log-1",
+                    "cloudRunId": "c" * 32,
+                    "startSeq": 1,
+                    "endSeq": 1,
+                    "lines": [{"seq": 1, "loss": 0.5}],
+                },
+            },
+        ),
+        None,
+    )
+
+    assert json.loads(created["settings"]) == create["settings"]
+    assert json.loads(created["dataInputs"]) == create["dataInputs"]
+    assert json.loads(updated["progress"]) == update["progress"]
+    assert json.loads(updated["summary"]) == update["summary"]
+    assert json.loads(updated["artifacts"]) == update["artifacts"]
+    assert json.loads(batch["lines"]) == [{"seq": 1, "loss": 0.5}]
 
 
 def test_rejects_a_different_team_before_reading_table(table):

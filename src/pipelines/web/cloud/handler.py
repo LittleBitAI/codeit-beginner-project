@@ -60,6 +60,19 @@ def _public(item: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in item.items() if key not in {"PK", "SK", "expiresAt", "lastEventId"}}
 
 
+def _awsjson_text(value: Any) -> str:
+    """AppSync가 해석한 AWSJSON을 DynamoDB에 안전한 JSON text로 되돌립니다."""
+
+    if isinstance(value, str):
+        return value
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+
+
 def _create(event: dict[str, Any], team_id: str, data: dict[str, Any]) -> dict[str, Any]:
     identity = _require_member(event)
     claims = identity.get("claims") or {}
@@ -74,8 +87,8 @@ def _create(event: dict[str, Any], team_id: str, data: dict[str, Any]) -> dict[s
         "actorSub": identity.get("sub") or claims.get("sub") or "unknown",
         "actorName": claims.get("cognito:username") or claims.get("email") or "팀원",
         "status": "starting",
-        "settings": data["settings"],
-        "dataInputs": data["dataInputs"],
+        "settings": _awsjson_text(data["settings"]),
+        "dataInputs": _awsjson_text(data["dataInputs"]),
         "progress": "{}",
         "summary": "{}",
         "artifacts": "{}",
@@ -113,9 +126,9 @@ def _update(team_id: str, data: dict[str, Any]) -> dict[str, Any]:
             "startedAt": data.get("startedAt"),
             "finishedAt": data.get("finishedAt"),
             "message": data.get("message"),
-            "progress": data["progress"],
-            "summary": data["summary"],
-            "artifacts": data["artifacts"],
+            "progress": _awsjson_text(data["progress"]),
+            "summary": _awsjson_text(data["summary"]),
+            "artifacts": _awsjson_text(data["artifacts"]),
             "heartbeatAt": data["heartbeatAt"],
             "revision": max(revision, int(current.get("revision", 0)) + 1),
             "lastEventId": data["eventId"],
@@ -134,7 +147,7 @@ def _publish_logs(team_id: str, data: dict[str, Any]) -> dict[str, Any]:
         "cloudRunId": data["cloudRunId"],
         "startSeq": int(data["startSeq"]),
         "endSeq": int(data["endSeq"]),
-        "lines": data["lines"],
+        "lines": _awsjson_text(data["lines"]),
         "createdAt": timestamp,
         "expiresAt": int(time.time()) + int(os.environ.get("LOG_RETENTION_DAYS", "30")) * 86400,
         "lastEventId": data["eventId"],
