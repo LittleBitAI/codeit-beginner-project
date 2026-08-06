@@ -63,6 +63,49 @@ def test_create_run_requires_login_token(isolated_repo):
         )
 
 
+def test_actor_name_lets_a_headless_run_register_without_login(isolated_repo):
+    # Colab에는 browser login이 없습니다. 이름을 미리 정해 두면 IAM으로 기록합니다.
+    transport = FakeTransport()
+    sync = TeamSync(
+        TeamSyncConfig(**{**enabled_config().__dict__, "actor_name": "지현 (Colab)"}),
+        transport=transport,
+    )
+
+    cloud_run_id = sync.create_run(
+        access_token=None,
+        local_job_id="a" * 32,
+        run_id="run-a",
+        settings={},
+        data_inputs={},
+    )
+
+    assert cloud_run_id
+    call = transport.calls[-1]
+    assert call["iam"] is True
+    assert call["access_token"] is None
+    assert call["variables"]["input"]["actorName"] == "지현 (Colab)"
+
+
+def test_login_path_does_not_send_a_self_declared_name(isolated_repo):
+    transport = FakeTransport()
+    sync = TeamSync(
+        TeamSyncConfig(**{**enabled_config().__dict__, "actor_name": "지현 (Colab)"}),
+        transport=transport,
+    )
+
+    sync.create_run(
+        access_token="user-token",
+        local_job_id="a" * 32,
+        run_id="run-a",
+        settings={},
+        data_inputs={},
+    )
+
+    call = transport.calls[-1]
+    assert call["access_token"] == "user-token"
+    assert "actorName" not in call["variables"]["input"]
+
+
 def test_outbox_batches_logs_and_masks_sensitive_values(isolated_repo, monkeypatch):
     transport = FakeTransport()
     sync = TeamSync(enabled_config(), transport=transport)

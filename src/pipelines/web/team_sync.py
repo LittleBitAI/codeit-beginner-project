@@ -97,6 +97,10 @@ class TeamSyncConfig:
     user_pool_id: str | None = None
     user_pool_client_id: str | None = None
     cognito_domain: str | None = None
+    # 설정하면 browser login 없이도 학습을 팀에 기록합니다. Colab처럼 로그인
+    # 화면을 띄울 수 없는 곳을 위한 값이고, 이 이름은 Cognito가 확인해 주지
+    # 않습니다. 그래서 선택 값으로 두고, 켠 사람만 그 경로를 씁니다.
+    actor_name: str | None = None
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> "TeamSyncConfig":
@@ -117,6 +121,7 @@ class TeamSyncConfig:
             user_pool_id=_required(source, "PILL_TEAM_COGNITO_USER_POOL_ID"),
             user_pool_client_id=_required(source, "PILL_TEAM_COGNITO_CLIENT_ID"),
             cognito_domain=_required(source, "PILL_TEAM_COGNITO_DOMAIN"),
+            actor_name=(source.get("PILL_TEAM_ACTOR", "").strip() or None),
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -226,24 +231,29 @@ class TeamSync:
     ) -> str | None:
         if not self.enabled:
             return None
-        if not access_token:
-            raise TeamSyncAuthError("팀 학습을 시작하려면 먼저 로그인해야 합니다.")
+        actor_name = self.config.actor_name
+        if not access_token and not actor_name:
+            raise TeamSyncAuthError(
+                "팀 학습을 시작하려면 먼저 로그인해야 합니다. "
+                "Colab처럼 로그인할 수 없는 곳이면 PILL_TEAM_ACTOR에 이름을 넣으세요."
+            )
         cloud_run_id = uuid4().hex
+        payload: dict[str, Any] = {
+            "cloudRunId": cloud_run_id,
+            "localJobId": local_job_id,
+            "runId": run_id,
+            "settings": json.dumps(redact(settings), ensure_ascii=False, allow_nan=False),
+            "dataInputs": json.dumps(redact(data_inputs), ensure_ascii=False, allow_nan=False),
+        }
+        # 로그인이 있으면 claims가 이깁니다. 이름을 같이 보내지 않아야 화면에서
+        # 남의 이름으로 기록하는 길이 아예 생기지 않습니다.
+        if not access_token:
+            payload["actorName"] = actor_name
         data = self.transport.execute(
             CREATE_RUN,
-            {
-                "teamId": self.config.team_id,
-                "input": {
-                    "cloudRunId": cloud_run_id,
-                    "localJobId": local_job_id,
-                    "runId": run_id,
-                    "settings": json.dumps(redact(settings), ensure_ascii=False, allow_nan=False),
-                    "dataInputs": json.dumps(
-                        redact(data_inputs), ensure_ascii=False, allow_nan=False
-                    ),
-                },
-            },
+            {"teamId": self.config.team_id, "input": payload},
             access_token=access_token,
+            iam=not access_token,
         )
         created = data.get("createRun")
         if not isinstance(created, dict) or created.get("cloudRunId") != cloud_run_id:

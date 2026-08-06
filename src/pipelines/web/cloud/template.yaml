@@ -126,6 +126,7 @@ Resources:
       Definition: |
         scalar AWSJSON
         scalar AWSDateTime
+        enum ActorSource { cognito iam }
         enum RunStatus { starting running succeeded failed cancelled interrupted }
         type TeamRun @aws_cognito_user_pools @aws_iam {
           teamId: ID!
@@ -134,6 +135,7 @@ Resources:
           runId: String!
           actorSub: ID!
           actorName: String!
+          actorSource: ActorSource
           status: RunStatus!
           settings: AWSJSON!
           dataInputs: AWSJSON!
@@ -162,6 +164,7 @@ Resources:
           runId: String!
           settings: AWSJSON!
           dataInputs: AWSJSON!
+          actorName: String
         }
         input RunUpdateInput {
           eventId: ID!
@@ -191,7 +194,9 @@ Resources:
           runLogs(teamId: ID!, cloudRunId: ID!, afterSeq: Int = 0, limit: Int = 100): [LogBatch!]! @aws_cognito_user_pools
         }
         type Mutation {
-          createRun(teamId: ID!, input: CreateRunInput!): TeamRun! @aws_cognito_user_pools
+          createRun(teamId: ID!, input: CreateRunInput!): TeamRun!
+            @aws_cognito_user_pools
+            @aws_iam
           publishRunUpdate(teamId: ID!, input: RunUpdateInput!): TeamRun! @aws_iam
           publishLogBatch(teamId: ID!, input: LogBatchInput!): LogBatch! @aws_iam
         }
@@ -236,6 +241,9 @@ Resources:
   TeamPublisherPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
+      # Description을 바꾸면 CloudFormation이 managed policy를 교체해 ARN이 달라지고,
+      # 팀원 IAM에 붙여 둔 정책이 떨어져 나갑니다. 문구가 조금 낡아도 그대로 둡니다.
+      # 실제로 허용하는 mutation은 아래 Resource 목록이 정확합니다.
       Description: Allows a local training backend to publish only run updates and logs
       PolicyDocument:
         Version: '2012-10-17'
@@ -243,6 +251,11 @@ Resources:
           - Effect: Allow
             Action: appsync:GraphQL
             Resource:
+              # browser login이 없는 Colab과 CLI가 기록을 시작할 수 있게 합니다.
+              # 이 credential을 가진 사람은 이미 상태와 log를 올릴 수 있으므로
+              # 권한이 크게 넓어지지는 않지만, 이 경로의 actorName은 스스로 적은
+              # 이름이라 Cognito가 확인해 준 이름과 구분해 기록합니다.
+              - !Sub 'arn:${AWS::Partition}:appsync:${AWS::Region}:${AWS::AccountId}:apis/${GraphQLApi.ApiId}/types/Mutation/fields/createRun'
               - !Sub 'arn:${AWS::Partition}:appsync:${AWS::Region}:${AWS::AccountId}:apis/${GraphQLApi.ApiId}/types/Mutation/fields/publishRunUpdate'
               - !Sub 'arn:${AWS::Partition}:appsync:${AWS::Region}:${AWS::AccountId}:apis/${GraphQLApi.ApiId}/types/Mutation/fields/publishLogBatch'
 

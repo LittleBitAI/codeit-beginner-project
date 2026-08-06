@@ -48,6 +48,40 @@ def _require_member(event: dict[str, Any]) -> dict[str, Any]:
     return identity
 
 
+def _is_iam(identity: dict[str, Any]) -> bool:
+    """SigV4로 들어온 호출인지 봅니다.
+
+    AppSync는 IAM 요청에 claims 없이 userArn과 accountId를 실어 줍니다. 누가
+    부를 수 있는지는 TeamPublisherPolicy가 이미 정하므로 여기서는 경로만
+    가릅니다.
+    """
+
+    return not identity.get("claims") and bool(identity.get("userArn"))
+
+
+def _actor(event: dict[str, Any], data: dict[str, Any]) -> tuple[str, str, str]:
+    """누가 이 학습을 시작했는지 정합니다.
+
+    로그인 경로에서는 Cognito claims가 진실이고 input의 이름은 무시합니다.
+    그래야 GUI에서 남의 이름을 적어 보낼 수 없습니다. IAM 경로에는 확인해 줄
+    claims가 없으므로 부르는 쪽이 적은 이름을 쓰고, 그 사실을 함께 남깁니다.
+    """
+
+    identity = event.get("identity") or {}
+    if _is_iam(identity):
+        name = str(data.get("actorName") or "").strip()
+        if not name:
+            raise ValueError(
+                "로그인 없이 학습을 기록하려면 actorName이 필요합니다. "
+                "누가 돌린 학습인지 팀 화면에 남아야 합니다."
+            )
+        return str(identity.get("userArn")), name, "iam"
+
+    claims = _require_member(event).get("claims") or {}
+    name = claims.get("cognito:username") or claims.get("email") or "팀원"
+    return str(identity.get("sub") or claims.get("sub") or "unknown"), str(name), "cognito"
+
+
 def _pk(team_id: str) -> str:
     return f"TEAM#{team_id}"
 
@@ -74,8 +108,7 @@ def _awsjson_text(value: Any) -> str:
 
 
 def _create(event: dict[str, Any], team_id: str, data: dict[str, Any]) -> dict[str, Any]:
-    identity = _require_member(event)
-    claims = identity.get("claims") or {}
+    actor_sub, actor_name, actor_source = _actor(event, data)
     timestamp = _now()
     item = {
         "PK": _pk(team_id),
@@ -84,8 +117,9 @@ def _create(event: dict[str, Any], team_id: str, data: dict[str, Any]) -> dict[s
         "cloudRunId": data["cloudRunId"],
         "localJobId": data["localJobId"],
         "runId": data["runId"],
-        "actorSub": identity.get("sub") or claims.get("sub") or "unknown",
-        "actorName": claims.get("cognito:username") or claims.get("email") or "팀원",
+        "actorSub": actor_sub,
+        "actorName": actor_name,
+        "actorSource": actor_source,
         "status": "starting",
         "settings": _awsjson_text(data["settings"]),
         "dataInputs": _awsjson_text(data["dataInputs"]),

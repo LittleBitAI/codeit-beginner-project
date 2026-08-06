@@ -139,6 +139,8 @@ export interface TeamRun {
   runId: string;
   actorSub: string;
   actorName: string;
+  /** cognito는 로그인이 확인해 준 이름, iam은 실행하는 쪽이 직접 적은 이름입니다. */
+  actorSource: 'cognito' | 'iam' | null;
   status: JobStatus;
   settings: Record<string, unknown>;
   dataInputs: Record<string, unknown>;

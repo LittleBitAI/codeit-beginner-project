@@ -42,6 +42,7 @@ function run(actor: string, id: string, status: TeamRun['status'] = 'running'): 
     runId: `${actor}-run`,
     actorSub: actor,
     actorName: actor,
+    actorSource: 'cognito',
     status,
     settings: {
       architecture: ARCHITECTURE,
@@ -125,6 +126,19 @@ test('목록 한 줄에 모델명과 mAP가 그 순서로 보인다', async () =
 test('평가 전에는 mAP 자리가 사라지지 않고 -로 남는다', async () => {
   render(<TeamActivity defaults={defaults} />);
   expect(await screen.findByText(`${ARCHITECTURE} · mAP@[0.75:0.95] -`)).toBeInTheDocument();
+});
+
+test('로그인이 확인해 준 이름과 직접 적은 이름을 구분해 보여준다', async () => {
+  const headless = { ...run('지현 (Colab)', '1'), actorSource: 'iam' as const };
+  cloud.listRuns.mockResolvedValue([headless]);
+  render(<TeamActivity defaults={defaults} />);
+
+  expect(await screen.findByText('이름 직접 입력')).toBeInTheDocument();
+
+  cloud.listRuns.mockResolvedValue([run('a', '1')]);
+  render(<TeamActivity defaults={defaults} />);
+  await waitFor(() => expect(screen.getAllByText('a-run').length).toBeGreaterThan(0));
+  expect(screen.getAllByText('이름 직접 입력')).toHaveLength(1);
 });
 
 test('완료 결과를 JSON이 아니라 한글 label로 보여준다', async () => {

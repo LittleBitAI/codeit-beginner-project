@@ -12,7 +12,7 @@ import {
 import type { TeamConfig, TeamLogBatch, TeamRun } from '../api/types';
 
 const RUN_FIELDS = `
-  teamId cloudRunId localJobId runId actorSub actorName status settings dataInputs
+  teamId cloudRunId localJobId runId actorSub actorName actorSource status settings dataInputs
   progress summary artifacts evaluation message createdAt startedAt finishedAt heartbeatAt
   revision
 `;

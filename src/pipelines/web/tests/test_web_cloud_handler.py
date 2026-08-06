@@ -58,6 +58,21 @@ def table(monkeypatch):
     return value
 
 
+def iam_event(field, arguments):
+    """AppSync가 SigV4 요청에 붙여 주는 identity입니다. claims가 없습니다."""
+
+    return {
+        "info": {"fieldName": field},
+        "arguments": arguments,
+        "identity": {
+            "accountId": "070351677013",
+            "userArn": "arn:aws:iam::070351677013:user/teamlead",
+            "username": "teamlead",
+            "sourceIp": ["203.0.113.10"],
+        },
+    }
+
+
 def create_input():
     return {
         "cloudRunId": "c" * 32,
@@ -73,6 +88,40 @@ def test_create_run_requires_fixed_team_membership(table):
         cloud.handler(
             event("createRun", {"teamId": "pill-team", "input": create_input()}), None
         )
+
+
+def test_iam_caller_creates_a_run_without_browser_login(table):
+    # Colab처럼 browser login을 못 하는 곳에서도 팀 화면에 기록이 남아야 합니다.
+    payload = create_input()
+    payload["actorName"] = "지현 (Colab)"
+
+    created = cloud.handler(iam_event("createRun", {"teamId": "pill-team", "input": payload}), None)
+
+    assert created["actorName"] == "지현 (Colab)"
+    assert created["actorSub"] == "arn:aws:iam::070351677013:user/teamlead"
+    # Cognito가 확인해 준 이름이 아니라 스스로 적은 이름임을 화면이 알아야 합니다.
+    assert created["actorSource"] == "iam"
+
+
+def test_iam_caller_must_say_who_it_is(table):
+    with pytest.raises(ValueError, match="actorName"):
+        cloud.handler(
+            iam_event("createRun", {"teamId": "pill-team", "input": create_input()}), None
+        )
+
+
+def test_login_wins_over_a_self_declared_name(table):
+    payload = create_input()
+    payload["actorName"] = "다른 사람"
+
+    created = cloud.handler(
+        event("createRun", {"teamId": "pill-team", "input": payload}, groups=["train-team"]),
+        None,
+    )
+
+    # 로그인 경로에서는 claims가 진실입니다. input의 이름은 무시합니다.
+    assert created["actorName"] == "a@example.com"
+    assert created["actorSource"] == "cognito"
 
 
 def test_terminal_update_wins_even_after_revision_gap(table):

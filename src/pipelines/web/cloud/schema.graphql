@@ -1,6 +1,11 @@
 scalar AWSJSON
 scalar AWSDateTime
 
+enum ActorSource {
+  cognito
+  iam
+}
+
 enum RunStatus {
   starting
   running
@@ -17,6 +22,9 @@ type TeamRun @aws_cognito_user_pools @aws_iam {
   runId: String!
   actorSub: ID!
   actorName: String!
+  # cognito면 로그인이 확인해 준 이름이고, iam이면 실행하는 쪽이 스스로 적은
+  # 이름입니다. 화면이 둘을 구분해 보여 줄 수 있어야 합니다.
+  actorSource: ActorSource
   status: RunStatus!
   settings: AWSJSON!
   dataInputs: AWSJSON!
@@ -49,6 +57,8 @@ input CreateRunInput {
   runId: String!
   settings: AWSJSON!
   dataInputs: AWSJSON!
+  # IAM으로 만들 때만 씁니다. 로그인 경로에서는 claims가 이깁니다.
+  actorName: String
 }
 
 input RunUpdateInput {
@@ -85,7 +95,11 @@ type Query {
 }
 
 type Mutation {
-  createRun(teamId: ID!, input: CreateRunInput!): TeamRun! @aws_cognito_user_pools
+  # browser login이 없는 Colab과 CLI도 기록을 남길 수 있도록 IAM을 함께 받습니다.
+  # 누가 부를 수 있는지는 TeamPublisherPolicy가 정합니다.
+  createRun(teamId: ID!, input: CreateRunInput!): TeamRun!
+    @aws_cognito_user_pools
+    @aws_iam
   publishRunUpdate(teamId: ID!, input: RunUpdateInput!): TeamRun! @aws_iam
   publishLogBatch(teamId: ID!, input: LogBatchInput!): LogBatch! @aws_iam
 }
