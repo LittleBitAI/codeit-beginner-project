@@ -18,9 +18,11 @@ Consumers must not import you either. They read records through `read_experiment
 
 It reads `config["inputs"]["data"]`, `["train"]`, and `["evaluate"]`. Every consumed value must be a non-empty string; booleans, numbers, lists, and nested objects are rejected. When no upstream artifacts are present at all, the run is treated as a dummy run.
 
-Schema 1.1 keeps every required artifact unchanged. It additionally accepts optional `data.test_manifest_uri` and `evaluate.submission_uri`; when present, they follow the same URI safety, verification, provenance, and hashing rules as required artifact URIs.
+Schema 1.2 keeps every required artifact unchanged. It additionally accepts optional `data.test_manifest_uri` and `evaluate.submission_uri`; when present, they follow the same URI safety, verification, provenance, and hashing rules as required artifact URIs.
 
 `verify_artifacts` (default on) additionally confirms the referenced artifacts exist and match their checksums. **URI shape is validated even when verification is turned off** — turning it off must never turn off safety.
+
+A local `evaluate.submission_uri` is also read and checked against the CSV spec in `contracts/proposals/001`. Only what that document already states is checked; whether a `category_id` exists in the test manifest belongs to evaluate.
 
 ## Outputs
 
@@ -38,6 +40,6 @@ python -m pytest src/pipelines/registry/tests -q
 ## Local Rules
 
 - Secrets are redacted before anything is written. A record is a permanent artifact — treat every field in it as public.
-- Failures are typed (`MissingInputError`, `InvalidSchemaError`, `CorruptedArtifactError`) and returned as `status="error"`, never raised out of `run()`.
+- Failures are typed (`MissingInputError`, `InvalidSchemaError`, `CorruptedArtifactError`, `InvalidSubmissionError`) and returned as `status="error"`, never raised out of `run()`.
 - The record schema is what every consumer reads. Adding, renaming, or removing a field is a `contracts/proposals/` proposal, not an edit.
 - The repository root is derived from this file's location, never hardcoded. Keep it that way.
