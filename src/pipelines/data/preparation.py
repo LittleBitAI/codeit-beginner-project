@@ -8,7 +8,8 @@
 - `train_manifest.json`, `validation_manifest.json`: COCO 형식 manifest
 - `test_manifest.json`: annotation이 없는 COCO 형식 test manifest
 - `class_map.json`: `{"<category id>": "<category name>"}`
-- `dataset_summary.json`: 원본 위치, 비율, seed, 분포를 담은 요약
+- `dataset_summary.json`: 원본 위치, 비율, seed, 분포와 split manifest의 sha256을
+  담은 요약
 
 Storage 접근은 `src/common/storage.py`의 `create_storage(config)`로만 합니다.
 개별 pipeline은 `boto3`를 직접 쓰지 않습니다. competition 평가용 `test_images/`는
@@ -17,6 +18,8 @@ test manifest에만 기록하고 어떤 학습 split에도 넣지 않습니다.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -85,7 +88,14 @@ TEST_IMAGE_MARKER = "test_images/"
 # competition 평가용 원본입니다. 학습·검증 어디에도 들어가면 안 됩니다.
 FORBIDDEN_MARKERS = ("test_images/", "test_annotations/")
 MAX_READ_WORKERS = 16
-SUMMARY_SCHEMA_VERSION = "1.0"
+# 1.1에서 `split.checksums`가 추가됐습니다. 기존 key는 그대로입니다.
+SUMMARY_SCHEMA_VERSION = "1.1"
+CHECKSUM_ALGORITHM = "sha256"
+# hash를 남길 split 산출물입니다. 순서가 요약에 그대로 드러납니다.
+SPLIT_CHECKSUM_KEYS: tuple[tuple[str, str], ...] = (
+    ("train", "train_manifest_uri"),
+    ("validation", "validation_manifest_uri"),
+)
 
 
 @dataclass(frozen=True)
@@ -384,6 +394,34 @@ def _manifest(
     }
 
 
+def _stored_json_bytes(value: Any) -> bytes:
+    """Storage가 JSON artifact를 저장할 때 만드는 byte와 같은 값을 만듭니다.
+
+    `LocalStorage`와 `S3Storage`가 쓰는 직렬화(`ensure_ascii=False`, `indent=2`,
+    끝 줄바꿈 한 개)를 그대로 따릅니다. 그래야 저장된 file을 `sha256sum`으로
+    확인한 값과 요약에 적은 hash가 같습니다.
+    """
+
+    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+def _split_checksums(manifests: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
+    """train/validation manifest의 sha256과 byte 크기를 남깁니다.
+
+    seed와 비율을 고정해도 원본이 바뀌면 split은 달라집니다. 어떤 split으로
+    학습했는지 나중에 확인할 수 있는 기록은 이 hash뿐이라, 요약에 같이 남깁니다.
+    """
+
+    checksums: dict[str, Any] = {"algorithm": CHECKSUM_ALGORITHM}
+    for split, artifact_key in SPLIT_CHECKSUM_KEYS:
+        body = _stored_json_bytes(manifests[split])
+        checksums[ARTIFACT_FILE_NAMES[artifact_key]] = {
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "bytes": len(body),
+        }
+    return checksums
+
+
 def _dataset_summary(
     dataset: ConsolidatedDataset,
     split_result: SplitResult,
@@ -413,6 +451,7 @@ def _dataset_summary(
             "split_ratio": settings.split_ratio,
             "validation_ratio": settings.validation_ratio,
             "seed": settings.seed,
+            "checksums": _split_checksums(manifests),
         },
         "raw": {
             "listed_train_images": raw_image_count,

@@ -31,6 +31,8 @@ Prepared artifacts land under the processed dataset prefix, in a directory whose
 
 `test_manifest.json` is generated from decoded `test_images/` dimensions and the same class-map object written to `class_map.json`. It has no annotations. Test images never enter train/validation, and `test_annotations/` is never read.
 
+`dataset_summary.json` records under `split.checksums` the sha256 and byte size of both split manifests, computed from the exact bytes storage writes, so `sha256sum` on the stored file returns the same digest. Same source, seed, and ratio reproduce the same digests; a changed source shows up as a changed digest even when seed and ratio stayed fixed. Adding this made the summary `schema_version` `1.1`; every earlier key is unchanged.
+
 With `overwrite == false`, an exact legacy set of four artifacts is a safe backfill case:
 the pipeline reads its class map and writes only the missing test manifest. Any other
 partial set still fails, and an existing file is never replaced.
