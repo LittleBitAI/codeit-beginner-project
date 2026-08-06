@@ -145,6 +145,8 @@ export interface TeamRun {
   progress: Record<string, unknown>;
   summary: Record<string, unknown>;
   artifacts: Record<string, unknown>;
+  /** 평가를 아직 돌리지 않았거나 이 field가 생기기 전 기록이면 빈 객체입니다. */
+  evaluation: Record<string, unknown>;
   message: string | null;
   createdAt: string;
   startedAt: string | null;
