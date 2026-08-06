@@ -149,6 +149,97 @@ def test_remote_metrics_are_not_fetched(tmp_path: Path):
     assert summary["metrics_source"] == "unavailable"
 
 
+def read_summary(repo_root: Path, result: dict) -> dict:
+    """실행 결과가 가리키는 index summary 문서를 읽습니다."""
+
+    return json.loads(
+        (repo_root / result["artifacts"]["experiment_summary_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+
+
+def test_training_block_is_filled_from_the_config_snapshot(local_run):
+    repo_root, inputs = local_run
+    config = make_config(repo_root, inputs)
+    config["train"] = {
+        "architecture": "retinanet_resnet50_fpn_v2",
+        "pretrained": True,
+        "optimizer": "AdamW",
+        "learning_rate": 0.0001,
+        "weight_decay": 0.01,
+        "beta1": 0.9,
+        "beta2": 0.999,
+        "epsilon": 1e-8,
+        "device": "cuda",
+        "epochs": 50,
+        "batch_size": 4,
+        "num_workers": 0,
+        # 경로와 seed는 summary에 옮기지 않습니다.
+        "output_dir": "artifacts/train",
+        "seed": 7,
+    }
+
+    summary = read_summary(repo_root, registry.run(config))
+
+    assert summary["summary_version"] == "1"
+    assert summary["training_source"] == "config_snapshot"
+    assert summary["training"] == {
+        "architecture": "retinanet_resnet50_fpn_v2",
+        "pretrained": True,
+        "optimizer": "AdamW",
+        "learning_rate": pytest.approx(0.0001),
+        # optimizer 종류에 따라 record에 한쪽만 있으므로 없는 쪽은 null입니다.
+        "momentum": None,
+        "weight_decay": pytest.approx(0.01),
+        "beta1": pytest.approx(0.9),
+        "beta2": pytest.approx(0.999),
+        "epsilon": pytest.approx(1e-8),
+        "device": "cuda",
+        "epochs": 50,
+        "batch_size": 4,
+        "num_workers": 0,
+    }
+
+
+def test_record_without_a_train_section_stays_successful(local_run):
+    """train 설정이 없던 옛 record도 실패시키지 않고 null로 둡니다."""
+
+    repo_root, inputs = local_run
+
+    result = registry.run(make_config(repo_root, inputs))
+
+    assert result["status"] == "ok"
+    summary = read_summary(repo_root, result)
+    assert summary["training_source"] == "unavailable"
+    assert set(summary["training"].values()) == {None}
+
+
+def test_wrongly_typed_training_values_become_null(local_run):
+    """기본값으로 채우지 않고 null로 둡니다. 기록에 없는 것과 기본값은 다릅니다."""
+
+    repo_root, inputs = local_run
+    config = make_config(repo_root, inputs)
+    config["train"] = {
+        "architecture": 123,
+        "pretrained": "true",
+        "epochs": "50",
+        "batch_size": True,
+        "learning_rate": "0.0001",
+        "device": "cuda",
+    }
+
+    result = registry.run(config)
+
+    assert result["status"] == "ok"
+    summary = read_summary(repo_root, result)
+    # train 섹션 자체는 있으므로 출처는 config_snapshot입니다.
+    assert summary["training_source"] == "config_snapshot"
+    assert summary["training"]["device"] == "cuda"
+    for key in ("architecture", "pretrained", "epochs", "batch_size", "learning_rate"):
+        assert summary["training"][key] is None
+
+
 # --- index는 cache, record가 진실 -----------------------------------------
 
 

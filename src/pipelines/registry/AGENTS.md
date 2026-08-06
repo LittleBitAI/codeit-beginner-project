@@ -43,6 +43,7 @@ python -m src.pipelines.registry.rebuild_index --config configs/env.local.json
 - Secrets are redacted before anything is written. A record is a permanent artifact — treat every field in it as public.
 - **The record is the truth and the index is a cache.** A record is written first; if the index write then fails, the run still succeeds and reports `summary["index_status"] = "failed"`. Rebuild it rather than failing the run.
 - `summary.py` is the only file allowed to depend on another pipeline's document shape (evaluate's `metrics.json`). It reads defensively — an unreadable file yields null metrics, never an error.
+- `summary.py` also copies the `training` block out of the record's `config_snapshot.train`, paired with `training_source` (`config_snapshot` or `unavailable`). Same defensive rule: a missing section or a wrongly typed value becomes `null`, never a default and never an error — a summary must not claim a value the record does not hold.
 - Failures are typed (`MissingInputError`, `InvalidSchemaError`, `CorruptedArtifactError`, `InvalidSubmissionError`) and returned as `status="error"`, never raised out of `run()`.
 - The record schema is what every consumer reads. Adding, renaming, or removing a field is a `contracts/proposals/` proposal, not an edit.
 - The repository root is derived from this file's location, never hardcoded. Keep it that way.
