@@ -22,11 +22,25 @@ import { useDraft } from '../state/DraftContext';
 type TabKey = 'basic' | 'hyper' | 'output';
 
 const TABS: { key: TabKey; label: string; fields: string[] }[] = [
-  { key: 'basic', label: '기본 정보', fields: ['run_id', 'seed', 'device', 'pretrained'] },
+  {
+    key: 'basic',
+    label: '기본 정보',
+    fields: ['architecture', 'optimizer', 'run_id', 'seed', 'device', 'pretrained'],
+  },
   {
     key: 'hyper',
     label: '하이퍼파라미터',
-    fields: ['epochs', 'batch_size', 'learning_rate', 'momentum', 'weight_decay', 'num_workers'],
+    fields: [
+      'epochs',
+      'batch_size',
+      'learning_rate',
+      'momentum',
+      'weight_decay',
+      'beta1',
+      'beta2',
+      'epsilon',
+      'num_workers',
+    ],
   },
   { key: 'output', label: '출력', fields: ['output_dir', 'output_prefix'] },
 ];
@@ -91,6 +105,7 @@ export function NewExperiment({
   }
 
   const capability = resolveTrainCapability(defaults);
+  const selectedOptimizer = draft.train.optimizer || capability.optimizer.default;
   const activeTab = TABS.find((item) => item.key === tab) ?? TABS[0]!;
   const tabHasError = (item: (typeof TABS)[number]) =>
     item.fields.some((name) => messageFor(errors, `train.${name}`) !== undefined);
@@ -121,7 +136,7 @@ export function NewExperiment({
           모델 <code style={{ fontFamily: font.mono }}>{capability.model.default}</code> · optimizer{' '}
           <code style={{ fontFamily: font.mono }}>{capability.optimizer.default}</code>
           {capability.source === 'legacy_fallback'
-            ? '로 실행합니다. Train이 capability를 아직 제공하지 않아 현재 실제 구현과 맞춘 고정값입니다.'
+            ? '를 기본으로 씁니다. Train이 capability를 아직 제공하지 않아 현재 실제 구현과 맞춘 선택 목록입니다.'
             : '를 기본 구성으로 사용합니다.'}
         </AlertRow>
       </div>
@@ -181,12 +196,21 @@ export function NewExperiment({
               }}
             >
               {activeTab.fields.map((name) => {
+                if (selectedOptimizer === 'SGD' && ['beta1', 'beta2', 'epsilon'].includes(name)) {
+                  return null;
+                }
+                if (selectedOptimizer !== 'SGD' && name === 'momentum') return null;
                 const spec = fields.find((item) => item.name === name);
                 if (!spec) return null;
+                const optimizerDefault = spec.defaults_by_optimizer?.[selectedOptimizer];
+                const shownSpec =
+                  optimizerDefault === undefined
+                    ? spec
+                    : { ...spec, default: optimizerDefault };
                 return (
                   <TrainField
                     key={name}
-                    spec={spec}
+                    spec={shownSpec}
                     value={draft.train[name] ?? ''}
                     error={messageFor(errors, `train.${name}`)}
                     devices={defaults.devices}
@@ -393,6 +417,19 @@ function TrainField({
               {device.value}
               {device.available ? '' : ` (${device.reason ?? '사용 불가'})`}
             </option>
+          ))}
+        </select>
+      </Field>
+    );
+  }
+
+  if (spec.type === 'enum') {
+    const selected = value || (typeof spec.default === 'string' ? spec.default : '');
+    return (
+      <Field label={spec.label} hint={spec.hint} error={error}>
+        <select value={selected} onChange={(event) => onChange(event.target.value)} style={style}>
+          {(spec.choices ?? []).map((choice) => (
+            <option key={choice} value={choice}>{choice}</option>
           ))}
         </select>
       </Field>

@@ -5,7 +5,7 @@ from __future__ import annotations
 from src.pipelines.web import train_capabilities
 
 
-def test_missing_capability_uses_the_current_fixed_train_configuration():
+def test_missing_capability_uses_the_web_selection_mirror():
     capability = train_capabilities.resolve_train_capability(None)
 
     assert capability == {
@@ -14,13 +14,13 @@ def test_missing_capability_uses_the_current_fixed_train_configuration():
         "fallback_reason": "train_capability_unavailable",
         "model": {
             "default": train_capabilities.LEGACY_ARCHITECTURE,
-            "choices": [train_capabilities.LEGACY_ARCHITECTURE],
-            "selection_supported": False,
+            "choices": list(train_capabilities.SUPPORTED_ARCHITECTURES),
+            "selection_supported": True,
         },
         "optimizer": {
-            "default": "SGD",
-            "choices": ["SGD"],
-            "selection_supported": False,
+            "default": "AdamW",
+            "choices": list(train_capabilities.SUPPORTED_OPTIMIZERS),
+            "selection_supported": True,
         },
     }
 
@@ -69,7 +69,7 @@ def test_defaults_api_reports_fallback_source(client):
 
     assert body["architecture"] == train_capabilities.LEGACY_ARCHITECTURE
     assert body["train_capability"]["source"] == "legacy_fallback"
-    assert body["train_capability"]["optimizer"]["default"] == "SGD"
+    assert body["train_capability"]["optimizer"]["default"] == "AdamW"
 
 
 def test_defaults_api_accepts_a_future_reported_capability(client, monkeypatch):

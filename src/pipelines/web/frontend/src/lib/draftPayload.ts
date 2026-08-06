@@ -14,11 +14,27 @@ const NUMBER_PATTERN = /^-?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/;
  */
 export function toPayload(draft: Draft, fields: FieldSpec[]): ConfigDraftPayload {
   const train: Record<string, unknown> = {};
+  const optimizerSpec = fields.find((spec) => spec.name === 'optimizer');
+  const optimizer =
+    draft.train.optimizer?.trim() ||
+    (typeof optimizerSpec?.default === 'string' ? optimizerSpec.default : 'SGD');
+  const irrelevant =
+    optimizer === 'SGD'
+      ? new Set(['beta1', 'beta2', 'epsilon'])
+      : new Set(['momentum']);
 
   for (const spec of fields) {
+    if (irrelevant.has(spec.name)) continue;
     const raw = draft.train[spec.name];
     if (raw === undefined || raw.trim() === '') {
-      // 비워 두면 backend의 기본값을 씁니다.
+      // 새 enum 선택은 명시적으로 저장해 legacy config와 구분합니다.
+      if (
+        spec.type === 'enum' &&
+        spec.name !== 'device' &&
+        typeof spec.default === 'string'
+      ) {
+        train[spec.name] = spec.default;
+      }
       continue;
     }
     const text = raw.trim();

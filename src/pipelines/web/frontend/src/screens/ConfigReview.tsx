@@ -39,10 +39,14 @@ export function ConfigReview({
   }
 
   const train = saved.config.train as Record<string, unknown>;
+  const optimizer = String(train.optimizer ?? 'SGD');
   const defaultValues = Object.fromEntries(
     (defaults?.fields ?? [])
       .filter((spec) => spec.default !== undefined && spec.default !== null)
-      .map((spec) => [spec.name, spec.default]),
+      .map((spec) => [
+        spec.name,
+        spec.defaults_by_optimizer?.[optimizer] ?? spec.default,
+      ]),
   );
   const diff = diffAgainstDefaults(train, defaultValues);
   const busy = Boolean(listing?.active_job_id);
@@ -92,12 +96,20 @@ export function ConfigReview({
           }}
         >
           {[
-            ['MODEL', defaults?.architecture ?? 'Faster R-CNN'],
+            ['MODEL', String(train.architecture ?? defaults?.architecture ?? 'Faster R-CNN')],
+            ['OPTIMIZER', optimizer],
             ['DEVICE', String(train.device)],
             ['EPOCHS', String(train.epochs)],
             ['BATCH', String(train.batch_size)],
             ['LR', String(train.learning_rate)],
             ['SEED', String(train.seed)],
+            ...(optimizer === 'SGD'
+              ? [['MOMENTUM', String(train.momentum)]]
+              : [
+                  ['BETA 1', String(train.beta1)],
+                  ['BETA 2', String(train.beta2)],
+                  ['EPSILON', String(train.epsilon)],
+                ]),
           ].map(([label, value], index, all) => (
             <div
               key={label}

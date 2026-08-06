@@ -5,11 +5,13 @@ import type { EvaluationState, JobRecord, Progress } from '../api/types';
 
 const evaluationStatus = vi.fn();
 const startEvaluation = vi.fn();
+const retryRegistration = vi.fn();
 
 vi.mock('../api/client', () => ({
   api: {
     evaluationStatus: (...args: unknown[]) => evaluationStatus(...args),
     startEvaluation: (...args: unknown[]) => startEvaluation(...args),
+    retryRegistration: (...args: unknown[]) => retryRegistration(...args),
   },
 }));
 
@@ -70,6 +72,7 @@ function succeeded(competition: boolean): EvaluationState {
 beforeEach(() => {
   vi.clearAllMocks();
   startEvaluation.mockResolvedValue({ evaluation: { status: 'running' } });
+  retryRegistration.mockResolvedValue({ registration: { status: 'succeeded' } });
 });
 
 describe('EvaluatePanel · 대회 제출 흐름', () => {
@@ -128,5 +131,19 @@ describe('EvaluatePanel · 대회 제출 흐름', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: '이미 있으면 덮어쓰기' }));
 
     expect(screen.queryByText('기존 평가 파일이 있습니다')).toBeNull();
+  });
+
+  it('평가는 성공하고 등록만 실패한 경우 Registry 재시도를 제공한다', async () => {
+    evaluationStatus.mockResolvedValue({
+      evaluation: {
+        ...succeeded(false),
+        registration: { status: 'failed', message: 'Registry 저장 실패' },
+      },
+    });
+    render(<EvaluatePanel job={job(false)} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Registry 등록 재시도' }));
+
+    await waitFor(() => expect(retryRegistration).toHaveBeenCalledWith('a'.repeat(32)));
   });
 });

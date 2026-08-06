@@ -35,11 +35,19 @@ from .paths import (
     normalize_relative_posix,
     resolve_within_repo,
 )
+from .train_capabilities import (
+    LEGACY_ARCHITECTURE,
+    LEGACY_OPTIMIZER,
+    NEW_EXPERIMENT_OPTIMIZER,
+    SUPPORTED_ARCHITECTURES,
+    SUPPORTED_OPTIMIZERS,
+)
 
 
 __all__ = [
     "DATA_ARTIFACT_KEYS",
     "OPTIONAL_DATA_ARTIFACT_KEYS",
+    "OPTIMIZER_PROFILES",
     "build_runtime_config",
     "field_specs",
     "normalize_data_inputs",
@@ -75,14 +83,32 @@ _INTEGER_FIELDS = (
     ("batch_size", 1, 1),
     ("num_workers", 0, 0),
 )
-_FLOAT_FIELDS = (
-    ("learning_rate", 0.005, 0.0),
-    ("momentum", 0.9, 0.0),
-    ("weight_decay", 0.0005, 0.0),
-)
+OPTIMIZER_PROFILES = {
+    "AdamW": {
+        "learning_rate": 0.0001,
+        "weight_decay": 0.01,
+        "beta1": 0.9,
+        "beta2": 0.999,
+        "epsilon": 1e-8,
+    },
+    "SGD": {
+        "learning_rate": 0.005,
+        "momentum": 0.9,
+        "weight_decay": 0.0005,
+    },
+    "Adam": {
+        "learning_rate": 0.0001,
+        "weight_decay": 0.0,
+        "beta1": 0.9,
+        "beta2": 0.999,
+        "epsilon": 1e-8,
+    },
+}
 
 _FIELD_LABELS = {
     "run_id": ("실행 이름", "실행 결과가 저장되는 directory 이름으로 그대로 쓰입니다."),
+    "architecture": ("모델", "학습에 사용할 object detection architecture입니다."),
+    "optimizer": ("Optimizer", "가중치를 갱신할 optimizer와 관련 수치 항목을 선택합니다."),
     "seed": ("Random seed", "같은 seed와 같은 데이터면 같은 결과가 나옵니다."),
     "epochs": ("Epochs", "전체 학습 데이터를 몇 번 반복할지 정합니다."),
     "batch_size": ("Batch size", "한 번에 처리할 이미지 수. GPU 메모리에 가장 큰 영향을 줍니다."),
@@ -90,6 +116,9 @@ _FIELD_LABELS = {
     "learning_rate": ("Learning rate", "한 번에 얼마나 크게 배울지 정합니다. 너무 크면 발산합니다."),
     "momentum": ("Momentum", "SGD가 이전 방향을 얼마나 유지할지 정합니다."),
     "weight_decay": ("Weight decay", "과적합을 억제하는 정규화 강도입니다."),
+    "beta1": ("Beta 1", "Adam 계열의 1차 모멘트 감쇠율입니다."),
+    "beta2": ("Beta 2", "Adam 계열의 2차 모멘트 감쇠율입니다."),
+    "epsilon": ("Epsilon", "Adam 계열 계산에서 0으로 나누는 것을 막는 값입니다."),
     "device": ("Device", "학습을 CPU에서 할지 CUDA GPU에서 할지 정합니다."),
     "pretrained": ("Pretrained 가중치", "COCO로 미리 학습된 가중치에서 시작할지 정합니다."),
     "output_dir": ("Local 출력 directory", "저장소 기준 상대 경로여야 합니다."),
@@ -124,6 +153,21 @@ def field_specs() -> list[dict[str, Any]]:
     """새 실험 화면이 form을 그릴 때 쓰는 필드 정의입니다."""
 
     specs: list[dict[str, Any]] = []
+    for name, default, choices in (
+        ("architecture", LEGACY_ARCHITECTURE, SUPPORTED_ARCHITECTURES),
+        ("optimizer", NEW_EXPERIMENT_OPTIMIZER, SUPPORTED_OPTIMIZERS),
+    ):
+        label, hint = _FIELD_LABELS[name]
+        specs.append(
+            {
+                "name": name,
+                "type": "enum",
+                "default": default,
+                "choices": list(choices),
+                "label": label,
+                "hint": hint,
+            }
+        )
     label, hint = _FIELD_LABELS["run_id"]
     specs.append(
         {
@@ -148,13 +192,29 @@ def field_specs() -> list[dict[str, Any]]:
                 "hint": hint,
             }
         )
-    for name, default, minimum in _FLOAT_FIELDS:
+    default_profile = OPTIMIZER_PROFILES[NEW_EXPERIMENT_OPTIMIZER]
+    for name in (
+        "learning_rate",
+        "weight_decay",
+        "momentum",
+        "beta1",
+        "beta2",
+        "epsilon",
+    ):
+        fallback_profile = OPTIMIZER_PROFILES["SGD"] if name == "momentum" else default_profile
+        default = fallback_profile.get(name)
+        minimum = 1e-16 if name == "epsilon" else 0.0
         label, hint = _FIELD_LABELS[name]
         specs.append(
             {
                 "name": name,
                 "type": "number",
                 "default": default,
+                "defaults_by_optimizer": {
+                    optimizer: profile[name]
+                    for optimizer, profile in OPTIMIZER_PROFILES.items()
+                    if name in profile
+                },
                 "minimum": minimum,
                 "label": label,
                 "hint": hint,
@@ -227,6 +287,16 @@ def _normalize_float(
     return float(value)
 
 
+def _normalize_probability(
+    raw: Any, name: str, default: float, errors: list[FieldError]
+) -> float:
+    value = _normalize_float(raw, name, default, 0.0, errors)
+    if value >= 1.0:
+        collect(errors, f"train.{name}", "0 이상 1 미만의 유한한 숫자여야 합니다.")
+        return default
+    return value
+
+
 def normalize_train_settings(raw: Any) -> dict[str, Any]:
     """``config["train"]`` 후보를 train과 같은 규칙으로 정규화합니다.
 
@@ -239,6 +309,31 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         raw = {}
     if not isinstance(raw, dict):
         raise WebValidationError([FieldError("train", "train 설정은 object여야 합니다.")])
+
+    architecture = raw.get("architecture", LEGACY_ARCHITECTURE)
+    if not isinstance(architecture, str) or architecture not in SUPPORTED_ARCHITECTURES:
+        collect(
+            errors,
+            "train.architecture",
+            f"{', '.join(SUPPORTED_ARCHITECTURES)} 중 하나여야 합니다.",
+        )
+        architecture = LEGACY_ARCHITECTURE
+
+    optimizer = raw.get("optimizer", LEGACY_OPTIMIZER)
+    if not isinstance(optimizer, str) or optimizer not in SUPPORTED_OPTIMIZERS:
+        collect(
+            errors,
+            "train.optimizer",
+            f"{', '.join(SUPPORTED_OPTIMIZERS)} 중 하나여야 합니다.",
+        )
+        optimizer = LEGACY_OPTIMIZER
+    irrelevant = {"momentum"} if optimizer in {"AdamW", "Adam"} else {
+        "beta1",
+        "beta2",
+        "epsilon",
+    }
+    for name in sorted(irrelevant & set(raw)):
+        collect(errors, f"train.{name}", f"{optimizer}에서 사용하지 않는 값입니다.")
 
     device = raw.get("device", "cpu")
     if not isinstance(device, str) or device not in {"cpu", "cuda"}:
@@ -280,6 +375,8 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
 
     settings: dict[str, Any] = {
         "run_id": run_id,
+        "architecture": architecture,
+        "optimizer": optimizer,
         "device": device,
         "pretrained": pretrained,
         "output_dir": output_dir,
@@ -287,24 +384,49 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
     }
     for name, default, minimum in _INTEGER_FIELDS:
         settings[name] = _normalize_integer(raw, name, default, minimum, errors)
-    for name, default, minimum in _FLOAT_FIELDS:
-        settings[name] = _normalize_float(raw, name, default, minimum, errors)
+    profile = OPTIMIZER_PROFILES[optimizer]
+    for name in ("learning_rate", "weight_decay"):
+        settings[name] = _normalize_float(raw, name, profile[name], 0.0, errors)
+    if optimizer == "SGD":
+        settings["momentum"] = _normalize_float(
+            raw, "momentum", profile["momentum"], 0.0, errors
+        )
+    else:
+        settings["beta1"] = _normalize_probability(
+            raw, "beta1", profile["beta1"], errors
+        )
+        settings["beta2"] = _normalize_probability(
+            raw, "beta2", profile["beta2"], errors
+        )
+        settings["epsilon"] = _normalize_float(
+            raw, "epsilon", profile["epsilon"], 1e-16, errors
+        )
 
     raise_if_any(errors)
     # train이 읽는 순서와 같게 정렬해 config를 읽기 쉽게 만듭니다.
     return {
         "run_id": settings["run_id"],
+        "architecture": settings["architecture"],
+        "optimizer": settings["optimizer"],
         "seed": settings["seed"],
         "epochs": settings["epochs"],
         "batch_size": settings["batch_size"],
         "num_workers": settings["num_workers"],
         "learning_rate": settings["learning_rate"],
-        "momentum": settings["momentum"],
         "weight_decay": settings["weight_decay"],
         "device": settings["device"],
         "pretrained": settings["pretrained"],
         "output_dir": settings["output_dir"],
         "output_prefix": settings["output_prefix"],
+        **(
+            {"momentum": settings["momentum"]}
+            if optimizer == "SGD"
+            else {
+                "beta1": settings["beta1"],
+                "beta2": settings["beta2"],
+                "epsilon": settings["epsilon"],
+            }
+        ),
     }
 
 
@@ -370,7 +492,9 @@ def run_id_output_path(settings: dict[str, Any]) -> Path:
     return resolve_within_repo(settings["output_dir"], label="출력 directory") / settings["run_id"]
 
 
-def preflight_warnings(settings: dict[str, Any], data_inputs: dict[str, str]) -> list[dict[str, str]]:
+def preflight_warnings(
+    settings: dict[str, Any], data_inputs: dict[str, str]
+) -> list[dict[str, str]]:
     """실행을 막지는 않지만 미리 알려 주면 좋은 것들을 모읍니다."""
 
     warnings: list[dict[str, str]] = []
@@ -510,7 +634,9 @@ def write_runtime_config(config: dict[str, Any]) -> str:
     destination = directory / f"{config_id}.json"
     payload = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
 
-    handle, temporary_name = tempfile.mkstemp(dir=directory, prefix=f".{config_id}-", suffix=".tmp")
+    handle, temporary_name = tempfile.mkstemp(
+        dir=directory, prefix=f".{config_id}-", suffix=".tmp"
+    )
     temporary = Path(temporary_name)
     try:
         with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:

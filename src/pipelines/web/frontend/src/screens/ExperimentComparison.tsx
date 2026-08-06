@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import { api } from '../api/client';
 import type { CapabilityValueSource, ExperimentSummary } from '../api/types';
@@ -127,6 +127,18 @@ function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) 
       values: experiments.map((experiment) => shown(experiment.optimizer.weight_decay)),
     },
     {
+      label: 'BETA 1',
+      values: experiments.map((experiment) => shown(experiment.optimizer.beta1)),
+    },
+    {
+      label: 'BETA 2',
+      values: experiments.map((experiment) => shown(experiment.optimizer.beta2)),
+    },
+    {
+      label: 'EPSILON',
+      values: experiments.map((experiment) => shown(experiment.optimizer.epsilon)),
+    },
+    {
       label: 'BEST EPOCH',
       values: experiments.map((experiment) => shown(experiment.metrics.best_epoch)),
     },
@@ -218,11 +230,39 @@ function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) 
 export function ExperimentComparison() {
   const listing = usePolling(() => api.listExperiments(), 3000);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const experiments = listing.data?.experiments ?? [];
-  const selected = useMemo(
-    () => experiments.filter((experiment) => selectedIds.includes(experiment.experiment_id)),
+  const [compared, setCompared] = useState<ExperimentSummary[]>([]);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const experiments = useMemo(() => listing.data?.experiments ?? [], [listing.data]);
+  const selectedRunIds = useMemo(
+    () => experiments
+      .filter((experiment) => selectedIds.includes(experiment.experiment_id))
+      .map((experiment) => experiment.run_id),
     [experiments, selectedIds],
   );
+
+  useEffect(() => {
+    if (selectedRunIds.length < 2) {
+      setCompared([]);
+      setCompareError(null);
+      return;
+    }
+    let active = true;
+    void api.compareExperiments(selectedRunIds).then(
+      (result) => {
+        if (active) {
+          setCompared(result.experiments);
+          setCompareError(null);
+        }
+      },
+      (error: unknown) => {
+        if (active) {
+          setCompared([]);
+          setCompareError(error instanceof Error ? error.message : '비교 정보를 불러오지 못했습니다.');
+        }
+      },
+    );
+    return () => { active = false; };
+  }, [selectedRunIds]);
 
   const toggle = (experimentId: string) => {
     setSelectedIds((current) =>
@@ -255,7 +295,7 @@ export function ExperimentComparison() {
         right={
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
             <span style={{ font: `400 11px/1 ${font.mono}`, color: color.textMuted }}>
-              {selected.length}개 선택
+              {selectedIds.length}개 선택
             </span>
             <Button
               onClick={() => setSelectedIds(experiments.slice(0, 2).map((item) => item.experiment_id))}
@@ -263,7 +303,7 @@ export function ExperimentComparison() {
             >
               최근 2개 선택
             </Button>
-            <Button onClick={() => setSelectedIds([])} disabled={selected.length === 0}>
+            <Button onClick={() => setSelectedIds([])} disabled={selectedIds.length === 0}>
               선택 해제
             </Button>
           </div>
@@ -313,13 +353,16 @@ export function ExperimentComparison() {
         )}
       </Panel>
 
-      <DatasetNotice experiments={selected} />
+      {compareError && <AlertRow level="error" title="비교 정보를 불러오지 못했습니다">{compareError}</AlertRow>}
+      <DatasetNotice experiments={compared} />
 
       <Panel title="비교표" bodyStyle={{ padding: 0 }}>
-        {selected.length < 2 ? (
+        {selectedIds.length < 2 ? (
           <EmptyState message="위에서 실험을 2개 이상 선택하면 비교표가 열립니다." />
+        ) : compared.length < 2 ? (
+          <EmptyState message="선택한 실험의 상세 기록을 불러오고 있습니다." />
         ) : (
-          <ComparisonTable experiments={selected} />
+          <ComparisonTable experiments={compared} />
         )}
       </Panel>
     </div>

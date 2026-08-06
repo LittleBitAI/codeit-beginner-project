@@ -17,11 +17,16 @@ from pathlib import Path
 import pytest
 
 from src.pipelines.web.api.routes_train import ARCHITECTURE
-from src.pipelines.web.train_capabilities import LEGACY_OPTIMIZER
+from src.pipelines.web.train_capabilities import (
+    LEGACY_OPTIMIZER,
+    SUPPORTED_ARCHITECTURES,
+    SUPPORTED_OPTIMIZERS,
+)
 from src.pipelines.web.train_config import (
     DATA_ARTIFACT_KEYS,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_PREFIX,
+    OPTIMIZER_PROFILES,
     RUN_ID_PATTERN,
     normalize_train_settings,
 )
@@ -63,6 +68,14 @@ def module_constant(source: str, name: str) -> object:
             try:
                 return ast.literal_eval(value)
             except ValueError:
+                if isinstance(value, (ast.Tuple, ast.List)):
+                    resolved = [
+                        module_constant(source, item.id)
+                        if isinstance(item, ast.Name)
+                        else ast.literal_eval(item)
+                        for item in value.elts
+                    ]
+                    return tuple(resolved) if isinstance(value, ast.Tuple) else resolved
                 pytest.fail(f"train의 {name} 값을 읽지 못했습니다.")
     pytest.fail(f"train source에서 {name} 상수를 찾지 못했습니다.")
 
@@ -111,6 +124,21 @@ def test_architecture_matches_train_source():
     assert ARCHITECTURE == module_constant(read_source("model.py"), "ARCHITECTURE")
 
 
+def test_model_and_optimizer_choices_match_train_source():
+    assert SUPPORTED_ARCHITECTURES == module_constant(
+        read_source("model.py"), "SUPPORTED_ARCHITECTURES"
+    )
+    assert SUPPORTED_OPTIMIZERS == module_constant(
+        read_source("trainer.py"), "SUPPORTED_OPTIMIZERS"
+    )
+
+
+def test_optimizer_profiles_match_train_source():
+    assert OPTIMIZER_PROFILES == module_constant(
+        read_source("pipeline.py"), "OPTIMIZER_PROFILES"
+    )
+
+
 def test_fallback_optimizer_matches_train_source():
     """Capability이 없을 때 보여 주는 optimizer가 실제 고정 구현과 같아야 합니다."""
 
@@ -126,6 +154,8 @@ def test_numeric_defaults_match_train_source():
 
     assert train_defaults, "train source에서 기본값 호출을 하나도 찾지 못했습니다."
     for name, expected in train_defaults.items():
+        if name in {"learning_rate", "weight_decay", "momentum", "epsilon"}:
+            continue
         assert mirrored[name] == expected, f"train.{name} 기본값이 어긋났습니다."
 
 

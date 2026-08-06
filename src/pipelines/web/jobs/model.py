@@ -64,6 +64,8 @@ class JobRecord:
     settings: dict[str, Any] = field(default_factory=dict)
     data_inputs: dict[str, Any] = field(default_factory=dict)
     progress: dict[str, Any] = field(default_factory=dict)
+    evaluation: dict[str, Any] = field(default_factory=dict)
+    registration: dict[str, Any] = field(default_factory=dict)
     log_lines: int = 0
     orphan_note: str | None = None
     cloud_run_id: str | None = None
@@ -103,6 +105,8 @@ class JobRecord:
             "settings": dict(self.settings),
             "data_inputs": dict(self.data_inputs),
             "progress": dict(self.progress),
+            "evaluation": dict(self.evaluation),
+            "registration": dict(self.registration),
             "log_lines": self.log_lines,
             "orphan_note": self.orphan_note,
             "cloud_run_id": self.cloud_run_id,
@@ -126,6 +130,8 @@ class JobRecord:
             settings=dict(payload.get("settings") or {}),
             data_inputs=dict(payload.get("data_inputs") or {}),
             progress=dict(payload.get("progress") or {}),
+            evaluation=dict(payload.get("evaluation") or {}),
+            registration=dict(payload.get("registration") or {}),
             log_lines=int(payload.get("log_lines") or 0),
             orphan_note=payload.get("orphan_note"),
             cloud_run_id=payload.get("cloud_run_id"),

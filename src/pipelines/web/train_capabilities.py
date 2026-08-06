@@ -5,8 +5,8 @@ import하거나 임의의 함수를 호출하지 않습니다. 공개 capability
 검증된 현재 구성으로 fallback하고, 나중에는 ``reported_train_capability`` 한 곳만 공개
 연결점에 맞춰 바꾸면 됩니다.
 
-이 계층은 capability metadata만 호환합니다. 새 model/optimizer 선택값을 runtime config에
-추가하거나 Train이 아직 받지 않는 설정을 전달하지는 않습니다.
+이 계층은 capability metadata만 호환합니다. 실제 runtime config 검증과 정규화는
+``train_config``가 담당합니다.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ __all__ = [
     "CAPABILITY_SCHEMA_VERSION",
     "LEGACY_ARCHITECTURE",
     "LEGACY_OPTIMIZER",
+    "SUPPORTED_ARCHITECTURES",
+    "SUPPORTED_OPTIMIZERS",
     "current_train_capability",
     "reported_train_capability",
     "resolve_train_capability",
@@ -29,9 +31,16 @@ __all__ = [
 CAPABILITY_SCHEMA_VERSION = 1
 
 # Train 내부를 runtime에 import하지 않는 대신 contract test가 실제 source와 일치하는지
-# 감시합니다. 현재 Train은 이 모델과 optimizer 하나만 지원합니다.
+# 감시합니다. 기존 설정에서 값이 빠진 경우에만 legacy 기본값을 사용합니다.
 LEGACY_ARCHITECTURE = "fasterrcnn_mobilenet_v3_large_320_fpn"
 LEGACY_OPTIMIZER = "SGD"
+SUPPORTED_ARCHITECTURES = (
+    LEGACY_ARCHITECTURE,
+    "fasterrcnn_resnet50_fpn_v2",
+    "retinanet_resnet50_fpn_v2",
+)
+SUPPORTED_OPTIMIZERS = ("AdamW", "SGD", "Adam")
+NEW_EXPERIMENT_OPTIMIZER = "AdamW"
 
 _CHOICE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+\-]{0,127}$")
 
@@ -53,13 +62,13 @@ def _fallback(reason: str) -> dict[str, Any]:
         "fallback_reason": reason,
         "model": {
             "default": LEGACY_ARCHITECTURE,
-            "choices": [LEGACY_ARCHITECTURE],
-            "selection_supported": False,
+            "choices": list(SUPPORTED_ARCHITECTURES),
+            "selection_supported": True,
         },
         "optimizer": {
-            "default": LEGACY_OPTIMIZER,
-            "choices": [LEGACY_OPTIMIZER],
-            "selection_supported": False,
+            "default": NEW_EXPERIMENT_OPTIMIZER,
+            "choices": list(SUPPORTED_OPTIMIZERS),
+            "selection_supported": True,
         },
     }
 

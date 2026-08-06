@@ -6,9 +6,13 @@ import type { ExperimentSummary } from '../api/types';
 import { datasetRelationship } from '../lib/experiments';
 
 const listExperiments = vi.fn();
+const compareExperiments = vi.fn();
 
 vi.mock('../api/client', () => ({
-  api: { listExperiments: () => listExperiments() },
+  api: {
+    listExperiments: () => listExperiments(),
+    compareExperiments: (runIds: string[]) => compareExperiments(runIds),
+  },
 }));
 
 const { ExperimentComparison } = await import('./ExperimentComparison');
@@ -38,6 +42,9 @@ function makeExperiment(
       learning_rate: 0.005,
       momentum: 0.9,
       weight_decay: 0.0005,
+      beta1: null,
+      beta2: null,
+      epsilon: null,
     },
     training: { device: 'cpu', epochs: 2, batch_size: 1, num_workers: 0, seed: 42 },
     metrics: { best_epoch: 2, best_validation_loss: 0.4, map: null, map50: null },
@@ -66,24 +73,9 @@ describe('ExperimentComparison', () => {
     listExperiments.mockResolvedValue({
       experiments: [makeExperiment('a', 'same'), makeExperiment('b', 'same')],
     });
-    render(
-      <MemoryRouter>
-        <ExperimentComparison />
-      </MemoryRouter>,
-    );
-
-    fireEvent.click(await screen.findByLabelText('run-a 비교 선택'));
-    fireEvent.click(screen.getByLabelText('run-b 비교 선택'));
-
-    expect(screen.getByText('같은 dataset 입력으로 기록된 실험입니다')).toBeInTheDocument();
-    expect(screen.getByText('BEST VAL LOSS')).toBeInTheDocument();
-    expect(screen.getAllByText('0.4000')).toHaveLength(2);
-    expect(screen.getAllByText('SGD (호환 기본값)')).toHaveLength(2);
-  });
-
-  it('dataset 기록이 빠진 선택은 판정 불가로 알린다', async () => {
-    listExperiments.mockResolvedValue({
-      experiments: [makeExperiment('a', 'same'), makeExperiment('b', null)],
+    compareExperiments.mockResolvedValue({
+      experiments: [makeExperiment('a', 'same'), makeExperiment('b', 'same')],
+      missing: [],
     });
     render(
       <MemoryRouter>
@@ -94,6 +86,30 @@ describe('ExperimentComparison', () => {
     fireEvent.click(await screen.findByLabelText('run-a 비교 선택'));
     fireEvent.click(screen.getByLabelText('run-b 비교 선택'));
 
-    expect(screen.getByText('dataset 동일 여부를 판정할 수 없습니다')).toBeInTheDocument();
+    expect(await screen.findByText('같은 dataset 입력으로 기록된 실험입니다')).toBeInTheDocument();
+    expect(screen.getByText('BEST VAL LOSS')).toBeInTheDocument();
+    expect(screen.getAllByText('0.4000')).toHaveLength(2);
+    expect(screen.getAllByText('SGD (호환 기본값)')).toHaveLength(2);
+    expect(compareExperiments).toHaveBeenCalledWith(['run-a', 'run-b']);
+  });
+
+  it('dataset 기록이 빠진 선택은 판정 불가로 알린다', async () => {
+    listExperiments.mockResolvedValue({
+      experiments: [makeExperiment('a', 'same'), makeExperiment('b', null)],
+    });
+    compareExperiments.mockResolvedValue({
+      experiments: [makeExperiment('a', 'same'), makeExperiment('b', null)],
+      missing: [],
+    });
+    render(
+      <MemoryRouter>
+        <ExperimentComparison />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByLabelText('run-a 비교 선택'));
+    fireEvent.click(screen.getByLabelText('run-b 비교 선택'));
+
+    expect(await screen.findByText('dataset 동일 여부를 판정할 수 없습니다')).toBeInTheDocument();
   });
 });

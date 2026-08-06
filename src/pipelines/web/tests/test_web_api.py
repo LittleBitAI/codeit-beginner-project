@@ -46,6 +46,8 @@ def test_defaults_expose_every_train_field(client):
     names = {field["name"] for field in body["fields"]}
     assert names == {
         "run_id",
+        "architecture",
+        "optimizer",
         "seed",
         "epochs",
         "batch_size",
@@ -53,12 +55,23 @@ def test_defaults_expose_every_train_field(client):
         "learning_rate",
         "momentum",
         "weight_decay",
+        "beta1",
+        "beta2",
+        "epsilon",
         "device",
         "pretrained",
         "output_dir",
         "output_prefix",
     }
     assert {field["name"] for field in body["data_fields"]} == set(DATA_ARTIFACT_KEYS)
+    learning_rate = next(
+        field for field in body["fields"] if field["name"] == "learning_rate"
+    )
+    assert learning_rate["defaults_by_optimizer"] == {
+        "AdamW": 0.0001,
+        "SGD": 0.005,
+        "Adam": 0.0001,
+    }
     # 값 자체가 train과 같은지는 test_web_train_contract.py가 train source를 읽어 확인합니다.
     assert body["architecture"] == ARCHITECTURE
 
@@ -99,6 +112,66 @@ def test_validate_accepts_valid_payload(client, valid_payload):
 
     assert body["valid"] is True
     assert body["normalized"]["execution"] == {"mode": "real"}
+
+
+@pytest.mark.parametrize("optimizer", ("AdamW", "Adam"))
+def test_validate_applies_adam_profile_and_omits_momentum(
+    client, data_inputs, optimizer
+):
+    body = client.post(
+        "/api/train/validate",
+        json={"train": {"run_id": "adam-run", "optimizer": optimizer}, "inputs": {"data": data_inputs}},
+    ).json()
+
+    assert body["valid"] is True
+    train = body["normalized"]["train"]
+    assert train["optimizer"] == optimizer
+    assert train["learning_rate"] == 0.0001
+    assert train["beta1"] == 0.9
+    assert train["beta2"] == 0.999
+    assert train["epsilon"] == 1e-8
+    assert "momentum" not in train
+
+
+@pytest.mark.parametrize("field", ("beta1", "beta2"))
+def test_validate_rejects_adam_beta_equal_to_one(client, data_inputs, field):
+    body = client.post(
+        "/api/train/validate",
+        json={
+            "train": {"run_id": "bad-beta", "optimizer": "AdamW", field: 1.0},
+            "inputs": {"data": data_inputs},
+        },
+    ).json()
+
+    assert body["valid"] is False
+    assert body["errors"][0]["field"] == f"train.{field}"
+
+
+def test_validate_keeps_legacy_sgd_when_optimizer_is_missing(client, valid_payload):
+    body = client.post("/api/train/validate", json=valid_payload).json()
+
+    train = body["normalized"]["train"]
+    assert train["optimizer"] == "SGD"
+    assert train["momentum"] == 0.9
+    assert "beta1" not in train
+
+
+@pytest.mark.parametrize(
+    ("train", "field"),
+    (
+        ({"optimizer": "AdamW", "momentum": 0.5}, "train.momentum"),
+        ({"optimizer": "SGD", "beta1": 0.8}, "train.beta1"),
+        ({"optimizer": "SGD", "epsilon": 1e-7}, "train.epsilon"),
+    ),
+)
+def test_validate_rejects_irrelevant_optimizer_fields(client, data_inputs, train, field):
+    body = client.post(
+        "/api/train/validate",
+        json={"train": {"run_id": "bad-profile", **train}, "inputs": {"data": data_inputs}},
+    ).json()
+
+    assert body["valid"] is False
+    assert field in {item["field"] for item in body["errors"]}
 
 
 # --- 설정 저장 --------------------------------------------------------------

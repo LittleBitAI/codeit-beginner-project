@@ -1,8 +1,7 @@
-"""여러 학습 기록이 저장 후 비교 API까지 도달하는 Web E2E 시나리오.
+"""Registry 등록 전 학습 기록이 비교 API에 섞이지 않는 Web E2E 시나리오.
 
 실제 GPU 학습 대신 subprocess stdout만 대역으로 바꿉니다. 설정 검증, config 저장,
-job thread, 결과 parsing, record 영구 저장, 서버 재로딩과 비교 adapter는 실제 코드를
-그대로 통과합니다.
+job thread, 결과 parsing, record 영구 저장과 서버 재로딩은 실제 코드를 통과합니다.
 """
 
 from __future__ import annotations
@@ -62,7 +61,7 @@ def wait_until_idle(manager: JobManager, job_id: str, timeout: float = 10.0) -> 
     raise AssertionError(f"E2E job이 {timeout}초 안에 끝나지 않았습니다: {job_id}")
 
 
-def test_two_experiments_survive_reload_and_reach_comparison_api(
+def test_finished_training_jobs_do_not_bypass_registry_for_comparison(
     client, manager, monkeypatch, fake_process_factory
 ):
     scenario = load_scenario()
@@ -72,7 +71,6 @@ def test_two_experiments_survive_reload_and_reach_comparison_api(
     )
     monkeypatch.setattr(runner, "spawn", lambda *args, **kwargs: processes.popleft())
 
-    started_ids: list[str] = []
     for experiment in scenario["experiments"]:
         config_response = client.post(
             "/api/train/configs",
@@ -88,7 +86,6 @@ def test_two_experiments_survive_reload_and_reach_comparison_api(
         )
         assert start_response.status_code == 201, start_response.text
         job_id = start_response.json()["job_id"]
-        started_ids.append(job_id)
         wait_until_idle(manager, job_id)
 
     # 메모리 상태를 버리고 새 서버가 디스크 record를 다시 읽는 상황을 재현합니다.
@@ -99,33 +96,4 @@ def test_two_experiments_survive_reload_and_reach_comparison_api(
 
     assert response.status_code == 200
     experiments = response.json()["experiments"]
-    assert {item["experiment_id"] for item in experiments} == set(started_ids)
-    assert {item["run_id"] for item in experiments} == {
-        item["run_id"] for item in scenario["experiments"]
-    }
-    assert {item["status"] for item in experiments} == {"succeeded"}
-    identities = [item["dataset"]["identity"] for item in experiments]
-    if any(identity is None for identity in identities):
-        dataset_relationship = "unknown"
-    elif len(set(identities)) == 1:
-        dataset_relationship = "same"
-    else:
-        dataset_relationship = "different"
-    assert dataset_relationship == scenario["expectation"]["dataset_relationship"]
-    assert all(item["dataset"]["artifacts_complete"] for item in experiments)
-
-    by_run = {item["run_id"]: item for item in experiments}
-    for expected in scenario["experiments"]:
-        actual = by_run[expected["run_id"]]
-        assert actual["optimizer"]["learning_rate"] == expected["train"]["learning_rate"]
-        assert actual["training"]["batch_size"] == expected["train"]["batch_size"]
-        assert actual["metrics"]["best_validation_loss"] == expected["summary"][
-            "best_validation_loss"
-        ]
-        assert actual["optimizer"]["name"] == "SGD"
-        assert actual["optimizer"]["source"] == "legacy_fallback"
-
-    best = min(experiments, key=lambda item: item["metrics"]["best_validation_loss"])
-    assert best["run_id"] == scenario["expectation"]["best_run_id"]
-    assert "train_manifest_uri" not in response.text
-    assert "artifacts/e2e/pills" not in response.text
+    assert experiments == []
