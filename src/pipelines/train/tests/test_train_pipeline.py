@@ -11,16 +11,16 @@ import torch
 from botocore.exceptions import ClientError
 from PIL import Image
 from torch import nn
-from torchvision.models.detection import FasterRCNN
+from torchvision.models.detection import FasterRCNN, RetinaNet
 
 from src.common import LocalStorage, S3Storage, StorageError
 from src.pipelines import train
 from src.pipelines.train import pipeline
-from src.pipelines.train.dataset import REPOSITORY_ROOT, load_class_map
-from src.pipelines.train.model import build_model
+from src.pipelines.train.dataset import DetectionAugmentation, REPOSITORY_ROOT, load_class_map
+from src.pipelines.train.model import SUPPORTED_ARCHITECTURES, build_model
 from src.pipelines.train import progress as progress_module
 from src.pipelines.train.progress import SCHEMA, ProgressEmitter
-from src.pipelines.train.trainer import train_model
+from src.pipelines.train.trainer import build_optimizer, train_model
 
 
 class TinyDetector(nn.Module):
@@ -198,11 +198,206 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
             map_location="cpu",
             weights_only=True,
         )
+        assert {
+            "epoch",
+            "model_state_dict",
+            "optimizer_state_dict",
+            "validation_loss",
+            "architecture",
+            "num_classes",
+            "class_map",
+            "category_ids",
+            "seed",
+            "training_config",
+        } <= set(checkpoint)
         assert checkpoint["architecture"] == "fasterrcnn_mobilenet_v3_large_320_fpn"
         assert checkpoint["class_map"] == {"pill": 1}
         assert checkpoint["category_ids"] == [0, 7]
         assert checkpoint["num_classes"] == 2
         assert checkpoint["seed"] == 17
+        assert isinstance(checkpoint["model_state_dict"], dict)
+        assert isinstance(checkpoint["optimizer_state_dict"], dict)
+        assert checkpoint["optimizer_state_dict"]["param_groups"]
+
+        recorded = checkpoint["training_config"]
+        assert set(recorded) == {
+            "schema_version",
+            "run_id",
+            "architecture",
+            "optimizer",
+            "augmentation",
+            "seed",
+            "epochs",
+            "batch_size",
+            "num_workers",
+            "device",
+            "pretrained",
+        }
+        assert recorded["schema_version"] == 1
+        assert recorded["run_id"] == "cpu-smoke"
+        assert recorded["architecture"] == checkpoint["architecture"]
+        assert recorded["optimizer"] == {
+            "name": "SGD",
+            "learning_rate": 0.005,
+            "weight_decay": 0.0005,
+            "momentum": 0.9,
+        }
+        assert recorded["augmentation"] == {
+            "version": 1,
+            "preset": "none",
+            "horizontal_flip_probability": 0.0,
+            "vertical_flip_probability": 0.0,
+            "color_probability": 0.0,
+            "brightness": 0.0,
+            "contrast": 0.0,
+            "saturation": 0.0,
+            "hue": 0.0,
+        }
+        assert recorded["seed"] == checkpoint["seed"]
+        assert recorded["epochs"] == 2
+        assert recorded["batch_size"] == 1
+        assert recorded["num_workers"] == 0
+        assert recorded["device"] == "cpu"
+        assert recorded["pretrained"] is False
+        assert 1 <= checkpoint["epoch"] <= recorded["epochs"]
+
+        if artifact_name == "best_checkpoint_uri":
+            assert checkpoint["epoch"] == result["summary"]["best_epoch"]
+            assert checkpoint["validation_loss"] == result["summary"][
+                "best_validation_loss"
+            ]
+        else:
+            assert checkpoint["epoch"] == recorded["epochs"]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_type"),
+    [("AdamW", torch.optim.AdamW), ("SGD", torch.optim.SGD), ("Adam", torch.optim.Adam)],
+)
+def test_optimizer_factory_uses_the_selected_implementation(name, expected_type):
+    parameter = nn.Parameter(torch.tensor(1.0))
+    settings = {
+        "optimizer": name,
+        "learning_rate": 0.001,
+        "weight_decay": 0.01,
+    }
+    if name == "SGD":
+        settings["momentum"] = 0.8
+    else:
+        settings.update({"beta1": 0.85, "beta2": 0.95, "epsilon": 1e-7})
+
+    optimizer = build_optimizer([parameter], settings)
+
+    assert isinstance(optimizer, expected_type)
+
+
+def test_explicit_adamw_run_records_effective_reproducibility_settings(local_config):
+    local_config["train"].update(
+        {
+            "optimizer": "AdamW",
+            "architecture": "fasterrcnn_resnet50_fpn_v2",
+            "augmentation": {"preset": "pill_basic"},
+            "learning_rate": 0.0002,
+        }
+    )
+
+    result = train.run(local_config)
+
+    assert result["status"] == "ok"
+    checkpoint = torch.load(
+        REPOSITORY_ROOT / result["artifacts"]["last_checkpoint_uri"],
+        map_location="cpu",
+        weights_only=True,
+    )
+    recorded = checkpoint["training_config"]
+    assert checkpoint["architecture"] == "fasterrcnn_resnet50_fpn_v2"
+    assert checkpoint["epoch"] == 2
+    assert checkpoint["seed"] == 17
+    assert recorded["optimizer"] == {
+        "name": "AdamW",
+        "learning_rate": 0.0002,
+        "weight_decay": 0.01,
+        "betas": [0.9, 0.999],
+        "epsilon": 1e-08,
+    }
+    assert recorded["augmentation"] == {
+        "version": 1,
+        "preset": "pill_basic",
+        "horizontal_flip_probability": 0.5,
+        "vertical_flip_probability": 0.5,
+        "color_probability": 0.3,
+        "brightness": 0.1,
+        "contrast": 0.1,
+        "saturation": 0.1,
+        "hue": 0.02,
+    }
+    assert recorded["seed"] == 17
+    assert recorded["epochs"] == 2
+    optimizer_group = checkpoint["optimizer_state_dict"]["param_groups"][0]
+    assert optimizer_group["lr"] == 0.0002
+    assert optimizer_group["weight_decay"] == 0.01
+    assert optimizer_group["betas"] == (0.9, 0.999)
+    assert optimizer_group["eps"] == 1e-8
+    assert result["summary"]["optimizer"] == "AdamW"
+    assert result["summary"]["augmentation"] == "pill_basic"
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "message"),
+    [
+        ("optimizer", "Lion", "train.optimizer must be one of"),
+        ("architecture", "unknown_detector", "train.architecture must be one of"),
+        ("augmentation", {"preset": "unsafe_crop"}, "augmentation.preset must be one of"),
+        ("weight_decay", -1.0, "train.weight_decay must be a number"),
+    ],
+)
+def test_invalid_config_fails_before_writing_run_artifacts(
+    local_config, setting, value, message
+):
+    local_config["train"][setting] = value
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert message in result["message"]
+    output = REPOSITORY_ROOT / local_config["train"]["output_dir"] / "cpu-smoke"
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("optimizer", "irrelevant"),
+    [
+        ("AdamW", {"momentum": 0.9}),
+        ("Adam", {"momentum": 0.9}),
+        ("SGD", {"beta1": 0.9}),
+        ("SGD", {"beta2": 0.999}),
+        ("SGD", {"epsilon": 1e-8}),
+    ],
+)
+def test_irrelevant_optimizer_settings_are_rejected_before_writing_artifacts(
+    local_config, optimizer, irrelevant
+):
+    local_config["train"].update({"optimizer": optimizer, **irrelevant})
+
+    result = train.run(local_config)
+
+    field = next(iter(irrelevant))
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert f"train.{field} is not used by train.optimizer={optimizer}" in result["message"]
+    output = REPOSITORY_ROOT / local_config["train"]["output_dir"] / "cpu-smoke"
+    assert not output.exists()
+
+
+def test_adam_beta_bounds_are_validated_when_the_setting_is_meaningful(local_config):
+    local_config["train"].update({"optimizer": "AdamW", "beta1": 1.0})
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert "train.beta1 must be a number >= 0.0 and < 1.0" in result["message"]
 
 
 def _progress_events(captured_stderr: str) -> list[dict]:
@@ -440,6 +635,8 @@ def test_seed_reproduces_training_history(local_config):
     second_config = copy.deepcopy(local_config)
     first_config["train"]["run_id"] = "seed-first"
     second_config["train"]["run_id"] = "seed-second"
+    first_config["train"]["augmentation"] = {"preset": "pill_basic"}
+    second_config["train"]["augmentation"] = {"preset": "pill_basic"}
 
     first = train.run(first_config)
     second = train.run(second_config)
@@ -525,6 +722,82 @@ def test_model_builder_creates_faster_rcnn_without_downloading_weights():
 
     assert isinstance(model, FasterRCNN)
     assert model.roi_heads.box_predictor.cls_score.out_features == 3
+
+
+@pytest.mark.parametrize(
+    ("architecture", "expected_type"),
+    [
+        ("fasterrcnn_mobilenet_v3_large_320_fpn", FasterRCNN),
+        ("fasterrcnn_resnet50_fpn_v2", FasterRCNN),
+        ("retinanet_resnet50_fpn_v2", RetinaNet),
+    ],
+)
+def test_supported_model_builders_round_trip_state_without_download(
+    architecture, expected_type
+):
+    assert architecture in SUPPORTED_ARCHITECTURES
+    first = build_model(3, architecture=architecture, pretrained=False)
+    second = build_model(3, architecture=architecture, pretrained=False)
+
+    second.load_state_dict(first.state_dict())
+
+    assert isinstance(first, expected_type)
+
+
+def test_pill_basic_augmentation_updates_flip_boxes_without_mutating_target(monkeypatch):
+    draws = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
+    image = torch.arange(3 * 4 * 6, dtype=torch.float32).reshape(3, 4, 6)
+    target = {
+        "boxes": torch.tensor([[1.0, 1.0, 4.0, 3.0]]),
+        "labels": torch.tensor([1]),
+    }
+    original = copy.deepcopy(target)
+    augmentation = DetectionAugmentation(
+        {
+            "preset": "pill_basic",
+            "horizontal_flip_probability": 0.5,
+            "vertical_flip_probability": 0.5,
+            "color_probability": 0.3,
+            "brightness": 0.1,
+            "contrast": 0.1,
+            "saturation": 0.1,
+            "hue": 0.02,
+        }
+    )
+
+    augmented_image, augmented_target = augmentation(image, target)
+
+    assert torch.equal(augmented_image, torch.flip(image, dims=(-2, -1)))
+    assert torch.equal(augmented_target["boxes"], torch.tensor([[2.0, 1.0, 5.0, 3.0]]))
+    assert torch.equal(target["boxes"], original["boxes"])
+
+
+def test_pill_basic_color_augmentation_keeps_detection_target(monkeypatch):
+    draws = iter((1.0, 1.0, 0.0, 0.5, 0.5, 0.5, 0.5))
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
+    image = torch.full((3, 4, 6), 0.5)
+    target = {
+        "boxes": torch.tensor([[1.0, 1.0, 4.0, 3.0]]),
+        "labels": torch.tensor([1]),
+    }
+    augmentation = DetectionAugmentation(
+        {
+            "preset": "pill_basic",
+            "horizontal_flip_probability": 0.5,
+            "vertical_flip_probability": 0.5,
+            "color_probability": 0.3,
+            "brightness": 0.1,
+            "contrast": 0.1,
+            "saturation": 0.1,
+            "hue": 0.02,
+        }
+    )
+
+    _, augmented_target = augmentation(image, target)
+
+    assert torch.equal(augmented_target["boxes"], target["boxes"])
+    assert torch.equal(augmented_target["labels"], target["labels"])
 
 
 def test_faster_rcnn_cpu_forward_and_backward_smoke():

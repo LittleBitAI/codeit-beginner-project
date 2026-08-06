@@ -15,12 +15,64 @@ from urllib.parse import urlsplit
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
+from torchvision.transforms import functional as transform_functional
 
 from src.common import LocalStorage, Storage
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 _INTEGER_TEXT = re.compile(r"[+-]?\d+")
+
+
+class DetectionAugmentation:
+    """Tensor image와 detection bbox에 같은 무작위 변환을 적용합니다."""
+
+    def __init__(self, settings: Mapping[str, Any]) -> None:
+        self.settings = dict(settings)
+
+    def __call__(
+        self,
+        image: torch.Tensor,
+        target: Mapping[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if self.settings.get("preset") == "none":
+            return image, {name: value.clone() for name, value in target.items()}
+
+        augmented = image
+        copied = {name: value.clone() for name, value in target.items()}
+        boxes = copied["boxes"]
+        height, width = augmented.shape[-2:]
+        if torch.rand(()).item() < self.settings["horizontal_flip_probability"]:
+            augmented = torch.flip(augmented, dims=(-1,))
+            if boxes.numel():
+                left = width - boxes[:, 2].clone()
+                right = width - boxes[:, 0].clone()
+                boxes[:, 0], boxes[:, 2] = left, right
+        if torch.rand(()).item() < self.settings["vertical_flip_probability"]:
+            augmented = torch.flip(augmented, dims=(-2,))
+            if boxes.numel():
+                top = height - boxes[:, 3].clone()
+                bottom = height - boxes[:, 1].clone()
+                boxes[:, 1], boxes[:, 3] = top, bottom
+        if torch.rand(()).item() < self.settings["color_probability"]:
+            augmented = self._color(augmented)
+        return augmented, copied
+
+    def _factor(self, amount: float) -> float:
+        return 1.0 + (torch.rand(()).item() * 2.0 - 1.0) * amount
+
+    def _color(self, image: torch.Tensor) -> torch.Tensor:
+        image = transform_functional.adjust_brightness(
+            image, self._factor(self.settings["brightness"])
+        )
+        image = transform_functional.adjust_contrast(
+            image, self._factor(self.settings["contrast"])
+        )
+        image = transform_functional.adjust_saturation(
+            image, self._factor(self.settings["saturation"])
+        )
+        hue = (torch.rand(()).item() * 2.0 - 1.0) * self.settings["hue"]
+        return transform_functional.adjust_hue(image, hue)
 
 
 def _is_s3(location: str) -> bool:
@@ -142,11 +194,13 @@ class CocoDetectionDataset(Dataset):
         class_map: Mapping[str, int],
         storage: Storage,
         cache_directory: Path,
+        augmentation: Mapping[str, Any] | None = None,
     ) -> None:
         self.manifest_uri = manifest_uri
         self.class_map = dict(class_map)
         self.storage = storage
         self.cache_directory = cache_directory
+        self.augmentation = DetectionAugmentation(augmentation) if augmentation else None
         document = read_json_artifact(manifest_uri, storage)
         if not isinstance(document, Mapping):
             raise ValueError(f"COCO manifest root must be an object: {manifest_uri}")
@@ -312,4 +366,6 @@ class CocoDetectionDataset(Dataset):
             "area": torch.tensor([entry["area"] for entry in entries], dtype=torch.float32),
             "iscrowd": torch.tensor([entry["iscrowd"] for entry in entries], dtype=torch.int64),
         }
+        if self.augmentation is not None:
+            return self.augmentation(tensor, target)
         return tensor, target
