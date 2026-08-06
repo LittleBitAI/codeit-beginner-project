@@ -36,6 +36,26 @@ METRIC_KEYS: tuple[str, ...] = (
     "recall50",
 )
 
+# Train이 config에 쓰는 이름을 그대로 씁니다. 값 종류마다 통과시키는 타입이 달라서
+# key 이름과 함께 적어 둡니다. run_id, seed, output_dir, output_prefix는 넣지
+# 않습니다. seed는 summary 최상위에 이미 있고, 나머지 둘은 경로라 기록에 남기지
+# 않습니다.
+TRAINING_KEYS: tuple[tuple[str, str], ...] = (
+    ("architecture", "text"),
+    ("pretrained", "bool"),
+    ("optimizer", "text"),
+    ("learning_rate", "number"),
+    ("momentum", "number"),
+    ("weight_decay", "number"),
+    ("beta1", "number"),
+    ("beta2", "number"),
+    ("epsilon", "number"),
+    ("device", "text"),
+    ("epochs", "integer"),
+    ("batch_size", "integer"),
+    ("num_workers", "integer"),
+)
+
 
 def artifact_key_names() -> tuple[str, ...]:
     """선언된 필수·선택 artifact 중 실제 파일을 가리키는 key 이름입니다."""
@@ -86,6 +106,63 @@ def _number_or_none(value: Any) -> float | int | None:
     if value in (float("inf"), float("-inf")):
         return None
     return value
+
+
+def _text_or_none(value: Any) -> str | None:
+    """문자열만 통과시킵니다. 빈 문자열은 값이 없는 것과 같게 둡니다."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    """참·거짓만 통과시킵니다. 0이나 "true" 같은 값은 통과시키지 않습니다."""
+
+    return value if isinstance(value, bool) else None
+
+
+def _integer_or_none(value: Any) -> int | None:
+    """정수만 통과시킵니다. bool은 파이썬에서 정수지만 여기서는 정수가 아닙니다."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _empty_training() -> dict[str, None]:
+    return {key: None for key, _ in TRAINING_KEYS}
+
+
+def read_training(record: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+    """record의 `config_snapshot.train`에서 학습 설정을 방어적으로 읽습니다.
+
+    `config_snapshot.train`이 Mapping일 때만 `"config_snapshot"`을 함께 돌려줍니다.
+    그 밖에는 모든 값을 None으로 두고 `"unavailable"`을 돌려줍니다. 타입이 어긋난
+    값도 예외 없이 None이 되며, 기본값으로 채우지 않습니다. 기록에 없는 것과
+    기본값을 쓴 것은 다르기 때문입니다.
+
+    파일을 읽지 않으므로 `verify`와 무관합니다. `config_snapshot`은 record를 만들
+    때 이미 redact를 거친 값입니다.
+    """
+
+    snapshot = record.get("config_snapshot")
+    if not isinstance(snapshot, Mapping):
+        return _empty_training(), "unavailable"
+    train = snapshot.get("train")
+    if not isinstance(train, Mapping):
+        return _empty_training(), "unavailable"
+
+    readers = {
+        "text": _text_or_none,
+        "bool": _bool_or_none,
+        "integer": _integer_or_none,
+        "number": _number_or_none,
+    }
+    return (
+        {key: readers[kind](train.get(key)) for key, kind in TRAINING_KEYS},
+        "config_snapshot",
+    )
 
 
 def read_metrics(
@@ -143,6 +220,8 @@ def build_summary(
         verify=verify,
     )
 
+    training, training_source = read_training(record)
+
     verification = record.get("verification")
     verification = verification if isinstance(verification, Mapping) else {}
 
@@ -155,6 +234,8 @@ def build_summary(
         "experiment_record_uri": record_uri,
         "metrics": metrics,
         "metrics_source": metrics_source,
+        "training": training,
+        "training_source": training_source,
         "artifacts": artifacts,
         "verification": {
             "artifacts_checked": verification.get("artifacts_checked"),
