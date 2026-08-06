@@ -100,9 +100,15 @@ fallback하지 않으며, `read_experiment_record()`의 동작은 그대로입�
 
 summary 문서의 형식(`summary_version`, `run_id`, `created_at`, `seed`,
 `schema_version`, `experiment_record_uri`, `metrics`, `metrics_source`,
-`artifacts`, `verification`, `submission_check`)은
-`contracts/proposals/002-experiment-index-and-summary.md`에 있습니다. 값은 없을 수
-있으며 그때는 `null`입니다.
+`training`, `training_source`, `artifacts`, `verification`, `submission_check`)은
+`contracts/proposals/002-experiment-index-and-summary.md`와
+`contracts/proposals/003-experiment-summary-training-fields.md`에 있습니다. 값은 없을
+수 있으며 그때는 `null`입니다.
+
+`training`은 record의 `config_snapshot.train`에서 온 학습 설정이고
+`training_source`는 `"config_snapshot"` 또는 `"unavailable"`입니다. `metrics`와 같이
+방어적으로 읽으므로, 값이 없어도 실행이 실패하지 않고 기본값으로 채워지지도
+않습니다. 기록에 없는 것과 기본값을 쓴 것은 다르므로 그 구분은 읽는 쪽이 합니다.
 
 **index는 record에서 다시 만들 수 있는 cache이고 record가 진실입니다.** 그래서
 registry는 index 저장이 실패해도 실행을 실패시키지 않고 `summary["index_status"]`로
