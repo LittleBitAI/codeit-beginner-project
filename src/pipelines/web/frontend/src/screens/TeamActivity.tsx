@@ -224,6 +224,10 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
                 </span>
                 <span style={{ font: `400 11px/1.4 ${font.sans}`, color: color.textBody }}>
                   {run.actorName} · {new Date(run.createdAt).toLocaleString('ko-KR')}
+                  {/* Cognito가 확인해 준 이름이 아니면 그렇다고 말해 줍니다. */}
+                  {run.actorSource === 'iam' && (
+                    <span style={{ marginLeft: 6, color: color.textMuted }}>이름 직접 입력</span>
+                  )}
                 </span>
                 {/* 클릭하지 않아도 팀원끼리 비교되도록 맨 아래에 요약 한 줄을 둡니다. */}
                 <span
