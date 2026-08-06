@@ -1,4 +1,4 @@
-"""Deterministic Faster R-CNN training loop."""
+"""재현 가능한 torchvision detection 학습 loop입니다."""
 
 from __future__ import annotations
 
@@ -15,6 +15,31 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from .progress import ProgressEmitter
+
+
+SUPPORTED_OPTIMIZERS = ("AdamW", "SGD", "Adam")
+
+
+def build_optimizer(
+    parameters: list[nn.Parameter], settings: Mapping[str, Any]
+) -> torch.optim.Optimizer:
+    """정규화된 설정으로 optimizer를 만듭니다."""
+    common = {
+        "lr": settings["learning_rate"],
+        "weight_decay": settings["weight_decay"],
+    }
+    name = settings.get("optimizer", "SGD")
+    if name == "SGD":
+        return torch.optim.SGD(parameters, momentum=settings["momentum"], **common)
+    adam = {
+        "betas": (settings.get("beta1", 0.9), settings.get("beta2", 0.999)),
+        "eps": settings.get("epsilon", 1e-8),
+    }
+    if name == "AdamW":
+        return torch.optim.AdamW(parameters, **common, **adam)
+    if name == "Adam":
+        return torch.optim.Adam(parameters, **common, **adam)
+    raise ValueError(f"unsupported train optimizer: {name}")
 
 
 def set_seed(seed: int) -> None:
@@ -97,12 +122,7 @@ def _train_model(
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not parameters:
         raise RuntimeError("model has no trainable parameters")
-    optimizer = torch.optim.SGD(
-        parameters,
-        lr=settings["learning_rate"],
-        momentum=settings["momentum"],
-        weight_decay=settings["weight_decay"],
-    )
+    optimizer = build_optimizer(parameters, settings)
 
     history: list[dict[str, float | int]] = []
     best_loss = math.inf

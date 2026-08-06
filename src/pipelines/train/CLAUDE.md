@@ -4,7 +4,7 @@ Read the repository root `CLAUDE.md` first. This file adds only what is specific
 
 ## Scope
 
-Trains the Faster R-CNN baseline named by `ARCHITECTURE` in `model.py` — a MobileNetV3 320 FPN variant chosen so the pipeline stays runnable on CPU — and writes checkpoints plus a training history. It does not prepare data, compute metrics, or register experiments.
+Trains a config-selected torchvision detector and writes checkpoints plus a training history. The CPU-friendly MobileNetV3 320 FPN Faster R-CNN remains the legacy architecture when the setting is absent. It does not prepare data, compute metrics, or register experiments.
 
 ## Boundaries
 
@@ -21,6 +21,14 @@ It requires the four data artifacts in `config["inputs"]["data"]`.
 ## Outputs
 
 Checkpoints and history go to the configured repository-relative output directory, or to the configured S3 prefix. Checkpoints are written into a temporary directory and moved into place, so an interrupted run never leaves a half-written checkpoint behind. Existing files are not overwritten.
+
+## Configurable Training
+
+- Supported architectures are declared in `model.py`; never accept arbitrary import or builder names.
+- Supported optimizers are AdamW, SGD, and Adam. A missing optimizer means legacy SGD, while new callers should explicitly send AdamW.
+- Reject optimizer-specific settings that the selected optimizer does not use; never ignore them silently.
+- Augmentation defaults to `none`. `pill_basic` applies only to the train split and must update bounding boxes with geometric transforms.
+- Checkpoints record the normalized model, optimizer, augmentation, and seed settings under `training_config`. Keep that metadata JSON-safe and free of storage credentials.
 
 ## Run and Test
 

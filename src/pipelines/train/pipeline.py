@@ -1,4 +1,4 @@
-"""Public orchestration for the Faster R-CNN train pipeline."""
+"""설정 기반 object detection 학습 pipeline을 조정합니다."""
 
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ import torch
 from src.common import S3Storage, Storage, StorageError, create_storage
 
 from .dataset import CocoDetectionDataset, REPOSITORY_ROOT, load_class_map, read_json_artifact
-from .model import ARCHITECTURE, build_model
+from .model import ARCHITECTURE, SUPPORTED_ARCHITECTURES, build_model
 from .progress import ProgressEmitter
-from .trainer import set_seed, train_model
+from .trainer import SUPPORTED_OPTIMIZERS, set_seed, train_model
 
 
 RETURN_KEYS = {"status", "artifacts", "summary", "message"}
@@ -31,6 +31,51 @@ DATA_ARTIFACT_KEYS = {
     "dataset_summary_uri",
 }
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+OPTIMIZER_PROFILES = {
+    "AdamW": {
+        "learning_rate": 0.0001,
+        "weight_decay": 0.01,
+        "beta1": 0.9,
+        "beta2": 0.999,
+        "epsilon": 1e-8,
+    },
+    "SGD": {
+        "learning_rate": 0.005,
+        "momentum": 0.9,
+        "weight_decay": 0.0005,
+    },
+    "Adam": {
+        "learning_rate": 0.0001,
+        "weight_decay": 0.0,
+        "beta1": 0.9,
+        "beta2": 0.999,
+        "epsilon": 1e-8,
+    },
+}
+AUGMENTATION_PRESETS = {
+    "none": {
+        "version": 1,
+        "preset": "none",
+        "horizontal_flip_probability": 0.0,
+        "vertical_flip_probability": 0.0,
+        "color_probability": 0.0,
+        "brightness": 0.0,
+        "contrast": 0.0,
+        "saturation": 0.0,
+        "hue": 0.0,
+    },
+    "pill_basic": {
+        "version": 1,
+        "preset": "pill_basic",
+        "horizontal_flip_probability": 0.5,
+        "vertical_flip_probability": 0.5,
+        "color_probability": 0.3,
+        "brightness": 0.1,
+        "contrast": 0.1,
+        "saturation": 0.1,
+        "hue": 0.02,
+    },
+}
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -58,8 +103,56 @@ def _float(settings: Mapping[str, Any], name: str, default: float, *, minimum: f
     return float(value)
 
 
+def _probability(settings: Mapping[str, Any], name: str, default: float) -> float:
+    value = _float(settings, name, default, minimum=0.0)
+    if value >= 1.0:
+        raise ValueError(f"train.{name} must be a number >= 0.0 and < 1.0")
+    return value
+
+
+def _augmentation(raw: Mapping[str, Any]) -> dict[str, Any]:
+    value = raw.get("augmentation", {"preset": "none"})
+    if not isinstance(value, Mapping):
+        raise ValueError("train.augmentation must be an object")
+    preset = value.get("preset", "none")
+    if not isinstance(preset, str) or preset not in AUGMENTATION_PRESETS:
+        choices = ", ".join(AUGMENTATION_PRESETS)
+        raise ValueError(f"train.augmentation.preset must be one of: {choices}")
+    unexpected = set(value) - {"preset"}
+    if unexpected:
+        raise ValueError(
+            "train.augmentation contains unsupported settings: "
+            + ", ".join(sorted(unexpected))
+        )
+    return dict(AUGMENTATION_PRESETS[preset])
+
+
+def _reject_irrelevant_optimizer_settings(
+    raw: Mapping[str, Any], optimizer: str
+) -> None:
+    irrelevant = {"momentum"} if optimizer in {"AdamW", "Adam"} else {
+        "beta1",
+        "beta2",
+        "epsilon",
+    }
+    provided = sorted(irrelevant & set(raw))
+    if provided:
+        fields = ", ".join(f"train.{name}" for name in provided)
+        raise ValueError(f"{fields} is not used by train.optimizer={optimizer}")
+
+
 def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
     raw = _mapping(config.get("train", {}), "config.train")
+    architecture = raw.get("architecture", ARCHITECTURE)
+    if not isinstance(architecture, str) or architecture not in SUPPORTED_ARCHITECTURES:
+        raise ValueError(
+            "train.architecture must be one of: " + ", ".join(SUPPORTED_ARCHITECTURES)
+        )
+    optimizer = raw.get("optimizer", "SGD")
+    if not isinstance(optimizer, str) or optimizer not in SUPPORTED_OPTIMIZERS:
+        raise ValueError("train.optimizer must be one of: " + ", ".join(SUPPORTED_OPTIMIZERS))
+    _reject_irrelevant_optimizer_settings(raw, optimizer)
+    profile = OPTIMIZER_PROFILES[optimizer]
     device = raw.get("device", "cpu")
     if not isinstance(device, str) or device not in {"cpu", "cuda"}:
         raise ValueError("train.device must be 'cpu' or 'cuda'")
@@ -77,20 +170,37 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("train.output_dir must be a non-empty repository-relative path")
     if not isinstance(output_prefix, str) or not output_prefix.strip():
         raise ValueError("train.output_prefix must be a non-empty S3 prefix")
-    return {
+    normalized = {
         "run_id": run_id,
+        "architecture": architecture,
+        "optimizer": optimizer,
         "seed": _integer(raw, "seed", 42, minimum=0),
         "epochs": _integer(raw, "epochs", 1, minimum=1),
         "batch_size": _integer(raw, "batch_size", 1, minimum=1),
         "num_workers": _integer(raw, "num_workers", 0, minimum=0),
-        "learning_rate": _float(raw, "learning_rate", 0.005, minimum=0.0),
-        "momentum": _float(raw, "momentum", 0.9, minimum=0.0),
-        "weight_decay": _float(raw, "weight_decay", 0.0005, minimum=0.0),
+        "learning_rate": _float(
+            raw, "learning_rate", profile["learning_rate"], minimum=0.0
+        ),
+        "weight_decay": _float(
+            raw, "weight_decay", profile["weight_decay"], minimum=0.0
+        ),
+        "augmentation": _augmentation(raw),
         "device": device,
         "pretrained": pretrained,
         "output_dir": output_dir,
         "output_prefix": output_prefix.strip("/"),
     }
+    if optimizer == "SGD":
+        normalized["momentum"] = _float(
+            raw, "momentum", profile["momentum"], minimum=0.0
+        )
+    else:
+        normalized["beta1"] = _probability(raw, "beta1", profile["beta1"])
+        normalized["beta2"] = _probability(raw, "beta2", profile["beta2"])
+        normalized["epsilon"] = _float(
+            raw, "epsilon", profile["epsilon"], minimum=1e-16
+        )
+    return normalized
 
 
 def _data_inputs(config: Mapping[str, Any]) -> dict[str, str]:
@@ -131,11 +241,44 @@ def _checkpoint_payload(
     ]
     return {
         **checkpoint,
-        "architecture": ARCHITECTURE,
+        "architecture": settings.get("architecture", ARCHITECTURE),
         "num_classes": len(class_map) + 1,
         "class_map": dict(class_map),
         "category_ids": category_ids_by_label,
         "seed": settings["seed"],
+        "training_config": _training_config(settings),
+    }
+
+
+def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
+    optimizer = settings.get("optimizer", "SGD")
+    profile = OPTIMIZER_PROFILES[optimizer]
+    optimizer_settings: dict[str, Any] = {
+        "name": optimizer,
+        "learning_rate": settings.get("learning_rate", profile["learning_rate"]),
+        "weight_decay": settings.get("weight_decay", profile["weight_decay"]),
+    }
+    if optimizer == "SGD":
+        optimizer_settings["momentum"] = settings.get("momentum", profile["momentum"])
+    else:
+        optimizer_settings["betas"] = [
+            settings.get("beta1", profile["beta1"]),
+            settings.get("beta2", profile["beta2"]),
+        ]
+        optimizer_settings["epsilon"] = settings.get("epsilon", profile["epsilon"])
+    augmentation = settings.get("augmentation", AUGMENTATION_PRESETS["none"])
+    return {
+        "schema_version": 1,
+        "run_id": settings.get("run_id"),
+        "architecture": settings.get("architecture", ARCHITECTURE),
+        "optimizer": optimizer_settings,
+        "augmentation": dict(augmentation),
+        "seed": settings["seed"],
+        "epochs": settings.get("epochs"),
+        "batch_size": settings.get("batch_size"),
+        "num_workers": settings.get("num_workers"),
+        "device": settings.get("device"),
+        "pretrained": settings.get("pretrained"),
     }
 
 
@@ -234,7 +377,11 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="train-images-", dir=cache_root) as directory:
         cache = Path(directory)
         train_dataset = CocoDetectionDataset(
-            data["train_manifest_uri"], class_map, storage, cache / "train"
+            data["train_manifest_uri"],
+            class_map,
+            storage,
+            cache / "train",
+            augmentation=settings["augmentation"],
         )
         validation_dataset = CocoDetectionDataset(
             data["validation_manifest_uri"], class_map, storage, cache / "validation"
@@ -247,7 +394,7 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
         progress = ProgressEmitter(settings["run_id"])
         progress.emit(
             "run_started",
-            architecture=ARCHITECTURE,
+            architecture=settings["architecture"],
             device=settings["device"],
             epochs=settings["epochs"],
             train_images=len(train_dataset),
@@ -255,7 +402,11 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
             class_count=len(class_map),
         )
         set_seed(settings["seed"])
-        model = build_model(len(class_map) + 1, pretrained=settings["pretrained"])
+        model = build_model(
+            len(class_map) + 1,
+            architecture=settings["architecture"],
+            pretrained=settings["pretrained"],
+        )
         best, last, history = train_model(
             model, train_dataset, validation_dataset, settings, progress
         )
@@ -273,7 +424,9 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
         "status": "ok",
         "artifacts": artifacts,
         "summary": {
-            "architecture": ARCHITECTURE,
+            "architecture": settings["architecture"],
+            "optimizer": settings["optimizer"],
+            "augmentation": settings["augmentation"]["preset"],
             "device": settings["device"],
             "epochs": settings["epochs"],
             "train_images": len(train_dataset),
@@ -282,12 +435,12 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
             "best_epoch": best_epoch["epoch"],
             "best_validation_loss": best_epoch["validation_loss"],
         },
-        "message": "Faster R-CNN training completed successfully",
+        "message": "object detection training completed successfully",
     }
 
 
 def run(config: dict) -> dict:
-    """Train Faster R-CNN from data-pipeline artifact fixtures."""
+    """Data pipeline artifact와 train 설정으로 detector를 학습합니다."""
     try:
         if not isinstance(config, dict):
             raise ValueError("config must be an object")
