@@ -73,6 +73,41 @@ Storage, schema, run ID 검증 실패는 모두 public `ExperimentRegistryError`
 원문을 넣지 않고 안전한 예외 type만 표시하며, 원래 예외는 `__cause__`로
 보존합니다.
 
+## Experiment 목록·검색·비교 interface
+
+위 exact-URI 조회와 **별개 경로**입니다. Registry는 실행마다 experiment record와
+함께 run별 summary sidecar를 `registry/index/<run_id>.json`에 남기고
+(`config["registry"]["index_prefix"]`로 바꿀 수 있습니다), 소비자는 아래 함수로 그
+index만 읽습니다.
+
+```python
+from src.common import (
+    compare_experiment_summaries,
+    list_experiment_summaries,
+    search_experiment_summaries,
+)
+
+summaries = list_experiment_summaries(config)
+찾은_것 = search_experiment_summaries(config, run_id_contains="exp-", min_map=0.3)
+비교 = compare_experiment_summaries(["exp-0001", "exp-0002"], config)
+```
+
+세 함수는 index prefix 아래만 읽습니다. 원하는 index가 없다고 해서 record를 추측해
+fallback하지 않으며, `read_experiment_record()`의 동작은 그대로입니다. index 항목
+하나를 읽지 못해도 목록 전체를 실패시키지 않고 그 항목만 건너뜁니다. 실패는 모두
+`ExperimentRegistryError`로 보고하며 public message에 입력 경로나 backend 오류
+원문을 넣지 않습니다.
+
+summary 문서의 형식(`summary_version`, `run_id`, `created_at`, `seed`,
+`schema_version`, `experiment_record_uri`, `metrics`, `metrics_source`,
+`artifacts`, `verification`, `submission_check`)은
+`contracts/proposals/002-experiment-index-and-summary.md`에 있습니다. 값은 없을 수
+있으며 그때는 `null`입니다.
+
+**index는 record에서 다시 만들 수 있는 cache이고 record가 진실입니다.** 그래서
+registry는 index 저장이 실패해도 실행을 실패시키지 않고 `summary["index_status"]`로
+알립니다. 빠진 index는 registry가 제공하는 명령으로 다시 만듭니다.
+
 ### Web 경계
 
 Web pipeline이 외부에 공개하는 interface는 계속 `run(config) -> dict` 하나뿐입니다.
@@ -80,3 +115,6 @@ Web pipeline이 외부에 공개하는 interface는 계속 `run(config) -> dict`
 `Path`, `open`, `read_text`, storage 직접 생성, registry pipeline import/호출로
 artifact를 읽지 않습니다. 선택 설정 `expected_run_id`로 조회한 실험을 고정할 수
 있습니다. URI 설정이 없으면 기존 dummy 결과를 그대로 반환합니다.
+
+실험 목록·검색·비교 화면이 필요하면 위 세 함수를 씁니다. 이때도 `Path`, `open`,
+storage 직접 생성, registry pipeline import는 하지 않습니다.
