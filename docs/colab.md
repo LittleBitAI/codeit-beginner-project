@@ -78,6 +78,33 @@ checkpoint와 학습 기록은 `s3://<bucket>/experiments/completed/<실행 이�
 
 평가와 registry 등록은 이 문서 범위가 아닙니다. 학습이 끝나면 로컬 GUI에서 그 checkpoint로 이어서 하세요.
 
+## 인자 대신 화면으로 하고 싶다면
+
+5·6번 대신 GUI를 띄웁니다. 화면에서 고르고 시작하고 진행 로그를 봅니다.
+
+```python
+!cd src/pipelines/web/frontend && npm ci && npm run build
+```
+
+```python
+import os, subprocess, time
+from google.colab import output
+os.environ["PILL_TEAM_SYNC_ENABLED"] = "true"
+os.environ["PILL_TEAM_ACTOR"] = "이름 (Colab)"   # 팀 화면에 이렇게 남습니다
+# 나머지 PILL_TEAM_* 값은 팀에서 받은 것을 그대로 넣습니다
+subprocess.Popen(["python", "-m", "src.pipelines.web.server"])
+time.sleep(8)
+output.serve_kernel_port_as_window(8000)
+```
+
+`PILL_TEAM_ACTOR`를 넣으면 **로그인 없이도 이 학습이 팀 활동에 올라갑니다.** 다른 팀원이 자기 PC에서 `/team` 화면을 열면 진행 상황과 로그가 실시간으로 보입니다.
+
+이 이름은 Cognito가 확인해 주는 값이 아니라 직접 적는 값이라, 팀 화면에는 `이름 직접 입력`이라고 함께 표시됩니다. 본인 이름을 정확히 적어 주세요.
+
+`PILL_TEAM_ACTOR`를 넣지 않으면 예전처럼 로그인을 요구하고, 로그인을 못 하므로 학습이 시작되지 않습니다. 팀 공유가 필요 없으면 `PILL_TEAM_SYNC_ENABLED=false`로 두세요.
+
+**Colab 화면에서는 `/team` 탭이 열리지 않습니다.** 팀 기록을 *읽는* 것은 로그인이 필요한데, Cognito에 등록된 주소는 `localhost:8000`뿐이고 Colab 주소는 세션마다 바뀌어 등록할 수 없습니다. 쓰기만 IAM으로 열려 있습니다. 팀 활동은 각자 PC의 GUI에서 보세요.
+
 ## 자주 막히는 곳
 
 | 증상 | 원인 |
