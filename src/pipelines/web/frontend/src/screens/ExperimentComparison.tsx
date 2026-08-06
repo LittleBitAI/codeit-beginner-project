@@ -8,6 +8,10 @@ import { usePolling } from '../hooks/usePolling';
 import { datasetRelationship } from '../lib/experiments';
 import { duration, loss, startedAt } from '../lib/format';
 
+// evaluate가 내는 `mAP`는 IoU 0.75~0.95 평균입니다. 이름만 mAP로 적으면 흔한
+// mAP@0.5로 읽혀 값이 낮아 보입니다. TeamActivity 화면과 같은 label을 씁니다.
+const MAP_LABEL = 'mAP@[0.75:0.95]';
+
 function shown(value: string | number | null): string {
   return value === null || value === '' ? '-' : String(value);
 }
@@ -24,6 +28,11 @@ function metric(value: number | null): string {
 function capabilityValue(value: string | null, source: CapabilityValueSource): string {
   const text = shown(value);
   return source === 'legacy_fallback' && value !== null ? `${text} (호환 기본값)` : text;
+}
+
+/** TeamActivity의 summaryLine과 같은 형식입니다. 두 화면이 같아 보여야 합니다. */
+function summaryLine(experiment: ExperimentSummary): string {
+  return `${shown(experiment.model.architecture)} · ${MAP_LABEL} ${metric(experiment.metrics.map)}`;
 }
 
 function relationLabel(experiments: ExperimentSummary[]): string {
@@ -148,9 +157,7 @@ function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) 
       values: experiments.map((experiment) => loss(experiment.metrics.best_validation_loss)),
     },
     {
-      // evaluate가 내는 `mAP`는 IoU 0.75~0.95 평균입니다. 이름만 mAP로 적으면
-      // 흔한 mAP@0.5로 읽혀 값이 낮아 보입니다.
-      label: 'mAP@[0.75:0.95]',
+      label: MAP_LABEL,
       values: experiments.map((experiment) => metric(experiment.metrics.map)),
     },
     {
@@ -244,8 +251,8 @@ export function ExperimentComparison() {
   );
 
   useEffect(() => {
-    // 목록은 registry index만 읽어 모델과 하이퍼파라미터가 비어 있습니다. 하나만
-    // 골라도 record를 읽어 채워 줍니다.
+    // 목록은 registry index의 training 블록으로 채웁니다. 하나만 골라도 record를
+    // 읽어 다시 채우며, 두 값이 다르면 record가 진실입니다.
     if (selectedRunIds.length === 0) {
       setCompared([]);
       setCompareError(null);
@@ -349,6 +356,16 @@ export function ExperimentComparison() {
                     </span>
                     <span style={{ font: `400 10px/1.3 ${font.mono}`, color: color.textFaint }}>
                       {startedAt(experiment.started_at ?? experiment.created_at)}
+                    </span>
+                    {/* 고르지 않아도 목록에서 바로 견줄 수 있도록 요약 한 줄을 둡니다. */}
+                    <span
+                      style={{
+                        font: `400 11px/1.4 ${font.mono}`,
+                        color: color.textStrong,
+                        overflowWrap: 'anywhere',
+                      }}
+                    >
+                      {summaryLine(experiment)}
                     </span>
                   </span>
                   <StatusBadge status={experiment.status} label={experiment.status_label} />

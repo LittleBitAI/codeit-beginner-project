@@ -99,21 +99,84 @@ def registry_config() -> dict[str, Any]:
     return {"storage": storage, "registry": {"repo_root": str(repository_root())}}
 
 
-def _summary_base(summary: Mapping[str, Any]) -> dict[str, Any]:
-    run_id = _text(summary.get("run_id")) or ""
-    created_at = _text(summary.get("created_at")) or ""
-    metrics = summary.get("metrics")
-    metric_values = metrics if isinstance(metrics, Mapping) else {}
+def _training_blocks(
+    settings: Mapping[str, Any], fallback_seed: int | None
+) -> dict[str, Any]:
+    """평면 학습 설정 하나를 화면이 쓰는 model/optimizer/training 세 블록으로 나눕니다.
+
+    목록(index summary의 ``training``)과 비교(record의 ``config_snapshot.train``)가
+    같은 실험에 다른 값을 보이지 않도록 두 경로가 이 함수 하나만 씁니다. 값이 없으면
+    호환 기본값을 채우고 ``source``를 ``legacy_fallback``으로 표시합니다.
+    ``seed``는 이 설정에 없으면 ``fallback_seed``(summary 최상위 seed)를 씁니다.
+    """
+
+    recorded_architecture = _text(settings.get("architecture"))
+    architecture = recorded_architecture or train_capabilities.LEGACY_ARCHITECTURE
+    recorded_optimizer = _text(settings.get("optimizer"))
+    optimizer = recorded_optimizer or train_capabilities.LEGACY_OPTIMIZER
+    optimizer_source = "record" if recorded_optimizer else "legacy_fallback"
+    if optimizer not in OPTIMIZER_PROFILES:
+        optimizer = train_capabilities.LEGACY_OPTIMIZER
+        optimizer_source = "legacy_fallback"
+    profile = OPTIMIZER_PROFILES[optimizer]
+    learning_rate = _number(settings.get("learning_rate"))
+    seed = _integer(settings.get("seed"))
     return {
-        "experiment_id": run_id,
-        "run_id": run_id,
-        "status": "succeeded",
-        "status_label": "등록 완료",
-        "created_at": created_at,
-        "started_at": None,
-        "finished_at": created_at or None,
-        "elapsed_seconds": None,
-        "dataset": _dataset_from_artifacts(summary.get("artifacts")),
+        "model": {
+            "architecture": architecture,
+            "pretrained": _boolean(settings.get("pretrained")),
+            "source": "record" if recorded_architecture else "legacy_fallback",
+        },
+        "optimizer": {
+            "name": optimizer,
+            "source": optimizer_source,
+            "learning_rate": (
+                learning_rate if learning_rate is not None else profile["learning_rate"]
+            ),
+            "momentum": (
+                _number(settings.get("momentum"))
+                if optimizer == "SGD" and settings.get("momentum") is not None
+                else profile.get("momentum")
+            ),
+            "weight_decay": (
+                _number(settings.get("weight_decay"))
+                if settings.get("weight_decay") is not None
+                else profile["weight_decay"]
+            ),
+            "beta1": (
+                _number(settings.get("beta1"))
+                if optimizer != "SGD" and settings.get("beta1") is not None
+                else profile.get("beta1")
+            ),
+            "beta2": (
+                _number(settings.get("beta2"))
+                if optimizer != "SGD" and settings.get("beta2") is not None
+                else profile.get("beta2")
+            ),
+            "epsilon": (
+                _number(settings.get("epsilon"))
+                if optimizer != "SGD" and settings.get("epsilon") is not None
+                else profile.get("epsilon")
+            ),
+        },
+        "training": {
+            "device": _text(settings.get("device")),
+            "epochs": _integer(settings.get("epochs")),
+            "batch_size": _integer(settings.get("batch_size")),
+            "num_workers": _integer(settings.get("num_workers")),
+            "seed": seed if seed is not None else fallback_seed,
+        },
+    }
+
+
+def _unknown_blocks(fallback_seed: int | None) -> dict[str, Any]:
+    """학습 설정을 아예 모를 때의 세 블록입니다.
+
+    ``training`` key가 없는 옛 index는 registry가 판단한 적이 없는 기록이므로
+    호환 기본값을 지어내지 않고 전부 ``None``으로 두어 화면에 ``-``가 나오게 합니다.
+    """
+
+    return {
         "model": {"architecture": None, "pretrained": None, "source": "record"},
         "optimizer": {
             "name": None,
@@ -130,8 +193,46 @@ def _summary_base(summary: Mapping[str, Any]) -> dict[str, Any]:
             "epochs": None,
             "batch_size": None,
             "num_workers": None,
-            "seed": _integer(summary.get("seed")),
+            "seed": fallback_seed,
         },
+    }
+
+
+def _index_blocks(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Index summary 하나를 세 블록으로 바꿉니다.
+
+    ``training`` key가 있으면 ``training_source``가 ``config_snapshot``이든
+    ``unavailable``이든 registry가 record를 보고 판단한 결과이므로 비교 경로와 같은
+    helper를 태웁니다. key 자체가 없으면 이 기능 이전의 옛 index라 값을 모릅니다.
+    """
+
+    fallback_seed = _integer(summary.get("seed"))
+    if "training" not in summary:
+        return _unknown_blocks(fallback_seed)
+    training = summary.get("training")
+    settings = training if isinstance(training, Mapping) else {}
+    return _training_blocks(settings, fallback_seed)
+
+
+def _summary_base(summary: Mapping[str, Any]) -> dict[str, Any]:
+    run_id = _text(summary.get("run_id")) or ""
+    created_at = _text(summary.get("created_at")) or ""
+    metrics = summary.get("metrics")
+    metric_values = metrics if isinstance(metrics, Mapping) else {}
+    blocks = _index_blocks(summary)
+    return {
+        "experiment_id": run_id,
+        "run_id": run_id,
+        "status": "succeeded",
+        "status_label": "등록 완료",
+        "created_at": created_at,
+        "started_at": None,
+        "finished_at": created_at or None,
+        "elapsed_seconds": None,
+        "dataset": _dataset_from_artifacts(summary.get("artifacts")),
+        "model": blocks["model"],
+        "optimizer": blocks["optimizer"],
+        "training": blocks["training"],
         "metrics": {
             "best_epoch": None,
             "best_validation_loss": None,
@@ -151,62 +252,10 @@ def _record_settings(record: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _enrich_summary(summary: Mapping[str, Any], record: Mapping[str, Any]) -> dict[str, Any]:
     value = _summary_base(summary)
-    settings = _record_settings(record)
-    recorded_architecture = _text(settings.get("architecture"))
-    architecture = recorded_architecture or train_capabilities.LEGACY_ARCHITECTURE
-    recorded_optimizer = _text(settings.get("optimizer"))
-    optimizer = recorded_optimizer or train_capabilities.LEGACY_OPTIMIZER
-    optimizer_source = "record" if recorded_optimizer else "legacy_fallback"
-    if optimizer not in OPTIMIZER_PROFILES:
-        optimizer = train_capabilities.LEGACY_OPTIMIZER
-        optimizer_source = "legacy_fallback"
-    profile = OPTIMIZER_PROFILES[optimizer]
-    learning_rate = _number(settings.get("learning_rate"))
-    seed = _integer(settings.get("seed"))
-    value["model"] = {
-        "architecture": architecture,
-        "pretrained": _boolean(settings.get("pretrained")),
-        "source": "record" if recorded_architecture else "legacy_fallback",
-    }
-    value["optimizer"] = {
-        "name": optimizer,
-        "source": optimizer_source,
-        "learning_rate": (
-            learning_rate if learning_rate is not None else profile["learning_rate"]
-        ),
-        "momentum": (
-            _number(settings.get("momentum"))
-            if optimizer == "SGD" and settings.get("momentum") is not None
-            else profile.get("momentum")
-        ),
-        "weight_decay": (
-            _number(settings.get("weight_decay"))
-            if settings.get("weight_decay") is not None
-            else profile["weight_decay"]
-        ),
-        "beta1": (
-            _number(settings.get("beta1"))
-            if optimizer != "SGD" and settings.get("beta1") is not None
-            else profile.get("beta1")
-        ),
-        "beta2": (
-            _number(settings.get("beta2"))
-            if optimizer != "SGD" and settings.get("beta2") is not None
-            else profile.get("beta2")
-        ),
-        "epsilon": (
-            _number(settings.get("epsilon"))
-            if optimizer != "SGD" and settings.get("epsilon") is not None
-            else profile.get("epsilon")
-        ),
-    }
-    value["training"] = {
-        "device": _text(settings.get("device")),
-        "epochs": _integer(settings.get("epochs")),
-        "batch_size": _integer(settings.get("batch_size")),
-        "num_workers": _integer(settings.get("num_workers")),
-        "seed": seed if seed is not None else value["training"]["seed"],
-    }
+    # record가 진실이므로 목록이 index로 채운 세 블록을 record 값으로 다시 계산합니다.
+    value.update(
+        _training_blocks(_record_settings(record), _integer(summary.get("seed")))
+    )
     sanitized = redact(value)
     return sanitized if isinstance(sanitized, dict) else value
 
