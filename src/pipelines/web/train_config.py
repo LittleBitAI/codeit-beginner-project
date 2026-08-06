@@ -36,10 +36,12 @@ from .paths import (
     resolve_within_repo,
 )
 from .train_capabilities import (
+    DEFAULT_AUGMENTATION,
     LEGACY_ARCHITECTURE,
     LEGACY_OPTIMIZER,
     NEW_EXPERIMENT_OPTIMIZER,
     SUPPORTED_ARCHITECTURES,
+    SUPPORTED_AUGMENTATIONS,
     SUPPORTED_OPTIMIZERS,
 )
 
@@ -109,6 +111,10 @@ _FIELD_LABELS = {
     "run_id": ("실행 이름", "실행 결과가 저장되는 directory 이름으로 그대로 쓰입니다."),
     "architecture": ("모델", "학습에 사용할 object detection architecture입니다."),
     "optimizer": ("Optimizer", "가중치를 갱신할 optimizer와 관련 수치 항목을 선택합니다."),
+    "augmentation": (
+        "증강 preset",
+        "학습 split에만 적용합니다. 데이터가 적을 때 pill_basic이 과적합을 줄여 줍니다.",
+    ),
     "seed": ("Random seed", "같은 seed와 같은 데이터면 같은 결과가 나옵니다."),
     "epochs": ("Epochs", "전체 학습 데이터를 몇 번 반복할지 정합니다."),
     "batch_size": ("Batch size", "한 번에 처리할 이미지 수. GPU 메모리에 가장 큰 영향을 줍니다."),
@@ -156,6 +162,7 @@ def field_specs() -> list[dict[str, Any]]:
     for name, default, choices in (
         ("architecture", LEGACY_ARCHITECTURE, SUPPORTED_ARCHITECTURES),
         ("optimizer", NEW_EXPERIMENT_OPTIMIZER, SUPPORTED_OPTIMIZERS),
+        ("augmentation", DEFAULT_AUGMENTATION, SUPPORTED_AUGMENTATIONS),
     ):
         label, hint = _FIELD_LABELS[name]
         specs.append(
@@ -319,6 +326,15 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         )
         architecture = LEGACY_ARCHITECTURE
 
+    augmentation = raw.get("augmentation", DEFAULT_AUGMENTATION)
+    if not isinstance(augmentation, str) or augmentation not in SUPPORTED_AUGMENTATIONS:
+        collect(
+            errors,
+            "train.augmentation",
+            f"{', '.join(SUPPORTED_AUGMENTATIONS)} 중 하나여야 합니다.",
+        )
+        augmentation = DEFAULT_AUGMENTATION
+
     optimizer = raw.get("optimizer", LEGACY_OPTIMIZER)
     if not isinstance(optimizer, str) or optimizer not in SUPPORTED_OPTIMIZERS:
         collect(
@@ -377,6 +393,7 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         "run_id": run_id,
         "architecture": architecture,
         "optimizer": optimizer,
+        "augmentation": augmentation,
         "device": device,
         "pretrained": pretrained,
         "output_dir": output_dir,
@@ -408,6 +425,8 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         "run_id": settings["run_id"],
         "architecture": settings["architecture"],
         "optimizer": settings["optimizer"],
+        # train은 preset key 하나만 든 object를 받고 다른 key가 있으면 거부합니다.
+        "augmentation": {"preset": settings["augmentation"]},
         "seed": settings["seed"],
         "epochs": settings["epochs"],
         "batch_size": settings["batch_size"],

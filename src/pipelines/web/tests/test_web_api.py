@@ -48,6 +48,7 @@ def test_defaults_expose_every_train_field(client):
         "run_id",
         "architecture",
         "optimizer",
+        "augmentation",
         "seed",
         "epochs",
         "batch_size",

@@ -18,8 +18,10 @@ import pytest
 
 from src.pipelines.web.api.routes_train import ARCHITECTURE
 from src.pipelines.web.train_capabilities import (
+    DEFAULT_AUGMENTATION,
     LEGACY_OPTIMIZER,
     SUPPORTED_ARCHITECTURES,
+    SUPPORTED_AUGMENTATIONS,
     SUPPORTED_OPTIMIZERS,
 )
 from src.pipelines.web.train_config import (
@@ -133,6 +135,15 @@ def test_model_and_optimizer_choices_match_train_source():
     )
 
 
+def test_augmentation_choices_match_train_source():
+    """화면이 보여 주는 증강 preset이 train이 실제로 받는 이름과 같아야 합니다."""
+
+    presets = module_constant(read_source("pipeline.py"), "AUGMENTATION_PRESETS")
+    assert SUPPORTED_AUGMENTATIONS == tuple(presets)
+    # train은 값이 없으면 none을 씁니다. 화면 기본값도 같아야 합니다.
+    assert DEFAULT_AUGMENTATION in presets
+
+
 def test_optimizer_profiles_match_train_source():
     assert OPTIMIZER_PROFILES == module_constant(
         read_source("pipeline.py"), "OPTIMIZER_PROFILES"
@@ -166,6 +177,23 @@ def test_string_and_boolean_defaults_match_train_source():
     assert train_defaults.get("pretrained") is False
     assert train_defaults.get("output_dir") == DEFAULT_OUTPUT_DIR
     assert train_defaults.get("output_prefix") == DEFAULT_OUTPUT_PREFIX
+
+
+def test_augmentation_reaches_train_as_the_object_it_expects():
+    """train은 preset key 하나만 든 object를 받고 다른 key가 있으면 거부합니다."""
+
+    settings = normalize_train_settings({"augmentation": "pill_basic"})
+
+    assert settings["augmentation"] == {"preset": "pill_basic"}
+
+
+def test_augmentation_defaults_to_none_like_train():
+    assert normalize_train_settings({})["augmentation"] == {"preset": DEFAULT_AUGMENTATION}
+
+
+def test_unknown_augmentation_is_rejected_before_training_starts():
+    with pytest.raises(Exception, match="augmentation"):
+        normalize_train_settings({"augmentation": "무작위회전"})
 
 
 def test_run_id_pattern_matches_train_source():
