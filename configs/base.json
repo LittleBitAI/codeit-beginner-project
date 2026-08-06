@@ -4,5 +4,11 @@
   },
   "execution": {
     "mode": "dummy"
+  },
+  "data": {
+    "raw_prefix": "datasets/pill_detection/raw/v1/",
+    "split_ratio": "8:2",
+    "seed": 42,
+    "overwrite": false
   }
 }
