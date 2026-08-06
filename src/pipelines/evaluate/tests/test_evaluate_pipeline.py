@@ -104,8 +104,14 @@ def test_metrics_document_contains_expected_scores(base_config: dict, repository
     assert metrics["metrics"]["mAP50"] == pytest.approx(1.0)
     assert metrics["image_count"] == 2
     assert metrics["annotation_count"] == 3
-    assert len(metrics["iou_thresholds"]) == 10
+    # 메인 지표는 mAP@[0.75:0.95] 5점이고, COCOeval에는 10점을 넘깁니다.
+    assert metrics["iou_thresholds"] == [0.75, 0.8, 0.85, 0.9, 0.95]
+    assert len(metrics["iou_thresholds_all"]) == 10
     assert {entry["name"] for entry in metrics["per_class"]} == {"tylenol", "aspirin"}
+    assert metrics["analysis"]["score_threshold"] == 0.5
+    assert set(metrics["analysis"]["by_iou"]) == {"0.50", "0.75"}
+    assert metrics["metrics"]["precision50"] == pytest.approx(1.0)
+    assert metrics["metrics"]["recall50"] == pytest.approx(1.0)
 
 
 def test_predictions_document_keeps_evaluated_detections(
@@ -208,7 +214,9 @@ def test_competition_run_reuses_one_checkpoint_and_writes_submission(
     ]
     metrics = _read_json(repository_root, result["artifacts"]["metrics_uri"])
     assert metrics["iou_thresholds"] == COMPETITION_THRESHOLDS
-    assert metrics["metrics"]["mAP50"] is None
+    # mAP@0.50은 보조 지표이므로 대회 실행에서도 항상 계산합니다.
+    # (이전에는 threshold 목록에 0.5가 없어 null이었습니다.)
+    assert metrics["metrics"]["mAP50"] is not None
     assert result["summary"]["score_threshold"] == 0.0
     assert result["summary"]["max_detections_per_image"] == 4
     assert "test_metrics" not in result["summary"]
@@ -464,7 +472,8 @@ def test_manifest_with_zero_annotations_is_rejected(base_config: dict, repositor
     metrics = _read_json(repository_root, result["artifacts"]["metrics_uri"])
 
     assert result["status"] == "ok", result["message"]
-    assert metrics["metrics"]["mAP"] == 0.0
+    # ground truth가 하나도 없으면 평균 낼 대상이 없으므로 0.0이 아니라 null입니다.
+    assert metrics["metrics"]["mAP"] is None
     assert metrics["evaluated_class_count"] == 0
 
 
@@ -612,16 +621,19 @@ def test_output_dir_outside_the_repository_is_rejected(base_config: dict, reposi
     assert not (repository_root.parent / "outside").exists()
 
 
-def test_metrics_without_iou_50_report_null(base_config: dict, repository_root: Path):
+def test_custom_iou_thresholds_are_rejected(base_config: dict, repository_root: Path):
+    """메인 지표 구간은 고정입니다.
+
+    설정 key가 있는데 조용히 무시되면 다른 기준으로 잰 값을 메인 지표로 읽게
+    되므로, 다른 값이 오면 명시적으로 거절합니다.
+    """
     base_config["evaluate"]["iou_thresholds"] = [0.6, 0.7]
 
     result = run(base_config)
-    metrics = _read_json(repository_root, result["artifacts"]["metrics_uri"])
 
-    assert result["status"] == "ok", result["message"]
-    assert metrics["metrics"]["mAP50"] is None
-    assert metrics["metrics"]["mAP75"] is None
-    assert metrics["metrics"]["mAP"] == pytest.approx(1.0)
+    assert result["status"] == "error"
+    assert "iou_thresholds" in result["message"]
+    assert result["artifacts"] == {}
 
 
 def test_settings_prefer_own_config_over_inputs(base_config: dict, repository_root: Path):
