@@ -241,7 +241,10 @@ Resources:
   TeamPublisherPolicy:
     Type: AWS::IAM::ManagedPolicy
     Properties:
-      Description: Allows a training backend to start a run and publish its updates and logs
+      # Description을 바꾸면 CloudFormation이 managed policy를 교체해 ARN이 달라지고,
+      # 팀원 IAM에 붙여 둔 정책이 떨어져 나갑니다. 문구가 조금 낡아도 그대로 둡니다.
+      # 실제로 허용하는 mutation은 아래 Resource 목록이 정확합니다.
+      Description: Allows a local training backend to publish only run updates and logs
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
