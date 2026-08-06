@@ -20,6 +20,7 @@ from .record import (
     resolve_run_id,
     validate_inputs,
 )
+from .summary import build_summary
 
 
 __all__ = ["run"]
@@ -30,6 +31,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 _DEFAULT_RECORD_NAME = "experiment_record.json"
 _DEFAULT_RECORD_PREFIX = "registry"
+
+# 재시작 뒤에도 실험을 찾을 수 있도록, run마다 작은 summary를 이 prefix에 남깁니다.
+DEFAULT_INDEX_PREFIX = "registry/index"
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -68,6 +72,17 @@ def _resolve_repo_root(registry_config: Mapping[str, Any]) -> Path:
             "config['registry']['repo_root']는 비어 있지 않은 문자열이어야 합니다."
         )
     return Path(configured).expanduser().resolve()
+
+
+def resolve_index_prefix(registry_config: Mapping[str, Any]) -> str:
+    """Summary index를 저장할 prefix를 결정합니다."""
+
+    configured = registry_config.get("index_prefix", DEFAULT_INDEX_PREFIX)
+    if not isinstance(configured, str) or not configured.strip():
+        raise RegistryError(
+            "config['registry']['index_prefix']는 비어 있지 않은 문자열이어야 합니다."
+        )
+    return configured.strip().strip("/")
 
 
 def _relative_to_repo(location: str, repo_root: Path) -> str:
@@ -141,17 +156,46 @@ def run(config: dict) -> dict:
                 "config['registry']['record_uri']는 비어 있지 않은 문자열이어야 합니다."
             )
 
+        index_prefix = resolve_index_prefix(registry_config)
+
         storage = create_storage(root_config)
         written = storage.write_json(destination, record, overwrite=overwrite)
         record_uri = _relative_to_repo(written, repo_root)
 
+        # Index는 record에서 다시 만들 수 있는 cache이고 record가 진실입니다.
+        # 그래서 index 저장이 실패해도 실행 자체를 실패로 만들지 않고 알리기만 합니다.
+        artifacts: dict[str, Any] = {
+            "run_id": run_id,
+            "experiment_record_uri": record_uri,
+        }
+        message = f"experiment record를 저장했습니다: {record_uri}"
+        try:
+            summary_document = build_summary(
+                record,
+                record_uri=record_uri,
+                repo_root=repo_root,
+                verify=verify,
+            )
+            written_index = storage.write_json(
+                f"{index_prefix}/{run_id}.json",
+                summary_document,
+                overwrite=overwrite,
+            )
+            artifacts["experiment_summary_uri"] = _relative_to_repo(
+                written_index, repo_root
+            )
+            index_status = "written"
+        except StorageError as error:
+            index_status = "failed"
+            message = (
+                f"{message} (index 저장에 실패했습니다: {error}. "
+                "python -m src.pipelines.registry.rebuild_index로 다시 만들 수 있습니다.)"
+            )
+
         verification = record["verification"]
         return {
             "status": "ok",
-            "artifacts": {
-                "run_id": run_id,
-                "experiment_record_uri": record_uri,
-            },
+            "artifacts": artifacts,
             "summary": {
                 "pipeline": "registry",
                 "run_id": run_id,
@@ -161,8 +205,9 @@ def run(config: dict) -> dict:
                 "artifacts_checked": verification["artifacts_checked"],
                 "artifacts_hashed": verification["artifacts_hashed"],
                 "artifacts_skipped_remote": verification["artifacts_skipped_remote"],
+                "index_status": index_status,
             },
-            "message": f"experiment record를 저장했습니다: {record_uri}",
+            "message": message,
         }
     except RegistryError as error:
         return {

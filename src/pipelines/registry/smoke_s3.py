@@ -53,13 +53,24 @@ SMOKE_INPUTS: dict[str, dict[str, str]] = {
 }
 
 
-def build_smoke_config(config: dict, *, run_id: str, record_uri: str) -> dict:
-    """원본 config를 바꾸지 않고 smoke test용 registry 설정을 얹습니다."""
+def build_smoke_config(
+    config: dict,
+    *,
+    run_id: str,
+    record_uri: str,
+    index_prefix: str,
+) -> dict:
+    """원본 config를 바꾸지 않고 smoke test용 registry 설정을 얹습니다.
+
+    smoke test는 자동으로 지우지 않으므로, index까지 전용 prefix 안에 두어 실제
+    실험 목록에 smoke 기록이 섞이지 않게 합니다.
+    """
 
     smoke_config = copy.deepcopy(config)
     smoke_config["registry"] = {
         "run_id": run_id,
         "record_uri": record_uri,
+        "index_prefix": index_prefix,
         "verify_artifacts": False,
     }
     smoke_config["inputs"] = copy.deepcopy(SMOKE_INPUTS)
@@ -78,8 +89,16 @@ def run_smoke_test(config_path: str, *, smoke_id: str | None = None) -> dict:
     resolved_id = smoke_id or uuid.uuid4().hex
     run_id = f"smoke-{resolved_id}"
     record_uri = f"{SMOKE_PREFIX}{resolved_id}/experiment_record.json"
+    index_prefix = f"{SMOKE_PREFIX}{resolved_id}/index"
 
-    result = run_registry(build_smoke_config(config, run_id=run_id, record_uri=record_uri))
+    result = run_registry(
+        build_smoke_config(
+            config,
+            run_id=run_id,
+            record_uri=record_uri,
+            index_prefix=index_prefix,
+        )
+    )
     if result["status"] != "ok":
         raise RegistryError(f"registry pipeline이 실패했습니다: {result['message']}")
 
