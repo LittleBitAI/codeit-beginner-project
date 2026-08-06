@@ -4,12 +4,14 @@ import type {
   DataVerification,
   Defaults,
   EvaluationState,
+  ExperimentComparisonResult,
   ExperimentListing,
   GpuStatus,
   JobListing,
   JobRecord,
   LogPage,
   PreparationResponse,
+  RegistrationState,
   RuntimeConfig,
   TeamConfig,
   ValidationResult,
@@ -85,6 +87,12 @@ export const api = {
 
   listExperiments: () => request<ExperimentListing>('/api/train/experiments'),
 
+  compareExperiments: (runIds: string[]) =>
+    request<ExperimentComparisonResult>('/api/train/experiments/compare', {
+      method: 'POST',
+      body: JSON.stringify({ run_ids: runIds }),
+    }),
+
   getJob: (jobId: string) => request<JobRecord>(`/api/train/jobs/${jobId}`),
 
   getJobConfig: (jobId: string) =>
@@ -123,6 +131,11 @@ export const api = {
     request<{ evaluation: EvaluationState }>(`/api/train/jobs/${jobId}/evaluate`, {
       method: 'POST',
       body: JSON.stringify(body),
+    }),
+
+  retryRegistration: (jobId: string) =>
+    request<{ registration: RegistrationState }>(`/api/train/jobs/${jobId}/register`, {
+      method: 'POST',
     }),
 
   inspectDirectory: (directory: string) =>

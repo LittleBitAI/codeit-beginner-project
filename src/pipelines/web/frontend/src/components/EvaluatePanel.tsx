@@ -36,6 +36,7 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
   const [testManifestUri, setTestManifestUri] = useState(recordedTestManifest);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [registering, setRegistering] = useState(false);
 
   useEffect(() => {
     setTestManifestUri(recordedTestManifest);
@@ -71,6 +72,19 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
       setError(describeError(caught, '평가를 시작하지 못했습니다.'));
     } finally {
       setStarting(false);
+    }
+  }
+
+  async function retryRegistration() {
+    setRegistering(true);
+    setError(null);
+    try {
+      await api.retryRegistration(job.job_id);
+      status.refresh();
+    } catch (caught) {
+      setError(describeError(caught, 'Registry 등록을 다시 시도하지 못했습니다.'));
+    } finally {
+      setRegistering(false);
     }
   }
 
@@ -181,7 +195,29 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
         )}
 
         {state && state.status !== 'idle' && (
-          <EvaluationResult state={state} submissionRequested={resultUsedSubmission} />
+          <>
+            <EvaluationResult state={state} submissionRequested={resultUsedSubmission} />
+            {state.status === 'succeeded' && state.registration?.status === 'succeeded' && (
+              <AlertRow level="success" title="Registry 등록 완료">
+                평가 결과가 실험 비교 목록에 등록됐습니다.
+              </AlertRow>
+            )}
+            {state.status === 'succeeded' && state.registration?.status === 'failed' && (
+              <AlertRow level="error" title="평가는 완료됐지만 Registry 등록에 실패했습니다">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <span>{state.registration.message}</span>
+                  <Button disabled={registering} onClick={() => void retryRegistration()}>
+                    {registering ? '등록하는 중…' : 'Registry 등록 재시도'}
+                  </Button>
+                </div>
+              </AlertRow>
+            )}
+            {state.status === 'succeeded' && state.registration?.status === 'index_failed' && (
+              <AlertRow level="warning" title="Registry record는 저장됐지만 목록 index가 없습니다">
+                rebuild_index 명령으로 index를 복구해 주세요. 기존 record는 덮어쓰지 않습니다.
+              </AlertRow>
+            )}
+          </>
         )}
       </div>
     </Panel>

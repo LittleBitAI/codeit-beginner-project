@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from .. import train_capabilities
 from ..errors import FieldError, JobConflictError, WebValidationError
 from ..evaluation import DEFAULT_MAX_DETECTIONS, get_evaluation_runner
-from ..experiments import experiment_summary
+from .. import experiments
 from ..gpu import cuda_is_available
 from ..jobs import get_manager
 from ..jobs.model import TERMINAL_STATUSES, JobRecord
@@ -30,10 +30,7 @@ from .schemas import ConfigRequest, StartJobRequest
 
 router = APIRouter(prefix="/api/train", tags=["train"])
 
-# 이 저장소의 train pipeline은 torchvision Faster R-CNN 하나만 지원합니다.
-# design mockup에 있는 모델 family 선택은 실제로 존재하지 않으므로 만들지 않습니다.
-#
-# 이 값은 ``src/pipelines/train/model.py``의 ARCHITECTURE를 그대로 옮긴 것입니다.
+# 이 값은 ``src/pipelines/train/model.py``의 기존 기본 architecture를 그대로 옮긴 것입니다.
 # train을 import하면 경계를 넘으므로 복제하되, 조용히 어긋나면 화면이 실제로 학습되는
 # 모델과 다른 이름을 보여 주게 됩니다. 그래서
 # ``test_web_train_contract.py::test_architecture_matches_train_source``가 train의
@@ -128,13 +125,20 @@ def list_jobs(status: str | None = Query(default=None)) -> dict[str, Any]:
 
 @router.get("/experiments")
 def list_experiments() -> dict[str, Any]:
-    """저장된 학습 기록을 비교 화면에 필요한 최소 형태로 돌려줍니다."""
+    """Registry에 등록된 완료 실험을 최신순으로 돌려줍니다."""
 
-    records = get_manager().list_jobs()
-    capability = train_capabilities.current_train_capability()
-    return {
-        "experiments": [experiment_summary(record, capability) for record in records]
-    }
+    return {"experiments": experiments.list_registry_experiments()}
+
+
+class CompareExperimentsRequest(BaseModel):
+    run_ids: list[str]
+
+
+@router.post("/experiments/compare")
+def compare_experiments(payload: CompareExperimentsRequest = Body(...)) -> dict[str, Any]:
+    """선택한 Registry record만 읽어 학습 설정과 평가 결과를 비교합니다."""
+
+    return experiments.compare_registry_experiments(payload.run_ids)
 
 
 @router.post("/jobs", status_code=201)
@@ -208,8 +212,8 @@ class EvaluateRequest(BaseModel):
 def evaluation_status(job_id: str) -> dict[str, Any]:
     """이 학습에 대한 평가 상태입니다."""
 
-    get_manager().get(job_id)  # 없는 job이면 404
-    return {"evaluation": get_evaluation_runner().status(job_id)}
+    record = get_manager().get(job_id)  # 없는 job이면 404
+    return {"evaluation": get_evaluation_runner().status_for(record)}
 
 
 @router.post("/jobs/{job_id}/evaluate", status_code=202)
@@ -226,6 +230,14 @@ def start_evaluation(job_id: str, payload: EvaluateRequest = Body(...)) -> dict[
     if record.status != "succeeded":
         raise JobConflictError("성공으로 끝난 학습만 평가할 수 있습니다.")
     return {"evaluation": get_evaluation_runner().start(record, payload.model_dump())}
+
+
+@router.post("/jobs/{job_id}/register")
+def retry_registration(job_id: str) -> dict[str, Any]:
+    """성공한 평가 artifact를 바꾸지 않고 Registry 등록만 다시 시도합니다."""
+
+    record = get_manager().get(job_id)
+    return {"registration": get_evaluation_runner().retry_registration(record)}
 
 
 @router.get("/jobs/{job_id}/events")

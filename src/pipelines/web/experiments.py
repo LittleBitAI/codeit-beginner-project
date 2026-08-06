@@ -1,8 +1,4 @@
-"""학습 job 기록을 비교 화면용 experiment 요약으로 바꿉니다.
-
-비교 화면은 원본 artifact URI나 전체 설정을 받을 필요가 없습니다. 이 adapter는 화면에
-필요한 값만 고르고, 데이터셋은 URI 자체 대신 동일성 판정용 fingerprint만 돌려줍니다.
-"""
+"""Registry summary 목록과 선택한 experiment record를 Web 표현으로 바꿉니다."""
 
 from __future__ import annotations
 
@@ -12,13 +8,26 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+from src.common import (
+    ExperimentRegistryError,
+    compare_experiment_summaries,
+    list_experiment_summaries,
+    read_experiment_record,
+)
+
 from . import train_capabilities
-from .jobs.model import STATUS_LABELS, JobRecord
+from .datasets import storage_environment
+from .errors import FieldError, WebError, WebValidationError
 from .masking import redact
-from .train_config import DATA_ARTIFACT_KEYS
+from .paths import repository_root
+from .train_config import DATA_ARTIFACT_KEYS, OPTIMIZER_PROFILES
 
 
-__all__ = ["experiment_summary"]
+__all__ = [
+    "compare_registry_experiments",
+    "list_registry_experiments",
+    "registry_config",
+]
 
 
 def _text(value: Any) -> str | None:
@@ -53,113 +62,183 @@ def _fingerprint(value: Mapping[str, str]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _dataset(record: JobRecord) -> dict[str, Any]:
-    """명시적 id를 우선하고, 없으면 완전한 artifact URI 묶음을 식별자로 씁니다."""
-
-    explicit_id = _text(record.data_inputs.get("dataset_id"))
-    if explicit_id is not None:
+def _dataset_from_artifacts(artifacts: Any) -> dict[str, Any]:
+    if not isinstance(artifacts, Mapping):
         return {
-            "identity": _fingerprint({"dataset_id": explicit_id}),
-            "identity_source": "dataset_id",
-            "artifacts_complete": all(
-                _text(record.data_inputs.get(key)) is not None for key in DATA_ARTIFACT_KEYS
-            ),
+            "identity": None,
+            "identity_source": "unknown",
+            "artifacts_complete": False,
         }
-
-    artifacts: dict[str, str] = {}
+    selected: dict[str, str] = {}
     for key in DATA_ARTIFACT_KEYS:
-        uri = _text(record.data_inputs.get(key))
-        if uri is None:
+        value = _text(artifacts.get(key))
+        if value is None:
             return {
                 "identity": None,
                 "identity_source": "unknown",
                 "artifacts_complete": False,
             }
-        artifacts[key] = uri.replace("\\", "/")
-
+        selected[key] = value.replace("\\", "/")
     return {
-        "identity": _fingerprint(artifacts),
+        "identity": _fingerprint(selected),
         "identity_source": "artifact_set",
         "artifacts_complete": True,
     }
 
 
-def experiment_summary(
-    record: JobRecord, capability: Mapping[str, Any] | None = None
-) -> dict[str, Any]:
-    """``JobRecord`` 한 건을 비교 화면의 안정된 최소 형태로 변환합니다.
+def registry_config() -> dict[str, Any]:
+    """현재 Web 환경이 선택한 storage의 Registry index를 읽을 설정입니다."""
 
-    metric처럼 알 수 없는 값은 추정하지 않고 ``None``으로 둡니다. 다만 현재 Train에서
-    고정된 model/optimizer는 capability 호환 계층의 값과 출처를 함께 기록합니다.
-    """
+    environment = storage_environment()
+    backend = environment["default_backend"]
+    storage = (
+        {"backend": "s3", "s3": {"prefix": ""}}
+        if backend == "s3"
+        else {"backend": "local", "local": {"root": "artifacts"}}
+    )
+    return {"storage": storage, "registry": {"repo_root": str(repository_root())}}
 
-    resolved_capability = (
-        dict(capability) if capability is not None else train_capabilities.current_train_capability()
-    )
-    settings = record.settings
-    train_summary = record.summary
-    progress = record.progress
-    metrics_value = train_summary.get("metrics")
-    metrics = metrics_value if isinstance(metrics_value, Mapping) else {}
 
-    recorded_architecture = _text(train_summary.get("architecture")) or _text(
-        progress.get("architecture")
-    )
-    recorded_optimizer = _text(settings.get("optimizer"))
-    model_capability = resolved_capability.get("model")
-    optimizer_capability = resolved_capability.get("optimizer")
-    architecture = recorded_architecture or (
-        _text(model_capability.get("default"))
-        if isinstance(model_capability, Mapping)
-        else None
-    )
-    optimizer_name = recorded_optimizer or (
-        _text(optimizer_capability.get("default"))
-        if isinstance(optimizer_capability, Mapping)
-        else None
-    )
-    reported_source = resolved_capability.get("source")
-    capability_source = (
-        reported_source
-        if reported_source in {"train", "legacy_fallback"}
-        else "legacy_fallback"
-    )
-
-    value = {
-        "experiment_id": record.job_id,
-        "run_id": record.run_id,
-        "status": record.status,
-        "status_label": STATUS_LABELS.get(record.status, record.status),
-        "created_at": record.created_at,
-        "started_at": record.started_at,
-        "finished_at": record.finished_at,
-        "elapsed_seconds": record.elapsed_seconds(),
-        "dataset": _dataset(record),
-        "model": {
-            "architecture": architecture,
-            "pretrained": _boolean(settings.get("pretrained")),
-            "source": "record" if recorded_architecture is not None else capability_source,
-        },
+def _summary_base(summary: Mapping[str, Any]) -> dict[str, Any]:
+    run_id = _text(summary.get("run_id")) or ""
+    created_at = _text(summary.get("created_at")) or ""
+    metrics = summary.get("metrics")
+    metric_values = metrics if isinstance(metrics, Mapping) else {}
+    return {
+        "experiment_id": run_id,
+        "run_id": run_id,
+        "status": "succeeded",
+        "status_label": "등록 완료",
+        "created_at": created_at,
+        "started_at": None,
+        "finished_at": created_at or None,
+        "elapsed_seconds": None,
+        "dataset": _dataset_from_artifacts(summary.get("artifacts")),
+        "model": {"architecture": None, "pretrained": None, "source": "record"},
         "optimizer": {
-            "name": optimizer_name,
-            "source": "record" if recorded_optimizer is not None else capability_source,
-            "learning_rate": _number(settings.get("learning_rate")),
-            "momentum": _number(settings.get("momentum")),
-            "weight_decay": _number(settings.get("weight_decay")),
+            "name": None,
+            "source": "record",
+            "learning_rate": None,
+            "momentum": None,
+            "weight_decay": None,
+            "beta1": None,
+            "beta2": None,
+            "epsilon": None,
         },
         "training": {
-            "device": _text(settings.get("device")),
-            "epochs": _integer(settings.get("epochs")),
-            "batch_size": _integer(settings.get("batch_size")),
-            "num_workers": _integer(settings.get("num_workers")),
-            "seed": _integer(settings.get("seed")),
+            "device": None,
+            "epochs": None,
+            "batch_size": None,
+            "num_workers": None,
+            "seed": _integer(summary.get("seed")),
         },
         "metrics": {
-            "best_epoch": _integer(train_summary.get("best_epoch")),
-            "best_validation_loss": _number(train_summary.get("best_validation_loss")),
-            "map": _number(metrics.get("mAP")),
-            "map50": _number(metrics.get("mAP50")),
+            "best_epoch": None,
+            "best_validation_loss": None,
+            "map": _number(metric_values.get("mAP")),
+            "map50": _number(metric_values.get("mAP50")),
         },
+    }
+
+
+def _record_settings(record: Mapping[str, Any]) -> Mapping[str, Any]:
+    snapshot = record.get("config_snapshot")
+    train = snapshot.get("train") if isinstance(snapshot, Mapping) else None
+    if not isinstance(train, Mapping):
+        return {}
+    return train
+
+
+def _enrich_summary(summary: Mapping[str, Any], record: Mapping[str, Any]) -> dict[str, Any]:
+    value = _summary_base(summary)
+    settings = _record_settings(record)
+    recorded_architecture = _text(settings.get("architecture"))
+    architecture = recorded_architecture or train_capabilities.LEGACY_ARCHITECTURE
+    recorded_optimizer = _text(settings.get("optimizer"))
+    optimizer = recorded_optimizer or train_capabilities.LEGACY_OPTIMIZER
+    optimizer_source = "record" if recorded_optimizer else "legacy_fallback"
+    if optimizer not in OPTIMIZER_PROFILES:
+        optimizer = train_capabilities.LEGACY_OPTIMIZER
+        optimizer_source = "legacy_fallback"
+    profile = OPTIMIZER_PROFILES[optimizer]
+    learning_rate = _number(settings.get("learning_rate"))
+    seed = _integer(settings.get("seed"))
+    value["model"] = {
+        "architecture": architecture,
+        "pretrained": _boolean(settings.get("pretrained")),
+        "source": "record" if recorded_architecture else "legacy_fallback",
+    }
+    value["optimizer"] = {
+        "name": optimizer,
+        "source": optimizer_source,
+        "learning_rate": (
+            learning_rate if learning_rate is not None else profile["learning_rate"]
+        ),
+        "momentum": (
+            _number(settings.get("momentum"))
+            if optimizer == "SGD" and settings.get("momentum") is not None
+            else profile.get("momentum")
+        ),
+        "weight_decay": (
+            _number(settings.get("weight_decay"))
+            if settings.get("weight_decay") is not None
+            else profile["weight_decay"]
+        ),
+        "beta1": (
+            _number(settings.get("beta1"))
+            if optimizer != "SGD" and settings.get("beta1") is not None
+            else profile.get("beta1")
+        ),
+        "beta2": (
+            _number(settings.get("beta2"))
+            if optimizer != "SGD" and settings.get("beta2") is not None
+            else profile.get("beta2")
+        ),
+        "epsilon": (
+            _number(settings.get("epsilon"))
+            if optimizer != "SGD" and settings.get("epsilon") is not None
+            else profile.get("epsilon")
+        ),
+    }
+    value["training"] = {
+        "device": _text(settings.get("device")),
+        "epochs": _integer(settings.get("epochs")),
+        "batch_size": _integer(settings.get("batch_size")),
+        "num_workers": _integer(settings.get("num_workers")),
+        "seed": seed if seed is not None else value["training"]["seed"],
     }
     sanitized = redact(value)
     return sanitized if isinstance(sanitized, dict) else value
+
+
+def list_registry_experiments() -> list[dict[str, Any]]:
+    try:
+        return [_summary_base(item) for item in list_experiment_summaries(registry_config())]
+    except ExperimentRegistryError as error:
+        raise WebError(f"실험 목록을 읽지 못했습니다({type(error).__name__}).") from error
+
+
+def compare_registry_experiments(run_ids: list[str]) -> dict[str, Any]:
+    if not run_ids or not all(
+        isinstance(run_id, str) and run_id.strip() for run_id in run_ids
+    ):
+        raise WebValidationError(
+            [FieldError("run_ids", "비어 있지 않은 run_id 목록이 필요합니다.")]
+        )
+    config = registry_config()
+    try:
+        compared = compare_experiment_summaries(run_ids, config)
+        summaries = {item["run_id"]: item for item in list_experiment_summaries(config)}
+        uri_field = compared.get("fields", {}).get("experiment_record_uri", {})
+        uri_values = uri_field.get("values", {}) if isinstance(uri_field, Mapping) else {}
+        resolved: list[dict[str, Any]] = []
+        for run_id in compared.get("run_ids", []):
+            uri = uri_values.get(run_id) if isinstance(uri_values, Mapping) else None
+            summary = summaries.get(run_id)
+            if not isinstance(uri, str) or not isinstance(summary, Mapping):
+                continue
+            record = read_experiment_record(uri, config, expected_run_id=run_id)
+            resolved.append(_enrich_summary(summary, record))
+        return {"experiments": resolved, "missing": list(compared.get("missing", []))}
+    except ExperimentRegistryError as error:
+        raise WebError(f"실험 비교 정보를 읽지 못했습니다({type(error).__name__}).") from error

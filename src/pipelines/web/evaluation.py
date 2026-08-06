@@ -27,8 +27,10 @@ from .train_config import normalize_data_inputs
 __all__ = [
     "EvaluationRunner",
     "build_evaluate_config",
+    "build_registry_config",
     "get_evaluation_runner",
     "run_evaluation",
+    "run_registry",
 ]
 
 # 이미지마다 추론을 돌리므로 학습만큼은 아니어도 오래 걸릴 수 있습니다.
@@ -199,12 +201,106 @@ def run_evaluation(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def build_registry_config(
+    record: JobRecord,
+    evaluation: dict[str, Any],
+) -> dict[str, Any]:
+    """저장된 학습·평가 결과를 Registry 입력 계약으로 연결합니다."""
+
+    storage = evaluation.get("storage")
+    settings = evaluation.get("settings")
+    artifacts = evaluation.get("artifacts")
+    if (
+        not isinstance(storage, dict)
+        or not isinstance(settings, dict)
+        or not isinstance(artifacts, dict)
+    ):
+        raise WebValidationError(
+            [FieldError("registration", "등록에 필요한 평가 결과가 남아 있지 않습니다.")]
+        )
+    seed = record.settings.get("seed", 42)
+    return {
+        "project": {"name": "pill-object-detection"},
+        "execution": {"mode": "real"},
+        "storage": dict(storage),
+        "train": dict(record.settings),
+        "evaluate": dict(settings),
+        "registry": {"seed": seed, "overwrite": False},
+        "inputs": {
+            "data": dict(record.data_inputs),
+            "train": dict(record.artifacts),
+            "evaluate": dict(artifacts),
+        },
+    }
+
+
+def run_registry(config: dict[str, Any]) -> dict[str, Any]:
+    """Registry stage 하나만 실행하고 등록 상태로 정규화합니다."""
+
+    from .train_config import config_relative_path, write_runtime_config
+
+    config_id: str | None = None
+    try:
+        config_id = write_runtime_config(config)
+        completed = runner.run_stage(
+            config_relative_path(config_id),
+            "registry",
+            cwd=repository_root(),
+            timeout=60.0,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "artifacts": {},
+            "summary": {},
+            "message": "Registry 등록이 시간 안에 끝나지 않았습니다.",
+        }
+    except OSError as error:
+        return {
+            "ok": False,
+            "artifacts": {},
+            "summary": {},
+            "message": f"Registry를 실행하지 못했습니다({type(error).__name__}).",
+        }
+    finally:
+        if config_id is not None:
+            (config_dir() / f"{config_id}.json").unlink(missing_ok=True)
+
+    result = _parse_result(completed.stdout)
+    if result is None:
+        return {
+            "ok": False,
+            "artifacts": {},
+            "summary": {},
+            "message": "Registry 결과를 해석하지 못했습니다.",
+        }
+    artifacts = _unwrap_named_stage(result.get("artifacts"), "registry")
+    summary = _unwrap_named_stage(result.get("summary"), "registry")
+    return {
+        "ok": completed.returncode == 0 and result.get("status") == "ok",
+        "artifacts": artifacts,
+        "summary": summary,
+        "message": sanitize_line(str(result.get("message") or "")),
+    }
+
+
+def _unwrap_named_stage(value: Any, stage: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    nested = value.get(stage)
+    return dict(nested) if isinstance(nested, dict) else dict(value)
+
+
 class EvaluationRunner:
     """평가를 한 번에 하나만 실행합니다. 어느 학습에 대한 것인지 함께 기록합니다."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._state: dict[str, Any] = {"status": STATUS_IDLE, "job_id": None}
+        self._state: dict[str, Any] = {
+            "status": STATUS_IDLE,
+            "job_id": None,
+            "registration": {"status": STATUS_IDLE},
+        }
 
     def status(self, job_id: str | None = None) -> dict[str, Any]:
         with self._lock:
@@ -213,6 +309,21 @@ class EvaluationRunner:
             # 다른 학습의 결과를 그 학습의 것인 양 보여 주면 안 됩니다.
             return {"status": STATUS_IDLE, "job_id": job_id, "busy_with": state.get("job_id")}
         return state
+
+    def status_for(self, record: JobRecord) -> dict[str, Any]:
+        """메모리에 없으면 JobRecord에 영속화된 마지막 평가 상태를 돌려줍니다."""
+
+        state = self.status(record.job_id)
+        if state.get("status") != STATUS_IDLE or not record.evaluation:
+            return state
+        saved = {
+            **dict(record.evaluation),
+            "job_id": record.job_id,
+            "registration": dict(record.registration or {"status": STATUS_IDLE}),
+        }
+        if state.get("busy_with"):
+            saved["busy_with"] = state["busy_with"]
+        return saved
 
     def start(self, record: JobRecord, options: dict[str, Any]) -> dict[str, Any]:
         from .jobs.model import utc_now_text
@@ -245,43 +356,115 @@ class EvaluationRunner:
                 "message": "checkpoint로 검증 이미지를 추론하고 있습니다.",
                 "artifacts": {},
                 "summary": {},
+                "registration": {"status": STATUS_IDLE},
                 "device": config["evaluate"].get("device"),
                 "score_threshold": config["evaluate"]["score_threshold"],
             }
 
         threading.Thread(
-            target=self._run, args=(config,), name="evaluation", daemon=True
+            target=self._run, args=(record, config), name="evaluation", daemon=True
         ).start()
         return self.status()
 
-    def _run(self, config: dict[str, Any]) -> None:
+    def _run(self, record: JobRecord, config: dict[str, Any]) -> None:
         from .jobs.model import utc_now_text
 
         try:
             result = run_evaluation(config)
         except Exception as error:  # 평가 실패가 서버를 죽이면 안 됩니다.
+            evaluation_state = {
+                "status": STATUS_FAILED,
+                "finished_at": utc_now_text(),
+                "message": sanitize_line(
+                    "평가 중 예기치 못한 오류가 났습니다: "
+                    f"{type(error).__name__}: {error}"
+                ),
+                "exit_code": None,
+                "artifacts": {},
+                "summary": {},
+                "settings": dict(config["evaluate"]),
+                "storage": dict(config["storage"]),
+            }
+            record.evaluation = evaluation_state
+            record.registration = {"status": STATUS_IDLE}
+            try:
+                from .jobs import store
+
+                store.save_record(record)
+            except OSError:
+                pass
             with self._lock:
                 self._state.update(
-                    status=STATUS_FAILED,
-                    finished_at=utc_now_text(),
-                    # type만 남기면 원인을 찾을 수 없습니다. 실제로 "ValueError"만 보고
-                    # 무엇이 잘못됐는지 알 수 없던 적이 있어 내용까지 담습니다.
-                    # 경로와 credential은 sanitize_line이 가립니다.
-                    message=sanitize_line(
-                        f"평가 중 예기치 못한 오류가 났습니다: {type(error).__name__}: {error}"
-                    ),
+                    **evaluation_state,
+                    registration={"status": STATUS_IDLE},
                 )
             return
 
+        evaluation_state = {
+            "status": STATUS_SUCCEEDED if result["ok"] else STATUS_FAILED,
+            "finished_at": utc_now_text(),
+            "message": result["message"],
+            "exit_code": result.get("exit_code"),
+            "artifacts": dict(result["artifacts"]),
+            "summary": dict(result["summary"]),
+            "settings": dict(config["evaluate"]),
+            "storage": dict(config["storage"]),
+        }
+        record.evaluation = evaluation_state
+        registration = {"status": STATUS_IDLE}
+        if result["ok"]:
+            registration = self._register(record)
+        record.registration = registration
+        try:
+            from .jobs import store
+
+            store.save_record(record)
+        except OSError:
+            pass
         with self._lock:
             self._state.update(
-                status=STATUS_SUCCEEDED if result["ok"] else STATUS_FAILED,
-                finished_at=utc_now_text(),
-                message=result["message"],
-                exit_code=result.get("exit_code"),
-                artifacts=dict(result["artifacts"]),
-                summary=dict(result["summary"]),
+                **evaluation_state,
+                registration=dict(registration),
             )
+
+    def _register(self, record: JobRecord) -> dict[str, Any]:
+        """평가 성공을 유지하면서 Registry 결과를 별도 상태로 돌려줍니다."""
+
+        try:
+            result = run_registry(build_registry_config(record, record.evaluation))
+        except (WebValidationError, ValueError) as error:
+            return {"status": STATUS_FAILED, "message": sanitize_line(str(error))}
+        if not result["ok"]:
+            return {"status": STATUS_FAILED, "message": result["message"]}
+        index_status = result["summary"].get("index_status")
+        status = "index_failed" if index_status == "failed" else STATUS_SUCCEEDED
+        return {
+            "status": status,
+            "message": result["message"],
+            "artifacts": dict(result["artifacts"]),
+            "summary": dict(result["summary"]),
+        }
+
+    def retry_registration(self, record: JobRecord) -> dict[str, Any]:
+        """저장된 평가 artifact를 바꾸지 않고 Registry만 다시 실행합니다."""
+
+        if record.registration.get("status") == STATUS_SUCCEEDED:
+            return dict(record.registration)
+        if record.registration.get("status") == "index_failed":
+            raise JobConflictError(
+                "Registry record는 이미 저장됐습니다. rebuild_index로 목록 index를 복구해 주세요."
+            )
+        if record.evaluation.get("status") != STATUS_SUCCEEDED:
+            raise JobConflictError("성공으로 끝난 평가만 Registry에 등록할 수 있습니다.")
+        registration = self._register(record)
+        record.registration = registration
+        from .jobs import store
+
+        store.save_record(record)
+        with self._lock:
+            if self._state.get("job_id") == record.job_id:
+                self._state["registration"] = dict(registration)
+        return dict(registration)
 
 
 _RUNNER: EvaluationRunner | None = None

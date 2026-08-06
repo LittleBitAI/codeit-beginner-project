@@ -9,6 +9,22 @@ import { DATA_KEYS } from './dataKeys';
 import { dataMatchesSource, sourceKeyOf } from './dataSource';
 
 const FIELDS: FieldSpec[] = [
+  {
+    name: 'architecture',
+    type: 'enum',
+    default: 'mobile',
+    choices: ['mobile', 'resnet'],
+    label: 'Model',
+    hint: '',
+  },
+  {
+    name: 'optimizer',
+    type: 'enum',
+    default: 'AdamW',
+    choices: ['AdamW', 'SGD', 'Adam'],
+    label: 'Optimizer',
+    hint: '',
+  },
   { name: 'epochs', type: 'integer', default: 1, label: 'Epochs', hint: '' },
   { name: 'learning_rate', type: 'number', default: 0.005, label: 'LR', hint: '' },
   { name: 'pretrained', type: 'boolean', default: false, label: 'Pretrained', hint: '' },
@@ -38,10 +54,10 @@ describe('디자인 토큰', () => {
 });
 
 describe('toPayload', () => {
-  it('빈 값은 보내지 않아 backend 기본값을 쓴다', () => {
+  it('빈 수치는 보내지 않고 새 enum 기본값만 명시한다', () => {
     const payload = toPayload({ train: { epochs: '', run_id: '  ' }, data: {} }, FIELDS);
 
-    expect(payload.train).toEqual({});
+    expect(payload.train).toEqual({ architecture: 'mobile', optimizer: 'AdamW' });
   });
 
   it('정수와 실수를 알맞은 타입으로 바꾼다', () => {
@@ -71,6 +87,30 @@ describe('toPayload', () => {
     );
 
     expect(payload.inputs.data).toEqual({ class_map_uri: 'artifacts/a.json' });
+  });
+
+  it('새 enum 기본값을 명시하고 optimizer와 무관한 수치는 보내지 않는다', () => {
+    const fields: FieldSpec[] = [
+      ...FIELDS,
+      { name: 'momentum', type: 'number', default: 0.9, label: 'Momentum', hint: '' },
+      { name: 'beta1', type: 'number', default: 0.9, label: 'Beta 1', hint: '' },
+      { name: 'epsilon', type: 'number', default: 1e-8, label: 'Epsilon', hint: '' },
+    ];
+
+    const adam = toPayload(
+      { train: { momentum: '0.7', beta1: '0.8' }, data: {} },
+      fields,
+    );
+    expect(adam.train).toMatchObject({ architecture: 'mobile', optimizer: 'AdamW', beta1: 0.8 });
+    expect(adam.train).not.toHaveProperty('momentum');
+
+    const sgd = toPayload(
+      { train: { optimizer: 'SGD', momentum: '0.7', beta1: '0.8' }, data: {} },
+      fields,
+    );
+    expect(sgd.train).toMatchObject({ architecture: 'mobile', optimizer: 'SGD', momentum: 0.7 });
+    expect(sgd.train).not.toHaveProperty('beta1');
+    expect(sgd.train).not.toHaveProperty('epsilon');
   });
 });
 

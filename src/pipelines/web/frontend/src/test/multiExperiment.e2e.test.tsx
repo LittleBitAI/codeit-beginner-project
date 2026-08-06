@@ -32,6 +32,9 @@ function experimentListing(): ExperimentListing {
       learning_rate: experiment.train.learning_rate,
       momentum: experiment.train.momentum,
       weight_decay: experiment.train.weight_decay,
+      beta1: null,
+      beta2: null,
+      epsilon: null,
     },
     training: {
       device: experiment.train.device,
@@ -66,6 +69,9 @@ beforeEach(() => {
       if (path === '/api/train/jobs') return jsonResponse({ jobs: [], active_job_id: null });
       if (path === '/api/data/source') return jsonResponse({ source: null });
       if (path === '/api/train/experiments') return jsonResponse(experimentListing());
+      if (path === '/api/train/experiments/compare') {
+        return jsonResponse({ experiments: experimentListing().experiments, missing: [] });
+      }
       if (path === '/api/train/defaults') {
         return jsonResponse({
           architecture: 'fasterrcnn_mobilenet_v3_large_320_fpn',

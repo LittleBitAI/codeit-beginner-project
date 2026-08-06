@@ -41,7 +41,7 @@ SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 # ``--only``에 넘길 수 있는 stage. 사용자 입력이 여기 닿는 일은 없어야 하므로
 # 목록을 못 박아 둡니다. 새 stage를 부르는 기능을 만들면 여기에도 추가해야 합니다.
-ALLOWED_STAGES = ("train", "data", "evaluate")
+ALLOWED_STAGES = ("train", "data", "evaluate", "registry")
 
 
 def build_argv(config_relative_path: str, stage: str = "train") -> list[str]:

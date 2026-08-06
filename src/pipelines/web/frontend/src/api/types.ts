@@ -13,6 +13,7 @@ export interface FieldSpec {
   name: string;
   type: 'string' | 'integer' | 'number' | 'boolean' | 'enum' | 'uri';
   default?: unknown;
+  defaults_by_optimizer?: Record<string, number>;
   minimum?: number;
   choices?: string[];
   label: string;
@@ -113,6 +114,8 @@ export interface JobRecord {
   settings: Record<string, unknown>;
   data_inputs: Record<string, string>;
   progress: Progress;
+  evaluation?: EvaluationState;
+  registration?: RegistrationState;
   log_lines: number;
   orphan_note: string | null;
   cloud_run_id?: string | null;
@@ -189,6 +192,9 @@ export interface ExperimentSummary {
     learning_rate: number | null;
     momentum: number | null;
     weight_decay: number | null;
+    beta1: number | null;
+    beta2: number | null;
+    epsilon: number | null;
   };
   training: {
     device: string | null;
@@ -207,6 +213,11 @@ export interface ExperimentSummary {
 
 export interface ExperimentListing {
   experiments: ExperimentSummary[];
+}
+
+export interface ExperimentComparisonResult {
+  experiments: ExperimentSummary[];
+  missing: string[];
 }
 
 export interface LogLine {
@@ -322,6 +333,12 @@ export interface EvaluationState {
   };
   /** 다른 학습의 평가가 돌고 있으면 그 job id */
   busy_with?: string | null;
+  registration?: RegistrationState;
+}
+
+export interface RegistrationState {
+  status: 'idle' | 'running' | 'succeeded' | 'failed' | 'index_failed';
+  message?: string;
 }
 
 export interface StorageEnvironment {
