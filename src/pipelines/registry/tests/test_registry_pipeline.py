@@ -115,7 +115,11 @@ def test_run_returns_exact_contract_keys(local_run):
 
     assert set(result) == RETURN_KEYS
     assert result["status"] == "ok"
-    assert set(result["artifacts"]) == {"run_id", "experiment_record_uri"}
+    assert set(result["artifacts"]) == {
+        "run_id",
+        "experiment_record_uri",
+        "experiment_summary_uri",
+    }
     assert isinstance(result["artifacts"]["run_id"], str)
     assert isinstance(result["artifacts"]["experiment_record_uri"], str)
 
@@ -156,7 +160,11 @@ def test_records_and_hashes_optional_artifacts_deterministically(tmp_path: Path)
     result = registry.run(make_config(tmp_path, inputs))
 
     assert set(result) == RETURN_KEYS
-    assert set(result["artifacts"]) == {"run_id", "experiment_record_uri"}
+    assert set(result["artifacts"]) == {
+        "run_id",
+        "experiment_record_uri",
+        "experiment_summary_uri",
+    }
     record = json.loads(
         (tmp_path / result["artifacts"]["experiment_record_uri"]).read_text(
             encoding="utf-8"

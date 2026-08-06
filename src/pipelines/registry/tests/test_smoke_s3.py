@@ -78,7 +78,8 @@ def test_smoke_test_registers_and_reads_back_record():
         f"s3://{BUCKET}/registry/smoke-tests/fixed-id/experiment_record.json"
     )
     assert result["experiment_record_uri"] == expected_uri
-    assert result["listed_count"] == 1
+    # experiment record 하나와 index sidecar 하나가 전용 prefix 아래에 생깁니다.
+    assert result["listed_count"] == 2
     assert result["artifacts_skipped_remote"] == 9
 
     stored = objects[expected_uri]
@@ -101,7 +102,11 @@ def test_smoke_test_uses_dedicated_prefix_and_does_not_delete():
     assert not hasattr(storage, "delete")
     storage.client.delete_object.assert_not_called()
     assert "자동 삭제하지 않았습니다" in result["cleanup"]
-    assert len(objects) == 1
+    # smoke test는 지우지 않으므로, index를 포함해 만든 object가 모두 전용 prefix
+    # 안에 있어야 실제 실험 목록이 오염되지 않습니다.
+    assert objects
+    for uri in objects:
+        assert uri.startswith(f"s3://{BUCKET}/{smoke_s3.SMOKE_PREFIX}")
 
 
 def test_smoke_inputs_follow_the_artifact_contract():
@@ -117,7 +122,10 @@ def test_build_smoke_config_does_not_mutate_original_config():
     before = copy.deepcopy(config)
 
     smoke_config = smoke_s3.build_smoke_config(
-        config, run_id="smoke-1", record_uri="registry/smoke-tests/1/record.json"
+        config,
+        run_id="smoke-1",
+        record_uri="registry/smoke-tests/1/record.json",
+        index_prefix="registry/smoke-tests/1/index",
     )
 
     assert config == before

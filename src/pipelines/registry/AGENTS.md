@@ -14,7 +14,7 @@ Consumers must not import you either. They read records through `read_experiment
 
 ## Interface
 
-`run(config) -> dict` is the only public symbol. On success `artifacts` carries `run_id` and `experiment_record_uri`. On failure, `status="error"` and `artifacts={}`.
+`run(config) -> dict` is the only public symbol. On success `artifacts` carries `run_id`, `experiment_record_uri`, and `experiment_summary_uri` (the last one only when the index was written). On failure, `status="error"` and `artifacts={}`.
 
 It reads `config["inputs"]["data"]`, `["train"]`, and `["evaluate"]`. Every consumed value must be a non-empty string; booleans, numbers, lists, and nested objects are rejected. When no upstream artifacts are present at all, the run is treated as a dummy run.
 
@@ -26,13 +26,14 @@ A local `evaluate.submission_uri` is also read and checked against the CSV spec 
 
 ## Outputs
 
-One experiment record under the registry prefix, in a directory named for the run. Local URIs must be repository-relative: absolute paths, Windows drive letters, paths escaping the repository, and schemes other than `s3://` are all errors.
+One experiment record under the registry prefix, in a directory named for the run, plus one summary sidecar per run under the index prefix (`registry/index`, configurable). Local URIs must be repository-relative: absolute paths, Windows drive letters, paths escaping the repository, and schemes other than `s3://` are all errors.
 
 ## Run and Test
 
 ```
 python -m src.main_pipeline --only registry
 python -m pytest src/pipelines/registry/tests -q
+python -m src.pipelines.registry.rebuild_index --config configs/env.local.json
 ```
 
 `smoke_s3.py` is a separate CLI that needs real AWS credentials. Run it only with approval; without AWS it exits 1 rather than pretending to pass.
@@ -40,6 +41,8 @@ python -m pytest src/pipelines/registry/tests -q
 ## Local Rules
 
 - Secrets are redacted before anything is written. A record is a permanent artifact — treat every field in it as public.
+- **The record is the truth and the index is a cache.** A record is written first; if the index write then fails, the run still succeeds and reports `summary["index_status"] = "failed"`. Rebuild it rather than failing the run.
+- `summary.py` is the only file allowed to depend on another pipeline's document shape (evaluate's `metrics.json`). It reads defensively — an unreadable file yields null metrics, never an error.
 - Failures are typed (`MissingInputError`, `InvalidSchemaError`, `CorruptedArtifactError`, `InvalidSubmissionError`) and returned as `status="error"`, never raised out of `run()`.
 - The record schema is what every consumer reads. Adding, renaming, or removing a field is a `contracts/proposals/` proposal, not an edit.
 - The repository root is derived from this file's location, never hardcoded. Keep it that way.
