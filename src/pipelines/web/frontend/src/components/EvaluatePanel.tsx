@@ -1,8 +1,14 @@
 import { useEffect, useState } from 'react';
 
 import { api } from '../api/client';
-import type { DetectionMetrics, EvaluationState, JobRecord } from '../api/types';
-import { color, font } from '../design/tokens';
+import type {
+  DetectionMetrics,
+  EvaluateProgress,
+  EvaluationState,
+  JobRecord,
+} from '../api/types';
+import { color, font, radius } from '../design/tokens';
+import { formatDuration, useElapsedSeconds } from '../hooks/useElapsedSeconds';
 import { usePolling } from '../hooks/usePolling';
 import { describeError } from '../lib/describeError';
 import { AlertRow, Button, Field, KpiCard, Panel, controlStyle } from './primitives';
@@ -224,6 +230,107 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
   );
 }
 
+/** 지금 어느 단계인지, 추론 단계라면 몇 장까지 했는지 보여 줍니다. */
+function EvaluateProgressView({
+  progress,
+  fallback,
+}: {
+  progress: EvaluateProgress | undefined;
+  fallback: string;
+}) {
+  // 진행 줄이 한 번도 없으면 지금까지와 같은 고정 안내 문구만 둡니다.
+  // 여기서 가짜 진행률을 그리면 없는 정보를 지어내는 것입니다.
+  if (!progress?.available) {
+    return (
+      <span style={{ font: `400 11.5px/1.6 ${font.sans}`, color: color.textBody }}>
+        {fallback} 검증 이미지와 test 이미지 수만큼 추론하므로 잠시 걸립니다.
+      </span>
+    );
+  }
+
+  const predict = progress.predict ?? null;
+  const percent = predict?.percent ?? null;
+  const eta = progress.eta_seconds;
+  const images = progress.images ?? null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
+        {progress.stage_label && (
+          <span style={{ font: `600 12px/1 ${font.sans}`, color: color.text }}>
+            {progress.stage_label}
+          </span>
+        )}
+        {predict && predict.done !== null && (
+          <span style={{ font: `500 11.5px/1 ${font.mono}`, color: color.textBody }}>
+            {predict.total !== null && predict.total !== undefined
+              ? `${predict.done} / ${predict.total}`
+              : `${predict.done}장`}
+          </span>
+        )}
+        {eta !== null && eta !== undefined && (
+          <span style={{ font: `400 10.5px/1 ${font.sans}`, color: color.textMuted }}>
+            남은 시간 약 {formatDuration(eta)}
+          </span>
+        )}
+      </div>
+
+      {percent !== null && percent !== undefined && (
+        <div
+          role="progressbar"
+          aria-valuenow={percent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label={progress.stage_label ?? '진행률'}
+          style={{
+            height: 6,
+            borderRadius: radius.control,
+            background: color.borderInner,
+            overflow: 'hidden',
+          }}
+        >
+          <div style={{ width: `${percent}%`, height: '100%', background: color.primary }} />
+        </div>
+      )}
+
+      {images && (
+        // 842장을 한 장씩 추론하므로 20분 넘게 걸리는 것이 정상입니다. 그 사실을
+        // 숫자로 보여 주어야 사람이 멈춘 줄 알고 취소하지 않습니다.
+        <span style={{ font: `400 10.5px/1.45 ${font.mono}`, color: color.textMuted }}>
+          추론 대상 · 검증 이미지 {images.validation_images ?? '-'}장 · test 이미지{' '}
+          {images.test_images ?? '-'}장
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** 평가가 도는 동안 경과 시간과 진행 상황을 보여 줍니다. */
+function EvaluationRunning({ state }: { state: EvaluationState }) {
+  const elapsed = useElapsedSeconds(state.started_at, true);
+
+  return (
+    <AlertRow level="info" title="평가 중">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {elapsed !== null && (
+          <div style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
+            <span style={{ font: `500 10px/1.3 ${font.mono}`, color: color.textMuted }}>
+              경과 시간
+            </span>
+            <span style={{ font: `600 12px/1 ${font.mono}`, color: color.text }}>
+              {formatDuration(elapsed)}
+            </span>
+          </div>
+        )}
+        <EvaluateProgressView
+          progress={state.progress}
+          fallback={state.message ?? 'checkpoint로 이미지를 추론하고 있습니다.'}
+        />
+      </div>
+    </AlertRow>
+  );
+}
+
 function EvaluationResult({
   state,
   submissionRequested,
@@ -232,11 +339,7 @@ function EvaluationResult({
   submissionRequested: boolean;
 }) {
   if (state.status === 'running') {
-    return (
-      <AlertRow level="info" title="평가 중">
-        {state.message} 검증 이미지와 test 이미지 수만큼 추론하므로 잠시 걸립니다.
-      </AlertRow>
-    );
+    return <EvaluationRunning state={state} />;
   }
 
   if (state.status === 'failed') {

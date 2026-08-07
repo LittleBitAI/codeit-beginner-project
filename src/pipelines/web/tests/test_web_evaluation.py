@@ -47,7 +47,9 @@ def make_record(
     )
 
 
-def completed(ok: bool = True, returncode: int = 0, *, with_submission: bool = False):
+def evaluate_stdout(ok: bool = True, *, with_submission: bool = False) -> str:
+    """평가 subprocess가 stdout에 남기는 결과 JSON 문서 하나입니다."""
+
     evaluate_artifacts = {
         "run_id": "run-1",
         "metrics_uri": "artifacts/evaluate/run-1/metrics.json",
@@ -55,39 +57,32 @@ def completed(ok: bool = True, returncode: int = 0, *, with_submission: bool = F
     }
     if with_submission:
         evaluate_artifacts["submission_uri"] = "submissions/run-1/submission.csv"
-    return subprocess.CompletedProcess(
-        [],
-        returncode,
-        json.dumps(
-            {
-                "status": "ok" if ok else "error",
-                "artifacts": {
-                    "evaluate": evaluate_artifacts
-                },
-                "summary": {
-                    "evaluate": {
-                        "pipeline": "evaluate",
-                        "image_count": 46,
-                        "prediction_count": 120,
-                        "evaluated_class_count": 56,
-                        "iou_thresholds": [0.75, 0.8, 0.85, 0.9, 0.95]
-                        if with_submission
-                        else [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
-                        "metrics": {
-                            "mAP": 0.3123,
-                            "mAP50": 0.5512,
-                            "mAP75": 0.2811,
-                            "precision50": 0.61,
-                            "recall50": 0.48,
-                        },
-                    }
-                },
-                "message": "evaluate pipeline 실행 완료",
+    return json.dumps(
+        {
+            "status": "ok" if ok else "error",
+            "artifacts": {"evaluate": evaluate_artifacts},
+            "summary": {
+                "evaluate": {
+                    "pipeline": "evaluate",
+                    "image_count": 46,
+                    "prediction_count": 120,
+                    "evaluated_class_count": 56,
+                    "iou_thresholds": [0.75, 0.8, 0.85, 0.9, 0.95]
+                    if with_submission
+                    else [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95],
+                    "metrics": {
+                        "mAP": 0.3123,
+                        "mAP50": 0.5512,
+                        "mAP75": 0.2811,
+                        "precision50": 0.61,
+                        "recall50": 0.48,
+                    },
+                }
             },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        "",
+            "message": "evaluate pipeline 실행 완료",
+        },
+        ensure_ascii=False,
+        indent=2,
     )
 
 
@@ -247,30 +242,129 @@ def test_bad_detection_limit_is_rejected(bad):
 # --- 실행 ---------------------------------------------------------------------
 
 
-def test_run_calls_only_the_evaluate_stage(isolated_repo, monkeypatch):
-    captured = {}
+def spawn_evaluate(monkeypatch, fake_process_factory, **kwargs):
+    """``runner.spawn``이 돌려줄 가짜 평가 process를 심습니다.
 
-    def fake_run_stage(path, stage, *, cwd, timeout):
-        captured["stage"] = stage
-        return completed()
+    평가는 20분 넘게 걸리므로 ``run_stage``가 아니라 ``spawn`` + reader thread로
+    돕니다. 넘어간 argv를 담아 두어 어느 stage를 불렀는지 확인합니다.
+    """
 
-    monkeypatch.setattr(evaluation.runner, "run_stage", fake_run_stage)
+    captured: dict = {}
+    kwargs.setdefault("stdout", evaluate_stdout())
+    process = fake_process_factory(**kwargs)
+
+    def fake_spawn(argv, *, cwd, env):
+        captured["argv"] = argv
+        captured["cwd"] = cwd
+        return process
+
+    monkeypatch.setattr(evaluation.runner, "spawn", fake_spawn)
+    return captured, process
+
+
+def test_run_calls_only_the_evaluate_stage(isolated_repo, monkeypatch, fake_process_factory):
+    captured, _ = spawn_evaluate(monkeypatch, fake_process_factory)
 
     result = evaluation.run_evaluation(evaluation.build_evaluate_config(make_record()))
 
-    assert captured["stage"] == "evaluate"
+    assert captured["argv"][-2:] == ["--only", "evaluate"]
     assert result["ok"] is True
     # stage 이름으로 감싼 한 겹을 벗겨야 합니다.
     assert result["artifacts"]["metrics_uri"].endswith("metrics.json")
     assert result["summary"]["metrics"]["mAP50"] == 0.5512
 
 
-def test_run_removes_the_temporary_config(isolated_repo, monkeypatch):
-    monkeypatch.setattr(evaluation.runner, "run_stage", lambda *a, **k: completed())
+def test_run_removes_the_temporary_config(isolated_repo, monkeypatch, fake_process_factory):
+    spawn_evaluate(monkeypatch, fake_process_factory)
 
     evaluation.run_evaluation(evaluation.build_evaluate_config(make_record()))
 
     assert list((isolated_repo / "artifacts" / "web" / "configs").glob("*.json")) == []
+
+
+def test_run_feeds_stderr_lines_to_the_progress_callback(
+    isolated_repo, monkeypatch, fake_process_factory
+):
+    """진행 로그는 stderr로만 옵니다. stdout은 결과 JSON 문서 하나입니다."""
+
+    progress_line = json.dumps(
+        {"schema": "evaluate.progress/1", "event": "predict_progress",
+         "stage": "test", "done": 400, "total": 842}
+    )
+    spawn_evaluate(
+        monkeypatch,
+        fake_process_factory,
+        stderr=f"{progress_line}\nCOCOeval 요약 한 줄\n",
+    )
+    seen: list[str] = []
+
+    result = evaluation.run_evaluation(
+        evaluation.build_evaluate_config(make_record()), on_progress_line=seen.append
+    )
+
+    assert [item.strip() for item in seen] == [progress_line, "COCOeval 요약 한 줄"]
+    assert result["ok"] is True  # stdout 파싱 경로는 그대로입니다
+
+
+def test_run_survives_a_progress_callback_that_raises(
+    isolated_repo, monkeypatch, fake_process_factory
+):
+    """진행 로그를 못 읽는다고 평가가 실패하면 안 됩니다."""
+
+    spawn_evaluate(monkeypatch, fake_process_factory, stderr="한 줄\n")
+
+    def explode(line):
+        raise RuntimeError("진행 로그 처리 실패")
+
+    result = evaluation.run_evaluation(
+        evaluation.build_evaluate_config(make_record()), on_progress_line=explode
+    )
+
+    assert result["ok"] is True
+
+
+def test_run_reports_a_process_that_never_started(isolated_repo, monkeypatch):
+    def refuse(argv, *, cwd, env):
+        raise OSError("실행할 수 없습니다")
+
+    monkeypatch.setattr(evaluation.runner, "spawn", refuse)
+
+    result = evaluation.run_evaluation(evaluation.build_evaluate_config(make_record()))
+
+    assert result["ok"] is False
+    assert result["exit_code"] is None
+    assert "실행하지 못했습니다" in result["message"]
+    assert list((isolated_repo / "artifacts" / "web" / "configs").glob("*.json")) == []
+
+
+def test_run_does_not_deadlock_on_large_output(isolated_repo, monkeypatch):
+    """양쪽 pipe를 동시에 읽지 않으면 OS buffer가 차면서 교착합니다.
+
+    ``COCOeval``이 stdout에, 진행 로그가 stderr에 쏟아지는 상황입니다. 실제
+    subprocess를 써야만 증명되는 성질이라 여기서만 진짜 process를 띄웁니다.
+    """
+
+    import sys
+
+    script = (
+        "import sys\n"
+        "for i in range(4000):\n"
+        "    sys.stdout.write('x' * 80 + '\\n')\n"
+        "    sys.stderr.write('y' * 80 + '\\n')\n"
+    )
+    monkeypatch.setattr(
+        evaluation.runner, "build_argv", lambda path, stage: [sys.executable, "-c", script]
+    )
+    seen: list[str] = []
+
+    result = evaluation.run_evaluation(
+        evaluation.build_evaluate_config(make_record()), on_progress_line=seen.append
+    )
+
+    assert len(seen) == 4000  # stderr를 한 줄도 잃지 않았습니다
+    # stdout이 JSON이 아니므로 평가는 실패로 보고됩니다. 교착하지 않는 것이 요점입니다.
+    assert result["ok"] is False
+    assert result["exit_code"] == 0
 
 
 def test_run_registry_calls_only_registry_and_removes_temporary_config(
@@ -308,9 +402,9 @@ def test_run_registry_calls_only_registry_and_removes_temporary_config(
     assert list((isolated_repo / "artifacts" / "web" / "configs").glob("*.json")) == []
 
 
-def test_failure_is_reported(isolated_repo, monkeypatch):
-    monkeypatch.setattr(
-        evaluation.runner, "run_stage", lambda *a, **k: completed(ok=False, returncode=1)
+def test_failure_is_reported(isolated_repo, monkeypatch, fake_process_factory):
+    spawn_evaluate(
+        monkeypatch, fake_process_factory, stdout=evaluate_stdout(ok=False), exit_code=1
     )
 
     result = evaluation.run_evaluation(evaluation.build_evaluate_config(make_record()))
@@ -319,25 +413,32 @@ def test_failure_is_reported(isolated_repo, monkeypatch):
     assert result["exit_code"] == 1
 
 
-def test_timeout_is_reported(isolated_repo, monkeypatch):
-    def timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
-
-    monkeypatch.setattr(evaluation.runner, "run_stage", timeout)
+def test_timeout_is_reported(isolated_repo, monkeypatch, fake_process_factory):
+    _, process = spawn_evaluate(
+        monkeypatch, fake_process_factory, block_until_signalled=True
+    )
+    monkeypatch.setattr(evaluation, "EVALUATE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(evaluation.runner, "terminate_tree", lambda proc: proc.terminate())
 
     result = evaluation.run_evaluation(evaluation.build_evaluate_config(make_record()))
 
     assert result["ok"] is False
+    assert result["exit_code"] is None
     assert "시간 안에 끝나지 않았습니다" in result["message"]
+    assert process.terminate_calls == 1  # 시간이 지나면 그냥 두지 않고 종료합니다
 
 
-def test_unparsable_output_does_not_leak_paths(isolated_repo, monkeypatch):
+def test_unparsable_output_does_not_leak_paths(
+    isolated_repo, monkeypatch, fake_process_factory
+):
     from src.pipelines.web.paths import REPOSITORY_ROOT
 
-    monkeypatch.setattr(
-        evaluation.runner,
-        "run_stage",
-        lambda *a, **k: subprocess.CompletedProcess([], 1, "깨짐", f"실패 {REPOSITORY_ROOT}/x"),
+    spawn_evaluate(
+        monkeypatch,
+        fake_process_factory,
+        stdout="깨짐",
+        stderr=f"실패 {REPOSITORY_ROOT}/x\n",
+        exit_code=1,
     )
 
     result = evaluation.run_evaluation(evaluation.build_evaluate_config(make_record()))
@@ -369,11 +470,12 @@ def wait_done(slot: EvaluationRunner, timeout: float = 10.0) -> dict:
     raise AssertionError("평가가 시간 안에 끝나지 않았습니다.")
 
 
-def test_successful_evaluation_records_metrics(runner_slot, monkeypatch):
+def test_successful_evaluation_records_metrics(
+    runner_slot, monkeypatch, fake_process_factory
+):
+    spawn_evaluate(monkeypatch, fake_process_factory)
     monkeypatch.setattr(
-        evaluation.runner,
-        "run_stage",
-        lambda path, stage, **kwargs: completed() if stage == "evaluate" else registry_completed(),
+        evaluation.runner, "run_stage", lambda *a, **k: registry_completed()
     )
 
     runner_slot.start(make_record(), {})
@@ -385,14 +487,52 @@ def test_successful_evaluation_records_metrics(runner_slot, monkeypatch):
     assert state["registration"]["status"] == "succeeded"
 
 
+def test_running_status_carries_the_progress_block(
+    runner_slot, monkeypatch, fake_process_factory
+):
+    """평가 상태 응답에 진행 블록이 실려야 화면이 단계와 막대를 그릴 수 있습니다."""
+
+    spawn_evaluate(
+        monkeypatch,
+        fake_process_factory,
+        stderr=json.dumps(
+            {
+                "schema": "evaluate.progress/1",
+                "event": "predict_progress",
+                "stage": "test",
+                "done": 421,
+                "total": 842,
+            }
+        )
+        + "\n",
+    )
+    monkeypatch.setattr(
+        evaluation.runner, "run_stage", lambda *a, **k: registry_completed()
+    )
+
+    started = runner_slot.start(make_record(), {})
+    # 진행 로그가 오기 전에는 진행률을 지어내지 않습니다.
+    assert started["progress"]["available"] is False
+    state = wait_done(runner_slot)
+
+    # 기존 key는 그대로 두고 더하기만 합니다.
+    assert state["status"] == "succeeded"
+    assert state["summary"]["metrics"]["mAP"] == 0.3123
+    assert state["progress"]["available"] is True
+    assert state["progress"]["stage"] == "test"
+    assert state["progress"]["predict"]["done"] == 421
+    assert state["progress"]["predict"]["total"] == 842
+
+
 def test_registry_failure_keeps_evaluation_success_and_can_retry(
-    runner_slot, monkeypatch
+    runner_slot, monkeypatch, fake_process_factory
 ):
     calls = []
+    spawn_evaluate(monkeypatch, fake_process_factory)
 
     def first_run(path, stage, **kwargs):
         calls.append(stage)
-        return completed() if stage == "evaluate" else registry_completed(ok=False)
+        return registry_completed(ok=False)
 
     monkeypatch.setattr(evaluation.runner, "run_stage", first_run)
     record = make_record()
@@ -414,7 +554,7 @@ def test_registry_failure_keeps_evaluation_success_and_can_retry(
     retried = runner_slot.retry_registration(persisted)
 
     assert retried["status"] == "succeeded"
-    assert calls == ["evaluate", "registry", "registry"]
+    assert calls == ["registry", "registry"]
 
 
 def test_index_failure_requires_rebuild_instead_of_registration_retry(
@@ -442,12 +582,17 @@ def test_registration_retry_requires_a_successful_saved_evaluation(runner_slot):
         runner_slot.retry_registration(make_record())
 
 
-def test_failed_evaluation_never_calls_registry(runner_slot, monkeypatch):
+def test_failed_evaluation_never_calls_registry(
+    runner_slot, monkeypatch, fake_process_factory
+):
     calls = []
+    spawn_evaluate(
+        monkeypatch, fake_process_factory, stdout=evaluate_stdout(ok=False), exit_code=1
+    )
 
     def fake(path, stage, **kwargs):
         calls.append(stage)
-        return completed(ok=False, returncode=1)
+        return registry_completed()
 
     monkeypatch.setattr(evaluation.runner, "run_stage", fake)
     runner_slot.start(make_record(), {})
@@ -456,11 +601,11 @@ def test_failed_evaluation_never_calls_registry(runner_slot, monkeypatch):
 
     assert state["status"] == "failed"
     assert state["registration"]["status"] == "idle"
-    assert calls == ["evaluate"]
+    assert calls == []
 
 
 def test_unexpected_evaluation_failure_is_persisted(runner_slot, monkeypatch):
-    def fail(config):
+    def fail(config, on_progress_line=None):
         raise RuntimeError("temporary path failed")
 
     monkeypatch.setattr(evaluation, "run_evaluation", fail)
@@ -475,11 +620,14 @@ def test_unexpected_evaluation_failure_is_persisted(runner_slot, monkeypatch):
     assert persisted.registration["status"] == "idle"
 
 
-def test_submission_request_and_artifact_are_visible_in_status(runner_slot, monkeypatch):
+def test_submission_request_and_artifact_are_visible_in_status(
+    runner_slot, monkeypatch, fake_process_factory
+):
+    spawn_evaluate(
+        monkeypatch, fake_process_factory, stdout=evaluate_stdout(with_submission=True)
+    )
     monkeypatch.setattr(
-        evaluation.runner,
-        "run_stage",
-        lambda *a, **k: completed(with_submission=True),
+        evaluation.runner, "run_stage", lambda *a, **k: registry_completed()
     )
 
     started = runner_slot.start(make_record(with_test_manifest=True), {})
@@ -494,12 +642,11 @@ def test_submission_request_and_artifact_are_visible_in_status(runner_slot, monk
 def test_runner_marks_a_manifest_attached_at_evaluation_time(runner_slot, monkeypatch):
     captured = {}
 
-    def fake_run(config):
+    def fake_run(config, on_progress_line=None):
         captured.update(config)
-        result = completed(with_submission=True)
         return {
             "ok": True,
-            "exit_code": result.returncode,
+            "exit_code": 0,
             "artifacts": {"submission_uri": "submissions/run-1/submission.csv"},
             "summary": {"iou_thresholds": [0.75, 0.8, 0.85, 0.9, 0.95]},
             "message": "완료",
@@ -520,26 +667,33 @@ def test_runner_marks_a_manifest_attached_at_evaluation_time(runner_slot, monkey
     assert state["artifacts"]["submission_uri"].endswith("submission.csv")
 
 
-def test_second_evaluation_is_rejected_while_running(runner_slot, monkeypatch):
-    import threading
-
-    release = threading.Event()
+def test_second_evaluation_is_rejected_while_running(
+    runner_slot, monkeypatch, fake_process_factory
+):
+    _, process = spawn_evaluate(
+        monkeypatch, fake_process_factory, block_until_signalled=True
+    )
     monkeypatch.setattr(
-        evaluation.runner, "run_stage", lambda *a, **k: (release.wait(5), completed())[1]
+        evaluation.runner, "run_stage", lambda *a, **k: registry_completed()
     )
     runner_slot.start(make_record(), {})
 
     with pytest.raises(JobConflictError):
         runner_slot.start(make_record(), {})
 
-    release.set()
+    process.release()
     wait_done(runner_slot)
 
 
-def test_status_does_not_show_another_jobs_result(runner_slot, monkeypatch):
+def test_status_does_not_show_another_jobs_result(
+    runner_slot, monkeypatch, fake_process_factory
+):
     """다른 학습의 평가 결과를 이 학습의 것인 양 보여 주면 안 됩니다."""
 
-    monkeypatch.setattr(evaluation.runner, "run_stage", lambda *a, **k: completed())
+    spawn_evaluate(monkeypatch, fake_process_factory)
+    monkeypatch.setattr(
+        evaluation.runner, "run_stage", lambda *a, **k: registry_completed()
+    )
     runner_slot.start(make_record(), {})
     wait_done(runner_slot)
 

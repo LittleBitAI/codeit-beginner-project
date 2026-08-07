@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { EvaluationState, JobRecord, Progress } from '../api/types';
+import type { EvaluateProgress, EvaluationState, JobRecord, Progress } from '../api/types';
 
 const evaluationStatus = vi.fn();
 const startEvaluation = vi.fn();
@@ -145,5 +145,141 @@ describe('EvaluatePanel · 대회 제출 흐름', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Registry 등록 재시도' }));
 
     await waitFor(() => expect(retryRegistration).toHaveBeenCalledWith('a'.repeat(32)));
+  });
+});
+
+const STARTED_AT = '2026-08-07T03:30:00Z';
+/** 평가를 시작하고 74초가 지난 시점입니다. */
+const NOW = Date.parse('2026-08-07T03:31:14Z');
+
+function running(progress?: EvaluateProgress): EvaluationState {
+  return {
+    status: 'running',
+    job_id: 'a'.repeat(32),
+    started_at: STARTED_AT,
+    finished_at: null,
+    submission_requested: true,
+    message: 'checkpoint로 검증 이미지를 추론하고 있습니다.',
+    progress,
+  };
+}
+
+function showRunning(progress?: EvaluateProgress) {
+  evaluationStatus.mockResolvedValue({ evaluation: running(progress) });
+  return render(<EvaluatePanel job={job(true)} />);
+}
+
+describe('EvaluatePanel · 평가 진행 상황', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('경과 시간을 초 단위로 보여 주고 계속 갱신한다', async () => {
+    showRunning();
+
+    expect(await screen.findByText('1분 14초')).toBeInTheDocument();
+
+    // 가짜 시계를 4초 밀면 1초짜리 interval이 그 사이에 네 번 돕니다.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+
+    expect(await screen.findByText('1분 18초')).toBeInTheDocument();
+  });
+
+  it('지금 어떤 단계인지 보여 준다', async () => {
+    showRunning({
+      available: true,
+      stage: 'metrics',
+      stage_label: '지표 계산 중',
+      predict: null,
+    });
+
+    expect(await screen.findByText('지표 계산 중')).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  });
+
+  it('test 추론 중에는 done / total과 막대를 보여 준다', async () => {
+    showRunning({
+      available: true,
+      stage: 'test',
+      stage_label: 'test 추론 중',
+      predict: { stage: 'test', done: 421, total: 842, percent: 50 },
+      images: { validation_images: 46, test_images: 842 },
+    });
+
+    expect(await screen.findByText('test 추론 중')).toBeInTheDocument();
+    expect(screen.getByText('421 / 842')).toBeInTheDocument();
+    const bar = screen.getByRole('progressbar');
+    expect(bar).toHaveAttribute('aria-valuenow', '50');
+    expect(bar).toHaveAttribute('aria-valuemax', '100');
+  });
+
+  it('오래 걸리는 것이 정상임을 알 수 있게 test 이미지 장수를 함께 보여 준다', async () => {
+    showRunning({
+      available: true,
+      stage: 'validation',
+      stage_label: 'validation 추론 중',
+      predict: { stage: 'validation', done: 10, total: 46, percent: 21.7 },
+      images: { validation_images: 46, test_images: 842 },
+    });
+
+    expect(await screen.findByText(/test 이미지 842장/)).toBeInTheDocument();
+  });
+
+  it('관측된 남은 시간이 있으면 함께 보여 준다', async () => {
+    showRunning({
+      available: true,
+      stage: 'test',
+      stage_label: 'test 추론 중',
+      predict: { stage: 'test', done: 421, total: 842, percent: 50 },
+      eta_seconds: 95,
+    });
+
+    expect(await screen.findByText(/남은 시간 약 1분 35초/)).toBeInTheDocument();
+  });
+
+  it('남은 시간을 아직 모르면 그 자리를 비워 둔다', async () => {
+    showRunning({
+      available: true,
+      stage: 'test',
+      stage_label: 'test 추론 중',
+      predict: { stage: 'test', done: 421, total: 842, percent: 50 },
+      eta_seconds: null,
+    });
+
+    expect(await screen.findByText('test 추론 중')).toBeInTheDocument();
+    expect(screen.queryByText(/남은 시간/)).not.toBeInTheDocument();
+  });
+
+  it('진행 정보가 없으면 가짜 진행률 대신 지금까지의 안내 문구를 보여 준다', async () => {
+    showRunning({
+      available: false,
+      reason: 'evaluate_pipeline_no_progress_stream',
+      message: 'evaluate pipeline이 진행 로그를 제공하지 않아 진행률을 알 수 없습니다.',
+      stage: null,
+      predict: null,
+    });
+
+    expect(
+      await screen.findByText(/checkpoint로 검증 이미지를 추론하고 있습니다/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    // 경과 시간은 진행 로그 없이도 알 수 있으므로 계속 보여 줍니다.
+    expect(screen.getByText('1분 14초')).toBeInTheDocument();
+  });
+
+  it('진행 블록 자체가 없는 옛 서버 응답에서도 깨지지 않는다', async () => {
+    showRunning(undefined);
+
+    expect(
+      await screen.findByText(/checkpoint로 검증 이미지를 추론하고 있습니다/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
   });
 });

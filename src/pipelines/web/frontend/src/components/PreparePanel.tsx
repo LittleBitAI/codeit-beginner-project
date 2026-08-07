@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { api, ApiError } from '../api/client';
 import type { PreparationProgress, PreparationState, StorageEnvironment } from '../api/types';
 import { color, font, radius } from '../design/tokens';
+import { formatDuration, useElapsedSeconds } from '../hooks/useElapsedSeconds';
 import { usePolling } from '../hooks/usePolling';
 import { AlertRow, Button, Field, controlStyle } from './primitives';
 
@@ -272,35 +273,6 @@ function StorageChoice({
       )}
     </div>
   );
-}
-
-/** 초를 "7분 54초"처럼 읽기 쉬운 한국어로 바꿉니다. */
-export function formatDuration(seconds: number): string {
-  const whole = Math.max(0, Math.floor(seconds));
-  const minutes = Math.floor(whole / 60);
-  const rest = whole % 60;
-  return minutes > 0 ? `${minutes}분 ${rest}초` : `${rest}초`;
-}
-
-/**
- * 준비를 시작한 뒤 지난 시간을 초 단위로 계속 셉니다.
- *
- * 준비는 8분 가까이 걸립니다. 화면에 움직이는 것이 하나도 없으면 멈춘 줄 알기
- * 때문에, 진행 로그가 하나도 없을 때에도 이 숫자만은 계속 움직입니다.
- */
-function useElapsedSeconds(startedAt: string | null | undefined, active: boolean): number | null {
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (!active) return;
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [active]);
-
-  if (!startedAt) return null;
-  const started = Date.parse(startedAt);
-  if (Number.isNaN(started)) return null;
-  return Math.max(0, (now - started) / 1000);
 }
 
 /** 지금 어느 단계인지, 읽기라면 얼마나 읽었는지 보여 줍니다. */
