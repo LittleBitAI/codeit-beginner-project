@@ -289,6 +289,40 @@ export interface DataSource {
   preparation?: Record<string, unknown> | null;
 }
 
+/**
+ * 준비 subprocess가 stderr로 흘린 `data.progress/1` 진행 로그를 읽은 결과.
+ *
+ * 진행 줄이 한 번도 없으면 `available`이 false이고 나머지는 모두 null입니다.
+ * 그때 가짜 진행률을 그리면 안 됩니다.
+ */
+export interface PreparationProgress {
+  available: boolean;
+  reason?: string | null;
+  message?: string | null;
+  /** listing / annotations / test_images / split / manifests / publish / completed */
+  stage?: string | null;
+  stage_label?: string | null;
+  raw_prefix?: string | null;
+  split_ratio?: string | null;
+  seed?: number | null;
+  split_method?: string | null;
+  sources?: { train_images?: number; annotations?: number; test_images?: number } | null;
+  read?: {
+    stage: string | null;
+    done: number | null;
+    total: number | null;
+    percent: number | null;
+  } | null;
+  completed?: {
+    train_images?: number;
+    validation_images?: number;
+    category_count?: number;
+  } | null;
+  /** 관측된 읽기 속도로만 계산합니다. 관측이 부족하면 null입니다. */
+  eta_seconds?: number | null;
+  malformed_lines?: number;
+}
+
 /** 원본에서 artifact를 만드는 준비 실행의 상태. */
 export interface PreparationState {
   status: 'idle' | 'running' | 'succeeded' | 'failed';
@@ -304,6 +338,7 @@ export interface PreparationState {
   artifacts?: Record<string, string>;
   summary?: Record<string, unknown>;
   selected?: boolean;
+  progress?: PreparationProgress;
 }
 
 /** evaluate가 만드는 detection metric. 계산하지 않은 값은 null입니다. */
