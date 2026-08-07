@@ -201,12 +201,20 @@ def test_appsync_parsed_awsjson_is_stored_as_json_text(table):
         None,
     )
 
-    assert json.loads(created["settings"]) == create["settings"]
-    assert json.loads(created["dataInputs"]) == create["dataInputs"]
-    assert json.loads(updated["progress"]) == update["progress"]
-    assert json.loads(updated["summary"]) == update["summary"]
-    assert json.loads(updated["artifacts"]) == update["artifacts"]
-    assert json.loads(batch["lines"]) == [{"seq": 1, "loss": 0.5}]
+    # AWSJSON field는 값 그대로 돌려줘야 합니다. 여기서 문자열을 돌려주면 AppSync가
+    # 그것을 한 번 더 감싸서, 화면은 두 겹으로 감싼 문자열을 받고 값을 통째로 잃습니다.
+    assert created["settings"] == create["settings"]
+    assert created["dataInputs"] == create["dataInputs"]
+    assert updated["progress"] == update["progress"]
+    assert updated["summary"] == update["summary"]
+    assert updated["artifacts"] == update["artifacts"]
+    assert batch["lines"] == [{"seq": 1, "loss": 0.5}]
+
+    # DynamoDB에는 계속 JSON text로 둡니다. float과 빈 값 때문에 item 자체를
+    # 중첩 구조로 두면 저장이 까다로워집니다.
+    stored = table.get_item(Key={"PK": "TEAM#pill-team", "SK": f"RUN#{'c' * 32}"})["Item"]
+    assert json.loads(stored["settings"]) == create["settings"]
+    assert json.loads(stored["summary"]) == update["summary"]
 
 
 def test_evaluation_is_kept_when_a_later_update_omits_it(table):
@@ -218,7 +226,7 @@ def test_evaluation_is_kept_when_a_later_update_omits_it(table):
         ),
         None,
     )
-    assert created["evaluation"] == "{}"
+    assert created["evaluation"] == {}
 
     def update(revision, **extra):
         payload = {
@@ -245,11 +253,11 @@ def test_evaluation_is_kept_when_a_later_update_omits_it(table):
     assert legacy["status"] == "succeeded"
 
     stored = update(2, evaluation={"status": "succeeded", "metrics": {"mAP": 0.73}})
-    assert json.loads(stored["evaluation"])["metrics"]["mAP"] == 0.73
+    assert stored["evaluation"]["metrics"]["mAP"] == 0.73
 
     # 30초마다 오는 heartbeat는 evaluation을 싣지 않습니다. 지우면 안 됩니다.
     heartbeat = update(3)
-    assert json.loads(heartbeat["evaluation"])["metrics"]["mAP"] == 0.73
+    assert heartbeat["evaluation"]["metrics"]["mAP"] == 0.73
 
 
 def test_rejects_a_different_team_before_reading_table(table):

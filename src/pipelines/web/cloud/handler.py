@@ -90,8 +90,31 @@ def _run_sk(cloud_run_id: str) -> str:
     return f"{RUN_PREFIX}{cloud_run_id}"
 
 
+# DynamoDB에는 JSON text로 두지만 GraphQL로 나갈 때는 값 그대로 돌려줘야 하는
+# field입니다. AWSJSON은 AppSync가 알아서 문자열 하나로 직렬화해 줍니다. 여기서
+# 이미 문자열이 된 값을 돌려주면 그것을 한 번 더 감싸므로, 화면은 두 겹으로 감싼
+# 문자열을 받고 settings와 summary, evaluation, lines를 통째로 잃습니다.
+_JSON_FIELDS = frozenset(
+    {"settings", "dataInputs", "progress", "summary", "artifacts", "evaluation", "lines"}
+)
+
+
+def _decoded(key: str, value: Any) -> Any:
+    if key not in _JSON_FIELDS or not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except ValueError:
+        # 예전에 다른 모양으로 저장된 값이 있어도 조회 전체를 실패시키지 않습니다.
+        return None
+
+
 def _public(item: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in item.items() if key not in {"PK", "SK", "expiresAt", "lastEventId"}}
+    return {
+        key: _decoded(key, value)
+        for key, value in item.items()
+        if key not in {"PK", "SK", "expiresAt", "lastEventId"}
+    }
 
 
 def _awsjson_text(value: Any) -> str:
