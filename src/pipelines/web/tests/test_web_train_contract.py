@@ -120,6 +120,15 @@ def get_defaults(source: str) -> dict[str, object]:
     return found
 
 
+def function_node(source: str, name: str) -> ast.FunctionDef:
+    """함수 하나를 이름으로 찾습니다. 그 안의 값만 보고 싶을 때 씁니다."""
+
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    pytest.fail(f"train source에서 {name} 함수를 찾지 못했습니다.")
+
+
 def test_architecture_matches_train_source():
     """화면에 보여 주는 모델 이름이 실제로 학습되는 모델과 같아야 합니다."""
 
@@ -194,6 +203,32 @@ def test_augmentation_defaults_to_none_like_train():
 def test_unknown_augmentation_is_rejected_before_training_starts():
     with pytest.raises(Exception, match="augmentation"):
         normalize_train_settings({"augmentation": "무작위회전"})
+
+
+def test_early_stopping_keys_match_train_source():
+    """train은 모르는 key가 있으면 object를 통째로 거부합니다.
+
+    화면이 만든 object의 key가 train이 허용하는 집합과 정확히 같아야 합니다.
+    """
+
+    function = function_node(read_source("pipeline.py"), "_early_stopping")
+    allowed = [ast.literal_eval(node) for node in ast.walk(function) if isinstance(node, ast.Set)]
+
+    assert len(allowed) == 1, "train의 _early_stopping에서 허용 key 집합을 하나만 찾아야 합니다."
+    mirrored = normalize_train_settings(
+        {"early_stopping": True, "early_stopping_patience": 5}
+    )
+    assert set(mirrored["early_stopping"]) == allowed[0]
+
+
+def test_early_stopping_min_delta_default_matches_train_source():
+    train_default = get_defaults(read_source("pipeline.py")).get("min_delta")
+    mirrored = normalize_train_settings(
+        {"early_stopping": True, "early_stopping_patience": 5}
+    )
+
+    assert train_default is not None, "train source에서 min_delta 기본값을 찾지 못했습니다."
+    assert mirrored["early_stopping"]["min_delta"] == train_default
 
 
 def test_run_id_pattern_matches_train_source():

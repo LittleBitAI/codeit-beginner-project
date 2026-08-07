@@ -79,6 +79,71 @@ def test_output_prefix_slashes_are_stripped():
     assert normalize_train_settings({"output_prefix": "/a/b/"})["output_prefix"] == "a/b"
 
 
+# --- 조기 종료 --------------------------------------------------------------
+
+
+def test_early_stopping_is_off_by_default_and_leaves_the_config_untouched():
+    """끄면 key 자체가 없어야 train이 예전과 똑같이 전체 epoch를 돕니다."""
+
+    assert "early_stopping" not in normalize_train_settings({})
+
+
+def test_early_stopping_reaches_train_as_the_object_it_expects():
+    settings = normalize_train_settings(
+        {"early_stopping": True, "early_stopping_patience": 5, "early_stopping_min_delta": 0.01}
+    )
+
+    assert settings["early_stopping"] == {"patience": 5, "min_delta": 0.01}
+
+
+def test_early_stopping_needs_a_patience():
+    """train은 patience를 필수로 받습니다. 켜 놓고 비우면 학습 전에 막습니다."""
+
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings({"early_stopping": True})
+
+    assert "train.early_stopping_patience" in fields_of(error.value)
+
+
+@pytest.mark.parametrize("patience", (0, -1, True, "5", 2.5, None))
+def test_rejects_bad_patience(patience):
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings({"early_stopping": True, "early_stopping_patience": patience})
+
+    assert "train.early_stopping_patience" in fields_of(error.value)
+
+
+@pytest.mark.parametrize("min_delta", (-0.1, True, "0.1", float("inf"), float("nan")))
+def test_rejects_bad_min_delta(min_delta):
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings(
+            {
+                "early_stopping": True,
+                "early_stopping_patience": 5,
+                "early_stopping_min_delta": min_delta,
+            }
+        )
+
+    assert "train.early_stopping_min_delta" in fields_of(error.value)
+
+
+@pytest.mark.parametrize("name", ("early_stopping_patience", "early_stopping_min_delta"))
+def test_rejects_settings_that_do_nothing_while_early_stopping_is_off(name):
+    """끈 채로 값을 보내면 화면과 실제 학습이 달라 보입니다. SGD의 beta처럼 막습니다."""
+
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings({name: 5})
+
+    assert f"train.{name}" in fields_of(error.value)
+
+
+def test_rejects_a_non_boolean_early_stopping_switch():
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings({"early_stopping": "yes"})
+
+    assert "train.early_stopping" in fields_of(error.value)
+
+
 # --- 잘못된 값 --------------------------------------------------------------
 
 

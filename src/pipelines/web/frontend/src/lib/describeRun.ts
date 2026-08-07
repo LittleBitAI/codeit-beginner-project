@@ -15,6 +15,12 @@ export function describeRun(config: RuntimeConfig | null): string {
   const start = train.pretrained === true ? 'COCO 사전학습 가중치' : '무작위 초기 가중치';
   const backend = (config.storage as { backend?: string }).backend === 's3' ? 'S3' : '로컬 디스크';
   const sources = Object.keys(data).length;
+  const earlyStopping = train.early_stopping as { patience?: unknown; min_delta?: unknown } | null;
+  // 켰을 때만 말합니다. 쓰지 않는 설명을 붙이면 안 쓰는 기능을 쓰는 줄 압니다.
+  const stopSentence = earlyStopping
+    ? `검증 손실이 ${String(earlyStopping.min_delta)}보다 크게 좋아지지 않는 상태가 ` +
+      `${String(earlyStopping.patience)} epoch 이어지면 남은 epoch를 채우지 않고 조기 종료합니다. `
+    : '';
 
   return (
     `data pipeline이 만든 artifact ${sources}개(학습 manifest, 검증 manifest, 클래스 맵, 데이터셋 요약)로 ` +
@@ -23,6 +29,7 @@ export function describeRun(config: RuntimeConfig | null): string {
     `momentum ${String(train.momentum)}, weight decay ${String(train.weight_decay)})를 쓰고, ` +
     `random seed는 ${String(train.seed)}이라 같은 데이터면 같은 결과가 나옵니다. ` +
     `DataLoader worker는 ${String(train.num_workers)}개이며 실행 대상은 ${device}입니다. ` +
+    stopSentence +
     `결과 checkpoint와 학습 이력은 ${backend}의 '${String(train.output_dir)}/${String(train.run_id)}'에 저장됩니다.`
   );
 }

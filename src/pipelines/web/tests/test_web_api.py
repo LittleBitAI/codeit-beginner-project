@@ -61,6 +61,9 @@ def test_defaults_expose_every_train_field(client):
         "epsilon",
         "device",
         "pretrained",
+        "early_stopping",
+        "early_stopping_patience",
+        "early_stopping_min_delta",
         "output_dir",
         "output_prefix",
     }

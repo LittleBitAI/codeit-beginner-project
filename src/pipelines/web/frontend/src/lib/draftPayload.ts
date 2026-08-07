@@ -5,6 +5,24 @@ import type { Draft } from '../state/DraftContext';
 const INTEGER_PATTERN = /^-?\d+$/;
 const NUMBER_PATTERN = /^-?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/;
 
+/** 조기 종료를 껐을 때 함께 사라지는 칸입니다. */
+export const EARLY_STOPPING_FIELDS = ['early_stopping_patience', 'early_stopping_min_delta'];
+
+/**
+ * 조기 종료 스위치의 현재 값입니다. 손대지 않았으면 서버가 알려 준 기본값입니다.
+ *
+ * 화면의 숨김 규칙과 payload의 제외 규칙이 항상 같아야 해서 한 곳에 둡니다.
+ * 숨겨 놓고 값을 실어 보내면 서버가 "쓰지 않는 값"이라며 저장을 막습니다.
+ */
+export function isEarlyStoppingOn(
+  train: Record<string, string>,
+  fields: FieldSpec[],
+): boolean {
+  const spec = fields.find((item) => item.name === 'early_stopping');
+  const value = train.early_stopping?.trim() || String(spec?.default === true);
+  return value === 'true';
+}
+
 /**
  * form의 문자열 값을 backend가 기대하는 타입으로 바꿉니다.
  *
@@ -22,6 +40,9 @@ export function toPayload(draft: Draft, fields: FieldSpec[]): ConfigDraftPayload
     optimizer === 'SGD'
       ? new Set(['beta1', 'beta2', 'epsilon'])
       : new Set(['momentum']);
+  if (!isEarlyStoppingOn(draft.train, fields)) {
+    for (const name of EARLY_STOPPING_FIELDS) irrelevant.add(name);
+  }
 
   for (const spec of fields) {
     if (irrelevant.has(spec.name)) continue;
