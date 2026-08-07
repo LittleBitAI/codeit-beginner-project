@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from src.common import StorageError
+from src.common import LocalStorage, ObjectNotFoundError, StorageError
 from src.pipelines import registry
 from src.pipelines.registry import rebuild_index as rebuild_module
 
@@ -35,9 +35,29 @@ METRICS_DOCUMENT = {
     },
 }
 
+# Train이 training_history.json에 쓰는 모양 그대로입니다. epoch 2가 validation
+# loss가 가장 낮고, 마지막 epoch은 3입니다.
+TRAINING_HISTORY_DOCUMENT = [
+    {"epoch": 1, "train_loss": 0.90, "validation_loss": 0.80},
+    {"epoch": 2, "train_loss": 0.50, "validation_loss": 0.40},
+    {"epoch": 3, "train_loss": 0.30, "validation_loss": 0.60},
+]
+
 
 def load_fixture(name: str) -> dict:
     return json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
+
+
+def artifact_content(pipeline: str, key: str) -> str:
+    """계약 형식의 artifact file 내용을 만듭니다."""
+
+    if key == "submission_uri":
+        return VALID_SUBMISSION_CSV
+    if key == "metrics_uri":
+        return json.dumps(METRICS_DOCUMENT, ensure_ascii=False)
+    if key == "training_history_uri":
+        return json.dumps(TRAINING_HISTORY_DOCUMENT, ensure_ascii=False)
+    return json.dumps({"pipeline": pipeline, "artifact": key}, ensure_ascii=False)
 
 
 def materialize(inputs: dict, repo_root: Path) -> None:
@@ -49,15 +69,49 @@ def materialize(inputs: dict, repo_root: Path) -> None:
                 continue
             path = repo_root / uri
             path.parent.mkdir(parents=True, exist_ok=True)
-            if key == "submission_uri":
-                content = VALID_SUBMISSION_CSV
-            elif key == "metrics_uri":
-                content = json.dumps(METRICS_DOCUMENT, ensure_ascii=False)
-            else:
-                content = json.dumps(
-                    {"pipeline": pipeline, "artifact": key}, ensure_ascii=False
-                )
-            path.write_text(content, encoding="utf-8", newline="\n")
+            path.write_text(
+                artifact_content(pipeline, key), encoding="utf-8", newline="\n"
+            )
+
+
+class FakeS3Storage:
+    """실제 AWS를 부르지 않고 s3:// 문서를 돌려주는 가짜 storage입니다.
+
+    읽기만 흉내 내고 쓰기는 local storage에 맡깁니다. registry가 boto3를 직접
+    쓰지 않고 `src/common/storage.py`의 interface만 쓰는지 확인하는 용도입니다.
+    """
+
+    def __init__(self, documents: dict, local: LocalStorage) -> None:
+        self.documents = documents
+        self._local = local
+        self.read_locations: list[str] = []
+
+    def read_json(self, source):
+        location = str(source)
+        self.read_locations.append(location)
+        if location not in self.documents:
+            raise ObjectNotFoundError(f"S3 object가 없습니다: {location}")
+        value = self.documents[location]
+        if isinstance(value, StorageError):
+            raise value
+        return value
+
+    def write_json(self, destination, value, *, overwrite=False):
+        return self._local.write_json(destination, value, overwrite=overwrite)
+
+    def exists(self, location) -> bool:
+        return self._local.exists(location)
+
+    def list(self, prefix=""):
+        return self._local.list(prefix)
+
+
+def use_fake_s3(monkeypatch, documents: dict, repo_root: Path) -> FakeS3Storage:
+    """registry가 만드는 storage를 가짜 S3 storage로 바꿉니다."""
+
+    storage = FakeS3Storage(documents, LocalStorage(repo_root / "artifacts"))
+    monkeypatch.setattr(registry, "create_storage", lambda config: storage)
+    return storage
 
 
 def make_config(repo_root: Path, inputs: dict, **registry_options) -> dict:
@@ -97,7 +151,7 @@ def test_run_writes_an_index_entry_next_to_the_record(local_run):
     assert summary_uri == "artifacts/registry/index/exp-0001.json"
 
     summary = json.loads((repo_root / summary_uri).read_text(encoding="utf-8"))
-    assert summary["summary_version"] == "1"
+    assert summary["summary_version"] == "2"
     assert summary["run_id"] == "exp-0001"
     assert summary["seed"] == 42
     assert summary["schema_version"] == "1.2"
@@ -134,21 +188,6 @@ def test_unreadable_metrics_file_does_not_fail_the_run(tmp_path: Path):
     assert summary["metrics"]["mAP"] is None
 
 
-def test_remote_metrics_are_not_fetched(tmp_path: Path):
-    """원격 artifact는 AWS 접근 없이 참조만 기록한다는 정책을 지킵니다."""
-
-    inputs = load_fixture("inputs_s3.json")
-
-    result = registry.run(make_config(tmp_path, inputs))
-
-    summary = json.loads(
-        (tmp_path / result["artifacts"]["experiment_summary_uri"]).read_text(
-            encoding="utf-8"
-        )
-    )
-    assert summary["metrics_source"] == "unavailable"
-
-
 def read_summary(repo_root: Path, result: dict) -> dict:
     """실행 결과가 가리키는 index summary 문서를 읽습니다."""
 
@@ -157,6 +196,90 @@ def read_summary(repo_root: Path, result: dict) -> dict:
             encoding="utf-8"
         )
     )
+
+
+# --- 지표와 loss 읽기 ------------------------------------------------------
+
+
+def test_local_losses_are_read_from_the_training_history(local_run):
+    """로컬 경로는 지금까지처럼 저장소 상대 경로로 직접 읽습니다."""
+
+    repo_root, inputs = local_run
+
+    summary = read_summary(repo_root, registry.run(make_config(repo_root, inputs)))
+
+    assert summary["losses_source"] == "training_history"
+    assert summary["losses"] == {
+        "best_epoch": 2,
+        "best_validation_loss": pytest.approx(0.40),
+        "final_train_loss": pytest.approx(0.30),
+        "final_validation_loss": pytest.approx(0.60),
+    }
+
+
+def test_remote_metrics_and_losses_are_read_through_storage(tmp_path: Path, monkeypatch):
+    """팀이 전원 S3를 쓰므로 s3:// artifact도 storage를 거쳐 읽습니다."""
+
+    inputs = load_fixture("inputs_s3.json")
+    metrics_uri = inputs["evaluate"]["metrics_uri"]
+    history_uri = inputs["train"]["training_history_uri"]
+    storage = use_fake_s3(
+        monkeypatch,
+        {metrics_uri: METRICS_DOCUMENT, history_uri: TRAINING_HISTORY_DOCUMENT},
+        tmp_path,
+    )
+
+    result = registry.run(make_config(tmp_path, inputs))
+
+    assert result["status"] == "ok"
+    summary = read_summary(tmp_path, result)
+    assert summary["metrics_source"] == "metrics_file"
+    assert summary["metrics"]["mAP50"] == pytest.approx(0.55)
+    assert summary["losses_source"] == "training_history"
+    assert summary["losses"]["best_epoch"] == 2
+    assert summary["losses"]["final_validation_loss"] == pytest.approx(0.60)
+    assert storage.read_locations == [metrics_uri, history_uri]
+
+
+def test_remote_read_failure_leaves_values_null_without_failing_the_run(
+    tmp_path: Path, monkeypatch
+):
+    """권한이 없거나 파일이 없어도 등록은 성공하고 값만 비어 있습니다."""
+
+    inputs = load_fixture("inputs_s3.json")
+    use_fake_s3(
+        monkeypatch,
+        {inputs["evaluate"]["metrics_uri"]: StorageError("접근 권한 거부를 흉내 냅니다.")},
+        tmp_path,
+    )
+
+    result = registry.run(make_config(tmp_path, inputs))
+
+    assert result["status"] == "ok"
+    summary = read_summary(tmp_path, result)
+    assert summary["metrics_source"] == "unavailable"
+    assert summary["metrics"]["mAP"] is None
+    # training_history는 아예 없는 경우입니다.
+    assert summary["losses_source"] == "unavailable"
+    assert set(summary["losses"].values()) == {None}
+
+
+def test_wrongly_typed_loss_values_become_null(local_run):
+    """epoch별 값의 타입이 어긋나면 그 값만 null이 됩니다."""
+
+    repo_root, inputs = local_run
+    (repo_root / inputs["train"]["training_history_uri"]).write_text(
+        json.dumps([{"epoch": "1", "train_loss": "0.5", "validation_loss": 0.4}]),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    summary = read_summary(repo_root, registry.run(make_config(repo_root, inputs)))
+
+    assert summary["losses_source"] == "training_history"
+    assert summary["losses"]["best_epoch"] is None
+    assert summary["losses"]["final_train_loss"] is None
+    assert summary["losses"]["best_validation_loss"] == pytest.approx(0.4)
 
 
 def test_training_block_is_filled_from_the_config_snapshot(local_run):
@@ -182,7 +305,7 @@ def test_training_block_is_filled_from_the_config_snapshot(local_run):
 
     summary = read_summary(repo_root, registry.run(config))
 
-    assert summary["summary_version"] == "1"
+    assert summary["summary_version"] == "2"
     assert summary["training_source"] == "config_snapshot"
     assert summary["training"] == {
         "architecture": "retinanet_resnet50_fpn_v2",

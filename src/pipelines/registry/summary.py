@@ -3,18 +3,23 @@
 Summary는 Web을 포함한 모든 소비자가 목록·검색·비교에 쓰는 형식이며, 규격은
 `contracts/proposals/002-experiment-index-and-summary.md`에 있습니다.
 
-Evaluate의 `metrics.json` 내부 구조에 의존하는 곳은 이 file 하나뿐입니다. 다른
-pipeline의 산출물 형식이 바뀌어도 registry가 통째로 깨지지 않도록, 지표 읽기는
-실패해도 예외를 올리지 않고 `metrics_source`로만 알립니다. 파일은 읽기만 하며
-고치거나 지우지 않습니다.
+Evaluate의 `metrics.json`과 train의 `training_history.json` 내부 구조에 의존하는
+곳은 이 file 하나뿐입니다. 다른 pipeline의 산출물 형식이 바뀌어도 registry가
+통째로 깨지지 않도록, 읽기는 실패해도 예외를 올리지 않고 `metrics_source`와
+`losses_source`로만 알립니다. 파일은 읽기만 하며 고치거나 지우지 않습니다.
+
+`s3://` artifact는 `src/common/storage.py`가 준 storage로만 읽습니다. 이 file은
+boto3를 직접 쓰지 않습니다.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+from src.common import Storage, StorageError
 
 from .record import (
     OPTIONAL_ARTIFACT_KEYS,
@@ -24,7 +29,9 @@ from .record import (
 )
 
 
-SUMMARY_VERSION = "1"
+# "1" -> "2": metrics를 s3://에서도 읽고 losses와 losses_source를 더했습니다.
+# 기존 key는 이름도 뜻도 그대로입니다.
+SUMMARY_VERSION = "2"
 
 # Evaluate가 metrics.json에 쓰는 이름을 그대로 씁니다. 이름을 한 번 더 번역하면
 # 어느 쪽이 진짜인지 알기 어려워집니다.
@@ -34,6 +41,15 @@ METRIC_KEYS: tuple[str, ...] = (
     "mAP75",
     "precision50",
     "recall50",
+)
+
+# Train이 run() 요약과 training_history.json에 쓰는 이름을 그대로 씁니다.
+# `best_*`는 validation loss가 가장 낮은 epoch, `final_*`는 마지막 epoch입니다.
+LOSS_KEYS: tuple[str, ...] = (
+    "best_epoch",
+    "best_validation_loss",
+    "final_train_loss",
+    "final_validation_loss",
 )
 
 # Train이 config에 쓰는 이름을 그대로 씁니다. 값 종류마다 통과시키는 타입이 달라서
@@ -165,28 +181,63 @@ def read_training(record: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
     )
 
 
+def _is_remote(uri: str) -> bool:
+    """원격 artifact를 가리키는 URI인지 확인합니다."""
+
+    return uri.lower().startswith("s3://")
+
+
+def _read_json_document(
+    uri: str,
+    *,
+    repo_root: Path,
+    storage: Storage | None,
+) -> Any | None:
+    """Artifact JSON 문서를 방어적으로 읽습니다. 못 읽으면 None입니다.
+
+    `s3://`는 `src/common/storage.py`가 준 storage로만 읽습니다. storage가 없거나
+    local backend라 원격을 다룰 수 없으면 값이 없는 것으로 봅니다. Local 경로는
+    지금까지처럼 저장소 기준 상대 경로 규칙을 확인한 뒤 직접 읽습니다.
+
+    파일이 없거나 권한이 없거나 JSON이 깨져도 예외를 올리지 않습니다. 지표나
+    loss를 못 읽었다는 이유로 등록이 실패하면 안 되기 때문입니다.
+    """
+
+    try:
+        if _is_remote(uri):
+            if storage is None:
+                return None
+            return storage.read_json(uri)
+        path = resolve_local_uri(uri, repo_root=repo_root)
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (
+        RegistryError,
+        StorageError,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ):
+        return None
+
+
 def read_metrics(
     metrics_uri: str | None,
     *,
     repo_root: Path,
     verify: bool,
+    storage: Storage | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Evaluate의 metrics.json에서 지표를 방어적으로 읽습니다.
 
-    파일이 없거나 원격이거나 JSON이 깨졌거나 키가 없으면 모든 지표를 None으로 두고
+    파일이 없거나 JSON이 깨졌거나 키가 없으면 모든 지표를 None으로 두고
     `"unavailable"`을 함께 돌려줍니다. 지표를 못 읽었다는 이유로 실행이 실패하지는
-    않습니다.
+    않습니다. `s3://`는 `storage`가 있을 때만 읽습니다.
     """
 
     if not metrics_uri or not verify:
         return _empty_metrics(), "unavailable"
 
-    try:
-        path = resolve_local_uri(metrics_uri, repo_root=repo_root)
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (RegistryError, OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return _empty_metrics(), "unavailable"
-
+    document = _read_json_document(metrics_uri, repo_root=repo_root, storage=storage)
     if not isinstance(document, Mapping):
         return _empty_metrics(), "unavailable"
     metrics = document.get("metrics")
@@ -199,25 +250,90 @@ def read_metrics(
     )
 
 
+def _empty_losses() -> dict[str, None]:
+    return {key: None for key in LOSS_KEYS}
+
+
+def _loss_entries(document: Any) -> list[Mapping[str, Any]]:
+    """training_history 문서에서 epoch 기록만 골라냅니다."""
+
+    if isinstance(document, (str, bytes)) or not isinstance(document, Sequence):
+        return []
+    return [entry for entry in document if isinstance(entry, Mapping)]
+
+
+def read_losses(
+    training_history_uri: str | None,
+    *,
+    repo_root: Path,
+    verify: bool,
+    storage: Storage | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Train의 training_history.json에서 loss를 방어적으로 읽습니다.
+
+    `metrics` / `metrics_source`와 같은 짝 구조입니다. 값을 하나라도 읽었을 때만
+    `"training_history"`를 돌려주고, 그 밖에는 전부 None과 `"unavailable"`입니다.
+    타입이 어긋난 값은 그 값만 None이 되며 0.0 같은 기본값으로 채우지 않습니다.
+    측정하지 않은 것과 0은 다르기 때문입니다.
+    """
+
+    if not training_history_uri or not verify:
+        return _empty_losses(), "unavailable"
+
+    document = _read_json_document(
+        training_history_uri, repo_root=repo_root, storage=storage
+    )
+    entries = _loss_entries(document)
+    if not entries:
+        return _empty_losses(), "unavailable"
+
+    # validation loss를 읽을 수 있는 epoch 중에서만 best를 고릅니다.
+    scored = [
+        (loss, entry)
+        for entry in entries
+        if (loss := _number_or_none(entry.get("validation_loss"))) is not None
+    ]
+    best = min(scored, key=lambda pair: pair[0])[1] if scored else {}
+    final = entries[-1]
+
+    losses = {
+        "best_epoch": _integer_or_none(best.get("epoch")),
+        "best_validation_loss": _number_or_none(best.get("validation_loss")),
+        "final_train_loss": _number_or_none(final.get("train_loss")),
+        "final_validation_loss": _number_or_none(final.get("validation_loss")),
+    }
+    if all(value is None for value in losses.values()):
+        return _empty_losses(), "unavailable"
+    return losses, "training_history"
+
+
 def build_summary(
     record: Mapping[str, Any],
     *,
     record_uri: str,
     repo_root: Path,
     verify: bool = True,
+    storage: Storage | None = None,
 ) -> dict[str, Any]:
-    """Experiment record 하나를 공통 summary 문서로 만듭니다."""
+    """Experiment record 하나를 공통 summary 문서로 만듭니다.
+
+    `storage`를 주면 `s3://` artifact의 지표와 loss도 읽습니다. 팀이 전원 S3를 쓰는
+    동안 summary가 계속 비어 있었기 때문입니다. 읽기에 실패해도 예외를 올리지 않고
+    해당 값만 None으로 둡니다.
+    """
 
     artifacts = _artifact_uris(record)
-    metrics_uri = artifacts.get("metrics_uri")
-    # 원격 artifact는 AWS 접근 없이 참조만 기록한다는 기존 정책을 그대로 따릅니다.
-    is_local_metrics = isinstance(metrics_uri, str) and not metrics_uri.lower().startswith(
-        "s3://"
-    )
     metrics, metrics_source = read_metrics(
-        metrics_uri if is_local_metrics else None,
+        artifacts.get("metrics_uri"),
         repo_root=repo_root,
         verify=verify,
+        storage=storage,
+    )
+    losses, losses_source = read_losses(
+        artifacts.get("training_history_uri"),
+        repo_root=repo_root,
+        verify=verify,
+        storage=storage,
     )
 
     training, training_source = read_training(record)
@@ -234,6 +350,8 @@ def build_summary(
         "experiment_record_uri": record_uri,
         "metrics": metrics,
         "metrics_source": metrics_source,
+        "losses": losses,
+        "losses_source": losses_source,
         "training": training,
         "training_source": training_source,
         "artifacts": artifacts,

@@ -82,6 +82,7 @@ def rebuild_index(config: Mapping[str, Any], *, overwrite: bool = False) -> dict
             record,
             record_uri=_relative_to_repo(location, repo_root),
             repo_root=repo_root,
+            storage=storage,
         )
         try:
             storage.write_json(destination, summary, overwrite=overwrite)
