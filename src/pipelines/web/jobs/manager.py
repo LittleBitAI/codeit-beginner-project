@@ -54,6 +54,26 @@ def _unwrap_stage(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
+def _lost_message(record: JobRecord) -> str:
+    """서버가 다시 떴을 때 그 학습에 무슨 일이 있었는지 사실대로 적습니다.
+
+    POSIX에서 학습은 별도 session으로 뜨므로 서버가 죽어도 함께 죽지 않습니다.
+    그때 "상태를 잃었습니다"만 보여 주면 학습이 끝난 줄 알고 process를 죽이거나
+    같은 GPU에 새 학습을 얹습니다. checkpoint는 학습이 다 끝난 뒤 한 번에
+    저장되므로, 그렇게 죽이면 그때까지 학습한 것이 전부 사라집니다.
+    """
+
+    pid = record.process_id
+    if pid and runner.process_alive(pid):
+        return (
+            f"서버가 다시 시작되어 이 화면은 실행 상태를 잃었지만, 학습 process"
+            f"(PID {pid})는 아직 돌고 있습니다. 결과는 학습이 끝나면 그대로 저장됩니다."
+            " 지금 그 process를 죽이면 여기까지 학습한 것이 모두 사라집니다."
+            " 로그는 여기에 다시 이어지지 않습니다."
+        )
+    return "서버가 다시 시작되어 실행 상태를 잃었습니다."
+
+
 class JobManager:
     """이 서버가 실행한 학습 job들의 유일한 소유자."""
 
@@ -79,11 +99,12 @@ class JobManager:
                 return
             for record in store.load_all_records():
                 if record.status in ACTIVE_STATUSES:
-                    # 서버가 죽는 동안 OS process는 사라졌습니다. 그대로 두면 유령 job이
-                    # 영원히 남아 새 학습을 막습니다.
+                    # 이 서버는 저 학습을 더 이상 관리할 수 없습니다. log pipe도 다시
+                    # 이을 수 없습니다. 그대로 두면 유령 job이 영원히 남아 새 학습을
+                    # 막습니다.
                     record.status = STATUS_INTERRUPTED
                     record.finished_at = record.finished_at or utc_now_text()
-                    record.message = "서버가 다시 시작되어 실행 상태를 잃었습니다."
+                    record.message = _lost_message(record)
                     try:
                         team_sync.get_team_sync().enqueue_update(record)
                         store.save_record(record)
@@ -274,6 +295,16 @@ class JobManager:
                 argv, cwd=Path(REPOSITORY_ROOT), env=runner.child_environment()
             )
             with self._lock:
+                # 서버가 죽었다가 다시 떴을 때 이 학습이 아직 살아 있는지 알아보려면
+                # PID가 디스크에 남아 있어야 합니다. ``_process``보다 먼저 기록해야
+                # process가 떴다고 본 쪽이 PID 없는 기록을 읽는 일이 없습니다.
+                record = self._records.get(job_id)
+                if record is not None:
+                    record.process_id = process.pid
+                    try:
+                        store.save_record(record)
+                    except OSError:
+                        pass
                 self._process = process
                 # spawn과 취소 사이의 아주 좁은 틈으로 취소가 들어올 수 있습니다.
                 cancel_now = self._cancel_requested

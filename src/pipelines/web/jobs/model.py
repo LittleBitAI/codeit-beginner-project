@@ -70,6 +70,9 @@ class JobRecord:
     orphan_note: str | None = None
     cloud_run_id: str | None = None
     sync_revision: int = 0
+    # 학습 process의 PID. 서버가 다시 떴을 때 그 학습이 아직 살아 있는지 확인하는
+    # 데만 씁니다.
+    process_id: int | None = None
 
     def is_active(self) -> bool:
         return self.status in ACTIVE_STATUSES
@@ -111,6 +114,7 @@ class JobRecord:
             "orphan_note": self.orphan_note,
             "cloud_run_id": self.cloud_run_id,
             "sync_revision": self.sync_revision,
+            "process_id": self.process_id,
         }
 
     @classmethod
@@ -136,4 +140,5 @@ class JobRecord:
             orphan_note=payload.get("orphan_note"),
             cloud_run_id=payload.get("cloud_run_id"),
             sync_revision=int(payload.get("sync_revision") or 0),
+            process_id=payload.get("process_id"),
         )

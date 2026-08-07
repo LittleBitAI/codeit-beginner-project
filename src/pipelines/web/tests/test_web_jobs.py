@@ -455,16 +455,47 @@ def test_records_are_persisted_and_reloaded(
 def test_stale_running_record_becomes_interrupted_on_load(
     manager, config_id, monkeypatch, fake_process_factory
 ):
-    """서버가 죽으면 running 기록만 남고 OS process는 사라집니다."""
+    """서버가 죽고 학습 process도 사라졌을 때입니다."""
 
     process = fake_process_factory(block_until_signalled=True)
     monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    monkeypatch.setattr(runner, "process_alive", lambda _pid: False)
     started = manager.start(config_id)
 
     reloaded = JobManager()
     reloaded.load()
 
-    assert reloaded.get(started.job_id).status == "interrupted"
+    reclaimed = reloaded.get(started.job_id)
+    assert reclaimed.status == "interrupted"
+    assert "잃었습니다" in (reclaimed.message or "")
+    process.release()
+    wait_for_finish(manager, started.job_id)
+
+
+def test_load_says_so_when_the_training_process_outlived_the_server(
+    manager, config_id, monkeypatch, fake_process_factory
+):
+    """POSIX에서 학습은 별도 session으로 떠서 서버가 죽어도 같이 죽지 않습니다.
+
+    그때 "상태를 잃었습니다"만 보여 주면 학습이 끝난 줄 알고 새로 시작하거나
+    process를 죽입니다. checkpoint는 학습이 다 끝난 뒤 한 번에 저장되므로
+    그렇게 죽이면 그때까지 학습한 것이 전부 사라집니다.
+    """
+
+    process = fake_process_factory(block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    monkeypatch.setattr(runner, "process_alive", lambda pid: pid == process.pid)
+    started = manager.start(config_id)
+    # process가 떴다는 것은 PID까지 기록에 남았다는 뜻입니다.
+    wait_for_spawn(manager)
+
+    reloaded = JobManager()
+    reloaded.load()
+
+    reclaimed = reloaded.get(started.job_id)
+    assert reclaimed.status == "interrupted"
+    assert str(process.pid) in (reclaimed.message or "")
+    assert "아직" in (reclaimed.message or "")
     process.release()
     wait_for_finish(manager, started.job_id)
 
