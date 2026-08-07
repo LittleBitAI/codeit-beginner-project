@@ -170,7 +170,9 @@ def test_competition_run_reuses_one_checkpoint_and_writes_submission(
     base_config["evaluate"].pop("predictions_input_uri")
     calls = []
 
-    def fake_predict_groups(store, record_groups, *, checkpoint_uri, device, seed):
+    def fake_predict_groups(
+        store, record_groups, *, checkpoint_uri, device, seed, on_progress=None
+    ):
         calls.append([[record["image_id"] for record in records] for records in record_groups])
         return [
             _normalised_validation_predictions(),

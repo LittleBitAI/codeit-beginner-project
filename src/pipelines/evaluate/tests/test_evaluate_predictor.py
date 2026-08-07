@@ -123,9 +123,17 @@ def test_predict_with_checkpoint_reports_missing_state_dict(repository_root: Pat
         predict_with_checkpoint(store, [], checkpoint_uri="checkpoints/best.pt")
 
 
-def test_record_groups_reuse_one_checkpoint_and_infer_every_image(
-    repository_root: Path, monkeypatch: pytest.MonkeyPatch
-):
+FAKE_GROUPS = [
+    [{"image_id": "validation", "image_key": "validation", "image_uri": "v.jpg"}],
+    [
+        {"image_id": 20, "image_key": "20", "image_uri": "20.jpg"},
+        {"image_id": 10, "image_key": "10", "image_uri": "10.jpg"},
+    ],
+]
+
+
+def install_fake_inference(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """torch/torchvision 없이 추론 흐름만 돌리는 대역을 심고 호출 수를 돌려줍니다."""
     from contextlib import nullcontext
     from types import SimpleNamespace
 
@@ -175,16 +183,16 @@ def test_record_groups_reuse_one_checkpoint_and_infer_every_image(
             }
         ],
     )
-    groups = [
-        [{"image_id": "validation", "image_key": "validation", "image_uri": "v.jpg"}],
-        [
-            {"image_id": 20, "image_key": "20", "image_uri": "20.jpg"},
-            {"image_id": 10, "image_key": "10", "image_uri": "10.jpg"},
-        ],
-    ]
+    return calls
+
+
+def test_record_groups_reuse_one_checkpoint_and_infer_every_image(
+    repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    calls = install_fake_inference(monkeypatch)
 
     predictions = predict_record_groups_with_checkpoint(
-        ArtifactStore(), groups, checkpoint_uri="checkpoints/best.pt"
+        ArtifactStore(), FAKE_GROUPS, checkpoint_uri="checkpoints/best.pt"
     )
 
     assert calls == {"checkpoint": 1, "model": 1}
@@ -192,6 +200,27 @@ def test_record_groups_reuse_one_checkpoint_and_infer_every_image(
         ["validation"],
         [20, 10],
     ]
+
+
+def test_on_progress_reports_every_image_without_changing_the_predictions(
+    repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """진행 콜백은 진행 로그 전용이며 예측 결과를 바꾸지 않습니다."""
+    install_fake_inference(monkeypatch)
+    reported: list[tuple[int, int, int]] = []
+
+    predictions = predict_record_groups_with_checkpoint(
+        ArtifactStore(),
+        FAKE_GROUPS,
+        checkpoint_uri="checkpoints/best.pt",
+        on_progress=lambda index, done, total: reported.append((index, done, total)),
+    )
+
+    assert reported == [(0, 1, 1), (1, 1, 2), (1, 2, 2)]
+    # 기본값 None인 호출과 결과가 완전히 같습니다.
+    assert predictions == predict_record_groups_with_checkpoint(
+        ArtifactStore(), FAKE_GROUPS, checkpoint_uri="checkpoints/best.pt"
+    )
 
 
 def test_predict_with_checkpoint_runs_on_cpu(repository_root: Path):

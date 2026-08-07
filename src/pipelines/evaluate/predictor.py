@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -193,8 +193,14 @@ def predict_record_groups_with_checkpoint(
     checkpoint_uri: str,
     device: str = "cpu",
     seed: int = 0,
+    on_progress: Callable[[int, int, int], None] | None = None,
 ) -> list[list[dict[str, Any]]]:
-    """Checkpoint와 model을 한 번만 준비해 여러 manifest를 차례로 추론합니다."""
+    """Checkpoint와 model을 한 번만 준비해 여러 manifest를 차례로 추론합니다.
+
+    `on_progress`를 주면 image 한 장을 추론할 때마다 (group 번호, 추론한 수,
+    그 group의 전체 수)를 알립니다. 진행 로그 전용이며 예측 결과에는 어떤
+    영향도 주지 않습니다.
+    """
     torch = _import_torch()
     checkpoint = load_checkpoint_document(store, checkpoint_uri, device=device)
     model = _build_model(checkpoint, source=checkpoint_uri)
@@ -216,15 +222,17 @@ def predict_record_groups_with_checkpoint(
 
     predictions_by_group: list[list[dict[str, Any]]] = []
     with tempfile.TemporaryDirectory(prefix="pill-evaluate-images-") as directory:
-        for records in record_groups:
+        for group_index, records in enumerate(record_groups):
             predictions: list[dict[str, Any]] = []
-            for record in records:
+            for order, record in enumerate(records):
                 image_tensor = _load_image_tensor(store, record, directory)
                 with torch.no_grad():
                     outputs = model([image_tensor.to(resolved_device)])
                 predictions.extend(
                     _outputs_to_predictions(outputs[0], record=record, category_ids=category_ids)
                 )
+                if on_progress is not None:
+                    on_progress(group_index, order + 1, len(records))
             predictions_by_group.append(predictions)
     return predictions_by_group
 

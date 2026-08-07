@@ -16,6 +16,7 @@ from .errors import ArtifactWriteError, ConfigurationError, EvaluateError
 from .manifest import load_class_map, load_manifest, load_test_manifest
 from .metrics import DEFAULT_IOU_THRESHOLDS, evaluate_detections, filter_predictions
 from .predictor import load_predictions, predict_record_groups_with_checkpoint
+from .progress import ProgressEmitter
 from .storage_io import ArtifactStore, join_uri
 from .submission import render_submission_csv
 
@@ -323,6 +324,8 @@ def run(config: dict) -> dict:
     started_at = _utc_now()
     created_uris: list[str] = []
     store: ArtifactStore | None = None
+    # 진행 로그는 stderr 전용 부가 출력입니다. 실패해도 평가는 그대로 진행됩니다.
+    progress = ProgressEmitter()
 
     try:
         settings = resolve_settings(config)
@@ -352,6 +355,15 @@ def run(config: dict) -> dict:
                 store, settings.test_manifest_uri
             )
 
+        test_image_count = len(test_records) if test_records is not None else 0
+        progress.emit(
+            "evaluate_started",
+            run_id=settings.run_id,
+            device=settings.device,
+            validation_images=len(records),
+            test_images=test_image_count,
+        )
+
         if settings.predictions_input_uri is not None:
             raw_predictions = load_predictions(
                 store, settings.predictions_input_uri, known_image_keys=image_keys
@@ -360,14 +372,24 @@ def run(config: dict) -> dict:
             raw_predictions = []
 
         inference_groups: list[list[dict[str, Any]]] = []
+        # 어느 group이 validation이고 어느 group이 test인지는 여기서만 알 수
+        # 있으므로, 진행 로그의 stage 이름도 여기서 정합니다.
+        group_stages: list[str] = []
         validation_group_index: int | None = None
         test_group_index: int | None = None
         if settings.predictions_input_uri is None:
             validation_group_index = len(inference_groups)
             inference_groups.append(records)
+            group_stages.append("validation")
         if test_records is not None:
             test_group_index = len(inference_groups)
             inference_groups.append(test_records)
+            group_stages.append("test")
+
+        def report_predict_progress(index: int, done: int, total: int) -> None:
+            """추론 진행을 stage 이름과 함께 알립니다. 실패해도 추론은 계속됩니다."""
+            if 0 <= index < len(group_stages):
+                progress.predict_progress(group_stages[index], done, total)
 
         generated_groups: list[list[dict[str, Any]]] = []
         if inference_groups:
@@ -377,6 +399,7 @@ def run(config: dict) -> dict:
                 checkpoint_uri=str(settings.checkpoint_uri),
                 device=settings.device,
                 seed=settings.seed,
+                on_progress=report_predict_progress,
             )
         if validation_group_index is not None:
             raw_predictions = generated_groups[validation_group_index]
@@ -393,8 +416,10 @@ def run(config: dict) -> dict:
             class_names=class_map,
             max_detections_per_image=settings.max_detections_per_image,
         )
+        progress.metrics_computed(report["metrics"])
 
         submission_text: str | None = None
+        submission_rows = 0
         if test_group_index is not None:
             test_predictions = filter_predictions(
                 generated_groups[test_group_index],
@@ -405,6 +430,7 @@ def run(config: dict) -> dict:
                 test_predictions,
                 category_ids=test_category_ids,
             )
+            submission_rows = len(test_predictions)
 
         finished_at = _utc_now()
         common_fields = {
@@ -437,6 +463,7 @@ def run(config: dict) -> dict:
             )
             if not submission_existed:
                 created_uris.append(settings.submission_uri)
+            progress.emit("submission_written", rows=submission_rows)
 
         predictions_existed = store.exists(settings.predictions_uri)
         predictions_uri = store.write_json(
@@ -452,6 +479,12 @@ def run(config: dict) -> dict:
         )
         if not metrics_existed:
             created_uris.append(settings.metrics_uri)
+
+        progress.emit(
+            "evaluate_completed",
+            validation_images=len(records),
+            test_images=test_image_count,
+        )
     except EvaluateError as error:
         if store is not None:
             for uri in created_uris:
