@@ -35,6 +35,11 @@ export function toPayload(draft: Draft, fields: FieldSpec[]): ConfigDraftPayload
       ) {
         train[spec.name] = spec.default;
       }
+      // boolean도 마찬가지입니다. 손대지 않았다고 빼 버리면 서버 fallback이
+      // 화면이 안내한 기본값을 덮어씁니다.
+      if (spec.type === 'boolean' && typeof spec.default === 'boolean') {
+        train[spec.name] = spec.default;
+      }
       continue;
     }
     const text = raw.trim();

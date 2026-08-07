@@ -66,6 +66,26 @@ describe('NewExperiment · Train capability 호환', () => {
     expect(field).toHaveValue('pill_basic');
   });
 
+  it('boolean 칸은 서버가 알려 준 기본값으로 시작한다', () => {
+    // 예전에는 무조건 "사용하지 않음"으로 시작해, 서버가 기본값을 바꿔도 화면이
+    // 따라가지 않았습니다.
+    const defaults: Defaults = {
+      ...LEGACY_DEFAULTS,
+      fields: [
+        { name: 'pretrained', type: 'boolean', default: true, label: 'Pretrained 가중치', hint: '' },
+      ],
+    };
+    render(
+      <MemoryRouter>
+        <DraftProvider>
+          <NewExperiment defaults={defaults} source={null} />
+        </DraftProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByLabelText('Pretrained 가중치')).toHaveValue('true');
+  });
+
   it('모델과 optimizer를 고르고 profile에 맞는 수치만 보여 준다', () => {
     const defaults: Defaults = {
       ...LEGACY_DEFAULTS,

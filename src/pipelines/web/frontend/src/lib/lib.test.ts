@@ -54,10 +54,20 @@ describe('디자인 토큰', () => {
 });
 
 describe('toPayload', () => {
-  it('빈 수치는 보내지 않고 새 enum 기본값만 명시한다', () => {
+  it('빈 수치는 보내지 않고 enum과 boolean 기본값만 명시한다', () => {
     const payload = toPayload({ train: { epochs: '', run_id: '  ' }, data: {} }, FIELDS);
 
-    expect(payload.train).toEqual({ architecture: 'mobile', optimizer: 'AdamW' });
+    expect(payload.train).toEqual({ architecture: 'mobile', optimizer: 'AdamW', pretrained: false });
+  });
+
+  it('손대지 않은 boolean은 화면이 알려 준 기본값을 그대로 실어 보낸다', () => {
+    // 서버 fallback은 train 기본값(False)을 따릅니다. GUI 기본값을 바꿔도 명시해
+    // 보내지 않으면 그 fallback이 이깁니다.
+    const fields = FIELDS.map((spec) =>
+      spec.name === 'pretrained' ? { ...spec, default: true } : spec,
+    );
+
+    expect(toPayload({ train: {}, data: {} }, fields).train.pretrained).toBe(true);
   });
 
   it('정수와 실수를 알맞은 타입으로 바꾼다', () => {
