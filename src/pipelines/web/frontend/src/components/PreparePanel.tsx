@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { api, ApiError } from '../api/client';
-import type { PreparationState, StorageEnvironment } from '../api/types';
+import type { PreparationProgress, PreparationState, StorageEnvironment } from '../api/types';
 import { color, font, radius } from '../design/tokens';
 import { usePolling } from '../hooks/usePolling';
 import { AlertRow, Button, Field, controlStyle } from './primitives';
@@ -274,11 +274,129 @@ function StorageChoice({
   );
 }
 
+/** 초를 "7분 54초"처럼 읽기 쉬운 한국어로 바꿉니다. */
+export function formatDuration(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(whole / 60);
+  const rest = whole % 60;
+  return minutes > 0 ? `${minutes}분 ${rest}초` : `${rest}초`;
+}
+
+/**
+ * 준비를 시작한 뒤 지난 시간을 초 단위로 계속 셉니다.
+ *
+ * 준비는 8분 가까이 걸립니다. 화면에 움직이는 것이 하나도 없으면 멈춘 줄 알기
+ * 때문에, 진행 로그가 하나도 없을 때에도 이 숫자만은 계속 움직입니다.
+ */
+function useElapsedSeconds(startedAt: string | null | undefined, active: boolean): number | null {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+
+  if (!startedAt) return null;
+  const started = Date.parse(startedAt);
+  if (Number.isNaN(started)) return null;
+  return Math.max(0, (now - started) / 1000);
+}
+
+/** 지금 어느 단계인지, 읽기라면 얼마나 읽었는지 보여 줍니다. */
+function PreparationProgressView({
+  progress,
+  fallback,
+}: {
+  progress: PreparationProgress | undefined;
+  fallback: string;
+}) {
+  // 진행 줄이 한 번도 없으면 지금까지와 같은 고정 안내 문구만 둡니다.
+  // 여기서 가짜 진행률을 그리면 없는 정보를 지어내는 것입니다.
+  if (!progress?.available) {
+    return (
+      <span style={{ font: `400 11.5px/1.6 ${font.sans}`, color: color.textBody }}>
+        {fallback} 원본이 크면 몇 분 걸릴 수 있습니다.
+      </span>
+    );
+  }
+
+  const read = progress.read ?? null;
+  const percent = read?.percent ?? null;
+  const eta = progress.eta_seconds;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
+        {progress.stage_label && (
+          <span style={{ font: `600 12px/1 ${font.sans}`, color: color.text }}>
+            {progress.stage_label}
+          </span>
+        )}
+        {read && read.done !== null && (
+          <span style={{ font: `500 11.5px/1 ${font.mono}`, color: color.textBody }}>
+            {read.total !== null && read.total !== undefined
+              ? `${read.done} / ${read.total}`
+              : `${read.done}개`}
+          </span>
+        )}
+        {eta !== null && eta !== undefined && (
+          <span style={{ font: `400 10.5px/1 ${font.sans}`, color: color.textMuted }}>
+            남은 시간 약 {formatDuration(eta)}
+          </span>
+        )}
+      </div>
+
+      {percent !== null && percent !== undefined && (
+        <div
+          role="progressbar"
+          aria-valuenow={percent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label={progress.stage_label ?? '진행률'}
+          style={{
+            height: 6,
+            borderRadius: radius.control,
+            background: color.borderInner,
+            overflow: 'hidden',
+          }}
+        >
+          <div style={{ width: `${percent}%`, height: '100%', background: color.primary }} />
+        </div>
+      )}
+
+      {progress.sources && (
+        <span style={{ font: `400 10.5px/1.45 ${font.mono}`, color: color.textMuted }}>
+          원본 · 학습 이미지 {progress.sources.train_images ?? '-'} · annotation{' '}
+          {progress.sources.annotations ?? '-'} · test 이미지 {progress.sources.test_images ?? '-'}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function PreparationResult({ state }: { state: PreparationState }) {
+  const elapsed = useElapsedSeconds(state.started_at, state.status === 'running');
+
   if (state.status === 'running') {
     return (
       <AlertRow level="info" title={`데이터 준비 중 · ${state.split_ratio ?? ''}`}>
-        {state.message ?? '원본을 읽고 있습니다.'} 원본이 크면 몇 분 걸릴 수 있습니다.
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {elapsed !== null && (
+            <div style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
+              <span style={{ font: `500 10px/1.3 ${font.mono}`, color: color.textMuted }}>
+                경과 시간
+              </span>
+              <span style={{ font: `600 12px/1 ${font.mono}`, color: color.text }}>
+                {formatDuration(elapsed)}
+              </span>
+            </div>
+          )}
+          <PreparationProgressView
+            progress={state.progress}
+            fallback={state.message ?? '원본을 읽고 있습니다.'}
+          />
+        </div>
       </AlertRow>
     );
   }

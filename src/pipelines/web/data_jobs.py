@@ -11,6 +11,7 @@ import threading
 from typing import Any
 
 from . import datasets
+from .data_progress import DataProgressState, consume_line, snapshot
 from .errors import JobConflictError, WebValidationError
 from .masking import sanitize_line
 
@@ -48,6 +49,7 @@ class PreparationRunner:
             processed_root=request.get("processed_root"),
         )
 
+        progress_state = DataProgressState()
         with self._lock:
             if self._state.get("status") == STATUS_RUNNING:
                 raise JobConflictError(
@@ -66,16 +68,35 @@ class PreparationRunner:
                 "artifacts": {},
                 "summary": {},
                 "selected": False,
+                # 진행 로그가 오기 전에는 진행률을 지어내지 않습니다.
+                # ``available: False``인 채로 시작합니다.
+                "progress": snapshot(progress_state),
             }
 
         threading.Thread(
-            target=self._run, args=(config,), name="data-preparation", daemon=True
+            target=self._run,
+            args=(config, progress_state),
+            name="data-preparation",
+            daemon=True,
         ).start()
         return self.status()
 
-    def _run(self, config: dict[str, Any]) -> None:
+    def _consume(self, progress_state: DataProgressState, line: str) -> None:
+        """준비 subprocess의 stderr 한 줄을 진행 상태에 반영합니다.
+
+        ``consume_line``은 어떤 입력에도 예외를 던지지 않으므로, 이 경로가 준비를
+        실패시키는 일은 없습니다.
+        """
+
+        consume_line(progress_state, line)
+        with self._lock:
+            self._state["progress"] = snapshot(progress_state)
+
+    def _run(self, config: dict[str, Any], progress_state: DataProgressState) -> None:
         try:
-            result = datasets.prepare_dataset(config)
+            result = datasets.prepare_dataset(
+                config, on_progress_line=lambda line: self._consume(progress_state, line)
+            )
         except Exception as error:  # 준비 실패가 서버를 죽이면 안 됩니다.
             with self._lock:
                 self._state.update(

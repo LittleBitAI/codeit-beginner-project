@@ -648,7 +648,7 @@ def test_prepare_can_be_started_for_each_ratio(client, monkeypatch, ratio):
     monkeypatch.setattr(
         datasets,
         "prepare_dataset",
-        lambda config: {
+        lambda config, on_progress_line=None: {
             "ok": True,
             "supported": True,
             "exit_code": 0,
@@ -661,7 +661,10 @@ def test_prepare_can_be_started_for_each_ratio(client, monkeypatch, ratio):
     response = client.post("/api/data/prepare", json={"split_ratio": ratio})
 
     assert response.status_code == 202
-    assert response.json()["preparation"]["split_ratio"] == ratio
+    preparation = response.json()["preparation"]
+    assert preparation["split_ratio"] == ratio
+    # 진행 블록이 응답에 실려 나가되, 아직 아무 줄도 못 봤으므로 지어내지 않습니다.
+    assert preparation["progress"]["available"] is False
 
 
 @pytest.mark.parametrize("bad", ("7:3", "80:20", "", "0.2"))

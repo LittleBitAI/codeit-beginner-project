@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -822,34 +823,113 @@ def _unsupported_result(result: dict[str, Any]) -> bool:
     return not (isinstance(summary, Mapping) and summary.get("mode") == "prepare")
 
 
-def prepare_dataset(config: dict[str, Any]) -> dict[str, Any]:
-    """실제 data pipeline을 불러 원본에서 필수 4개와 test manifest를 만듭니다."""
+def _drain_pipe(pipe: Any, sink: Any) -> None:
+    """Pipe 하나를 끝까지 읽습니다. thread 하나가 pipe 하나만 담당합니다.
+
+    양쪽을 동시에 읽지 않으면 반대쪽 pipe의 OS 버퍼(보통 64KB)가 차는 순간
+    교착합니다. ``jobs/manager.py``가 같은 문제를 같은 방식으로 풀어 둡니다.
+    """
+
+    try:
+        for line in pipe:
+            sink(line)
+    except (OSError, ValueError):
+        pass  # process가 죽으면서 pipe가 닫히는 것은 정상입니다.
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _run_prepare_process(
+    process: Any, on_progress_line: Any, timeout: float
+) -> tuple[str, str, int]:
+    """준비 process가 끝날 때까지 양쪽 pipe를 동시에 읽습니다.
+
+    ``(stdout 전체, 마지막 stderr 줄, exit code)``를 돌려줍니다. 시간이 지나면
+    ``subprocess.TimeoutExpired``를 그대로 올려 보내 호출한 쪽이 예전과 같은
+    형태로 답하게 합니다.
+    """
+
+    stdout_chunks: list[str] = []
+    last_stderr: list[str] = []
+
+    def stderr_sink(line: str) -> None:
+        text = line.rstrip("\r\n")
+        if text.strip():
+            last_stderr[:] = [text]
+        if on_progress_line is None:
+            return
+        try:
+            on_progress_line(line)
+        except Exception:
+            pass  # 진행 로그를 못 읽는다고 준비가 실패하면 안 됩니다.
+
+    readers = [
+        threading.Thread(
+            target=_drain_pipe, args=(process.stdout, stdout_chunks.append), daemon=True
+        ),
+        threading.Thread(target=_drain_pipe, args=(process.stderr, stderr_sink), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+
+    try:
+        exit_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        runner.terminate_tree(process)
+        try:
+            process.wait(timeout=runner.TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            runner.kill_tree(process)
+        raise
+    finally:
+        for reader in readers:
+            reader.join(timeout=30)
+
+    return "".join(stdout_chunks), (last_stderr[0] if last_stderr else ""), exit_code
+
+
+def prepare_dataset(
+    config: dict[str, Any], on_progress_line: Any = None
+) -> dict[str, Any]:
+    """실제 data pipeline을 불러 원본에서 필수 4개와 test manifest를 만듭니다.
+
+    ``run_stage``(``subprocess.run(capture_output=True)``)를 쓰면 자식 출력이 끝날
+    때까지 pipe에 갇혀서 8분 가까이 아무것도 볼 수 없습니다. 그래서 직접 띄우고
+    pipe마다 thread로 읽습니다. stdout은 결과 JSON 문서 하나라 모아서 파싱하고,
+    stderr는 줄 단위로 ``on_progress_line``에 넘깁니다.
+    """
 
     from .train_config import config_relative_path, write_runtime_config
 
     config_id = write_runtime_config(config)
     try:
-        completed = runner.run_stage(
-            config_relative_path(config_id),
-            "data",
-            cwd=repository_root(),
-            timeout=PREPARE_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "supported": True, "exit_code": None, "artifacts": {},
-                "summary": {}, "message": "데이터 준비가 시간 안에 끝나지 않았습니다."}
-    except OSError as error:
-        return {"ok": False, "supported": True, "exit_code": None, "artifacts": {},
-                "summary": {},
-                "message": f"data pipeline을 실행하지 못했습니다({type(error).__name__})."}
+        argv = runner.build_argv(config_relative_path(config_id), "data")
+        try:
+            process = runner.spawn(
+                argv, cwd=repository_root(), env=runner.child_environment()
+            )
+        except OSError as error:
+            return {"ok": False, "supported": True, "exit_code": None, "artifacts": {},
+                    "summary": {},
+                    "message": f"data pipeline을 실행하지 못했습니다({type(error).__name__})."}
+
+        try:
+            stdout_text, last_stderr, exit_code = _run_prepare_process(
+                process, on_progress_line, PREPARE_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "supported": True, "exit_code": None, "artifacts": {},
+                    "summary": {}, "message": "데이터 준비가 시간 안에 끝나지 않았습니다."}
     finally:
         (config_dir() / f"{config_id}.json").unlink(missing_ok=True)
 
-    result = _parse_result(completed.stdout)
+    result = _parse_result(stdout_text)
     if result is None:
-        lines = (completed.stderr or "").strip().splitlines()
-        detail = sanitize_line(lines[-1]) if lines else ""
-        return {"ok": False, "supported": True, "exit_code": completed.returncode,
+        detail = sanitize_line(last_stderr) if last_stderr else ""
+        return {"ok": False, "supported": True, "exit_code": exit_code,
                 "artifacts": {}, "summary": {},
                 "message": f"data pipeline 결과를 해석하지 못했습니다. {detail}".strip()}
 
@@ -858,7 +938,7 @@ def prepare_dataset(config: dict[str, Any]) -> dict[str, Any]:
         return {
             "ok": False,
             "supported": False,
-            "exit_code": completed.returncode,
+            "exit_code": exit_code,
             "artifacts": {},
             "summary": stage_summary,
             "message": (
@@ -868,9 +948,9 @@ def prepare_dataset(config: dict[str, Any]) -> dict[str, Any]:
         }
 
     return {
-        "ok": completed.returncode == 0 and result.get("status") == "ok",
+        "ok": exit_code == 0 and result.get("status") == "ok",
         "supported": True,
-        "exit_code": completed.returncode,
+        "exit_code": exit_code,
         "artifacts": _unwrap_stage(result.get("artifacts")),
         "summary": stage_summary,
         "message": sanitize_line(str(result.get("message") or "")),

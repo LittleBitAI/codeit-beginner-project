@@ -598,61 +598,105 @@ def test_prepare_config_rejects_bad_seed(bad):
     assert error.value.errors[0].field == "seed"
 
 
-def completed_prepare(status: str = "ok", mode: str = "prepare", returncode: int = 0):
-    import subprocess
-
-    return subprocess.CompletedProcess(
-        [],
-        returncode,
-        json.dumps(
-            {
-                "status": status,
-                "artifacts": {"data": {key: f"artifacts/p/{key}.json" for key in DATA_ARTIFACT_KEYS}},
-                "summary": {
-                    "data": {
-                        "pipeline": "data",
-                        "mode": mode,
-                        "split_ratio": "8:2",
-                        "train_images": 8,
-                        "validation_images": 2,
-                    }
-                },
-                "message": "준비 완료",
+def prepare_stdout(status: str = "ok", mode: str = "prepare") -> str:
+    return json.dumps(
+        {
+            "status": status,
+            "artifacts": {"data": {key: f"artifacts/p/{key}.json" for key in DATA_ARTIFACT_KEYS}},
+            "summary": {
+                "data": {
+                    "pipeline": "data",
+                    "mode": mode,
+                    "split_ratio": "8:2",
+                    "train_images": 8,
+                    "validation_images": 2,
+                }
             },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        "",
+            "message": "준비 완료",
+        },
+        ensure_ascii=False,
+        indent=2,
     )
 
 
-def test_prepare_runs_only_data_stage(isolated_repo, monkeypatch):
-    captured = {}
+def spawned(fake_process_factory, monkeypatch, **kwargs):
+    """``runner.spawn``이 돌려줄 가짜 process를 심고, 넘어간 argv를 담아 둡니다."""
 
-    def fake_run_stage(path, stage, *, cwd, timeout):
-        captured["stage"] = stage
-        captured["timeout"] = timeout
-        return completed_prepare()
+    captured: dict = {}
+    process = fake_process_factory(**kwargs)
 
-    monkeypatch.setattr(datasets.runner, "run_stage", fake_run_stage)
+    def fake_spawn(argv, *, cwd, env):
+        captured["argv"] = argv
+        captured["cwd"] = cwd
+        return process
+
+    monkeypatch.setattr(datasets.runner, "spawn", fake_spawn)
+    return captured, process
+
+
+def test_prepare_runs_only_data_stage(isolated_repo, monkeypatch, fake_process_factory):
+    captured, _ = spawned(fake_process_factory, monkeypatch, stdout=prepare_stdout())
 
     result = datasets.prepare_dataset(datasets.build_prepare_config("8:2"))
 
-    assert captured["stage"] == "data"
-    assert captured["timeout"] == datasets.PREPARE_TIMEOUT_SECONDS
+    assert captured["argv"][-2:] == ["--only", "data"]
     assert result["ok"] is True
     assert result["supported"] is True
     assert set(result["artifacts"]) == set(DATA_ARTIFACT_KEYS)
     assert result["summary"]["train_images"] == 8
 
 
-def test_prepare_detects_a_pipeline_without_the_feature(isolated_repo, monkeypatch):
+def test_prepare_feeds_stderr_lines_to_the_progress_callback(
+    isolated_repo, monkeypatch, fake_process_factory
+):
+    """진행 로그는 stderr로만 옵니다. stdout은 결과 JSON 문서 하나입니다."""
+
+    progress_line = json.dumps(
+        {"schema": "data.progress/1", "event": "step_started", "step": "split"}
+    )
+    spawned(
+        fake_process_factory,
+        monkeypatch,
+        stdout=prepare_stdout(),
+        stderr=f"{progress_line}\nbotocore 경고\n",
+    )
+    seen: list[str] = []
+
+    result = datasets.prepare_dataset(
+        datasets.build_prepare_config("8:2"), on_progress_line=seen.append
+    )
+
+    assert [item.strip() for item in seen] == [progress_line, "botocore 경고"]
+    assert result["ok"] is True  # stdout은 그대로 파싱됩니다
+
+
+def test_prepare_survives_a_progress_callback_that_raises(
+    isolated_repo, monkeypatch, fake_process_factory
+):
+    """진행 로그를 못 읽는다고 준비가 실패하면 안 됩니다."""
+
+    spawned(fake_process_factory, monkeypatch, stdout=prepare_stdout(), stderr="한 줄\n")
+
+    def explode(line):
+        raise RuntimeError("진행 로그 처리 실패")
+
+    result = datasets.prepare_dataset(
+        datasets.build_prepare_config("8:2"), on_progress_line=explode
+    )
+
+    assert result["ok"] is True
+
+
+def test_prepare_detects_a_pipeline_without_the_feature(
+    isolated_repo, monkeypatch, fake_process_factory
+):
     """준비를 요청했는데 mode가 prepare가 아니면 그 pipeline은 이 기능을 모릅니다."""
 
-    monkeypatch.setattr(
-        datasets.runner,
-        "run_stage",
-        lambda *a, **k: completed_prepare(status="error", mode="integration", returncode=1),
+    spawned(
+        fake_process_factory,
+        monkeypatch,
+        stdout=prepare_stdout(status="error", mode="integration"),
+        exit_code=1,
     )
 
     result = datasets.prepare_dataset(datasets.build_prepare_config("8:2"))
@@ -662,26 +706,67 @@ def test_prepare_detects_a_pipeline_without_the_feature(isolated_repo, monkeypat
     assert "지원하지 않습니다" in result["message"]
 
 
-def test_prepare_removes_the_temporary_config(isolated_repo, monkeypatch):
-    monkeypatch.setattr(datasets.runner, "run_stage", lambda *a, **k: completed_prepare())
+def test_prepare_removes_the_temporary_config(isolated_repo, monkeypatch, fake_process_factory):
+    spawned(fake_process_factory, monkeypatch, stdout=prepare_stdout())
 
     datasets.prepare_dataset(datasets.build_prepare_config("9:1"))
 
     assert list((isolated_repo / "artifacts" / "web" / "configs").glob("*.json")) == []
 
 
-def test_prepare_handles_timeout(isolated_repo, monkeypatch):
-    import subprocess
-
-    def timeout(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
-
-    monkeypatch.setattr(datasets.runner, "run_stage", timeout)
+def test_prepare_handles_timeout(isolated_repo, monkeypatch, fake_process_factory):
+    _, process = spawned(fake_process_factory, monkeypatch, block_until_signalled=True)
+    monkeypatch.setattr(datasets, "PREPARE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(datasets.runner, "terminate_tree", lambda proc: proc.terminate())
 
     result = datasets.prepare_dataset(datasets.build_prepare_config("8:2"))
 
     assert result["ok"] is False
+    assert result["exit_code"] is None
     assert "시간 안에 끝나지 않았습니다" in result["message"]
+    assert process.terminate_calls == 1  # 시간이 지나면 그냥 두지 않고 종료합니다
+
+
+def test_prepare_reports_a_process_that_never_started(isolated_repo, monkeypatch):
+    def refuse(argv, *, cwd, env):
+        raise OSError("실행할 수 없습니다")
+
+    monkeypatch.setattr(datasets.runner, "spawn", refuse)
+
+    result = datasets.prepare_dataset(datasets.build_prepare_config("8:2"))
+
+    assert result["ok"] is False
+    assert result["exit_code"] is None
+    assert "실행하지 못했습니다" in result["message"]
+    assert list((isolated_repo / "artifacts" / "web" / "configs").glob("*.json")) == []
+
+
+def test_prepare_does_not_deadlock_on_large_output(isolated_repo, monkeypatch):
+    """양쪽 pipe를 동시에 읽지 않으면 OS buffer가 차면서 교착합니다.
+
+    실제 subprocess를 써야만 증명되는 성질이라 여기서만 진짜 process를 띄웁니다.
+    준비는 하지 않습니다.
+    """
+
+    import sys
+
+    script = (
+        "import sys\n"
+        "for i in range(4000):\n"
+        "    sys.stdout.write('x' * 80 + '\\n')\n"
+        "    sys.stderr.write('y' * 80 + '\\n')\n"
+    )
+    monkeypatch.setattr(datasets.runner, "build_argv", lambda path, stage: [sys.executable, "-c", script])
+    seen: list[str] = []
+
+    result = datasets.prepare_dataset(
+        datasets.build_prepare_config("8:2"), on_progress_line=seen.append
+    )
+
+    assert len(seen) == 4000  # stderr를 한 줄도 잃지 않았습니다
+    # stdout은 JSON이 아니므로 준비는 실패로 보고됩니다. 교착하지 않는 것이 요점입니다.
+    assert result["ok"] is False
+    assert result["exit_code"] == 0
 
 
 # --- 준비 결과를 데이터셋으로 고르기 -----------------------------------------
