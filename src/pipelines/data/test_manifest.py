@@ -122,8 +122,13 @@ def build_test_manifest(
     class_map: Mapping[str | int, Any] | None,
     *,
     publish_file_name: Callable[[str], str],
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any]:
-    """Test image를 검증하고 downstream에서 읽을 수 있는 COCO 문서를 만듭니다."""
+    """Test image를 검증하고 downstream에서 읽을 수 있는 COCO 문서를 만듭니다.
+
+    `on_progress`를 주면 image 한 장을 읽을 때마다 (읽은 수, 전체 수)를
+    알립니다. 진행 로그 전용이며 manifest 내용에는 영향을 주지 않습니다.
+    """
 
     manifest_categories = _categories(class_map)
     candidates = _image_candidates(image_locations)
@@ -133,6 +138,8 @@ def build_test_manifest(
         for order, (image_id, name, location) in enumerate(candidates):
             destination = directory / f"{order}{Path(name).suffix.lower()}"
             width, height = _decoded_size(storage, location, destination, name)
+            if on_progress is not None:
+                on_progress(order + 1, len(candidates))
             images.append(
                 {
                     "id": image_id,
