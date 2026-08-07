@@ -33,6 +33,32 @@ class TinyDetector(nn.Module):
         return {"loss_classifier": (self.weight - 0.25).square() + image_term}
 
 
+class RetinaStyleDetector(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.rand(()))
+
+    def forward(self, images, targets):
+        image_term = sum(image.mean() * 0 for image in images)
+        return {
+            "classification": (self.weight - 0.25).square() + image_term,
+            "bbox_regression": self.weight.square() * 0 + 0.5,
+        }
+
+
+class SequencedDetector(nn.Module):
+    def __init__(self, validation_losses: list[float]) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.tensor(1.0))
+        self.validation_losses = iter(validation_losses)
+        self.calls = 0
+
+    def forward(self, images, targets):
+        self.calls += 1
+        value = 2.0 if self.calls % 2 else next(self.validation_losses)
+        return {"sequence_loss": self.weight.square() * 0 + value}
+
+
 class BatchNormDetector(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -183,6 +209,9 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
     assert result["summary"]["validation_images"] == 1
     assert result["summary"]["class_count"] == 1
     assert result["summary"]["epochs"] == 2
+    assert result["summary"]["planned_epochs"] == 2
+    assert result["summary"]["completed_epochs"] == 2
+    assert result["summary"]["stopped_early"] is False
 
     for name in ("best_checkpoint_uri", "last_checkpoint_uri", "training_history_uri"):
         uri = result["artifacts"][name]
@@ -232,6 +261,7 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
             "num_workers",
             "device",
             "pretrained",
+            "early_stopping",
         }
         assert recorded["schema_version"] == 1
         assert recorded["run_id"] == "cpu-smoke"
@@ -259,6 +289,7 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
         assert recorded["num_workers"] == 0
         assert recorded["device"] == "cpu"
         assert recorded["pretrained"] is False
+        assert recorded["early_stopping"] is None
         assert 1 <= checkpoint["epoch"] <= recorded["epochs"]
 
         if artifact_name == "best_checkpoint_uri":
@@ -366,6 +397,35 @@ def test_invalid_config_fails_before_writing_run_artifacts(
 
 
 @pytest.mark.parametrize(
+    ("early_stopping", "message"),
+    [
+        ({}, "train.early_stopping.patience must be an integer >= 1"),
+        ({"patience": True}, "train.early_stopping.patience must be an integer >= 1"),
+        (
+            {"patience": 1, "min_delta": float("nan")},
+            "train.early_stopping.min_delta must be a number >= 0.0",
+        ),
+        (
+            {"patience": 1, "unexpected": 3},
+            "train.early_stopping contains unsupported settings: unexpected",
+        ),
+    ],
+)
+def test_invalid_early_stopping_fails_before_writing_artifacts(
+    local_config, early_stopping, message
+):
+    local_config["train"]["early_stopping"] = early_stopping
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert message in result["message"]
+    output = REPOSITORY_ROOT / local_config["train"]["output_dir"] / "cpu-smoke"
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
     ("optimizer", "irrelevant"),
     [
         ("AdamW", {"momentum": 0.9}),
@@ -432,12 +492,13 @@ def test_run_emits_progress_events_on_stderr_and_leaves_stdout_empty(
         "epoch_completed",
         "epoch_started",
         "epoch_completed",
+        "training_completed",
     ]
     assert all(event["run_id"] == "cpu-smoke" for event in events)
     for event in events:
         datetime.strptime(event["ts"], "%Y-%m-%dT%H:%M:%S.%fZ")
 
-    started, _, first, _, last = events
+    started, _, first, _, last, completed = events
     assert started == {
         "schema": SCHEMA,
         "event": "run_started",
@@ -458,6 +519,8 @@ def test_run_emits_progress_events_on_stderr_and_leaves_stdout_empty(
         "epochs",
         "train_loss",
         "validation_loss",
+        "train_loss_components",
+        "validation_loss_components",
         "best_validation_loss",
         "best_epoch",
         "is_best",
@@ -483,6 +546,101 @@ def test_run_emits_progress_events_on_stderr_and_leaves_stdout_empty(
     ]
     assert result["summary"]["best_epoch"] == last["best_epoch"]
     assert result["summary"]["best_validation_loss"] == last["best_validation_loss"]
+    assert completed == {
+        "schema": SCHEMA,
+        "event": "training_completed",
+        "run_id": "cpu-smoke",
+        "planned_epochs": 2,
+        "completed_epochs": 2,
+        "stopped_early": False,
+        "best_epoch": result["summary"]["best_epoch"],
+        "best_validation_loss": result["summary"]["best_validation_loss"],
+        "ts": completed["ts"],
+    }
+
+
+def test_history_and_progress_preserve_model_loss_names(local_config, monkeypatch, capsys):
+    local_config["train"]["epochs"] = 1
+    monkeypatch.setattr(
+        pipeline, "build_model", lambda *args, **kwargs: RetinaStyleDetector()
+    )
+
+    result = train.run(local_config)
+    events = _progress_events(capsys.readouterr().err)
+    history = json.loads(
+        (REPOSITORY_ROOT / result["artifacts"]["training_history_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert result["status"] == "ok"
+    record = history[0]
+    expected_names = {"classification", "bbox_regression"}
+    assert set(record["train_loss_components"]) == expected_names
+    assert set(record["validation_loss_components"]) == expected_names
+    assert record["train_loss"] == pytest.approx(sum(record["train_loss_components"].values()))
+    assert record["validation_loss"] == pytest.approx(
+        sum(record["validation_loss_components"].values())
+    )
+    completed_epoch = next(event for event in events if event["event"] == "epoch_completed")
+    assert completed_epoch["train_loss_components"] == record["train_loss_components"]
+    assert completed_epoch["validation_loss_components"] == record[
+        "validation_loss_components"
+    ]
+
+
+def test_early_stopping_keeps_best_and_actual_last_checkpoint_separate(
+    local_config, monkeypatch, capsys
+):
+    local_config["train"].update(
+        {
+            "epochs": 6,
+            "early_stopping": {"patience": 2, "min_delta": 0.05},
+        }
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "build_model",
+        lambda *args, **kwargs: SequencedDetector([1.0, 0.98, 0.94, 0.93, 0.95, 0.96]),
+    )
+
+    result = train.run(local_config)
+    events = _progress_events(capsys.readouterr().err)
+
+    assert result["status"] == "ok"
+    assert result["summary"]["planned_epochs"] == 6
+    assert result["summary"]["completed_epochs"] == 5
+    assert result["summary"]["stopped_early"] is True
+    assert result["summary"]["best_epoch"] == 4
+    assert result["summary"]["best_validation_loss"] == pytest.approx(0.93)
+    history = json.loads(
+        (REPOSITORY_ROOT / result["artifacts"]["training_history_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [record["epoch"] for record in history] == [1, 2, 3, 4, 5]
+    best = torch.load(
+        REPOSITORY_ROOT / result["artifacts"]["best_checkpoint_uri"],
+        map_location="cpu",
+        weights_only=True,
+    )
+    last = torch.load(
+        REPOSITORY_ROOT / result["artifacts"]["last_checkpoint_uri"],
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert best["epoch"] == 4
+    assert best["validation_loss"] == pytest.approx(0.93)
+    assert last["epoch"] == 5
+    assert last["validation_loss"] == pytest.approx(0.95)
+    assert last["training_config"]["early_stopping"] == {
+        "patience": 2,
+        "min_delta": 0.05,
+    }
+    completed = events[-1]
+    assert completed["event"] == "training_completed"
+    assert completed["completed_epochs"] == 5
+    assert completed["stopped_early"] is True
 
 
 def test_progress_stream_stays_silent_for_the_dummy_execution(capsys):

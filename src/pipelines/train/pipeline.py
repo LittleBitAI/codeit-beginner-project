@@ -127,6 +127,32 @@ def _augmentation(raw: Mapping[str, Any]) -> dict[str, Any]:
     return dict(AUGMENTATION_PRESETS[preset])
 
 
+def _early_stopping(raw: Mapping[str, Any]) -> dict[str, float | int] | None:
+    value = raw.get("early_stopping")
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("train.early_stopping must be an object")
+    unexpected = set(value) - {"patience", "min_delta"}
+    if unexpected:
+        raise ValueError(
+            "train.early_stopping contains unsupported settings: "
+            + ", ".join(sorted(unexpected))
+        )
+    patience = value.get("patience")
+    if not isinstance(patience, int) or isinstance(patience, bool) or patience < 1:
+        raise ValueError("train.early_stopping.patience must be an integer >= 1")
+    min_delta = value.get("min_delta", 0.0)
+    if (
+        not isinstance(min_delta, (int, float))
+        or isinstance(min_delta, bool)
+        or not math.isfinite(float(min_delta))
+        or float(min_delta) < 0.0
+    ):
+        raise ValueError("train.early_stopping.min_delta must be a number >= 0.0")
+    return {"patience": patience, "min_delta": float(min_delta)}
+
+
 def _reject_irrelevant_optimizer_settings(
     raw: Mapping[str, Any], optimizer: str
 ) -> None:
@@ -187,6 +213,7 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "augmentation": _augmentation(raw),
         "device": device,
         "pretrained": pretrained,
+        "early_stopping": _early_stopping(raw),
         "output_dir": output_dir,
         "output_prefix": output_prefix.strip("/"),
     }
@@ -279,6 +306,11 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
         "num_workers": settings.get("num_workers"),
         "device": settings.get("device"),
         "pretrained": settings.get("pretrained"),
+        "early_stopping": (
+            dict(settings["early_stopping"])
+            if settings.get("early_stopping") is not None
+            else None
+        ),
     }
 
 
@@ -420,6 +452,16 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
         artifact_uris = _publish_local(best_payload, last_payload, history, settings)
     artifacts = {"run_id": settings["run_id"], **artifact_uris}
     best_epoch = min(history, key=lambda entry: entry["validation_loss"])
+    completed_epochs = len(history)
+    stopped_early = completed_epochs < settings["epochs"]
+    progress.emit(
+        "training_completed",
+        planned_epochs=settings["epochs"],
+        completed_epochs=completed_epochs,
+        stopped_early=stopped_early,
+        best_epoch=best_epoch["epoch"],
+        best_validation_loss=best_epoch["validation_loss"],
+    )
     return {
         "status": "ok",
         "artifacts": artifacts,
@@ -429,13 +471,21 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
             "augmentation": settings["augmentation"]["preset"],
             "device": settings["device"],
             "epochs": settings["epochs"],
+            "planned_epochs": settings["epochs"],
+            "completed_epochs": completed_epochs,
+            "stopped_early": stopped_early,
             "train_images": len(train_dataset),
             "validation_images": len(validation_dataset),
             "class_count": len(class_map),
             "best_epoch": best_epoch["epoch"],
             "best_validation_loss": best_epoch["validation_loss"],
         },
-        "message": "object detection training completed successfully",
+        "message": (
+            f"object detection training stopped early after {completed_epochs} of "
+            f"{settings['epochs']} epochs"
+            if stopped_early
+            else "object detection training completed successfully"
+        ),
     }
 
 

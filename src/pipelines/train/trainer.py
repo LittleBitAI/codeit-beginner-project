@@ -14,6 +14,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
+from .errors import TrainError
 from .progress import ProgressEmitter
 
 
@@ -63,16 +64,46 @@ def _loss(
     images: tuple[torch.Tensor, ...],
     targets: tuple[Mapping[str, torch.Tensor], ...],
     device: torch.device,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, dict[str, float]]:
     moved_images = [image.to(device) for image in images]
     moved_targets = [_move_target(target, device) for target in targets]
     losses = model(moved_images, moved_targets)
     if not isinstance(losses, Mapping) or not losses:
-        raise RuntimeError("Faster R-CNN did not return a non-empty loss mapping")
-    total = sum(loss for loss in losses.values())
+        raise TrainError("detector did not return a non-empty loss mapping")
+    components: dict[str, float] = {}
+    tensors: list[torch.Tensor] = []
+    for name, loss in losses.items():
+        if not isinstance(name, str) or not name:
+            raise TrainError("detector loss names must be non-empty strings")
+        if not isinstance(loss, torch.Tensor) or loss.numel() != 1:
+            raise TrainError(f"detector loss '{name}' must be a scalar tensor")
+        if not bool(torch.isfinite(loss).item()):
+            raise TrainError(f"training produced a non-finite loss: {name}")
+        tensors.append(loss)
+        components[name] = float(loss.detach().cpu())
+    total = torch.stack(tensors).sum()
     if not torch.isfinite(total):
-        raise RuntimeError("training produced a non-finite loss")
-    return total
+        raise TrainError("training produced a non-finite total loss")
+    return total, components
+
+
+def _add_components(
+    totals: dict[str, float],
+    components: Mapping[str, float],
+    *,
+    phase: str,
+) -> None:
+    """Batch마다 loss key가 바뀌어 잘못된 평균이 생기는 것을 막습니다."""
+    if totals and set(totals) != set(components):
+        raise TrainError(f"detector {phase} loss names changed between batches")
+    if not totals:
+        totals.update({name: 0.0 for name in components})
+    for name, value in components.items():
+        totals[name] += value
+
+
+def _average_components(totals: Mapping[str, float], batches: int) -> dict[str, float]:
+    return {name: value / batches for name, value in totals.items()}
 
 
 def _state_on_cpu(model: nn.Module) -> dict[str, torch.Tensor]:
@@ -98,7 +129,7 @@ def _train_model(
     validation_dataset: Dataset,
     settings: Mapping[str, Any],
     progress: ProgressEmitter | None = None,
-) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, float | int]]]:
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     seed = settings["seed"]
     device = torch.device(settings["device"])
     model.to(device)
@@ -124,36 +155,56 @@ def _train_model(
         raise RuntimeError("model has no trainable parameters")
     optimizer = build_optimizer(parameters, settings)
 
-    history: list[dict[str, float | int]] = []
+    history: list[dict[str, Any]] = []
     best_loss = math.inf
     best_epoch = 0
     best_checkpoint: dict[str, Any] | None = None
+    early_stopping = settings.get("early_stopping")
+    early_reference_loss = math.inf
+    epochs_without_improvement = 0
     for epoch in range(1, settings["epochs"] + 1):
         epoch_started_at = time.perf_counter()
         if progress is not None:
             progress.emit("epoch_started", epoch=epoch, epochs=settings["epochs"])
         model.train()
         train_total = 0.0
+        train_component_totals: dict[str, float] = {}
         for images, targets in train_loader:
             optimizer.zero_grad(set_to_none=True)
-            loss = _loss(model, images, targets, device)
+            loss, components = _loss(model, images, targets, device)
             loss.backward()
             optimizer.step()
             train_total += float(loss.detach().cpu())
+            _add_components(train_component_totals, components, phase="train")
 
         model.train()
         _freeze_batch_norm(model)
         validation_total = 0.0
+        validation_component_totals: dict[str, float] = {}
         with torch.no_grad():
             for images, targets in validation_loader:
-                validation_total += float(_loss(model, images, targets, device).detach().cpu())
+                loss, components = _loss(model, images, targets, device)
+                validation_total += float(loss.detach().cpu())
+                _add_components(
+                    validation_component_totals,
+                    components,
+                    phase="validation",
+                )
 
         train_loss = train_total / len(train_loader)
         validation_loss = validation_total / len(validation_loader)
+        train_loss_components = _average_components(
+            train_component_totals, len(train_loader)
+        )
+        validation_loss_components = _average_components(
+            validation_component_totals, len(validation_loader)
+        )
         epoch_record = {
             "epoch": epoch,
             "train_loss": train_loss,
             "validation_loss": validation_loss,
+            "train_loss_components": train_loss_components,
+            "validation_loss_components": validation_loss_components,
         }
         history.append(epoch_record)
         is_best = validation_loss < best_loss
@@ -166,6 +217,15 @@ def _train_model(
                 "optimizer_state_dict": copy.deepcopy(optimizer.state_dict()),
                 "validation_loss": validation_loss,
             }
+        should_stop = False
+        if early_stopping is not None:
+            min_delta = early_stopping["min_delta"]
+            if validation_loss < early_reference_loss - min_delta:
+                early_reference_loss = validation_loss
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                should_stop = epochs_without_improvement >= early_stopping["patience"]
         if progress is not None:
             progress.emit(
                 "epoch_completed",
@@ -173,16 +233,20 @@ def _train_model(
                 epochs=settings["epochs"],
                 train_loss=train_loss,
                 validation_loss=validation_loss,
+                train_loss_components=train_loss_components,
+                validation_loss_components=validation_loss_components,
                 best_validation_loss=best_loss,
                 best_epoch=best_epoch,
                 is_best=is_best,
                 epoch_seconds=round(time.perf_counter() - epoch_started_at, 3),
             )
+        if should_stop:
+            break
 
     if best_checkpoint is None:
         raise RuntimeError("training completed without a best checkpoint")
     last_checkpoint = {
-        "epoch": settings["epochs"],
+        "epoch": history[-1]["epoch"],
         "model_state_dict": _state_on_cpu(model),
         "optimizer_state_dict": copy.deepcopy(optimizer.state_dict()),
         "validation_loss": history[-1]["validation_loss"],
@@ -196,7 +260,7 @@ def train_model(
     validation_dataset: Dataset,
     settings: Mapping[str, Any],
     progress: ProgressEmitter | None = None,
-) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, float | int]]]:
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Train deterministically without leaving the global algorithm mode changed."""
     previous_deterministic = torch.are_deterministic_algorithms_enabled()
     previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
