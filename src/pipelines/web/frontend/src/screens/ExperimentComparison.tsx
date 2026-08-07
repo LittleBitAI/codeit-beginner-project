@@ -250,16 +250,27 @@ export function ExperimentComparison() {
     [experiments, selectedIds],
   );
 
+  /**
+   * 선택을 **값**으로 굳혀 effect의 의존성으로 씁니다.
+   *
+   * 목록은 3초마다 polling하고 그때마다 새 배열이 만들어집니다. 배열 자체를
+   * 의존성으로 두면 내용이 그대로여도 effect가 다시 돌고, 정리 함수가 아직
+   * 오지 않은 비교 응답을 버립니다. 비교가 polling 주기보다 오래 걸리면 표가
+   * 영원히 채워지지 않습니다. 실제로 그렇게 멈춰 있었습니다.
+   */
+  const selectedRunKey = selectedRunIds.join('\n');
+
   useEffect(() => {
     // 목록은 registry index의 training 블록으로 채웁니다. 하나만 골라도 record를
     // 읽어 다시 채우며, 두 값이 다르면 record가 진실입니다.
-    if (selectedRunIds.length === 0) {
+    const runIds = selectedRunKey ? selectedRunKey.split('\n') : [];
+    if (runIds.length === 0) {
       setCompared([]);
       setCompareError(null);
       return;
     }
     let active = true;
-    void api.compareExperiments(selectedRunIds).then(
+    void api.compareExperiments(runIds).then(
       (result) => {
         if (active) {
           setCompared(result.experiments);
@@ -274,7 +285,7 @@ export function ExperimentComparison() {
       },
     );
     return () => { active = false; };
-  }, [selectedRunIds]);
+  }, [selectedRunKey]);
 
   const toggle = (experimentId: string) => {
     setSelectedIds((current) =>

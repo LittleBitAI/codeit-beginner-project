@@ -95,6 +95,46 @@ describe('ExperimentComparison', () => {
     expect(compareExperiments).toHaveBeenCalledWith(['run-a', 'run-b']);
   });
 
+  it('목록 polling이 돌아도 같은 선택을 다시 요청하지 않는다', async () => {
+    // 목록은 3초마다 polling한다. 그때마다 새 배열이 만들어져 비교 요청이 다시
+    // 나가면, 앞 응답은 정리 함수가 버린다. 비교가 polling 주기보다 오래 걸리면
+    // 표는 영원히 채워지지 않는다. 실제로 20초 동안 비교 요청이 5번 나갔다.
+    vi.useFakeTimers();
+    try {
+      listExperiments.mockImplementation(async () => ({
+        // polling마다 새 객체를 돌려주는 실제 동작 그대로다.
+        experiments: [makeExperiment('a', 'same'), makeExperiment('b', 'same')],
+      }));
+      compareExperiments.mockResolvedValue({
+        experiments: [makeExperiment('a', 'same'), makeExperiment('b', 'same')],
+        missing: [],
+      });
+      render(
+        <MemoryRouter>
+          <ExperimentComparison />
+        </MemoryRouter>,
+      );
+
+      // 첫 목록 요청이 끝나 목록이 그려질 때까지 microtask를 흘려보낸다.
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (screen.queryByLabelText('run-a 비교 선택')) break;
+        await vi.advanceTimersByTimeAsync(10);
+      }
+      fireEvent.click(screen.getByLabelText('run-a 비교 선택'));
+      fireEvent.click(screen.getByLabelText('run-b 비교 선택'));
+      await vi.advanceTimersByTimeAsync(10);
+      const afterSelect = compareExperiments.mock.calls.length;
+      expect(afterSelect).toBeGreaterThan(0);
+
+      // polling을 여러 번 돌린다. 선택은 그대로다.
+      await vi.advanceTimersByTimeAsync(12_000);
+
+      expect(compareExperiments.mock.calls.length).toBe(afterSelect);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('실험 하나만 골라도 모델과 하이퍼파라미터를 채워 준다', async () => {
     listExperiments.mockResolvedValue({ experiments: [makeExperiment('a', 'same')] });
     compareExperiments.mockResolvedValue({
