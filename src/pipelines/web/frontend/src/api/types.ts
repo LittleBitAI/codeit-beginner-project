@@ -73,6 +73,9 @@ export interface EpochRecord {
   epoch: number;
   train_loss: number | null;
   validation_loss: number | null;
+  /** 이름은 모델이 정합니다. 화면이 목록을 정해 두지 않고 받은 것을 그립니다. */
+  train_loss_components?: Record<string, number> | null;
+  validation_loss_components?: Record<string, number> | null;
   epoch_seconds: number | null;
   is_best: boolean | null;
 }
@@ -90,6 +93,10 @@ export interface Progress {
   total_epochs: number | null;
   current_epoch: number | null;
   completed_epochs?: number;
+  /** train이 완료 event를 보냈는지. 조기 종료여도 true입니다. */
+  finished?: boolean;
+  /** 완료 event가 없으면 null입니다. 모르는 것을 지어내지 않습니다. */
+  stopped_early?: boolean | null;
   percent?: number | null;
   eta_seconds: number | null;
   epochs: EpochRecord[];

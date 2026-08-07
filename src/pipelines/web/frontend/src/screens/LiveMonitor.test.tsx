@@ -103,23 +103,23 @@ describe('LiveMonitor · 진행 로그가 없을 때', () => {
   });
 });
 
-describe('LiveMonitor · 진행 로그가 있을 때', () => {
-  const withProgress: Progress = {
-    available: true,
-    reason: null,
-    message: null,
-    total_epochs: 50,
-    current_epoch: 2,
-    completed_epochs: 2,
-    percent: 4,
-    eta_seconds: 720,
-    epochs: [
-      { epoch: 1, train_loss: 1.2, validation_loss: 1.1, epoch_seconds: 15, is_best: true },
-      { epoch: 2, train_loss: 0.9, validation_loss: 1.0, epoch_seconds: 15, is_best: true },
-    ],
-    best: { epoch: 2, validation_loss: 1.0 },
-  };
+const withProgress: Progress = {
+  available: true,
+  reason: null,
+  message: null,
+  total_epochs: 50,
+  current_epoch: 2,
+  completed_epochs: 2,
+  percent: 4,
+  eta_seconds: 720,
+  epochs: [
+    { epoch: 1, train_loss: 1.2, validation_loss: 1.1, epoch_seconds: 15, is_best: true },
+    { epoch: 2, train_loss: 0.9, validation_loss: 1.0, epoch_seconds: 15, is_best: true },
+  ],
+  best: { epoch: 2, validation_loss: 1.0 },
+};
 
+describe('LiveMonitor · 진행 로그가 있을 때', () => {
   it('실제 epoch 숫자와 추정 남은 시간을 보여 준다', async () => {
     getJob.mockResolvedValue(makeJob(withProgress));
 
@@ -150,5 +150,76 @@ describe('LiveMonitor · 진행 로그가 있을 때', () => {
     await waitFor(() =>
       expect(screen.getByText('남은 시간을 추정할 수 없습니다')).toBeInTheDocument(),
     );
+  });
+});
+
+describe('LiveMonitor · 조기 종료로 끝났을 때', () => {
+  const stoppedEarly: Progress = {
+    ...withProgress,
+    finished: true,
+    stopped_early: true,
+    percent: 100,
+    eta_seconds: 0,
+  };
+
+  it('계획 epoch가 남아 있어도 진행률을 다 채운다', async () => {
+    getJob.mockResolvedValue(makeJob(stoppedEarly));
+
+    renderMonitor();
+
+    expect(await screen.findByText('epoch 2 / 50')).toBeInTheDocument();
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('100');
+  });
+
+  it('남은 시간 대신 조기 종료로 끝났다고 알린다', async () => {
+    getJob.mockResolvedValue(makeJob(stoppedEarly));
+
+    renderMonitor();
+
+    expect(await screen.findByText('조기 종료로 끝남')).toBeInTheDocument();
+    expect(screen.queryByText(/남은 시간/)).toBeNull();
+  });
+
+  it('조기 종료가 아니면 그냥 끝났다고만 한다', async () => {
+    getJob.mockResolvedValue(makeJob({ ...stoppedEarly, stopped_early: false }));
+
+    renderMonitor();
+
+    expect(await screen.findByText('학습 완료')).toBeInTheDocument();
+    expect(screen.queryByText('조기 종료로 끝남')).toBeNull();
+  });
+});
+
+describe('LiveMonitor · epoch별 손실 분해', () => {
+  it('모델이 돌려준 이름과 값을 그대로 보여 준다', async () => {
+    getJob.mockResolvedValue(
+      makeJob({
+        ...withProgress,
+        epochs: [
+          withProgress.epochs[0]!,
+          {
+            ...withProgress.epochs[1]!,
+            train_loss_components: { classification: 0.72, bbox_regression: 0.53 },
+            validation_loss_components: { classification: 0.79, bbox_regression: 0.59 },
+          },
+        ],
+      }),
+    );
+
+    renderMonitor();
+
+    expect(await screen.findByText('classification')).toBeInTheDocument();
+    expect(screen.getByText('bbox_regression')).toBeInTheDocument();
+    expect(screen.getByText('0.7200')).toBeInTheDocument();
+    expect(screen.getByText('0.5900')).toBeInTheDocument();
+  });
+
+  it('상세 loss가 없으면 분해를 그리지 않는다', async () => {
+    getJob.mockResolvedValue(makeJob(withProgress));
+
+    renderMonitor();
+
+    await screen.findByText('epoch 2 / 50');
+    expect(screen.queryByText(/손실 분해/)).toBeNull();
   });
 });

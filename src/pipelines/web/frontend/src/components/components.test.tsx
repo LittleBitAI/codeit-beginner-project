@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { AlertRow, EstimatedValue, KpiCard, ProgressBar, StatusBadge } from './primitives';
 import { LogStream } from './LogStream';
+import { LossBreakdown } from './LossBreakdown';
 import { LossChart } from './LossChart';
 import type { EpochRecord, LogLine } from '../api/types';
 
@@ -114,5 +115,27 @@ describe('LossChart', () => {
     const { container } = render(<LossChart epochs={epochs} totalEpochs={4} currentEpoch={2} />);
 
     expect(container.querySelectorAll('polyline').length).toBe(2);
+  });
+});
+
+describe('LossBreakdown', () => {
+  it('한쪽에만 있는 이름은 반대쪽을 지어내지 않고 "-"로 둔다', () => {
+    const epochs: EpochRecord[] = [
+      {
+        epoch: 7,
+        train_loss: 1.0,
+        validation_loss: 1.1,
+        train_loss_components: { classification: 0.6, bbox_regression: 0.4 },
+        validation_loss_components: { classification: 0.7 },
+        epoch_seconds: 2,
+        is_best: true,
+      },
+    ];
+
+    render(<LossBreakdown epochs={epochs} />);
+
+    expect(screen.getByText('손실 분해 · epoch 7')).toBeInTheDocument();
+    expect(screen.getByText('0.4000')).toBeInTheDocument();
+    expect(screen.getByText('-')).toBeInTheDocument();
   });
 });

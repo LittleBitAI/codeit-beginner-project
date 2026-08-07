@@ -90,6 +90,80 @@ def test_epoch_completed_produces_readable_log_line():
     assert entry["level"] == "info"
 
 
+# --- 학습 완료 --------------------------------------------------------------
+
+
+def test_training_completed_finishes_progress_even_when_stopped_early():
+    state = feed(
+        line("run_started", epochs=50),
+        line("epoch_completed", epoch=1, epochs=50, validation_loss=0.9, epoch_seconds=10.0),
+        line("epoch_completed", epoch=2, epochs=50, validation_loss=0.8, epoch_seconds=10.0),
+        line(
+            "training_completed",
+            planned_epochs=50,
+            completed_epochs=2,
+            stopped_early=True,
+            best_epoch=2,
+            best_validation_loss=0.8,
+        ),
+    )
+
+    result = snapshot(state)
+
+    assert result["finished"] is True
+    assert result["stopped_early"] is True
+    assert result["total_epochs"] == 50  # 계획은 그대로 두고
+    assert result["completed_epochs"] == 2  # 실제로 돈 횟수를 따로 알려 줍니다
+    assert result["percent"] == 100.0  # 2/50이 아니라 끝난 학습입니다
+    assert result["eta_seconds"] == 0.0
+
+
+def test_training_completed_without_early_stop_reports_it_as_not_stopped():
+    state = feed(
+        line("run_started", epochs=3),
+        line("epoch_completed", epoch=1, epochs=3, validation_loss=0.5, epoch_seconds=1.0),
+        line("training_completed", planned_epochs=3, completed_epochs=3, stopped_early=False),
+    )
+
+    assert snapshot(state)["stopped_early"] is False
+
+
+def test_training_completed_produces_readable_log_line():
+    state = ProgressState()
+
+    entry = consume_line(
+        state,
+        line(
+            "training_completed",
+            planned_epochs=50,
+            completed_epochs=12,
+            stopped_early=True,
+            best_epoch=7,
+            best_validation_loss=0.41,
+        ),
+    )
+
+    assert "12/50" in entry["text"]
+    assert "조기 종료" in entry["text"]
+    assert entry["level"] == "info"
+
+
+def test_run_without_a_completion_event_is_not_reported_as_finished():
+    """취소된 학습과 이 event 이전의 옛 실행이 오늘과 똑같이 읽혀야 합니다."""
+
+    state = feed(
+        line("run_started", epochs=3),
+        line("epoch_completed", epoch=1, epochs=3, validation_loss=0.5),
+    )
+
+    result = snapshot(state)
+
+    assert result["finished"] is False
+    assert result["stopped_early"] is None  # 모르는 것을 지어내지 않습니다
+    assert result["percent"] == pytest.approx(33.3)
+    assert result["epochs"][0]["train_loss_components"] is None
+
+
 # --- 이상한 입력 ------------------------------------------------------------
 
 
@@ -179,6 +253,73 @@ def test_non_finite_loss_is_dropped_not_serialized_as_nan(bad):
 
     assert result["epochs"][0]["train_loss"] is None
     json.dumps(result, allow_nan=False)  # 여기서 터지면 안 됩니다
+
+
+@pytest.mark.parametrize(
+    "components",
+    (
+        "mapping이 아님",
+        5,
+        ["classification", 0.1],
+        {"classification": "0.7"},
+        {"classification": float("nan")},
+        {"classification": True},
+        {},
+    ),
+)
+def test_unusable_loss_components_are_dropped_without_losing_the_epoch(components):
+    state = ProgressState()
+
+    consume_line(
+        state,
+        json.dumps(
+            {
+                "schema": "train.progress/1",
+                "event": "epoch_completed",
+                "epoch": 1,
+                "epochs": 2,
+                "train_loss": 0.5,
+                "train_loss_components": components,
+            }
+        ),
+    )
+
+    record = snapshot(state)["epochs"][0]
+
+    assert record["train_loss"] == 0.5  # 나머지 event는 살아남습니다
+    assert record["train_loss_components"] is None
+    json.dumps(snapshot(state), allow_nan=False)
+
+
+def test_partly_unusable_loss_components_keep_the_usable_names():
+    state = feed(
+        line(
+            "epoch_completed",
+            epoch=1,
+            epochs=2,
+            train_loss_components={"classification": 0.72, "bbox_regression": "x"},
+        )
+    )
+
+    assert snapshot(state)["epochs"][0]["train_loss_components"] == {"classification": 0.72}
+
+
+@pytest.mark.parametrize("field", ("planned_epochs", "completed_epochs", "stopped_early"))
+def test_training_completed_with_a_broken_field_still_finishes(field):
+    state = feed(
+        line("run_started", epochs=4),
+        line("epoch_completed", epoch=1, epochs=4, validation_loss=0.5),
+        line(
+            "training_completed",
+            **{"planned_epochs": 4, "completed_epochs": 1, "stopped_early": True, field: "이상한 값"},
+        ),
+    )
+
+    result = snapshot(state)
+
+    assert result["finished"] is True  # 한 필드가 깨져도 끝난 사실은 압니다
+    assert result["percent"] == 100.0
+    json.dumps(result, allow_nan=False)
 
 
 @pytest.mark.parametrize("bad_epoch", ("3", 0, -1, True, None, 3.5))
@@ -378,3 +519,73 @@ def test_emitter_null_loss_is_handled():
     consume_line(state, emitted("epoch_completed", epoch=1, epochs=2, train_loss=None))
 
     assert snapshot(state)["epochs"][0]["train_loss"] is None
+
+
+def test_parses_an_early_stopped_session_in_the_emitters_own_format():
+    """조기 종료된 실행을 train이 실제로 내보내는 줄 그대로 넣어 고정합니다."""
+
+    state = ProgressState()
+    lines = [
+        emitted(
+            "run_started",
+            architecture="retinanet_resnet50_fpn",
+            device="cpu",
+            epochs=50,
+            train_images=8,
+            validation_images=4,
+            class_count=2,
+        ),
+        emitted("epoch_started", epoch=1, epochs=50),
+        emitted(
+            "epoch_completed",
+            epoch=1,
+            epochs=50,
+            train_loss=1.25,
+            validation_loss=1.38,
+            train_loss_components={"classification": 0.72, "bbox_regression": 0.53},
+            validation_loss_components={"classification": 0.79, "bbox_regression": 0.59},
+            best_validation_loss=1.38,
+            best_epoch=1,
+            is_best=True,
+            epoch_seconds=2.5,
+        ),
+        emitted("epoch_started", epoch=2, epochs=50),
+        emitted(
+            "epoch_completed",
+            epoch=2,
+            epochs=50,
+            train_loss=1.1,
+            validation_loss=1.4,
+            train_loss_components={"classification": 0.6, "bbox_regression": 0.5},
+            validation_loss_components={"classification": 0.82, "bbox_regression": 0.58},
+            best_validation_loss=1.38,
+            best_epoch=1,
+            is_best=False,
+            epoch_seconds=2.5,
+        ),
+        emitted(
+            "training_completed",
+            planned_epochs=50,
+            completed_epochs=2,
+            stopped_early=True,
+            best_epoch=1,
+            best_validation_loss=1.38,
+        ),
+    ]
+    for item in lines:
+        consume_line(state, item)
+
+    result = snapshot(state)
+
+    assert result["finished"] is True
+    assert result["stopped_early"] is True
+    assert result["total_epochs"] == 50
+    assert result["completed_epochs"] == 2
+    assert result["percent"] == 100.0
+    assert result["eta_seconds"] == 0.0
+    assert result["best"] == {"epoch": 1, "validation_loss": 1.38}
+    assert result["epochs"][1]["validation_loss_components"] == {
+        "classification": 0.82,
+        "bbox_regression": 0.58,
+    }
+    json.dumps(result, allow_nan=False, ensure_ascii=False)
