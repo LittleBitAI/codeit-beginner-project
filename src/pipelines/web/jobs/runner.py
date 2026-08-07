@@ -23,6 +23,7 @@ __all__ = [
     "build_argv",
     "child_environment",
     "kill_tree",
+    "process_alive",
     "run_taskkill",
     "signal_group",
     "spawn",
@@ -119,6 +120,47 @@ def spawn(argv: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.Pope
         close_fds=True,
         **options,
     )
+
+
+def process_alive(pid: int) -> bool:
+    """그 PID의 process가 아직 살아 있는지 봅니다. 아무것도 죽이지 않습니다.
+
+    POSIX에서 학습은 ``start_new_session=True``로 뜨기 때문에 서버가 죽어도 함께
+    죽지 않습니다. 그래서 "서버가 다시 시작됐다"와 "학습이 끝났다"는 다른 말입니다.
+
+    Windows에서는 ``os.kill``이 signal 0에도 process를 실제로 종료시키므로 절대
+    쓰지 않고 ``tasklist``로 확인만 합니다.
+
+    운영체제가 PID를 재사용한 뒤라면 남의 process를 보고 살아 있다고 답할 수
+    있습니다. 이 값은 화면에 보여 줄 문구를 고르는 데만 쓰고, 무엇을 죽이거나
+    되살리는 판단에는 쓰지 않습니다.
+    """
+
+    if pid <= 0:
+        return False
+    if IS_WINDOWS:
+        try:
+            found = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=TERMINATE_GRACE_SECONDS,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return str(pid) in found.stdout
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # 살아는 있는데 신호를 보낼 권한이 없는 경우입니다.
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def run_taskkill(pid: int) -> subprocess.CompletedProcess[str]:

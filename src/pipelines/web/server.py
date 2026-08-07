@@ -12,7 +12,6 @@ import argparse
 from collections.abc import Sequence
 
 from .api.app import create_app
-from .jobs import get_manager
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -33,7 +32,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     import uvicorn
 
     app = create_app(serve_frontend=not args.no_frontend)
-    get_manager().load()
+    # 여기서 남은 기록을 미리 읽지 않습니다. 이미 다른 서버가 port를 잡고 있으면 이
+    # process는 곧 죽는데, 그 전에 남의 학습 기록을 interrupted로 덮고 팀에도 그렇게
+    # 알려 버립니다. 기록 정리는 첫 요청이 들어올 때 JobManager가 알아서 합니다.
     print(f"Training GUI backend: http://{args.host}:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0
