@@ -80,6 +80,35 @@ function isStale(run: TeamRun): boolean {
   return isActive(run) && Date.now() - Date.parse(run.heartbeatAt) > 120_000;
 }
 
+/**
+ * 실패와 취소가 시간순 한 줄에 섞이면 성공한 학습을 눈으로 찾아내야 합니다. 지우지 않고
+ * 구역으로 묶고, 끝난 실패·취소만 접어 둡니다.
+ */
+interface Group {
+  key: string;
+  title: string;
+  open: boolean;
+  holds: (run: TeamRun) => boolean;
+}
+
+const GROUPS: Group[] = [
+  { key: 'active', title: '진행 중', open: true, holds: isActive },
+  { key: 'succeeded', title: '성공', open: true, holds: (run) => run.status === 'succeeded' },
+  {
+    key: 'closed',
+    title: '실패·취소',
+    open: false,
+    holds: (run) => !isActive(run) && run.status !== 'succeeded',
+  },
+];
+
+/** 비어 있는 구역은 머리글도 만들지 않습니다. 빈 칸이 늘면 다시 난잡해집니다. */
+function groupsOf(runs: TeamRun[]): { group: Group; members: TeamRun[] }[] {
+  return GROUPS.map((group) => ({ group, members: runs.filter(group.holds) })).filter(
+    (entry) => entry.members.length > 0,
+  );
+}
+
 function mergeRuns(previous: TeamRun[], incoming: TeamRun): TeamRun[] {
   const without = previous.filter((run) => run.cloudRunId !== incoming.cloudRunId);
   return [incoming, ...without].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -104,6 +133,60 @@ function ValueGrid({ rows }: { rows: [string, string][] }) {
   );
 }
 
+function RunRow({
+  run,
+  selected,
+  onSelect,
+}: {
+  run: TeamRun;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      style={{
+        width: '100%',
+        border: 0,
+        borderBottom: `1px solid ${color.borderInner}`,
+        background: selected ? color.primaryTint : color.surface,
+        padding: '12px 14px',
+        textAlign: 'left',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        cursor: 'pointer',
+      }}
+    >
+      <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+        <strong style={{ font: `600 12px/1.3 ${font.mono}`, color: color.text }}>{run.runId}</strong>
+        <StatusBadge status={run.status} />
+      </span>
+      <span style={{ font: `400 11px/1.4 ${font.sans}`, color: color.textBody }}>
+        {run.actorName} · {new Date(run.createdAt).toLocaleString('ko-KR')}
+        {/* Cognito가 확인해 준 이름이 아니면 그렇다고 말해 줍니다. */}
+        {run.actorSource === 'iam' && (
+          <span style={{ marginLeft: 6, color: color.textMuted }}>이름 직접 입력</span>
+        )}
+      </span>
+      {/* 클릭하지 않아도 팀원끼리 비교되도록 맨 아래에 요약 한 줄을 둡니다. */}
+      <span
+        style={{
+          font: `400 11px/1.4 ${font.mono}`,
+          color: color.textStrong,
+          overflowWrap: 'anywhere',
+        }}
+      >
+        {summaryLine(run)}
+      </span>
+      {isStale(run) && (
+        <span style={{ color: color.amber, fontSize: 11 }}>연결 끊김 의심 · 마지막 heartbeat 2분 초과</span>
+      )}
+    </button>
+  );
+}
+
 export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
   const team = useTeam();
   const teamId = team.config.team_id;
@@ -115,10 +198,13 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
   const [lines, setLines] = useState<LogLine[]>([]);
   const [error, setError] = useState<string | null>(null);
   const labels = useMemo(() => labelsOf(defaults), [defaults]);
-  const selected = useMemo(
-    () => runs.find((run) => run.cloudRunId === selectedId) ?? runs[0] ?? null,
-    [runs, selectedId],
-  );
+  const grouped = useMemo(() => groupsOf(runs), [runs]);
+  // 아무것도 고르지 않았을 때는 화면 맨 위에 보이는 학습을 엽니다. 실패가 가장
+  // 최근이라는 이유만으로 접힌 구역의 기록이 열려 있으면 헷갈립니다.
+  const selected = useMemo(() => {
+    const ordered = grouped.flatMap((entry) => entry.members);
+    return runs.find((run) => run.cloudRunId === selectedId) ?? ordered[0] ?? null;
+  }, [runs, grouped, selectedId]);
 
   const refresh = useCallback(async () => {
     if (!teamId || !canRead) return;
@@ -216,47 +302,29 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
           {runs.length === 0 ? (
             <div style={{ padding: 16, color: color.textMuted }}>공유된 학습이 없습니다.</div>
           ) : (
-            runs.map((run) => (
-              <button
-                key={run.cloudRunId}
-                type="button"
-                onClick={() => setSelectedId(run.cloudRunId)}
-                style={{
-                  width: '100%',
-                  border: 0,
-                  borderBottom: `1px solid ${color.borderInner}`,
-                  background: selected?.cloudRunId === run.cloudRunId ? color.primaryTint : color.surface,
-                  padding: '12px 14px',
-                  textAlign: 'left',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 6,
-                  cursor: 'pointer',
-                }}
-              >
-                <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                  <strong style={{ font: `600 12px/1.3 ${font.mono}`, color: color.text }}>{run.runId}</strong>
-                  <StatusBadge status={run.status} />
-                </span>
-                <span style={{ font: `400 11px/1.4 ${font.sans}`, color: color.textBody }}>
-                  {run.actorName} · {new Date(run.createdAt).toLocaleString('ko-KR')}
-                  {/* Cognito가 확인해 준 이름이 아니면 그렇다고 말해 줍니다. */}
-                  {run.actorSource === 'iam' && (
-                    <span style={{ marginLeft: 6, color: color.textMuted }}>이름 직접 입력</span>
-                  )}
-                </span>
-                {/* 클릭하지 않아도 팀원끼리 비교되도록 맨 아래에 요약 한 줄을 둡니다. */}
-                <span
+            grouped.map(({ group, members }) => (
+              <details key={group.key} open={group.open}>
+                <summary
                   style={{
-                    font: `400 11px/1.4 ${font.mono}`,
-                    color: color.textStrong,
-                    overflowWrap: 'anywhere',
+                    padding: '9px 14px',
+                    font: `600 11px/1.4 ${font.sans}`,
+                    color: color.textMuted,
+                    background: color.surfaceAlt,
+                    borderBottom: `1px solid ${color.borderInner}`,
+                    cursor: 'pointer',
                   }}
                 >
-                  {summaryLine(run)}
-                </span>
-                {isStale(run) && <span style={{ color: color.amber, fontSize: 11 }}>연결 끊김 의심 · 마지막 heartbeat 2분 초과</span>}
-              </button>
+                  {`${group.title} ${members.length}건`}
+                </summary>
+                {members.map((run) => (
+                  <RunRow
+                    key={run.cloudRunId}
+                    run={run}
+                    selected={selected?.cloudRunId === run.cloudRunId}
+                    onSelect={() => setSelectedId(run.cloudRunId)}
+                  />
+                ))}
+              </details>
             ))
           )}
         </Panel>
