@@ -175,6 +175,7 @@ def run(config: dict) -> dict:
                 record_uri=record_uri,
                 repo_root=repo_root,
                 verify=verify,
+                storage=storage,
             )
             written_index = storage.write_json(
                 f"{index_prefix}/{run_id}.json",
