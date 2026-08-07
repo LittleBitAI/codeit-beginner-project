@@ -24,7 +24,7 @@ import hashlib
 import json
 import os
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +34,7 @@ from src.common import LocalStorage, Storage, StorageError, create_storage
 
 from .coco import ConsolidatedDataset, consolidate
 from .errors import DatasetPreparationError
+from .progress import ProgressEmitter
 from .split import GroupRule, SplitResult, split_images
 from .test_manifest import build_test_manifest
 
@@ -324,13 +325,26 @@ def _raw_objects(
 
 
 def _read_documents(
-    storage: Storage, annotation_locations: Sequence[str]
+    storage: Storage,
+    annotation_locations: Sequence[str],
+    progress: ProgressEmitter,
 ) -> list[tuple[str, Any]]:
-    """이미지별 annotation 문서를 순서를 유지한 채 읽습니다."""
+    """이미지별 annotation 문서를 순서를 유지한 채 읽습니다.
 
-    workers = max(1, min(MAX_READ_WORKERS, len(annotation_locations)))
+    가장 오래 걸리는 구간이라 완료 개수를 세어 진행 로그로 알립니다. 결과는
+    제출한 순서 그대로 모으고, 세는 일만 완료 순서로 합니다.
+    """
+
+    total = len(annotation_locations)
+    workers = max(1, min(MAX_READ_WORKERS, total))
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        documents = list(executor.map(storage.read_json, annotation_locations))
+        futures = [
+            executor.submit(storage.read_json, location)
+            for location in annotation_locations
+        ]
+        for done, _ in enumerate(as_completed(futures), start=1):
+            progress.read_progress("annotations", done, total)
+        documents = [future.result() for future in futures]
     return list(zip(annotation_locations, documents))
 
 
@@ -655,6 +669,7 @@ def _backfill_test_manifest(
     storage: Storage,
     settings: PreparationSettings,
     publisher: LocationPublisher,
+    progress: ProgressEmitter,
 ) -> dict[str, Any]:
     """기존 네 artifact를 보존하고 누락된 test manifest만 만듭니다."""
 
@@ -669,12 +684,17 @@ def _backfill_test_manifest(
     if not test_image_locations:
         raise DatasetPreparationError("원본 prefix에서 test_images를 찾지 못했습니다.")
 
+    progress.emit("step_started", step="manifests")
     test_manifest = build_test_manifest(
         storage,
         test_image_locations,
         class_map,
         publish_file_name=publisher.image_file_name,
+        on_progress=lambda done, total: progress.read_progress(
+            "test_images", done, total
+        ),
     )
+    progress.emit("step_started", step="publish")
     test_location = storage.write_json(
         f"{settings.processed_prefix}{ARTIFACT_FILE_NAMES['test_manifest_uri']}",
         test_manifest,
@@ -715,18 +735,35 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
     # URI 변환기를 먼저 만들어, 내보낼 수 없는 위치라면 아무것도 쓰기 전에
     # 실패하게 합니다.
     publisher = build_publisher(storage, settings)
+    # 준비는 network를 오래 기다리므로, 지금 무엇을 하는지 stderr로 알립니다.
+    # 이 stream은 관찰용이며 산출물과 반환값에는 영향을 주지 않습니다.
+    progress = ProgressEmitter()
+    progress.emit(
+        "prepare_started",
+        raw_prefix=settings.raw_prefix,
+        split_ratio=settings.split_ratio,
+        seed=settings.seed,
+        split_method=settings.split_method,
+    )
     existing_keys = (
         frozenset() if settings.overwrite else _existing_artifact_keys(storage, settings)
     )
     if not settings.overwrite and existing_keys == LEGACY_ARTIFACT_KEYS:
-        return _backfill_test_manifest(storage, settings, publisher)
+        return _backfill_test_manifest(storage, settings, publisher, progress)
     _guard_existing(settings, existing_keys)
 
     image_locations, annotation_locations, test_image_locations = _raw_objects(
         storage, settings.raw_prefix
     )
-    documents = _read_documents(storage, annotation_locations)
+    progress.emit(
+        "sources_listed",
+        train_images=len(image_locations),
+        annotations=len(annotation_locations),
+        test_images=len(test_image_locations),
+    )
+    documents = _read_documents(storage, annotation_locations, progress)
     dataset = consolidate(documents, image_locations)
+    progress.emit("step_started", step="split")
     split_result = split_images(
         dataset.images,
         dataset.annotations,
@@ -735,6 +772,7 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         group_rule=settings.group_rule,
     )
 
+    progress.emit("step_started", step="manifests")
     manifests = {
         "train": _manifest(
             "train", split_result.train_image_ids, dataset, settings, publisher
@@ -759,8 +797,12 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         test_image_locations,
         class_map,
         publish_file_name=publisher.image_file_name,
+        on_progress=lambda done, total: progress.read_progress(
+            "test_images", done, total
+        ),
     )
 
+    progress.emit("step_started", step="publish")
     artifacts: dict[str, str] = {}
     for key, value in (
         ("train_manifest_uri", manifests["train"]),
@@ -835,6 +877,12 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         f"train {summary['train_images']}장({summary['train_groups']}그룹), "
         f"validation {summary['validation_images']}장"
         f"({summary['validation_groups']}그룹)." + train_only_note
+    )
+    progress.emit(
+        "prepare_completed",
+        train_images=summary["train_images"],
+        validation_images=summary["validation_images"],
+        category_count=summary["category_count"],
     )
     return {
         "status": "ok",
