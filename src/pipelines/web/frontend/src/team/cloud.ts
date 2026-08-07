@@ -10,6 +10,7 @@ import {
 } from 'aws-amplify/auth';
 
 import type { TeamConfig, TeamLogBatch, TeamRun } from '../api/types';
+import { decodeJson, decodeLines } from './decode';
 
 const RUN_FIELDS = `
   teamId cloudRunId localJobId runId actorSub actorName actorSource status settings dataInputs
@@ -82,33 +83,20 @@ export async function accessToken(): Promise<string | null> {
   return session.tokens?.accessToken.toString() ?? null;
 }
 
-function parseJson(value: unknown): Record<string, unknown> {
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value);
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch {
-      return {};
-    }
-  }
-  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
-}
-
 function normalizeRun(raw: Record<string, unknown>): TeamRun {
   return {
     ...(raw as unknown as TeamRun),
-    settings: parseJson(raw.settings),
-    dataInputs: parseJson(raw.dataInputs),
-    progress: parseJson(raw.progress),
-    summary: parseJson(raw.summary),
-    artifacts: parseJson(raw.artifacts),
-    evaluation: parseJson(raw.evaluation),
+    settings: decodeJson(raw.settings),
+    dataInputs: decodeJson(raw.dataInputs),
+    progress: decodeJson(raw.progress),
+    summary: decodeJson(raw.summary),
+    artifacts: decodeJson(raw.artifacts),
+    evaluation: decodeJson(raw.evaluation),
   };
 }
 
 function normalizeBatch(raw: Record<string, unknown>): TeamLogBatch {
-  const parsed = typeof raw.lines === 'string' ? JSON.parse(raw.lines) : raw.lines;
-  return { ...(raw as unknown as TeamLogBatch), lines: Array.isArray(parsed) ? parsed : [] };
+  return { ...(raw as unknown as TeamLogBatch), lines: decodeLines(raw.lines) };
 }
 
 function graphClient(): GraphQLClient {
