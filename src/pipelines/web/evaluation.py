@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 
 from . import team_sync
 from .errors import FieldError, JobConflictError, WebValidationError
+from .evaluate_progress import EvaluateProgressState, consume_line, snapshot
 from .jobs import runner
 from .jobs.model import JobRecord
 from .masking import sanitize_line
@@ -164,38 +165,117 @@ def _unwrap_stage(value: Any) -> dict[str, Any]:
     return dict(stage) if isinstance(stage, dict) else dict(value)
 
 
-def run_evaluation(config: dict[str, Any]) -> dict[str, Any]:
-    """실제 evaluate pipeline을 공개 CLI로 부릅니다."""
+def _drain_pipe(pipe: Any, sink: Any) -> None:
+    """Pipe 하나를 끝까지 읽습니다. thread 하나가 pipe 하나만 담당합니다.
+
+    양쪽을 동시에 읽지 않으면 반대쪽 pipe의 OS 버퍼(보통 64KB)가 차는 순간
+    교착합니다. ``datasets.py``가 같은 문제를 같은 방식으로 풀어 둡니다.
+    """
+
+    try:
+        for line in pipe:
+            sink(line)
+    except (OSError, ValueError):
+        pass  # process가 죽으면서 pipe가 닫히는 것은 정상입니다.
+    finally:
+        try:
+            pipe.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _run_evaluate_process(
+    process: Any, on_progress_line: Any, timeout: float
+) -> tuple[str, str, int]:
+    """평가 process가 끝날 때까지 양쪽 pipe를 동시에 읽습니다.
+
+    ``(stdout 전체, 마지막 stderr 줄, exit code)``를 돌려줍니다. stdout은 예전처럼
+    통째로 모아 두었다가 결과 JSON 문서를 파싱하는 데 씁니다. 시간이 지나면
+    ``subprocess.TimeoutExpired``를 그대로 올려 보내 호출한 쪽이 예전과 같은
+    형태로 답하게 합니다.
+    """
+
+    stdout_chunks: list[str] = []
+    last_stderr: list[str] = []
+
+    def stderr_sink(line: str) -> None:
+        text = line.rstrip("\r\n")
+        if text.strip():
+            last_stderr[:] = [text]
+        if on_progress_line is None:
+            return
+        try:
+            on_progress_line(line)
+        except Exception:
+            pass  # 진행 로그를 못 읽는다고 평가가 실패하면 안 됩니다.
+
+    readers = [
+        threading.Thread(
+            target=_drain_pipe, args=(process.stdout, stdout_chunks.append), daemon=True
+        ),
+        threading.Thread(target=_drain_pipe, args=(process.stderr, stderr_sink), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+
+    try:
+        exit_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        runner.terminate_tree(process)
+        try:
+            process.wait(timeout=runner.TERMINATE_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            runner.kill_tree(process)
+        raise
+    finally:
+        for reader in readers:
+            reader.join(timeout=30)
+
+    return "".join(stdout_chunks), (last_stderr[0] if last_stderr else ""), exit_code
+
+
+def run_evaluation(config: dict[str, Any], on_progress_line: Any = None) -> dict[str, Any]:
+    """실제 evaluate pipeline을 공개 CLI로 부릅니다.
+
+    ``run_stage``(``subprocess.run(capture_output=True)``)를 쓰면 자식 출력이 끝날
+    때까지 pipe에 갇혀서 20분 넘게 아무것도 볼 수 없습니다. 그래서 직접 띄우고
+    pipe마다 thread로 읽습니다. ``COCOeval``이 쓰는 stdout은 예전과 똑같이 모아
+    결과 JSON을 파싱하고, 진행 로그가 오는 stderr만 줄 단위로 ``on_progress_line``에
+    넘깁니다.
+    """
 
     from .train_config import config_relative_path, write_runtime_config
 
     config_id = write_runtime_config(config)
     try:
-        completed = runner.run_stage(
-            config_relative_path(config_id),
-            "evaluate",
-            cwd=repository_root(),
-            timeout=EVALUATE_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "exit_code": None, "artifacts": {}, "summary": {},
-                "message": "평가가 시간 안에 끝나지 않았습니다."}
-    except OSError as error:
-        return {"ok": False, "exit_code": None, "artifacts": {}, "summary": {},
-                "message": f"evaluate pipeline을 실행하지 못했습니다({type(error).__name__})."}
+        argv = runner.build_argv(config_relative_path(config_id), "evaluate")
+        try:
+            process = runner.spawn(
+                argv, cwd=repository_root(), env=runner.child_environment()
+            )
+        except OSError as error:
+            return {"ok": False, "exit_code": None, "artifacts": {}, "summary": {},
+                    "message": f"evaluate pipeline을 실행하지 못했습니다({type(error).__name__})."}
+
+        try:
+            stdout_text, last_stderr, exit_code = _run_evaluate_process(
+                process, on_progress_line, EVALUATE_TIMEOUT_SECONDS
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "exit_code": None, "artifacts": {}, "summary": {},
+                    "message": "평가가 시간 안에 끝나지 않았습니다."}
     finally:
         (config_dir() / f"{config_id}.json").unlink(missing_ok=True)
 
-    result = _parse_result(completed.stdout)
+    result = _parse_result(stdout_text)
     if result is None:
-        lines = (completed.stderr or "").strip().splitlines()
-        detail = sanitize_line(lines[-1]) if lines else ""
-        return {"ok": False, "exit_code": completed.returncode, "artifacts": {}, "summary": {},
+        detail = sanitize_line(last_stderr) if last_stderr else ""
+        return {"ok": False, "exit_code": exit_code, "artifacts": {}, "summary": {},
                 "message": f"평가 결과를 해석하지 못했습니다. {detail}".strip()}
 
     return {
-        "ok": completed.returncode == 0 and result.get("status") == "ok",
-        "exit_code": completed.returncode,
+        "ok": exit_code == 0 and result.get("status") == "ok",
+        "exit_code": exit_code,
         "artifacts": _unwrap_stage(result.get("artifacts")),
         "summary": _unwrap_stage(result.get("summary")),
         "message": sanitize_line(str(result.get("message") or "")),
@@ -344,6 +424,7 @@ class EvaluationRunner:
             test_manifest_uri=options.get("test_manifest_uri"),
         )
 
+        progress_state = EvaluateProgressState()
         with self._lock:
             if self._state.get("status") == STATUS_RUNNING:
                 raise JobConflictError(
@@ -364,18 +445,42 @@ class EvaluationRunner:
                 "registration": {"status": STATUS_IDLE},
                 "device": config["evaluate"].get("device"),
                 "score_threshold": config["evaluate"]["score_threshold"],
+                # 진행 로그가 오기 전에는 진행률을 지어내지 않습니다.
+                # ``available: False``인 채로 시작합니다.
+                "progress": snapshot(progress_state),
             }
 
         threading.Thread(
-            target=self._run, args=(record, config), name="evaluation", daemon=True
+            target=self._run,
+            args=(record, config, progress_state),
+            name="evaluation",
+            daemon=True,
         ).start()
         return self.status()
 
-    def _run(self, record: JobRecord, config: dict[str, Any]) -> None:
+    def _consume(self, progress_state: EvaluateProgressState, line: str) -> None:
+        """평가 subprocess의 stderr 한 줄을 진행 상태에 반영합니다.
+
+        ``consume_line``은 어떤 입력에도 예외를 던지지 않으므로, 이 경로가 평가를
+        실패시키는 일은 없습니다.
+        """
+
+        consume_line(progress_state, line)
+        with self._lock:
+            self._state["progress"] = snapshot(progress_state)
+
+    def _run(
+        self,
+        record: JobRecord,
+        config: dict[str, Any],
+        progress_state: EvaluateProgressState,
+    ) -> None:
         from .jobs.model import utc_now_text
 
         try:
-            result = run_evaluation(config)
+            result = run_evaluation(
+                config, on_progress_line=lambda line: self._consume(progress_state, line)
+            )
         except Exception as error:  # 평가 실패가 서버를 죽이면 안 됩니다.
             evaluation_state = {
                 "status": STATUS_FAILED,

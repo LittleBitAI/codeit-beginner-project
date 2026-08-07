@@ -350,6 +350,37 @@ export interface DetectionMetrics {
   recall50?: number | null;
 }
 
+/**
+ * 평가 subprocess가 stderr로 흘린 `evaluate.progress/1` 진행 상태입니다.
+ *
+ * 진행 줄이 한 번도 없으면 `available`이 false이고 나머지는 모두 비어 있습니다.
+ * 그때 화면은 가짜 진행률을 그리지 않고 고정 안내 문구만 둡니다.
+ */
+export interface EvaluateProgress {
+  available: boolean;
+  reason?: string | null;
+  message?: string | null;
+  /** started / validation / test / metrics / submission / completed */
+  stage?: string | null;
+  stage_label?: string | null;
+  run_id?: string | null;
+  device?: string | null;
+  images?: { validation_images?: number; test_images?: number } | null;
+  predict?: {
+    stage: string | null;
+    done: number | null;
+    total: number | null;
+    percent: number | null;
+  } | null;
+  /** 계산하지 않은 지표는 0이 아니라 null입니다. */
+  metrics?: { mAP?: number | null; mAP50?: number | null; mAP75?: number | null } | null;
+  submission_rows?: number | null;
+  completed?: { validation_images?: number; test_images?: number } | null;
+  /** 관측된 추론 속도로만 계산합니다. 관측이 부족하면 null입니다. */
+  eta_seconds?: number | null;
+  malformed_lines?: number;
+}
+
 export interface EvaluationState {
   status: 'idle' | 'running' | 'succeeded' | 'failed';
   job_id?: string | null;
@@ -375,6 +406,7 @@ export interface EvaluationState {
   /** 다른 학습의 평가가 돌고 있으면 그 job id */
   busy_with?: string | null;
   registration?: RegistrationState;
+  progress?: EvaluateProgress;
 }
 
 export interface RegistrationState {
