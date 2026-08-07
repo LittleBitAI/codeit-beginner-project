@@ -43,6 +43,19 @@ AWS_PROFILE=<팀 SSO profile>
 AWS 인증이나 network가 끊기면 `artifacts/web/team-sync/outbox.jsonl`에 쌓고 재연결 뒤
 순서대로 전송한다.
 
+## Field을 더할 때 (중요)
+
+AppSync subscription은 기록을 다시 읽지 않는다. **그 subscription을 깨운 mutation의
+selection set에 있던 field만** 구독자에게 전달하고, 나머지는 `null`로 채운다. 그래서
+`TeamRun`이나 `LogBatch`에 field를 더하거나 뺄 때는 세 곳을 함께 고친다.
+
+1. `cloud/schema.graphql` — type 정의
+2. `team_sync.py`의 `RUN_FIELDS` / `LOG_FIELDS` — mutation이 돌려받겠다고 고르는 목록
+3. `frontend/src/team/cloud.ts`의 `RUN_FIELDS` / `LOG_FIELDS` — 화면이 구독하는 목록
+
+2번이 3번보다 좁으면 팀 활동 화면이 `settings`·`summary`·`evaluation`·`lines`를 `null`로
+받아 모델명과 mAP가 `-`가 되고 실시간 로그가 멈춘다. `test_web_team_sync.py`가 이를 막는다.
+
 ## 데이터와 실패 동작
 
 - Cognito access token은 시작 요청에만 전달하며 파일이나 log에 저장하지 않는다.

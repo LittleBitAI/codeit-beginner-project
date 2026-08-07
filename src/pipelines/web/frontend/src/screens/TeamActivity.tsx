@@ -109,9 +109,29 @@ function groupsOf(runs: TeamRun[]): { group: Group; members: TeamRun[] }[] {
   );
 }
 
+/** 값이 없는 것과 "아직 안 왔다"를 구분합니다. 빈 객체는 후자로 봅니다. */
+function absent(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  return typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0;
+}
+
+/**
+ * AppSync subscription은 mutation이 고른 field만 실어 줍니다. 좁게 고른 publisher가
+ * 섞여 들어오면 settings·summary·evaluation이 빈 채로 도착하는데, 그걸 그대로
+ * 덮어쓰면 목록에서 모델명과 mAP가 통째로 `-`가 됩니다. 이미 아는 값은 지우지 않습니다.
+ */
 function mergeRuns(previous: TeamRun[], incoming: TeamRun): TeamRun[] {
+  const known = previous.find((run) => run.cloudRunId === incoming.cloudRunId);
+  let merged = incoming;
+  if (known) {
+    const kept: Record<string, unknown> = { ...known };
+    for (const [key, value] of Object.entries(incoming)) {
+      if (!absent(value)) kept[key] = value;
+    }
+    merged = kept as unknown as TeamRun;
+  }
   const without = previous.filter((run) => run.cloudRunId !== incoming.cloudRunId);
-  return [incoming, ...without].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return [merged, ...without].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 function mergeLines(previous: LogLine[], incoming: LogLine[]): LogLine[] {
@@ -196,6 +216,9 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
   const [runs, setRuns] = useState<TeamRun[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [lines, setLines] = useState<LogLine[]>([]);
+  // 학습 상태만 보고 "스트리밍 중"을 그리면, 구독이 끊겨 로그가 멈춰도 화면은
+  // 계속 연결된 척합니다. 실제 구독이 살아 있는지를 따로 들고 있습니다.
+  const [logsConnected, setLogsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const labels = useMemo(() => labelsOf(defaults), [defaults]);
   const grouped = useMemo(() => groupsOf(runs), [runs]);
@@ -229,6 +252,7 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
     let active = true;
     let cursor = 0;
     setLines([]);
+    setLogsConnected(true);
     const catchUp = async () => {
       try {
         const batches = await cloud.listLogs(teamId, selected.cloudRunId, cursor);
@@ -248,11 +272,14 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
         cursor = Math.max(cursor, batch.endSeq);
         setLines((previous) => mergeLines(previous, batch.lines));
       },
-      () => void catchUp(),
+      () => {
+        if (active) setLogsConnected(false);
+        void catchUp();
+      },
     );
-    void catchUp();
     return () => {
       active = false;
+      setLogsConnected(false);
       subscription.unsubscribe();
     };
   }, [teamId, selected?.cloudRunId]);
@@ -350,7 +377,11 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
                 </details>
               </Panel>
               <Panel title="실시간 로그" bodyStyle={{ padding: 0 }}>
-                <LogStream lines={lines} streaming={isActive(selected)} height={280} />
+                <LogStream
+                  lines={lines}
+                  streaming={isActive(selected) && logsConnected}
+                  height={280}
+                />
               </Panel>
               {!isActive(selected) && (
                 <Panel title="완료 결과와 산출물">

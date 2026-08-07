@@ -28,22 +28,35 @@ from .paths import web_state_dir
 __all__ = ["TeamSync", "TeamSyncConfig", "get_team_sync", "reset_team_sync"]
 
 
-CREATE_RUN = """
-mutation CreateRun($teamId: ID!, $input: CreateRunInput!) {
-  createRun(teamId: $teamId, input: $input) { cloudRunId status revision }
-}
+# AppSync subscription은 스스로 기록을 다시 읽지 않습니다. mutation이 고른 field를
+# 그대로 구독자에게 흘려보내고, 고르지 않은 field는 null로 채웁니다. 그래서 여기서
+# 좁게 고르면 팀 활동 화면이 settings·summary·evaluation·lines를 null로 받아
+# 모델명과 optimizer가 `-`가 되고 실시간 로그가 멈춥니다. 화면이 구독하는 field
+# 목록(frontend/src/team/cloud.ts의 RUN_FIELDS·LOG_FIELDS)과 같게 유지하세요.
+RUN_FIELDS = """
+  teamId cloudRunId localJobId runId actorSub actorName actorSource status settings dataInputs
+  progress summary artifacts evaluation message createdAt startedAt finishedAt heartbeatAt
+  revision
 """
 
-PUBLISH_UPDATE = """
-mutation PublishRunUpdate($teamId: ID!, $input: RunUpdateInput!) {
-  publishRunUpdate(teamId: $teamId, input: $input) { cloudRunId status revision }
-}
+LOG_FIELDS = "teamId cloudRunId startSeq endSeq lines createdAt"
+
+CREATE_RUN = f"""
+mutation CreateRun($teamId: ID!, $input: CreateRunInput!) {{
+  createRun(teamId: $teamId, input: $input) {{ {RUN_FIELDS} }}
+}}
 """
 
-PUBLISH_LOGS = """
-mutation PublishLogBatch($teamId: ID!, $input: LogBatchInput!) {
-  publishLogBatch(teamId: $teamId, input: $input) { cloudRunId startSeq endSeq }
-}
+PUBLISH_UPDATE = f"""
+mutation PublishRunUpdate($teamId: ID!, $input: RunUpdateInput!) {{
+  publishRunUpdate(teamId: $teamId, input: $input) {{ {RUN_FIELDS} }}
+}}
+"""
+
+PUBLISH_LOGS = f"""
+mutation PublishLogBatch($teamId: ID!, $input: LogBatchInput!) {{
+  publishLogBatch(teamId: $teamId, input: $input) {{ {LOG_FIELDS} }}
+}}
 """
 
 MAX_BATCH_LINES = 100
@@ -72,7 +85,13 @@ def _team_evaluation(public: dict[str, Any]) -> dict[str, Any]:
         "status": evaluation.get("status"),
         "finished_at": evaluation.get("finished_at"),
         "message": evaluation.get("message"),
-        "metrics": {key: values.get(key) for key in SHARED_METRIC_KEYS},
+        # 계산되지 않은 지표를 None으로 채워 보내면 화면은 "평가를 마쳤다"고 읽고
+        # `-`만 다섯 칸 그립니다. 실제로 나온 값만 싣습니다.
+        "metrics": {
+            key: values[key]
+            for key in SHARED_METRIC_KEYS
+            if values.get(key) is not None
+        },
         "registration_status": (
             registration.get("status") if isinstance(registration, dict) else None
         ),

@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from src.pipelines.web import team_sync
 from src.pipelines.web.errors import TeamSyncAuthError, TeamSyncError
 from src.pipelines.web.jobs.model import JobRecord
 from src.pipelines.web.team_sync import TeamSync, TeamSyncConfig
@@ -44,6 +45,42 @@ def enabled_config() -> TeamSyncConfig:
         user_pool_client_id="client",
         cognito_domain="example.auth.ap-northeast-2.amazoncognito.com",
     )
+
+
+def selection_of(query: str) -> set[str]:
+    """mutation이 돌려받겠다고 고른 field 이름만 뽑습니다."""
+
+    body = query[query.index("{", query.index("(")) :]
+    inner = body[body.index("{", 1) + 1 : body.rindex("}", 0, body.rindex("}"))]
+    return {word for word in inner.replace("\n", " ").split() if word not in {"{", "}"}}
+
+
+def test_run_mutations_select_every_field_the_team_screen_subscribes_to():
+    """AppSync subscription은 mutation이 고른 field만 그대로 전달합니다.
+
+    여기서 좁게 고르면 팀 화면의 onTeamRunChanged가 settings·summary·evaluation을
+    null로 받고, 모델명·optimizer·mAP가 전부 `-`가 됩니다.
+    """
+
+    expected = {
+        "teamId", "cloudRunId", "localJobId", "runId", "actorSub", "actorName",
+        "actorSource", "status", "settings", "dataInputs", "progress", "summary",
+        "artifacts", "evaluation", "message", "createdAt", "startedAt", "finishedAt",
+        "heartbeatAt", "revision",
+    }
+
+    for query in (team_sync.CREATE_RUN, team_sync.PUBLISH_UPDATE):
+        missing = expected - selection_of(query)
+        assert not missing, f"subscription이 null로 받게 될 field입니다: {sorted(missing)}"
+
+
+def test_log_mutation_selects_the_lines_the_team_screen_subscribes_to():
+    """lines를 고르지 않으면 onRunLogBatch가 빈 batch를 흘려 실시간 로그가 멈춥니다."""
+
+    expected = {"teamId", "cloudRunId", "startSeq", "endSeq", "lines", "createdAt"}
+
+    missing = expected - selection_of(team_sync.PUBLISH_LOGS)
+    assert not missing, f"subscription이 null로 받게 될 field입니다: {sorted(missing)}"
 
 
 def test_enabled_config_requires_every_non_secret_value():
@@ -187,7 +224,9 @@ def test_update_payload_carries_metrics_without_local_paths(isolated_repo, monke
     assert evaluation["status"] == "succeeded"
     assert evaluation["registration_status"] == "succeeded"
     assert evaluation["metrics"]["mAP"] == 0.7348
-    assert evaluation["metrics"]["mAP50"] is None
+    # evaluate가 계산하지 않은 지표를 None으로 채워 보내면 팀 화면은 "평가함"으로
+    # 판단하고 `-`만 다섯 칸 그립니다. 없는 값은 아예 싣지 않습니다.
+    assert "mAP50" not in evaluation["metrics"]
     encoded = json.dumps(evaluation)
     assert "C:\\Users\\person" not in encoded
     assert "very-secret" not in encoded
