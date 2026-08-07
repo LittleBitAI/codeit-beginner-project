@@ -160,6 +160,34 @@ test('로그인할 수 없는 환경에서는 왜 팀 기록이 안 보이는지
   expect(cloud.listRuns).not.toHaveBeenCalled();
 });
 
+test('진행 중·성공·실패를 구역으로 나누고 실패 구역은 접어 둔다', async () => {
+  // 예전에는 셋이 시간순으로 섞여 실패와 취소가 목록 여기저기에 흩어졌습니다.
+  cloud.listRuns.mockResolvedValue([
+    run('a', '1', 'failed'),
+    run('b', '2', 'succeeded'),
+    run('c', '3', 'running'),
+  ]);
+  render(<TeamActivity defaults={defaults} />);
+
+  expect(await screen.findByText('진행 중 1건')).toBeInTheDocument();
+  expect(screen.getByText('성공 1건')).toBeInTheDocument();
+  const closed = screen.getByText('실패·취소 1건').closest('details');
+  expect(closed).not.toBeNull();
+  expect(closed!.open).toBe(false);
+
+  // 실패가 가장 최근이어도 진행 중인 학습이 먼저 열립니다.
+  expect(screen.getByText('c · c-run')).toBeInTheDocument();
+});
+
+test('비어 있는 구역은 머리글조차 만들지 않는다', async () => {
+  cloud.listRuns.mockResolvedValue([run('a', '1', 'succeeded')]);
+  render(<TeamActivity defaults={defaults} />);
+
+  expect(await screen.findByText('성공 1건')).toBeInTheDocument();
+  expect(screen.queryByText(/진행 중/)).toBeNull();
+  expect(screen.queryByText(/실패·취소/)).toBeNull();
+});
+
 test('완료 결과를 JSON이 아니라 한글 label로 보여준다', async () => {
   cloud.listRuns.mockResolvedValue([run('a', '1', 'succeeded')]);
   render(<TeamActivity defaults={defaults} />);
