@@ -422,16 +422,30 @@ def test_every_category_appears_in_both_splits(split_ratio):
         assert category["validation_image_count"] >= 1
 
 
-def test_category_present_in_only_one_image_is_rejected():
+def test_a_single_group_category_does_not_stop_the_whole_preparation():
+    """그룹이 하나뿐인 category가 있어도 나머지 데이터는 그대로 씁니다.
+
+    실제 원본에는 조합이 하나뿐인 알약이 여러 종 있습니다. 예전에는 그 category
+    때문에 준비 전체가 실패해 나머지 데이터까지 못 쓰게 됐습니다.
+    """
+
     categories_by_image = {index: [(index - 1) % 2 + 1] for index in range(1, 11)}
     categories_by_image[5] = [1, 3]
 
     result, stored = prepare(prepare_config("8:2"), raw_objects(categories_by_image))
 
-    assert result["status"] == "error"
-    assert "서로 다른 그룹이 2개 이상 필요합니다" in result["message"]
-    assert "3" in result["message"]
-    assert not [uri for uri in stored if "/processed/" in uri]
+    assert result["status"] == "ok", result["message"]
+    assert result["summary"]["train_only_categories"] == [3]
+    # 조용히 넘어가지 않고, 지표를 잴 수 없는 category가 있다고 알립니다.
+    assert "train에만 둔 category 1종" in result["message"]
+    train = artifact_document(stored, result, "train_manifest_uri")
+    validation = artifact_document(stored, result, "validation_manifest_uri")
+    # 그룹이 하나뿐인 category 3은 train에만, 나머지는 양쪽에 있습니다.
+    assert {annotation["category_id"] for annotation in train["annotations"]} == {1, 2, 3}
+    assert {annotation["category_id"] for annotation in validation["annotations"]} == {
+        1,
+        2,
+    }
 
 
 # --- 산출물 형식 ------------------------------------------------------------
@@ -721,6 +735,8 @@ def test_dataset_summary_records_source_ratio_and_seed():
         "validation_ratio": 0.1,
         "validation_image_ratio": 0.1,
         "seed": 11,
+        # 모든 category가 그룹 2개 이상에 나타나므로 train 전용은 없습니다.
+        "train_only_categories": [],
     }
     assert summary_document["raw"]["listed_train_images"] == 40
     assert summary_document["raw"]["listed_test_images"] == 5
@@ -1356,8 +1372,12 @@ def test_category_coverage_wins_when_groups_cannot_hit_the_ratio():
     )
 
 
-def test_category_inside_a_single_group_is_rejected():
-    """한 그룹에만 있는 category는 양쪽 split에 넣을 수 없으므로 실패합니다."""
+def test_category_inside_a_single_group_lands_in_train_only_and_is_recorded():
+    """한 그룹에만 있는 category는 train에만 두고 요약에 남깁니다.
+
+    그룹을 통째로 옮기는 한 그 category를 양쪽 split에 넣을 방법이 없습니다.
+    그룹을 쪼개면 누수이므로, 대신 validation 지표를 포기하고 train에만 둡니다.
+    """
 
     # category 3은 첫 번째 조합 코드의 이미지에만 나타납니다.
     categories_by_image = {index: [(index - 1) % 2 + 1] for index in range(1, 41)}
@@ -1369,10 +1389,43 @@ def test_category_inside_a_single_group_is_rejected():
         grouped_raw_objects(categories_by_image=categories_by_image),
     )
 
-    assert result["status"] == "error"
-    assert "그룹" in result["message"]
-    assert "3" in result["message"]
-    assert not [uri for uri in stored if "/processed/" in uri]
+    assert result["status"] == "ok", result["message"]
+    validation = artifact_document(stored, result, "validation_manifest_uri")
+    assert 3 not in {annotation["category_id"] for annotation in validation["annotations"]}
+    train = artifact_document(stored, result, "train_manifest_uri")
+    assert 3 in {annotation["category_id"] for annotation in train["annotations"]}
+
+    split_document = artifact_document(stored, result, "dataset_summary_uri")["split"]
+    assert split_document["train_only_categories"] == [
+        {"id": 3, "name": "pill_c", "train_image_count": 2}
+    ]
+    summary_document = artifact_document(stored, result, "dataset_summary_uri")
+    by_id = {category["id"]: category for category in summary_document["categories"]}
+    assert by_id[3]["validation_image_count"] == 0
+    assert by_id[3]["train_image_count"] == 2
+
+
+def test_split_fails_when_every_group_holds_a_single_group_category():
+    """모든 그룹이 train에 묶이면 validation이 비므로 이유를 밝히고 실패합니다."""
+
+    images = [
+        {"id": image_id, "file_name": f"group{image_id}_0.jpg"} for image_id in (1, 2)
+    ]
+    annotations = [
+        {"id": image["id"], "image_id": image["id"], "category_id": image["id"]}
+        for image in images
+    ]
+
+    with pytest.raises(DataError) as error:
+        split_images(
+            images,
+            annotations,
+            validation_ratio=0.2,
+            seed=42,
+            group_rule=GroupRule(delimiter="_", tokens=1),
+        )
+
+    assert "validation에 넣을 수 있는 그룹이 없습니다" in str(error.value)
 
 
 def test_dataset_summary_records_the_split_method_and_group_counts():
