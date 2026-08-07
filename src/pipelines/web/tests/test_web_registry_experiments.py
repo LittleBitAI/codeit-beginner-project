@@ -227,6 +227,70 @@ def test_experiment_list_shows_nothing_for_index_without_training_key(client, mo
     }
 
 
+def test_experiment_list_exports_every_metric_and_loss(client, monkeypatch):
+    """새 index summary가 채워 준 지표 5개와 loss 4개를 그대로 내보냅니다."""
+
+    summary = registry_summary("full")
+    summary["metrics"] = {
+        "mAP": 0.31,
+        "mAP50": 0.55,
+        "mAP75": 0.28,
+        "precision50": 0.61,
+        "recall50": 0.47,
+    }
+    summary["losses"] = {
+        "best_epoch": 3,
+        "best_validation_loss": 0.42,
+        "final_train_loss": 0.31,
+        "final_validation_loss": 0.45,
+    }
+    summary["losses_source"] = "training_history"
+    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
+
+    listed = client.get("/api/train/experiments").json()["experiments"][0]
+
+    assert listed["metrics"] == {
+        "best_epoch": 3,
+        "best_validation_loss": 0.42,
+        "final_train_loss": 0.31,
+        "final_validation_loss": 0.45,
+        "map": 0.31,
+        "map50": 0.55,
+        "map75": 0.28,
+        "precision50": 0.61,
+        "recall50": 0.47,
+    }
+
+
+def test_experiment_metrics_stay_empty_without_losses_block(client, monkeypatch):
+    """losses가 없는 옛 summary는 값을 지어내지 않고 목록과 비교가 똑같이 비웁니다."""
+
+    summary = registry_summary("old-index")
+    assert "losses" not in summary
+    record = experiment_record("old-index")
+    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
+    monkeypatch.setattr(experiments, "read_experiment_record", lambda *a, **k: record)
+
+    listed = client.get("/api/train/experiments").json()["experiments"][0]
+    compared = client.post(
+        "/api/train/experiments/compare", json={"run_ids": ["old-index"]}
+    ).json()["experiments"][0]
+
+    assert listed["metrics"] == compared["metrics"]
+    for key in (
+        "best_epoch",
+        "best_validation_loss",
+        "final_train_loss",
+        "final_validation_loss",
+        "map75",
+        "precision50",
+        "recall50",
+    ):
+        assert listed["metrics"][key] is None
+    # 옛 summary에도 있던 지표는 그대로 남습니다.
+    assert listed["metrics"]["map"] == 0.31
+
+
 def test_experiment_list_masks_paths_like_compare_does(client, monkeypatch):
     """목록도 비교와 같은 redact를 거쳐야 한쪽으로만 경로가 새지 않습니다."""
 

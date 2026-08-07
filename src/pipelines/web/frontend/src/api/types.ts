@@ -209,11 +209,17 @@ export interface ExperimentSummary {
     num_workers: number | null;
     seed: number | null;
   };
+  /** 학습이 남긴 loss와 evaluate가 낸 지표. 기록에 없으면 null이고 화면은 - 로 둡니다. */
   metrics: {
     best_epoch: number | null;
     best_validation_loss: number | null;
+    final_train_loss: number | null;
+    final_validation_loss: number | null;
     map: number | null;
     map50: number | null;
+    map75: number | null;
+    precision50: number | null;
+    recall50: number | null;
   };
 }
 

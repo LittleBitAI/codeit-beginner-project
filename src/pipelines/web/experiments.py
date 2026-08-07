@@ -214,11 +214,36 @@ def _index_blocks(summary: Mapping[str, Any]) -> dict[str, Any]:
     return _training_blocks(settings, fallback_seed)
 
 
+def _metrics_block(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """Index summary 하나에서 화면이 비교할 결과값을 모두 꺼냅니다.
+
+    지표는 registry가 evaluate의 이름(``mAP``, ``mAP50``, ...)으로 적어 두므로 화면이
+    이미 쓰는 소문자 이름으로만 바꿔 담습니다. loss 4개는 registry가 나중에 붙인
+    ``losses`` 블록에 있고, **그 블록이 없는 옛 summary도 그대로 읽힙니다.** 그때는
+    호환 기본값을 지어내지 않고 전부 ``None``으로 두어 화면에 ``-``가 나오게 합니다.
+    목록과 비교가 같은 실험에 다른 결과를 보이지 않도록 두 경로가 이 함수만 씁니다.
+    """
+
+    metrics = summary.get("metrics")
+    metric_values = metrics if isinstance(metrics, Mapping) else {}
+    losses = summary.get("losses")
+    loss_values = losses if isinstance(losses, Mapping) else {}
+    return {
+        "best_epoch": _integer(loss_values.get("best_epoch")),
+        "best_validation_loss": _number(loss_values.get("best_validation_loss")),
+        "final_train_loss": _number(loss_values.get("final_train_loss")),
+        "final_validation_loss": _number(loss_values.get("final_validation_loss")),
+        "map": _number(metric_values.get("mAP")),
+        "map50": _number(metric_values.get("mAP50")),
+        "map75": _number(metric_values.get("mAP75")),
+        "precision50": _number(metric_values.get("precision50")),
+        "recall50": _number(metric_values.get("recall50")),
+    }
+
+
 def _summary_base(summary: Mapping[str, Any]) -> dict[str, Any]:
     run_id = _text(summary.get("run_id")) or ""
     created_at = _text(summary.get("created_at")) or ""
-    metrics = summary.get("metrics")
-    metric_values = metrics if isinstance(metrics, Mapping) else {}
     blocks = _index_blocks(summary)
     return {
         "experiment_id": run_id,
@@ -233,12 +258,7 @@ def _summary_base(summary: Mapping[str, Any]) -> dict[str, Any]:
         "model": blocks["model"],
         "optimizer": blocks["optimizer"],
         "training": blocks["training"],
-        "metrics": {
-            "best_epoch": None,
-            "best_validation_loss": None,
-            "map": _number(metric_values.get("mAP")),
-            "map50": _number(metric_values.get("mAP50")),
-        },
+        "metrics": _metrics_block(summary),
     }
 
 
