@@ -15,7 +15,12 @@ import {
 import { IconShield } from '../components/Icon';
 import { color, font, radius } from '../design/tokens';
 import { dataMatchesSource } from '../lib/dataSource';
-import { messageFor, toPayload } from '../lib/draftPayload';
+import {
+  EARLY_STOPPING_FIELDS,
+  isEarlyStoppingOn,
+  messageFor,
+  toPayload,
+} from '../lib/draftPayload';
 import { resolveTrainCapability } from '../lib/trainCapabilities';
 import { useDraft } from '../state/DraftContext';
 
@@ -48,6 +53,9 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
       'beta2',
       'epsilon',
       'num_workers',
+      'early_stopping',
+      'early_stopping_patience',
+      'early_stopping_min_delta',
     ],
   },
   { key: 'output', label: '출력', fields: ['output_dir', 'output_prefix'] },
@@ -114,6 +122,7 @@ export function NewExperiment({
 
   const capability = resolveTrainCapability(defaults);
   const selectedOptimizer = draft.train.optimizer || capability.optimizer.default;
+  const earlyStoppingOn = isEarlyStoppingOn(draft.train, fields);
   const activeTab = TABS.find((item) => item.key === tab) ?? TABS[0]!;
   const tabHasError = (item: (typeof TABS)[number]) =>
     item.fields.some((name) => messageFor(errors, `train.${name}`) !== undefined);
@@ -208,6 +217,9 @@ export function NewExperiment({
                   return null;
                 }
                 if (selectedOptimizer !== 'SGD' && name === 'momentum') return null;
+                // 조기 종료를 끄면 관련 숫자 칸도 감춥니다. 보이면 그 값이 학습에
+                // 쓰이는 것처럼 읽히고, 서버도 쓰지 않는 값이라며 거부합니다.
+                if (!earlyStoppingOn && EARLY_STOPPING_FIELDS.includes(name)) return null;
                 const spec = fields.find((item) => item.name === name);
                 if (!spec) return null;
                 const optimizerDefault = spec.defaults_by_optimizer?.[selectedOptimizer];

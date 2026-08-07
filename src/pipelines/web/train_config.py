@@ -78,6 +78,12 @@ OPTIONAL_DATA_ARTIFACT_KEYS = ("test_manifest_uri",)
 DEFAULT_OUTPUT_DIR = "artifacts/experiments/completed"
 DEFAULT_OUTPUT_PREFIX = "experiments/completed"
 
+# train은 patience에 기본값이 없습니다(있으면 필수). 화면이 안내하는 출발값입니다.
+DEFAULT_EARLY_STOPPING_PATIENCE = 5
+# train의 기본값과 같아야 합니다. test_web_train_contract.py가 대조합니다.
+DEFAULT_EARLY_STOPPING_MIN_DELTA = 0.0
+_EARLY_STOPPING_FIELDS = ("early_stopping_patience", "early_stopping_min_delta")
+
 # (이름, 기본값, 최소값)
 _INTEGER_FIELDS = (
     ("seed", 42, 0),
@@ -125,6 +131,18 @@ _FIELD_LABELS = {
     "beta1": ("Beta 1", "Adam 계열의 1차 모멘트 감쇠율입니다."),
     "beta2": ("Beta 2", "Adam 계열의 2차 모멘트 감쇠율입니다."),
     "epsilon": ("Epsilon", "Adam 계열 계산에서 0으로 나누는 것을 막는 값입니다."),
+    "early_stopping": (
+        "조기 종료",
+        "검증 손실이 나아지지 않으면 남은 epoch를 채우지 않고 학습을 끝냅니다.",
+    ),
+    "early_stopping_patience": (
+        "Patience",
+        "몇 epoch 연속으로 나아지지 않으면 끝낼지 정합니다. 1 이상의 정수입니다.",
+    ),
+    "early_stopping_min_delta": (
+        "Min delta",
+        "이만큼은 낮아져야 나아진 것으로 봅니다. 0이면 조금이라도 낮아지면 됩니다.",
+    ),
     "device": ("Device", "학습을 CPU에서 할지 CUDA GPU에서 할지 정합니다."),
     "pretrained": ("Pretrained 가중치", "COCO로 미리 학습된 가중치에서 시작할지 정합니다."),
     "output_dir": ("Local 출력 directory", "저장소 기준 상대 경로여야 합니다."),
@@ -238,6 +256,32 @@ def field_specs() -> list[dict[str, Any]]:
             "hint": hint,
         }
     )
+    label, hint = _FIELD_LABELS["early_stopping"]
+    specs.append(
+        {"name": "early_stopping", "type": "boolean", "default": False, "label": label, "hint": hint}
+    )
+    label, hint = _FIELD_LABELS["early_stopping_patience"]
+    specs.append(
+        {
+            "name": "early_stopping_patience",
+            "type": "integer",
+            "default": DEFAULT_EARLY_STOPPING_PATIENCE,
+            "minimum": 1,
+            "label": label,
+            "hint": hint,
+        }
+    )
+    label, hint = _FIELD_LABELS["early_stopping_min_delta"]
+    specs.append(
+        {
+            "name": "early_stopping_min_delta",
+            "type": "number",
+            "default": DEFAULT_EARLY_STOPPING_MIN_DELTA,
+            "minimum": 0.0,
+            "label": label,
+            "hint": hint,
+        }
+    )
     label, hint = _FIELD_LABELS["pretrained"]
     # 화면에서 시작하는 학습은 사전학습 가중치를 기본으로 씁니다. 아래
     # normalize_train_settings의 fallback은 train 기본값(False) 그대로 두어야 합니다.
@@ -306,6 +350,39 @@ def _normalize_probability(
         collect(errors, f"train.{name}", "0 이상 1 미만의 유한한 숫자여야 합니다.")
         return default
     return value
+
+
+def _normalize_early_stopping(
+    raw: Any, errors: list[FieldError]
+) -> dict[str, float | int] | None:
+    """평평한 세 칸을 train이 받는 object 하나로 접습니다.
+
+    검증 규칙은 train의 ``_early_stopping``(pipeline.py)을 그대로 옮긴 것입니다.
+    꺼져 있으면 key 자체를 만들지 않아, 조기 종료를 쓰지 않는 사람의 config는
+    이 기능이 생기기 전과 한 글자도 달라지지 않습니다.
+    """
+
+    enabled = raw.get("early_stopping", False)
+    if not isinstance(enabled, bool):
+        collect(errors, "train.early_stopping", "true 또는 false여야 합니다.")
+        enabled = False
+
+    if not enabled:
+        # 끈 채로 값을 보내면 화면과 실제 학습이 달라 보입니다. optimizer에서 쓰지
+        # 않는 값을 막는 것과 같은 이유입니다.
+        for name in sorted(set(_EARLY_STOPPING_FIELDS) & set(raw)):
+            collect(errors, f"train.{name}", "조기 종료를 사용할 때만 쓰는 값입니다.")
+        return None
+
+    # train은 patience를 필수로 받지만 그건 train이 받는 object의 규칙입니다. 다른 수치
+    # 칸과 똑같이 비어 있으면 화면이 안내한 기본값을 채워 완성된 object를 보냅니다.
+    patience = _normalize_integer(
+        raw, "early_stopping_patience", DEFAULT_EARLY_STOPPING_PATIENCE, 1, errors
+    )
+    min_delta = _normalize_float(
+        raw, "early_stopping_min_delta", DEFAULT_EARLY_STOPPING_MIN_DELTA, 0.0, errors
+    )
+    return {"patience": patience, "min_delta": min_delta}
 
 
 def normalize_train_settings(raw: Any) -> dict[str, Any]:
@@ -400,6 +477,7 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         "augmentation": augmentation,
         "device": device,
         "pretrained": pretrained,
+        "early_stopping": _normalize_early_stopping(raw, errors),
         "output_dir": output_dir,
         "output_prefix": output_prefix.strip("/"),
     }
@@ -439,6 +517,12 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         "weight_decay": settings["weight_decay"],
         "device": settings["device"],
         "pretrained": settings["pretrained"],
+        # 끄면 key 자체를 넣지 않습니다. train은 없으면 전체 epoch를 그대로 돕니다.
+        **(
+            {"early_stopping": settings["early_stopping"]}
+            if settings["early_stopping"] is not None
+            else {}
+        ),
         "output_dir": settings["output_dir"],
         "output_prefix": settings["output_prefix"],
         **(

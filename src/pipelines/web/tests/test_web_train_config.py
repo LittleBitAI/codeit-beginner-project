@@ -79,6 +79,78 @@ def test_output_prefix_slashes_are_stripped():
     assert normalize_train_settings({"output_prefix": "/a/b/"})["output_prefix"] == "a/b"
 
 
+# --- 조기 종료 --------------------------------------------------------------
+
+
+def test_early_stopping_is_off_by_default_and_leaves_the_config_untouched():
+    """끄면 key 자체가 없어야 train이 예전과 똑같이 전체 epoch를 돕니다."""
+
+    assert "early_stopping" not in normalize_train_settings({})
+
+
+def test_early_stopping_reaches_train_as_the_object_it_expects():
+    settings = normalize_train_settings(
+        {"early_stopping": True, "early_stopping_patience": 5, "early_stopping_min_delta": 0.01}
+    )
+
+    assert settings["early_stopping"] == {"patience": 5, "min_delta": 0.01}
+
+
+def test_early_stopping_patience_falls_back_to_the_default_the_form_shows():
+    """칸을 비우면 화면이 "기본값 5"라고 안내한 그 값이 그대로 쓰여야 합니다.
+
+    train은 patience를 필수로 받지만 그것은 train이 받는 object의 규칙입니다.
+    다른 수치 칸과 마찬가지로 web이 자기 기본값을 채워 완성된 object를 보냅니다.
+    여기서 오류를 내면 스위치를 켜자마자 저장이 막혀 아무것도 할 수 없습니다.
+    """
+
+    spec = next(
+        item for item in train_config.field_specs() if item["name"] == "early_stopping_patience"
+    )
+    settings = normalize_train_settings({"early_stopping": True})
+
+    assert settings["early_stopping"]["patience"] == spec["default"]
+
+
+@pytest.mark.parametrize("patience", (0, -1, True, "5", 2.5, None))
+def test_rejects_bad_patience(patience):
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings({"early_stopping": True, "early_stopping_patience": patience})
+
+    assert "train.early_stopping_patience" in fields_of(error.value)
+
+
+@pytest.mark.parametrize("min_delta", (-0.1, True, "0.1", float("inf"), float("nan")))
+def test_rejects_bad_min_delta(min_delta):
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings(
+            {
+                "early_stopping": True,
+                "early_stopping_patience": 5,
+                "early_stopping_min_delta": min_delta,
+            }
+        )
+
+    assert "train.early_stopping_min_delta" in fields_of(error.value)
+
+
+@pytest.mark.parametrize("name", ("early_stopping_patience", "early_stopping_min_delta"))
+def test_rejects_settings_that_do_nothing_while_early_stopping_is_off(name):
+    """끈 채로 값을 보내면 화면과 실제 학습이 달라 보입니다. SGD의 beta처럼 막습니다."""
+
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings({name: 5})
+
+    assert f"train.{name}" in fields_of(error.value)
+
+
+def test_rejects_a_non_boolean_early_stopping_switch():
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings({"early_stopping": "yes"})
+
+    assert "train.early_stopping" in fields_of(error.value)
+
+
 # --- 잘못된 값 --------------------------------------------------------------
 
 

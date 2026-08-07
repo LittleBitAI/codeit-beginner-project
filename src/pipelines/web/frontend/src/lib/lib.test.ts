@@ -90,6 +90,29 @@ describe('toPayload', () => {
     expect(toPayload({ train: { pretrained: 'false' }, data: {} }, FIELDS).train.pretrained).toBe(false);
   });
 
+  it('조기 종료를 끄면 patience와 min delta를 보내지 않는다', () => {
+    // 화면에서 숨긴 값을 payload에 남기면 서버가 "쓰지 않는 값"이라고 거부합니다.
+    const fields: FieldSpec[] = [
+      ...FIELDS,
+      { name: 'early_stopping', type: 'boolean', default: false, label: '조기 종료', hint: '' },
+      { name: 'early_stopping_patience', type: 'integer', default: 5, label: 'Patience', hint: '' },
+      { name: 'early_stopping_min_delta', type: 'number', default: 0, label: 'Min delta', hint: '' },
+    ];
+
+    const off = toPayload(
+      { train: { early_stopping: 'false', early_stopping_patience: '5' }, data: {} },
+      fields,
+    );
+    expect(off.train.early_stopping_patience).toBeUndefined();
+    expect(off.train.early_stopping_min_delta).toBeUndefined();
+
+    const on = toPayload(
+      { train: { early_stopping: 'true', early_stopping_patience: '5' }, data: {} },
+      fields,
+    );
+    expect(on.train.early_stopping_patience).toBe(5);
+  });
+
   it('data 입력의 공백을 정리하고 빈 값은 뺀다', () => {
     const payload = toPayload(
       { train: {}, data: { class_map_uri: '  artifacts/a.json ', dataset_summary_uri: '' } },
@@ -169,6 +192,20 @@ describe('describeRun', () => {
 
   it('설정이 없으면 지어내지 않는다', () => {
     expect(describeRun(null)).toBe('설정이 아직 준비되지 않았습니다.');
+  });
+
+  it('조기 종료를 쓰면 언제 멈추는지도 말한다', () => {
+    const text = describeRun({
+      ...config,
+      train: { ...config.train, early_stopping: { patience: 5, min_delta: 0.01 } },
+    });
+
+    expect(text).toContain('5 epoch');
+    expect(text).toContain('0.01');
+  });
+
+  it('조기 종료를 쓰지 않으면 그 말을 꺼내지 않는다', () => {
+    expect(describeRun(config)).not.toContain('조기 종료');
   });
 });
 

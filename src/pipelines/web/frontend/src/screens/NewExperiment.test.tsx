@@ -86,6 +86,34 @@ describe('NewExperiment · Train capability 호환', () => {
     expect(screen.getByLabelText('Pretrained 가중치')).toHaveValue('true');
   });
 
+  it('조기 종료를 켰을 때만 patience와 min delta를 묻는다', () => {
+    // 끈 채로 숫자 칸을 보여 주면 그 값이 학습에 쓰이는 것처럼 읽힙니다.
+    const defaults: Defaults = {
+      ...LEGACY_DEFAULTS,
+      fields: [
+        { name: 'early_stopping', type: 'boolean', default: false, label: '조기 종료', hint: '' },
+        { name: 'early_stopping_patience', type: 'integer', default: 5, label: 'Patience', hint: '' },
+        { name: 'early_stopping_min_delta', type: 'number', default: 0, label: 'Min delta', hint: '' },
+      ],
+    };
+    render(
+      <MemoryRouter>
+        <DraftProvider>
+          <NewExperiment defaults={defaults} source={null} />
+        </DraftProvider>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByText('하이퍼파라미터'));
+    expect(screen.queryByLabelText('Patience')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Min delta')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('조기 종료'), { target: { value: 'true' } });
+
+    expect(screen.getByLabelText('Patience')).toBeInTheDocument();
+    expect(screen.getByLabelText('Min delta')).toBeInTheDocument();
+  });
+
   it('모델과 optimizer를 고르고 profile에 맞는 수치만 보여 준다', () => {
     const defaults: Defaults = {
       ...LEGACY_DEFAULTS,
