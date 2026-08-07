@@ -79,8 +79,8 @@ epoch와 조기 종료 여부를 표시한다. Event나 새 필드가 없는 옛
 ## 구현 순서와 소유권
 
 1. 이 제안을 Train과 Web 담당자가 합의한다.
-2. Web 담당자가 optional config, 동적 loss mapping, 완료 event 소비를 먼저 구현한다.
-3. Web 변경이 main에 합쳐진 뒤 Train 담당자가 producer를 구현한다.
+2. Train 담당자가 합의한 optional config, 동적 loss mapping, 완료 event를 구현한다.
+3. Web 담당자가 공개된 schema에 맞춰 config 입력과 진행 event 소비를 구현한다.
 
 Train 담당자는 `src/pipelines/web/`을 수정하지 않는다. Web 담당자는 Train 내부를
 import하지 않고 현재처럼 공개 CLI와 progress JSON Lines만 소비한다.
