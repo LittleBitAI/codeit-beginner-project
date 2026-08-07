@@ -239,8 +239,12 @@ def field_specs() -> list[dict[str, Any]]:
         }
     )
     label, hint = _FIELD_LABELS["pretrained"]
+    # 화면에서 시작하는 학습은 사전학습 가중치를 기본으로 씁니다. 아래
+    # normalize_train_settings의 fallback은 train 기본값(False) 그대로 두어야 합니다.
+    # 그쪽은 다른 소유 영역이고 test_web_train_contract.py가 두 값을 대조합니다.
+    # 화면은 이 spec을 보고 pretrained를 명시적으로 실어 보냅니다.
     specs.append(
-        {"name": "pretrained", "type": "boolean", "default": False, "label": label, "hint": hint}
+        {"name": "pretrained", "type": "boolean", "default": True, "label": label, "hint": hint}
     )
     for name, default in (
         ("output_dir", DEFAULT_OUTPUT_DIR),

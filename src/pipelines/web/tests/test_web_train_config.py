@@ -48,6 +48,19 @@ def test_defaults_match_train_pipeline_defaults():
     assert settings["output_prefix"] == "experiments/completed"
 
 
+def test_form_starts_with_pretrained_turned_on():
+    """화면에서 시작하는 학습은 COCO 사전학습 가중치를 기본으로 씁니다.
+
+    train 파이프라인의 기본값은 그대로 False입니다. 그쪽은 다른 소유 영역이고
+    test_web_train_contract.py가 두 값을 대조합니다. 화면은 이 spec을 보고 폼을
+    채우고 pretrained를 명시적으로 실어 보내므로, GUI 학습만 기본이 바뀝니다.
+    """
+
+    spec = next(item for item in train_config.field_specs() if item["name"] == "pretrained")
+
+    assert spec["default"] is True
+
+
 def test_generated_run_id_matches_train_pattern(monkeypatch):
     from datetime import datetime, timezone
 

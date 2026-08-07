@@ -445,9 +445,12 @@ function TrainField({
   }
 
   if (spec.type === 'boolean') {
+    // 서버가 알려 준 기본값으로 시작합니다. 'false'로 못박아 두면 기본값을 바꿔도
+    // 화면이 따라가지 않습니다.
+    const selected = value || String(spec.default === true);
     return (
       <Field label={spec.label} hint={spec.hint} error={error}>
-        <select value={value || 'false'} onChange={(event) => onChange(event.target.value)} style={style}>
+        <select value={selected} onChange={(event) => onChange(event.target.value)} style={style}>
           <option value="false">사용하지 않음</option>
           <option value="true">사용함</option>
         </select>
