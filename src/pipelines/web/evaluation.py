@@ -306,10 +306,14 @@ class EvaluationRunner:
     def status(self, job_id: str | None = None) -> dict[str, Any]:
         with self._lock:
             state = dict(self._state)
-        if job_id is not None and state.get("job_id") not in (None, job_id):
-            # 다른 학습의 결과를 그 학습의 것인 양 보여 주면 안 됩니다.
-            return {"status": STATUS_IDLE, "job_id": job_id, "busy_with": state.get("job_id")}
-        return state
+        if job_id is None or state.get("job_id") in (None, job_id):
+            return state
+        # 다른 학습의 결과를 그 학습의 것인 양 보여 주면 안 됩니다.
+        other: dict[str, Any] = {"status": STATUS_IDLE, "job_id": job_id}
+        if state.get("status") == STATUS_RUNNING:
+            # 한 번에 하나만 돌 수 있으므로, 실제로 돌고 있을 때만 잠급니다.
+            other["busy_with"] = state.get("job_id")
+        return other
 
     def status_for(self, record: JobRecord) -> dict[str, Any]:
         """메모리에 없으면 JobRecord에 영속화된 마지막 평가 상태를 돌려줍니다."""

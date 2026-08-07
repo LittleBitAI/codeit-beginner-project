@@ -546,7 +546,8 @@ def test_status_does_not_show_another_jobs_result(runner_slot, monkeypatch):
     other = runner_slot.status("c" * 32)
 
     assert other["status"] == "idle"
-    assert other["busy_with"] == "a" * 32
+    # 끝난 평가가 다른 학습의 평가 버튼을 계속 잠그면 안 됩니다.
+    assert "busy_with" not in other
     assert runner_slot.status("a" * 32)["status"] == "succeeded"
 
 
