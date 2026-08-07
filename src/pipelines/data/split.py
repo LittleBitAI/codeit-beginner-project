@@ -8,16 +8,17 @@
 
 한 이미지에 여러 category가 함께 있을 수 있으므로(다중 라벨) 단순 무작위 분할은
 희귀 category를 한쪽 split에서 통째로 빠뜨릴 수 있습니다. 그래서 희귀 category부터
-validation에 배치해 **그룹이 2개 이상인 category가 train과 validation 양쪽에 반드시
-나타나게** 한 뒤, 남은 자리를 목표 비율에 가장 가깝게 채웁니다. 그룹은 통째로
+validation에 배치해 **validation에 갈 수 있는 category가 train과 validation 양쪽에
+반드시 나타나게** 한 뒤, 남은 자리를 목표 비율에 가장 가깝게 채웁니다. 그룹은 통째로
 움직이므로 validation 이미지 수가 목표에 정확히 맞지 않을 수 있고, 그때는 목표에
 가장 가까운 지점에서 멈춥니다.
 
-등장하는 그룹이 **하나뿐인 category**는 그룹을 통째로 옮기는 한 양쪽 split에 나타날
-방법이 원리적으로 없습니다. 그래서 그런 category는 실행을 실패시키는 대신 **train
-쪽에만** 두고(`train_only_category_ids`), 그 category를 가진 그룹은 validation으로
-보내지 않습니다. 학습에는 쓰지만 validation 지표는 잴 수 없는 category라는 뜻이므로,
-결과에 목록으로 남겨 요약에서 확인할 수 있게 합니다.
+그룹을 쪼개지 않고는 **validation에 갈 수 없는 category**는 그룹을 통째로 옮기는 한
+양쪽 split에 나타날 방법이 원리적으로 없습니다. 등장하는 그룹이 하나뿐인 category가
+그렇고, 그런 category를 품은 그룹은 validation 후보에서 빠지므로 자기 그룹이 전부
+그런 그룹인 category도 마찬가지입니다. 그래서 그런 category는 실행을 실패시키는 대신
+**train 쪽에만** 둡니다(`train_only_category_ids`). 학습에는 쓰지만 validation 지표는
+잴 수 없는 category라는 뜻이므로, 결과에 목록으로 남겨 요약에서 확인할 수 있게 합니다.
 
 같은 이미지 목록, 같은 seed, 같은 비율, 같은 그룹 규칙이면 언제나 같은 결과가
 나옵니다. 무작위는 seed를 고정한 `random.Random`의 순서 섞기 한 번에만 쓰이고,
@@ -77,7 +78,8 @@ class SplitResult:
     validation_image_ids: set[int]
     train_category_counts: dict[int, int]
     validation_category_counts: dict[int, int]
-    # 그룹이 하나뿐이라 train에만 둔 category id입니다. 오름차순입니다.
+    # 그룹을 쪼개지 않고는 validation에 갈 수 없어 train에만 둔 category id입니다.
+    # 오름차순입니다.
     train_only_category_ids: tuple[int, ...]
     group_count: int
     train_group_count: int
@@ -150,23 +152,38 @@ def split_images(
         for name in group_names
         for category_id in categories_by_group[name]
     )
-    # 그룹이 하나뿐인 category는 그룹을 쪼개지 않는 한 양쪽 split에 나타날 수
-    # 없습니다. 예전에는 여기서 준비 전체를 실패시켰지만, 그러면 그런 category
-    # 몇 종 때문에 나머지 데이터까지 쓸 수 없게 됩니다. 그래서 이제는 그 category만
-    # train 쪽에 두고 나머지는 평소대로 나눕니다. 아래 `keeps_train_coverage`가
-    # 그 category를 가진 그룹을 validation 후보에서 자동으로 뺍니다
-    # (총 그룹이 1개면 `1 <= 0`이 거짓이라 후보가 되지 않습니다).
-    # 이미지 단위 분할에서는 이미지 한 장이 곧 그룹 하나입니다.
+    groups_by_category: defaultdict[int, list[str]] = defaultdict(list)
+    for name in group_names:
+        for category_id in categories_by_group[name]:
+            groups_by_category[category_id].append(name)
+    # 그룹이 하나뿐인 category를 품은 그룹은 validation에 갈 수 없습니다. 그 그룹을
+    # 옮기면 category가 train에서 통째로 사라지기 때문이며, 아래
+    # `keeps_train_coverage`가 `1 <= 0`으로 그 그룹을 후보에서 영구히 뺍니다.
+    blocked_groups = {
+        name
+        for name in group_names
+        if any(
+            category_totals[category_id] < 2
+            for category_id in categories_by_group[name]
+        )
+    }
+    # 그룹을 쪼개지 않는 한 양쪽 split에 나타날 방법이 없는 category입니다. 그룹이
+    # 하나뿐인 경우가 대표적이지만, 그룹이 2개 이상이어도 그 그룹이 전부 위에서
+    # 막힌 그룹이면 마찬가지로 validation에 갈 수 없습니다. 예전에는 그런 category
+    # 때문에 준비 전체가 실패했지만, 그러면 몇 종 때문에 나머지 데이터까지 쓸 수
+    # 없게 됩니다. 그래서 이제는 그 category만 train 쪽에 두고 나머지는 평소대로
+    # 나눕니다. 이미지 단위 분할에서는 이미지 한 장이 곧 그룹 하나입니다.
     train_only_categories = tuple(
         sorted(
-            category_id for category_id, total in category_totals.items() if total < 2
+            category_id
+            for category_id, total in category_totals.items()
+            if total < 2
+            or all(name in blocked_groups for name in groups_by_category[category_id])
         )
     )
     # 양쪽 split에 반드시 나타나야 하는 category입니다. 이후 보장·분포 계산은
     # 모두 이 집합만 대상으로 합니다.
-    coverable = {
-        category_id for category_id, total in category_totals.items() if total >= 2
-    }
+    coverable = set(category_totals) - set(train_only_categories)
 
     target_size = min(max(1, round(len(image_ids) * validation_ratio)), len(image_ids) - 1)
     # 트레이드오프: 그룹을 통째로 옮기므로 이미지 단위 분할처럼 class 분포와
@@ -176,7 +193,7 @@ def split_images(
     # 1. 누수 방지가 먼저입니다. 같은 그룹은 절대 나누지 않습니다.
     # 2. 그다음이 category 보장입니다. 한 category라도 한쪽 split에서 빠지면
     #    그 category의 지표를 아예 잴 수 없으므로, 채우기보다 앞에 둡니다.
-    #    단 그룹이 하나뿐이라 애초에 양쪽에 둘 수 없는 category는 train 전용으로
+    #    단 그룹을 쪼개지 않고는 애초에 양쪽에 둘 수 없는 category는 train 전용으로
     #    빼고 계산합니다(위 `train_only_categories`).
     # 3. 그다음이 class 분포입니다. 채우기 단계에서 category별 목표 대비 상대
     #    오차의 제곱합이 가장 작은 그룹을 고릅니다.
@@ -326,11 +343,11 @@ def split_images(
             raise DatasetPreparationError(
                 "train과 validation split은 모두 비어 있으면 안 됩니다."
             )
-        # 모든 그룹이 train 전용 category를 하나씩 갖고 있으면 validation으로 옮길
+        # 모든 그룹이 그룹 1개짜리 category를 하나씩 갖고 있으면 validation으로 옮길
         # 수 있는 그룹이 남지 않습니다. 이때는 데이터 자체로 분할이 불가능합니다.
         raise DatasetPreparationError(
             "validation에 넣을 수 있는 그룹이 없습니다. 모든 그룹이 그룹 1개짜리 "
-            "category를 갖고 있어 train에 남아야 합니다. 그룹이 1개뿐인 category id: "
+            "category를 갖고 있어 train에 남아야 합니다. train 전용 category id: "
             + ", ".join(str(category_id) for category_id in train_only_categories)
         )
 
@@ -351,11 +368,11 @@ def split_images(
     )
     for category_id, total in image_totals.items():
         if category_id in train_only_categories:
-            # 그룹이 하나뿐인 category는 train에만 있어야 합니다. validation에
+            # train 전용 category는 train에만 있어야 합니다. validation에
             # 나타났다면 그룹이 쪼개졌다는 뜻이므로 누수입니다.
             if train_counts[category_id] < 1 or image_validation_counts[category_id]:
                 raise DatasetPreparationError(
-                    f"그룹이 1개뿐인 category {category_id}는 train에만 있어야 합니다."
+                    f"train 전용 category {category_id}는 train에만 있어야 합니다."
                 )
         elif train_counts[category_id] < 1 or image_validation_counts[category_id] < 1:
             raise DatasetPreparationError(

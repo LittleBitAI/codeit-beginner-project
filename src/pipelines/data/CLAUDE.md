@@ -35,7 +35,7 @@ Prepared artifacts land under the processed dataset prefix, in a directory whose
 
 The split unit is a **group**, not one image: the source shoots each pill combination repeatedly at different angles, and sibling shots split apart inflate validation. The group name is the file name up to the first `_` — the combination code (`GROUP_KEY_DELIMITER`, `GROUP_KEY_TOKENS`) — derived from the name, never listed per file, and a group lands in one split only. A name that does not fit the rule (no delimiter, empty prefix) becomes its own one-image group instead of failing the run.
 
-Because a group moves whole, the ratio comes last: leakage, then category coverage, then class distribution, then the target count. A category in only one group cannot reach both splits without splitting it, so it stays in train, listed in `split.train_only_categories` (`schema_version` `1.3`). Covering the rest may push validation past the target; the fill step stops at the closest reachable point, and `split.validation_image_ratio` records what the run produced. `split.py` states the trade-off in full.
+Because a group moves whole, the ratio comes last: leakage, then category coverage, then class distribution, then the target count. A category that cannot reach validation without splitting a group — one group, or only groups blocked by one — stays in train, listed in `split.train_only_categories` (`schema_version` `1.3`). Covering the rest may push validation past the target; the fill step stops at the closest reachable point, and `split.validation_image_ratio` records what the run produced. `split.py` states the trade-off in full.
 
 `data.split_method` is `"group"` (default) or `"image"` (the previous image-level split), and it is part of the directory name: `v1-seed42-8020-group/` beside the untouched `v1-seed42-8020/`. `split.method` and `split.grouping` (rule, group counts) say which data a model was trained on; adding them made `schema_version` `1.2`.
 
@@ -56,6 +56,6 @@ Tests run against a fake storage; they need no AWS.
 
 - **Leakage is the one unrecoverable mistake here.** Competition test images may be read only to build the test manifest; they never enter train/validation, and test annotations are never read. Never relax this to make a run succeed.
 - `split_ratio` accepts only the values in `SPLIT_RATIO_OPTIONS`. Adding one changes the output directory name, and therefore the artifact layout — agree with the train and evaluate owners first.
-- Every category with two or more groups must appear in both splits, and the same seed must reproduce the same split. Never relax that, and never split a group to give a one-group category a validation image — that is leakage. Such a category becomes train-only and the run reports it.
+- Every category that can reach validation must appear in both splits, and the same seed must reproduce the same split. Never relax that, and never split a group to reach one that cannot — that is leakage. It becomes train-only and the run reports it.
 - Never use `boto3` directly. Go through `src/common/storage.py`.
 - The manifest and class-map field names are a contract with train and evaluate. Changing one is a `contracts/proposals/` proposal, not an edit.

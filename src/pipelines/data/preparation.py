@@ -537,7 +537,7 @@ def _dataset_summary(
             ),
             "seed": settings.seed,
             "grouping": _grouping_summary(settings.group_rule, split_result),
-            # 그룹이 하나뿐이라 validation에 넣을 수 없어 train에만 둔
+            # 그룹을 쪼개지 않고는 validation에 넣을 수 없어 train에만 둔
             # category입니다. 이 category들은 validation 지표를 잴 수 없습니다.
             "train_only_categories": [
                 {
@@ -811,8 +811,8 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         "validation_groups": split_result.validation_group_count,
         "excluded_images": len(dataset.excluded_images),
         "category_count": len(dataset.categories),
-        # 그룹이 하나뿐이라 train에만 둔 category입니다. 자세한 내용은
-        # dataset_summary.json의 `split.train_only_categories`에 있습니다.
+        # 그룹을 쪼개지 않고는 validation에 갈 수 없어 train에만 둔 category입니다.
+        # 자세한 내용은 dataset_summary.json의 `split.train_only_categories`에 있습니다.
         "train_only_categories": list(split_result.train_only_category_ids),
         "test_images_used": 0,
         "test_manifest_images": len(test_manifest["images"]),
@@ -822,7 +822,7 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         ""
         if not split_result.train_only_category_ids
         else (
-            f" 그룹이 1개뿐이라 train에만 둔 category "
+            f" 그룹을 쪼개지 않고는 validation에 갈 수 없어 train에만 둔 category "
             f"{len(split_result.train_only_category_ids)}종은 validation 지표를 "
             "잴 수 없습니다."
         )
