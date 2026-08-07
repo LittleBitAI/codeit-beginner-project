@@ -25,6 +25,7 @@ from src.common.storage import S3Storage
 from src.pipelines.data import preparation, run
 from src.pipelines.data.errors import DataError
 from src.pipelines.data.preparation import REPOSITORY_ROOT
+from src.pipelines.data.split import split_images
 from src.pipelines.data.test_manifest import build_test_manifest
 
 
@@ -286,6 +287,39 @@ def test_two_options_are_stored_in_different_locations():
 
 
 # --- 재현성 ----------------------------------------------------------------
+
+
+# 그룹 분할을 넣기 전 구현이 이미지 1~40, category (id-1)%3+1, seed 42, 8:2에서
+# 내놓던 validation image id입니다. 이미지 단위 분할은 예전 산출물을 그대로 다시
+# 만들 수 있어야 하므로 이 값이 바뀌면 안 됩니다.
+IMAGE_SPLIT_VALIDATION_IDS = [4, 5, 10, 11, 12, 26, 33, 37]
+
+
+def test_image_split_reproduces_the_previous_validation_ids():
+    """이미지 분할의 정렬과 난수 입력 순서는 image id 숫자 순서여야 합니다.
+
+    그룹 이름을 `image:<id>` 같은 문자열로 만들면 1, 10, 2처럼 사전식으로 정렬되어
+    seed가 같아도 예전과 다른 split이 나옵니다.
+    """
+
+    images = [
+        {"id": image_id, "file_name": f"img_{image_id:03d}.jpg", "width": 100, "height": 100}
+        for image_id in range(1, 41)
+    ]
+    annotations = [
+        {
+            "id": image_id,
+            "image_id": image_id,
+            "category_id": (image_id - 1) % 3 + 1,
+            "bbox": [1, 1, 10, 10],
+            "iscrowd": 0,
+        }
+        for image_id in range(1, 41)
+    ]
+
+    result = split_images(images, annotations, validation_ratio=0.2, seed=42)
+
+    assert sorted(result.validation_image_ids) == IMAGE_SPLIT_VALIDATION_IDS
 
 
 def test_same_input_seed_and_ratio_produce_the_same_split():

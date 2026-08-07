@@ -75,14 +75,23 @@ class SplitResult:
 def _grouped_image_ids(
     images: Sequence[Mapping[str, Any]], group_rule: GroupRule | None
 ) -> dict[str, list[int]]:
-    """이미지를 그룹 이름별로 묶습니다. 규칙이 없으면 한 장이 한 그룹입니다."""
+    """이미지를 그룹 이름별로 묶습니다. 규칙이 없으면 한 장이 한 그룹입니다.
+
+    돌려주는 dict의 **순서가 곧 분할의 기준 순서**입니다. 이름으로 정렬하면
+    `image:1`, `image:10`, `image:2`처럼 사전식이 되어, 이미지 단위 분할이 같은
+    seed로도 예전과 다른 결과를 내놓습니다. 그래서 이미지 단위에서는 이름이
+    아니라 image id 숫자 순서로 넣습니다.
+    """
+
+    if group_rule is None:
+        return {
+            f"image:{image_id}": [image_id]
+            for image_id in sorted(image["id"] for image in images)
+        }
 
     groups: defaultdict[str, list[int]] = defaultdict(list)
     for image in images:
-        if group_rule is None:
-            groups[f"image:{image['id']}"].append(image["id"])
-        else:
-            groups[group_rule.key(str(image["file_name"]))].append(image["id"])
+        groups[group_rule.key(str(image["file_name"]))].append(image["id"])
     return {name: sorted(members) for name, members in sorted(groups.items())}
 
 
@@ -164,7 +173,9 @@ def split_images(
         for category_id, total in category_totals.items()
     }
 
-    shuffled = sorted(group_names)
+    # `_grouped_image_ids`가 이미 기준 순서대로 넣어 두었습니다. 여기서 다시
+    # 정렬하면 그 순서가 깨지므로 그대로 씁니다.
+    shuffled = list(group_names)
     random.Random(seed).shuffle(shuffled)
     tie_rank = {name: rank for rank, name in enumerate(shuffled)}
     validation: set[str] = set()
