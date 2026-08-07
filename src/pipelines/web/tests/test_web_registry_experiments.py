@@ -269,19 +269,6 @@ def test_experiment_metrics_stay_empty_without_losses_block(client, monkeypatch)
     assert "losses" not in summary
     record = experiment_record("old-index")
     monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
-    monkeypatch.setattr(
-        experiments,
-        "compare_experiment_summaries",
-        lambda run_ids, config: {
-            "run_ids": ["old-index"],
-            "fields": {
-                "experiment_record_uri": {
-                    "values": {"old-index": summary["experiment_record_uri"]}
-                }
-            },
-            "missing": [],
-        },
-    )
     monkeypatch.setattr(experiments, "read_experiment_record", lambda *a, **k: record)
 
     listed = client.get("/api/train/experiments").json()["experiments"][0]
