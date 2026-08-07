@@ -88,27 +88,17 @@ def test_experiment_api_lists_registry_index_only(client, manager, monkeypatch):
 def test_compare_reads_only_selected_exact_records(client, monkeypatch):
     summaries = [registry_summary("run-1"), registry_summary("run-2")]
     read = []
+    listed = []
+
+    def list_summaries(config, **_kwargs):
+        listed.append(config)
+        return summaries
+
+    # 두 이름을 함께 바꿔야 index를 몇 번 읽는지 셀 수 있습니다. web이 부르는
+    # 이름과, 공용 registry 안에서 다시 부르는 이름이 다른 객체이기 때문입니다.
+    monkeypatch.setattr(experiments, "list_experiment_summaries", list_summaries)
     monkeypatch.setattr(
-        experiments,
-        "compare_experiment_summaries",
-        lambda run_ids, config: {
-            "run_ids": list(run_ids),
-            "fields": {
-                "experiment_record_uri": {
-                    "values": {
-                        run_id: f"artifacts/registry/{run_id}/experiment_record.json"
-                        for run_id in run_ids
-                    },
-                    "differs": True,
-                }
-            },
-            "missing": [],
-        },
-    )
-    monkeypatch.setattr(
-        experiments,
-        "list_experiment_summaries",
-        lambda config: summaries,
+        "src.common.experiment_registry.list_experiment_summaries", list_summaries
     )
 
     def read_record(uri, config, *, expected_run_id=None):
@@ -135,7 +125,11 @@ def test_compare_reads_only_selected_exact_records(client, monkeypatch):
         "beta2": 0.98,
         "epsilon": 1e-7,
     }
-    assert [run_id for _, run_id in read] == ["run-2", "run-1"]
+    # record는 함께 읽으므로 읽는 순서는 정해져 있지 않습니다. 고른 것만 읽었는지와
+    # 응답 순서가 요청 순서와 같은지가 지켜야 할 약속입니다.
+    assert {run_id for _, run_id in read} == {"run-1", "run-2"}
+    # Index는 한 번만 읽습니다. 실험 하나를 골라도 전부를 훑으면 화면이 그만큼 느립니다.
+    assert len(listed) == 1
     assert "experiment_record_uri" not in response.text
 
 
@@ -143,15 +137,6 @@ def test_compare_uses_sgd_for_legacy_record_without_optimizer(client, monkeypatc
     summary = registry_summary("legacy")
     legacy = experiment_record("legacy")
     legacy["config_snapshot"]["train"] = {}
-    monkeypatch.setattr(
-        experiments,
-        "compare_experiment_summaries",
-        lambda run_ids, config: {
-            "run_ids": ["legacy"],
-            "fields": {"experiment_record_uri": {"values": {"legacy": summary["experiment_record_uri"]}}},
-            "missing": [],
-        },
-    )
     monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
     monkeypatch.setattr(experiments, "read_experiment_record", lambda *a, **k: legacy)
 
@@ -176,19 +161,6 @@ def test_compare_preserves_explicit_zero_values(client, monkeypatch):
     summary["seed"] = 7
     record = experiment_record("zero-values")
     record["config_snapshot"]["train"].update({"learning_rate": 0.0, "seed": 0})
-    monkeypatch.setattr(
-        experiments,
-        "compare_experiment_summaries",
-        lambda run_ids, config: {
-            "run_ids": ["zero-values"],
-            "fields": {
-                "experiment_record_uri": {
-                    "values": {"zero-values": summary["experiment_record_uri"]}
-                }
-            },
-            "missing": [],
-        },
-    )
     monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
     monkeypatch.setattr(experiments, "read_experiment_record", lambda *a, **k: record)
 
@@ -355,19 +327,6 @@ def test_experiment_list_matches_compare_for_unavailable_training(client, monkey
     record = experiment_record("legacy")
     record["config_snapshot"]["train"] = {}
     monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
-    monkeypatch.setattr(
-        experiments,
-        "compare_experiment_summaries",
-        lambda run_ids, config: {
-            "run_ids": ["legacy"],
-            "fields": {
-                "experiment_record_uri": {
-                    "values": {"legacy": summary["experiment_record_uri"]}
-                }
-            },
-            "missing": [],
-        },
-    )
     monkeypatch.setattr(experiments, "read_experiment_record", lambda *a, **k: record)
 
     listed = client.get("/api/train/experiments").json()["experiments"][0]

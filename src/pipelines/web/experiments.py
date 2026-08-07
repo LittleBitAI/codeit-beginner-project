@@ -6,11 +6,11 @@ import hashlib
 import json
 import math
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from src.common import (
     ExperimentRegistryError,
-    compare_experiment_summaries,
     list_experiment_summaries,
     read_experiment_record,
 )
@@ -299,6 +299,32 @@ def list_registry_experiments() -> list[dict[str, Any]]:
         raise WebError(f"실험 목록을 읽지 못했습니다({type(error).__name__}).") from error
 
 
+# Record 하나마다 storage 왕복이 한 번씩 붙습니다. 순서대로 읽으면 고른 실험 수에
+# 비례해 기다리게 되므로 함께 읽습니다. 화면에서 한 번에 고르는 수가 많지 않아
+# 상한은 낮게 둡니다.
+_COMPARE_READ_WORKERS = 8
+
+
+def _read_records(
+    targets: list[tuple[str, str]], config: Mapping[str, Any]
+) -> list[tuple[str, dict[str, Any]]]:
+    """(run_id, record) 목록을 **요청한 순서 그대로** 돌려줍니다.
+
+    읽기는 함께 하고 결과만 제출 순서로 모읍니다. 읽다가 실패하면 그 예외가
+    그대로 올라와 호출자가 지금처럼 처리합니다.
+    """
+
+    if not targets:
+        return []
+    workers = max(1, min(_COMPARE_READ_WORKERS, len(targets)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [
+            executor.submit(read_experiment_record, uri, config, expected_run_id=run_id)
+            for run_id, uri in targets
+        ]
+        return [(targets[index][0], future.result()) for index, future in enumerate(futures)]
+
+
 def compare_registry_experiments(run_ids: list[str]) -> dict[str, Any]:
     if not run_ids or not all(
         isinstance(run_id, str) and run_id.strip() for run_id in run_ids
@@ -307,19 +333,33 @@ def compare_registry_experiments(run_ids: list[str]) -> dict[str, Any]:
             [FieldError("run_ids", "비어 있지 않은 run_id 목록이 필요합니다.")]
         )
     config = registry_config()
+    requested = [run_id.strip() for run_id in run_ids]
     try:
-        compared = compare_experiment_summaries(run_ids, config)
-        summaries = {item["run_id"]: item for item in list_experiment_summaries(config)}
-        uri_field = compared.get("fields", {}).get("experiment_record_uri", {})
-        uri_values = uri_field.get("values", {}) if isinstance(uri_field, Mapping) else {}
-        resolved: list[dict[str, Any]] = []
-        for run_id in compared.get("run_ids", []):
-            uri = uri_values.get(run_id) if isinstance(uri_values, Mapping) else None
+        # Index는 한 번만 읽습니다. `compare_experiment_summaries`도 안에서 같은
+        # 목록을 읽으므로 그것까지 부르면 전체 index를 두 번 읽게 되고, 실험
+        # 하나만 골라도 등록된 전부를 훑게 됩니다. 화면이 실제로 쓰는 것은 그
+        # 결과 중 `experiment_record_uri` 하나뿐이라 summary에서 바로 꺼냅니다.
+        wanted = set(requested)
+        summaries = {
+            summary["run_id"]: summary
+            for summary in list_experiment_summaries(config)
+            if summary.get("run_id") in wanted
+        }
+        missing = [run_id for run_id in requested if run_id not in summaries]
+
+        targets: list[tuple[str, str]] = []
+        for run_id in requested:
             summary = summaries.get(run_id)
-            if not isinstance(uri, str) or not isinstance(summary, Mapping):
+            if not isinstance(summary, Mapping):
                 continue
-            record = read_experiment_record(uri, config, expected_run_id=run_id)
-            resolved.append(_enrich_summary(summary, record))
-        return {"experiments": resolved, "missing": list(compared.get("missing", []))}
+            uri = summary.get("experiment_record_uri")
+            if isinstance(uri, str) and uri.strip():
+                targets.append((run_id, uri))
+
+        resolved = [
+            _enrich_summary(summaries[run_id], record)
+            for run_id, record in _read_records(targets, config)
+        ]
+        return {"experiments": resolved, "missing": missing}
     except ExperimentRegistryError as error:
         raise WebError(f"실험 비교 정보를 읽지 못했습니다({type(error).__name__}).") from error
