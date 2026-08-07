@@ -46,8 +46,13 @@ function experimentListing(): ExperimentListing {
     metrics: {
       best_epoch: experiment.summary.best_epoch,
       best_validation_loss: experiment.summary.best_validation_loss,
+      final_train_loss: null,
+      final_validation_loss: null,
       map: null,
       map50: null,
+      map75: null,
+      precision50: null,
+      recall50: null,
     },
   }));
   return { experiments };
@@ -117,8 +122,12 @@ describe('Web multi-experiment E2E', () => {
     ).toBeInTheDocument();
     expect(screen.getAllByText('e2e-baseline').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('e2e-tuned').length).toBeGreaterThanOrEqual(1);
+    // 기본 탭인 결과값에는 loss가, 학습 세팅 탭에는 optimizer가 있습니다.
     expect(screen.getByText('0.7200')).toBeInTheDocument();
     expect(screen.getByText('0.4800')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '학습 세팅' }));
+
     expect(screen.getAllByText('SGD (호환 기본값)')).toHaveLength(2);
   });
 });

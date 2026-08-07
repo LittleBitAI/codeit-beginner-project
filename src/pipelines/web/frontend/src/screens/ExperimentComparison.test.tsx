@@ -47,8 +47,42 @@ function makeExperiment(
       epsilon: null,
     },
     training: { device: 'cpu', epochs: 2, batch_size: 1, num_workers: 0, seed: 42 },
-    metrics: { best_epoch: 2, best_validation_loss: 0.4, map: null, map50: null },
+    metrics: {
+      best_epoch: 2,
+      best_validation_loss: 0.4,
+      final_train_loss: null,
+      final_validation_loss: null,
+      map: null,
+      map50: null,
+      map75: null,
+      precision50: null,
+      recall50: null,
+    },
   };
+}
+
+/** 주어진 실험을 모두 골라 비교표를 연 화면입니다. 초록 표시 test가 같은 길을 씁니다. */
+async function renderComparison(experiments: ExperimentSummary[]) {
+  listExperiments.mockResolvedValue({ experiments });
+  compareExperiments.mockResolvedValue({ experiments, missing: [] });
+  const view = render(
+    <MemoryRouter>
+      <ExperimentComparison />
+    </MemoryRouter>,
+  );
+
+  for (const experiment of experiments) {
+    fireEvent.click(await screen.findByLabelText(`${experiment.run_id} 비교 선택`));
+  }
+  await screen.findByRole('button', { name: '결과값' });
+  return view;
+}
+
+/** 어떤 줄의 어떤 실험 칸이 초록으로 칠해졌는지 읽습니다. */
+function bestRunIds(container: HTMLElement, label: string): string[] {
+  return Array.from(
+    container.querySelectorAll(`[data-row="${label}"][data-best="true"]`),
+  ).map((cell) => cell.getAttribute('data-run') ?? '');
 }
 
 beforeEach(() => {
@@ -91,6 +125,9 @@ describe('ExperimentComparison', () => {
     // evaluate의 `mAP`는 mAP@[0.75:0.95]입니다. 그냥 mAP라고만 적으면 오해합니다.
     expect(screen.getByText('mAP@[0.75:0.95]')).toBeInTheDocument();
     expect(screen.getAllByText('0.4000')).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: '학습 세팅' }));
+
     expect(screen.getAllByText('SGD (호환 기본값)')).toHaveLength(2);
     expect(compareExperiments).toHaveBeenCalledWith(['run-a', 'run-b']);
   });
@@ -108,6 +145,7 @@ describe('ExperimentComparison', () => {
     );
 
     fireEvent.click(await screen.findByLabelText('run-a 비교 선택'));
+    fireEvent.click(await screen.findByRole('button', { name: '학습 세팅' }));
 
     // 목록 응답은 registry index만 읽어 모델과 optimizer가 null입니다. record를
     // 읽는 비교 요청을 거쳐야 값이 채워집니다.
@@ -132,6 +170,70 @@ describe('ExperimentComparison', () => {
     // 기록에 없는 값은 추정하지 않고 - 로 둡니다.
     expect(screen.getByText('- · mAP@[0.75:0.95] -')).toBeInTheDocument();
     expect(compareExperiments).not.toHaveBeenCalled();
+  });
+
+  it('토글로 학습 세팅과 결과값 두 묶음을 갈아 끼운다', async () => {
+    const { container } = await renderComparison([
+      makeExperiment('a', 'same'),
+      makeExperiment('b', 'same'),
+    ]);
+
+    // 기본은 결과값입니다. 사람이 비교하려는 이유가 결과이기 때문입니다.
+    expect(screen.getByText('FINAL TRAIN LOSS')).toBeInTheDocument();
+    expect(screen.queryByText('LEARNING RATE')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '학습 세팅' }));
+
+    expect(screen.getByText('LEARNING RATE')).toBeInTheDocument();
+    expect(screen.queryByText('FINAL TRAIN LOSS')).not.toBeInTheDocument();
+    // 상태와 dataset 관계는 탭을 오가도 사라지지 않습니다.
+    expect(container.querySelectorAll('[data-row="DATASET 관계"]').length).toBe(2);
+  });
+
+  it('loss는 낮은 쪽, 지표는 높은 쪽을 초록으로 표시한다', async () => {
+    const low = makeExperiment('a', 'same');
+    low.metrics = { ...low.metrics, best_validation_loss: 0.4, best_epoch: 2, map: 0.2 };
+    const high = makeExperiment('b', 'same');
+    high.metrics = { ...high.metrics, best_validation_loss: 0.7, best_epoch: 5, map: 0.5 };
+
+    const { container } = await renderComparison([low, high]);
+
+    expect(bestRunIds(container, 'BEST VAL LOSS')).toEqual(['run-a']);
+    expect(bestRunIds(container, 'mAP@[0.75:0.95]')).toEqual(['run-b']);
+    // BEST EPOCH는 크고 작음에 좋고 나쁨이 없습니다.
+    expect(bestRunIds(container, 'BEST EPOCH')).toEqual([]);
+  });
+
+  it('값이 모두 같으면 아무 칸도 초록이 아니다', async () => {
+    const { container } = await renderComparison([
+      makeExperiment('a', 'same'),
+      makeExperiment('b', 'same'),
+    ]);
+
+    expect(bestRunIds(container, 'BEST VAL LOSS')).toEqual([]);
+  });
+
+  it('값이 없는 칸은 이기지 않는다', async () => {
+    const lower = makeExperiment('a', 'same');
+    lower.metrics = { ...lower.metrics, map50: 0.5 };
+    const higher = makeExperiment('b', 'same');
+    higher.metrics = { ...higher.metrics, map50: 0.7 };
+    const missing = makeExperiment('c', 'same');
+
+    const { container } = await renderComparison([lower, higher, missing]);
+
+    expect(missing.metrics.map50).toBeNull();
+    expect(bestRunIds(container, 'mAP@0.5')).toEqual(['run-b']);
+  });
+
+  it('실험이 하나면 초록이 없다', async () => {
+    const only = makeExperiment('a', 'same');
+    only.metrics = { ...only.metrics, best_validation_loss: 0.4, map: 0.5 };
+
+    const { container } = await renderComparison([only]);
+
+    expect(bestRunIds(container, 'BEST VAL LOSS')).toEqual([]);
+    expect(bestRunIds(container, 'mAP@[0.75:0.95]')).toEqual([]);
   });
 
   it('dataset 기록이 빠진 선택은 판정 불가로 알린다', async () => {

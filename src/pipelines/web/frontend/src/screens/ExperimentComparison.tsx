@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api } from '../api/client';
 import type { CapabilityValueSource, ExperimentSummary } from '../api/types';
 import { AlertRow, Button, EmptyState, Panel, ScreenIntro, StatusBadge } from '../components/primitives';
-import { color, font, type } from '../design/tokens';
+import { color, font, radius, type } from '../design/tokens';
 import { usePolling } from '../hooks/usePolling';
 import { datasetRelationship } from '../lib/experiments';
 import { duration, loss, startedAt } from '../lib/format';
@@ -76,8 +76,56 @@ function DatasetNotice({ experiments }: { experiments: ExperimentSummary[] }) {
   );
 }
 
+/** 값이 클수록 좋은지 작을수록 좋은지. loss는 낮을수록, 지표는 높을수록 좋습니다. */
+type Better = 'higher' | 'lower';
+
+interface Row {
+  label: string;
+  values: ReactNode[];
+  /** 초록 표시를 계산할 원본 숫자입니다. 좋고 나쁨이 있는 줄만 채웁니다. */
+  numbers?: (number | null)[];
+  better?: Better;
+}
+
+/**
+ * 이 줄에서 가장 좋은 칸의 index입니다. 다음 경우에는 아무 칸도 고르지 않습니다.
+ *
+ * - 실험이 하나뿐이라 비교 대상이 없을 때
+ * - 값이 있는 칸이 하나뿐일 때. 없는 값이 이기는 일은 없어야 합니다.
+ * - 값이 모두 같을 때. 전부 초록이면 아무 정보가 아닙니다.
+ */
+function bestColumns(row: Row): Set<number> {
+  const chosen = new Set<number>();
+  const numbers = row.numbers;
+  if (!row.better || !numbers) return chosen;
+  const present = numbers.filter((value): value is number => value !== null);
+  if (present.length < 2 || new Set(present).size === 1) return chosen;
+  const target = row.better === 'lower' ? Math.min(...present) : Math.max(...present);
+  numbers.forEach((value, index) => {
+    if (value === target) chosen.add(index);
+  });
+  return chosen;
+}
+
+type MetricPick = (metrics: ExperimentSummary['metrics']) => number | null;
+
+/** loss 줄. 낮을수록 좋습니다. */
+function lossRow(label: string, experiments: ExperimentSummary[], pick: MetricPick): Row {
+  const numbers = experiments.map((experiment) => pick(experiment.metrics) ?? null);
+  return { label, values: numbers.map((value) => loss(value)), numbers, better: 'lower' };
+}
+
+/** mAP·precision·recall 줄. 높을수록 좋습니다. */
+function metricRow(label: string, experiments: ExperimentSummary[], pick: MetricPick): Row {
+  const numbers = experiments.map((experiment) => pick(experiment.metrics) ?? null);
+  return { label, values: numbers.map((value) => metric(value)), numbers, better: 'higher' };
+}
+
 function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) {
-  const rows: { label: string; values: ReactNode[] }[] = [
+  const [tab, setTab] = useState<'results' | 'settings'>('results');
+
+  // 상태와 dataset 관계, 시간은 어느 탭에서도 사라지면 안 되는 배경 정보입니다.
+  const fixedRows: Row[] = [
     {
       label: '상태',
       values: experiments.map((experiment) => (
@@ -92,6 +140,17 @@ function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) 
       label: 'DATASET 관계',
       values: experiments.map(() => relationLabel(experiments)),
     },
+    {
+      label: '경과 시간',
+      values: experiments.map((experiment) => duration(experiment.elapsed_seconds)),
+    },
+    {
+      label: '시작',
+      values: experiments.map((experiment) => startedAt(experiment.started_at ?? experiment.created_at)),
+    },
+  ];
+
+  const settingRows: Row[] = [
     {
       label: '모델',
       values: experiments.map((experiment) =>
@@ -148,92 +207,162 @@ function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) 
       label: 'EPSILON',
       values: experiments.map((experiment) => shown(experiment.optimizer.epsilon)),
     },
+  ];
+
+  const resultRows: Row[] = [
+    // BEST EPOCH는 몇 번째 epoch였는지일 뿐이라 크고 작음에 좋고 나쁨이 없습니다.
     {
       label: 'BEST EPOCH',
       values: experiments.map((experiment) => shown(experiment.metrics.best_epoch)),
     },
-    {
-      label: 'BEST VAL LOSS',
-      values: experiments.map((experiment) => loss(experiment.metrics.best_validation_loss)),
-    },
-    {
-      label: MAP_LABEL,
-      values: experiments.map((experiment) => metric(experiment.metrics.map)),
-    },
-    {
-      label: 'mAP50',
-      values: experiments.map((experiment) => metric(experiment.metrics.map50)),
-    },
-    {
-      label: '경과 시간',
-      values: experiments.map((experiment) => duration(experiment.elapsed_seconds)),
-    },
-    {
-      label: '시작',
-      values: experiments.map((experiment) => startedAt(experiment.started_at ?? experiment.created_at)),
-    },
+    lossRow('BEST VAL LOSS', experiments, (item) => item.best_validation_loss),
+    lossRow('FINAL TRAIN LOSS', experiments, (item) => item.final_train_loss),
+    lossRow('FINAL VAL LOSS', experiments, (item) => item.final_validation_loss),
+    metricRow(MAP_LABEL, experiments, (item) => item.map),
+    metricRow('mAP@0.5', experiments, (item) => item.map50),
+    metricRow('mAP@0.75', experiments, (item) => item.map75),
+    metricRow('Precision@IoU0.5', experiments, (item) => item.precision50),
+    metricRow('Recall@IoU0.5', experiments, (item) => item.recall50),
   ];
+
+  const rows = [...fixedRows, ...(tab === 'results' ? resultRows : settingRows)];
   const columns = `190px repeat(${experiments.length}, minmax(170px, 1fr))`;
 
   return (
-    <div style={{ overflowX: 'auto' }}>
-      <div style={{ minWidth: 190 + experiments.length * 170 }}>
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: columns,
-            background: color.surfaceTableHead,
-            borderBottom: `1px solid ${color.border}`,
-          }}
-        >
-          <span style={{ padding: '11px 13px', ...type.microLabel, color: color.textMuted }}>
-            비교 항목
-          </span>
-          {experiments.map((experiment) => (
-            <span
-              key={experiment.experiment_id}
-              style={{ padding: '10px 13px', display: 'flex', flexDirection: 'column', gap: 2 }}
-            >
-              <span style={{ font: `600 12px/1.35 ${font.sans}`, color: color.text }}>
-                {experiment.run_id}
-              </span>
-              <span style={{ font: `400 10px/1.3 ${font.mono}`, color: color.textFaint }}>
-                {experiment.experiment_id.slice(0, 8)}
-              </span>
-            </span>
-          ))}
-        </div>
-        {rows.map((row) => (
+    <div>
+      <div
+        role="group"
+        aria-label="비교 항목 묶음"
+        style={{
+          display: 'flex',
+          gap: 6,
+          padding: '10px 13px',
+          borderBottom: `1px solid ${color.border}`,
+        }}
+      >
+        <TabButton label="결과값" active={tab === 'results'} onClick={() => setTab('results')} />
+        <TabButton label="학습 세팅" active={tab === 'settings'} onClick={() => setTab('settings')} />
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <div style={{ minWidth: 190 + experiments.length * 170 }}>
           <div
-            key={row.label}
             style={{
               display: 'grid',
               gridTemplateColumns: columns,
-              borderBottom: `1px solid ${color.borderInner}`,
+              background: color.surfaceTableHead,
+              borderBottom: `1px solid ${color.border}`,
             }}
           >
-            <span
-              style={{
-                padding: '9px 13px',
-                font: `600 10.5px/1.4 ${font.mono}`,
-                color: color.textMuted,
-                background: color.surfaceAlt,
-              }}
-            >
-              {row.label}
+            <span style={{ padding: '11px 13px', ...type.microLabel, color: color.textMuted }}>
+              비교 항목
             </span>
-            {row.values.map((value, index) => (
+            {experiments.map((experiment) => (
               <span
-                key={`${row.label}-${experiments[index]?.experiment_id ?? index}`}
-                style={{ padding: '9px 13px', font: `500 11.5px/1.4 ${font.mono}`, color: color.textStrong }}
+                key={experiment.experiment_id}
+                style={{ padding: '10px 13px', display: 'flex', flexDirection: 'column', gap: 2 }}
               >
-                {value}
+                <span style={{ font: `600 12px/1.35 ${font.sans}`, color: color.text }}>
+                  {experiment.run_id}
+                </span>
+                <span style={{ font: `400 10px/1.3 ${font.mono}`, color: color.textFaint }}>
+                  {experiment.experiment_id.slice(0, 8)}
+                </span>
               </span>
             ))}
           </div>
-        ))}
+          {rows.map((row) => {
+            const best = bestColumns(row);
+            return (
+              <div
+                key={row.label}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: columns,
+                  borderBottom: `1px solid ${color.borderInner}`,
+                }}
+              >
+                <span
+                  style={{
+                    padding: '9px 13px',
+                    font: `600 10.5px/1.4 ${font.mono}`,
+                    color: color.textMuted,
+                    background: color.surfaceAlt,
+                  }}
+                >
+                  {row.label}
+                </span>
+                {row.values.map((value, index) => {
+                  const isBest = best.has(index);
+                  return (
+                    <span
+                      key={`${row.label}-${experiments[index]?.experiment_id ?? index}`}
+                      data-row={row.label}
+                      data-run={experiments[index]?.run_id ?? ''}
+                      data-best={isBest ? 'true' : undefined}
+                      style={{
+                        padding: '9px 13px',
+                        font: `500 11.5px/1.4 ${font.mono}`,
+                        color: isBest ? color.greenDark : color.textStrong,
+                        background: isBest ? color.greenTint : undefined,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                      }}
+                    >
+                      {value}
+                      {/* 색만으로 뜻을 전하지 않도록 글자 표식을 함께 둡니다. */}
+                      {isBest && (
+                        <span
+                          title={row.better === 'lower' ? '이 비교에서 가장 낮습니다' : '이 비교에서 가장 높습니다'}
+                          style={{
+                            ...type.badge,
+                            color: color.greenDark,
+                            border: `1px solid ${color.green}`,
+                            borderRadius: radius.badge,
+                            padding: '1px 4px',
+                          }}
+                        >
+                          최고
+                        </span>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </div>
+  );
+}
+
+function TabButton({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      style={{
+        font: `600 11.5px/1 ${font.sans}`,
+        padding: '7px 12px',
+        borderRadius: radius.control,
+        cursor: 'pointer',
+        color: active ? color.surface : color.textBody,
+        background: active ? color.primary : color.surface,
+        border: `1px solid ${active ? color.primary : color.borderControl}`,
+      }}
+    >
+      {label}
+    </button>
   );
 }
 
