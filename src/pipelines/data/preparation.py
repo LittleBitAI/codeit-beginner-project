@@ -1,15 +1,17 @@
 """S3 원본에서 학습·평가용 artifact 5개를 만들어 storage에 저장합니다.
 
 `config["data"]["prepare"]`가 `true`일 때만 동작하는 준비 경로입니다. 원본
-`train_images/`와 `train_annotations/`로 train/validation을 만들고,
-`test_images/`의 크기만 decode해 아래 다섯 file을 저장합니다. 이전 버전이 만든
-네 artifact만 정확히 남아 있으면 그 파일들은 보존하고 test manifest만 보충합니다.
+`train_images/`와 `train_annotations/`로 train/validation을 만들되, 같은 알약
+조합을 찍은 사진이 양쪽 split에 나뉘지 않도록 file 이름 접두사를 그룹으로 삼아
+그룹 단위로 나눕니다(`split.py`). 그리고 `test_images/`의 크기만 decode해 아래
+다섯 file을 저장합니다. 이전 버전이 만든 네 artifact만 정확히 남아 있으면 그
+파일들은 보존하고 test manifest만 보충합니다.
 
 - `train_manifest.json`, `validation_manifest.json`: COCO 형식 manifest
 - `test_manifest.json`: annotation이 없는 COCO 형식 test manifest
 - `class_map.json`: `{"<category id>": "<category name>"}`
-- `dataset_summary.json`: 원본 위치, 비율, seed, 분포와 split manifest의 sha256을
-  담은 요약
+- `dataset_summary.json`: 원본 위치, 분할 방식과 그룹 수, 비율, seed, 분포와
+  split manifest의 sha256을 담은 요약
 
 Storage 접근은 `src/common/storage.py`의 `create_storage(config)`로만 합니다.
 개별 pipeline은 `boto3`를 직접 쓰지 않습니다. competition 평가용 `test_images/`는
@@ -32,7 +34,7 @@ from src.common import LocalStorage, Storage, StorageError, create_storage
 
 from .coco import ConsolidatedDataset, consolidate
 from .errors import DatasetPreparationError
-from .split import SplitResult, split_images
+from .split import GroupRule, SplitResult, split_images
 from .test_manifest import build_test_manifest
 
 
@@ -42,6 +44,7 @@ __all__ = [
     "LocationPublisher",
     "PreparationSettings",
     "REPOSITORY_ROOT",
+    "SPLIT_METHOD_OPTIONS",
     "SPLIT_RATIO_OPTIONS",
     "build_publisher",
     "preparation_error_result",
@@ -64,6 +67,22 @@ DATASET_PREFIX = "datasets/"
 SPLIT_RATIO_OPTIONS: dict[str, float] = {"8:2": 0.2, "9:1": 0.1}
 # 비율이 다르면 산출물도 다르므로 저장 directory 이름에 비율을 드러냅니다.
 _RATIO_DIRECTORY_TOKENS: dict[str, str] = {"8:2": "8020", "9:1": "9010"}
+
+# 같은 알약 조합을 각도와 조명만 바꿔 여러 장 찍은 원본이라, 이미지 한 장씩
+# 나누면 거의 같은 사진이 train과 validation 양쪽에 들어갑니다. 그래서 기본은
+# 그룹 분할입니다. `"image"`는 예전 이미지 단위 분할이며, 이미 만들어 둔 산출물을
+# 다시 만들 때만 씁니다.
+SPLIT_METHOD_OPTIONS = ("group", "image")
+DEFAULT_SPLIT_METHOD = "group"
+# 그룹 이름은 file 이름의 첫 `_` 앞부분, 즉 알약 조합 코드입니다.
+# 예: K-001900-016548-019607-029451_0_2_0_2_70_000_200.png
+#     -> K-001900-016548-019607-029451
+# 원본 이름 규칙이 바뀌면 이 두 값을 바꿉니다. 파일별로 예외를 두지 않습니다.
+GROUP_KEY_DELIMITER = "_"
+GROUP_KEY_TOKENS = 1
+# 분할 방식이 다르면 내용이 완전히 다른 dataset이므로 directory 이름으로
+# 구분합니다. 이미지 분할은 이름을 그대로 두어 기존 산출물을 덮지 않습니다.
+_METHOD_DIRECTORY_TOKENS: dict[str, str] = {"group": "-group", "image": ""}
 
 ARTIFACT_FILE_NAMES: dict[str, str] = {
     "train_manifest_uri": "train_manifest.json",
@@ -88,8 +107,11 @@ TEST_IMAGE_MARKER = "test_images/"
 # competition 평가용 원본입니다. 학습·검증 어디에도 들어가면 안 됩니다.
 FORBIDDEN_MARKERS = ("test_images/", "test_annotations/")
 MAX_READ_WORKERS = 16
-# 1.1에서 `split.checksums`가 추가됐습니다. 기존 key는 그대로입니다.
-SUMMARY_SCHEMA_VERSION = "1.1"
+# 1.1에서 `split.checksums`가, 1.2에서 `split.grouping`, `split.strategy`,
+# `split.validation_image_ratio`가 추가됐습니다. 1.2에서 `split.method`는 분할
+# 방식("group"/"image")을 뜻하고, 1.1까지 그 자리에 있던 알고리즘 이름은
+# `split.strategy`로 옮겼습니다. 나머지 key는 그대로입니다.
+SUMMARY_SCHEMA_VERSION = "1.2"
 CHECKSUM_ALGORITHM = "sha256"
 # hash를 남길 split 산출물입니다. 순서가 요약에 그대로 드러납니다.
 SPLIT_CHECKSUM_KEYS: tuple[tuple[str, str], ...] = (
@@ -108,6 +130,8 @@ class PreparationSettings:
     raw_prefix: str
     processed_prefix: str
     overwrite: bool
+    split_method: str
+    group_rule: GroupRule | None
 
 
 def _data_config(config: Any) -> Mapping[str, Any]:
@@ -192,20 +216,47 @@ def _overwrite(section: Mapping[str, Any]) -> bool:
     return value
 
 
+def _split_method(section: Mapping[str, Any]) -> str:
+    """분할 방식을 읽습니다. 기본은 그룹 분할입니다."""
+
+    value = section.get("split_method", DEFAULT_SPLIT_METHOD)
+    if not isinstance(value, str) or value.strip() not in SPLIT_METHOD_OPTIONS:
+        allowed = ", ".join(f'"{option}"' for option in SPLIT_METHOD_OPTIONS)
+        raise DatasetPreparationError(
+            f"config['data']['split_method']는 {allowed} 중 하나여야 합니다."
+        )
+    return value.strip()
+
+
+def _group_rule(split_method: str) -> GroupRule | None:
+    """그룹 이름을 뽑는 규칙을 정합니다.
+
+    규칙은 file 이름에서 유도하며 config로 바꾸지 않습니다. 이미지 분할에는
+    그룹 개념이 없으므로 `None`이고, 이때는 이미지 한 장이 곧 한 그룹입니다.
+    """
+
+    if split_method == "image":
+        return None
+    return GroupRule(delimiter=GROUP_KEY_DELIMITER, tokens=GROUP_KEY_TOKENS)
+
+
 def resolve_settings(config: Any) -> PreparationSettings:
     """준비 경로 설정을 읽고 검증합니다."""
 
     section = _data_config(config)
     split_ratio = _split_ratio(section)
+    split_method = _split_method(section)
+    group_rule = _group_rule(split_method)
     seed = _seed(section)
     raw_prefix = _normalized_prefix(section.get("raw_prefix"), "raw_prefix", DEFAULT_RAW_PREFIX)
     processed_root = _normalized_prefix(
         section.get("processed_root"), "processed_root", DEFAULT_PROCESSED_ROOT
     )
-    # 비율과 seed가 directory 이름에 들어가므로 8:2와 9:1 산출물은 서로 덮어쓰지
-    # 않습니다.
+    # 비율과 seed, 분할 방식이 directory 이름에 들어가므로 8:2와 9:1, 그리고
+    # 그룹 분할과 이미지 분할 산출물은 서로 덮어쓰지 않고 함께 남습니다.
     processed_prefix = (
-        f"{processed_root}v1-seed{seed}-{_RATIO_DIRECTORY_TOKENS[split_ratio]}/"
+        f"{processed_root}v1-seed{seed}-{_RATIO_DIRECTORY_TOKENS[split_ratio]}"
+        f"{_METHOD_DIRECTORY_TOKENS[split_method]}/"
     )
     return PreparationSettings(
         split_ratio=split_ratio,
@@ -214,6 +265,8 @@ def resolve_settings(config: Any) -> PreparationSettings:
         raw_prefix=raw_prefix,
         processed_prefix=processed_prefix,
         overwrite=_overwrite(section),
+        split_method=split_method,
+        group_rule=group_rule,
     )
 
 
@@ -422,6 +475,27 @@ def _split_checksums(manifests: Mapping[str, dict[str, Any]]) -> dict[str, Any]:
     return checksums
 
 
+def _grouping_summary(
+    group_rule: GroupRule | None, split_result: SplitResult
+) -> dict[str, Any] | None:
+    """어떤 규칙으로 몇 개의 그룹을 나눴는지 남깁니다.
+
+    나중에 "이 모델은 어떤 데이터로 학습했나"를 요약만 보고 답할 수 있어야
+    합니다. directory 이름은 방식까지만 알려 주므로, 규칙과 그룹 수는 여기에
+    남깁니다. 이미지 분할에는 그룹 개념이 없으므로 `null`입니다.
+    """
+
+    if group_rule is None:
+        return None
+    return {
+        "delimiter": group_rule.delimiter,
+        "tokens": group_rule.tokens,
+        "group_count": split_result.group_count,
+        "train_groups": split_result.train_group_count,
+        "validation_groups": split_result.validation_group_count,
+    }
+
+
 def _dataset_summary(
     dataset: ConsolidatedDataset,
     split_result: SplitResult,
@@ -447,10 +521,21 @@ def _dataset_summary(
         "source_prefix": settings.raw_prefix,
         "processed_prefix": settings.processed_prefix,
         "split": {
-            "method": "deterministic_multilabel_distribution_preserving",
+            "method": settings.split_method,
+            "strategy": "deterministic_multilabel_distribution_preserving",
             "split_ratio": settings.split_ratio,
             "validation_ratio": settings.validation_ratio,
+            # 그룹을 통째로 옮기므로 목표 비율과 실제 비율이 다를 수 있습니다.
+            "validation_image_ratio": round(
+                len(split_result.validation_image_ids)
+                / (
+                    len(split_result.train_image_ids)
+                    + len(split_result.validation_image_ids)
+                ),
+                4,
+            ),
             "seed": settings.seed,
+            "grouping": _grouping_summary(settings.group_rule, split_result),
             "checksums": _split_checksums(manifests),
         },
         "raw": {
@@ -585,6 +670,7 @@ def _backfill_test_manifest(
         "pipeline": "data",
         "mode": "backfill_test_manifest",
         "split_ratio": settings.split_ratio,
+        "split_method": settings.split_method,
         "validation_ratio": settings.validation_ratio,
         "seed": settings.seed,
         "source_prefix": settings.raw_prefix,
@@ -630,6 +716,7 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         dataset.annotations,
         validation_ratio=settings.validation_ratio,
         seed=settings.seed,
+        group_rule=settings.group_rule,
     )
 
     manifests = {
@@ -697,22 +784,29 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         "mode": "prepare",
         "split_ratio": settings.split_ratio,
         "validation_ratio": settings.validation_ratio,
+        "split_method": settings.split_method,
         "seed": settings.seed,
         "source_prefix": settings.raw_prefix,
         "processed_prefix": settings.processed_prefix,
         "overwrite": settings.overwrite,
         "train_images": len(split_result.train_image_ids),
         "validation_images": len(split_result.validation_image_ids),
+        "train_groups": split_result.train_group_count,
+        "validation_groups": split_result.validation_group_count,
         "excluded_images": len(dataset.excluded_images),
         "category_count": len(dataset.categories),
         "test_images_used": 0,
         "test_manifest_images": len(test_manifest["images"]),
     }
+    unit = "그룹 단위" if settings.group_rule is not None else "이미지 단위"
     message = (
         f"원본 '{settings.raw_prefix}'에서 split_ratio {settings.split_ratio}"
         f"(validation {settings.validation_ratio}), seed {settings.seed}로 "
-        f"artifact 5개를 만들어 '{settings.processed_prefix}'에 저장했습니다. "
-        f"train {summary['train_images']}장, validation {summary['validation_images']}장."
+        f"{unit} 분할해 artifact 5개를 만들어 "
+        f"'{settings.processed_prefix}'에 저장했습니다. "
+        f"train {summary['train_images']}장({summary['train_groups']}그룹), "
+        f"validation {summary['validation_images']}장"
+        f"({summary['validation_groups']}그룹)."
     )
     return {
         "status": "ok",

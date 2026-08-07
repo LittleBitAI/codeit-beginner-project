@@ -25,6 +25,7 @@ from src.common.storage import S3Storage
 from src.pipelines.data import preparation, run
 from src.pipelines.data.errors import DataError
 from src.pipelines.data.preparation import REPOSITORY_ROOT
+from src.pipelines.data.split import GroupRule, split_images
 from src.pipelines.data.test_manifest import build_test_manifest
 
 
@@ -88,14 +89,27 @@ def make_fake_s3_storage(objects: dict[str, Any] | None = None) -> tuple[S3Stora
     return storage, stored
 
 
-def annotation_document(image_index: int, category_ids: list[int]) -> dict[str, Any]:
+def train_stem(image_index: int, group: int | None = None) -> str:
+    """원본과 같은 `<알약 조합 코드>_<촬영 조건>` 형태의 file 이름을 만듭니다.
+
+    `group`을 주면 여러 이미지가 같은 조합 코드를 공유합니다. 주지 않으면 이미지
+    한 장이 곧 조합 하나라 그룹도 한 장짜리가 됩니다.
+    """
+
+    code = image_index if group is None else group
+    return f"K-{code:06d}-016548_0_2_{image_index:03d}_70_000_200"
+
+
+def annotation_document(
+    image_index: int, category_ids: list[int], *, stem: str | None = None
+) -> dict[str, Any]:
     """이미지 한 장에 대한 원본 COCO 문서를 만듭니다."""
 
     return {
         "images": [
             {
                 "id": image_index,
-                "file_name": f"img_{image_index:03d}.jpg",
+                "file_name": f"{stem or train_stem(image_index)}.jpg",
                 "width": 100,
                 "height": 100,
             }
@@ -144,10 +158,9 @@ def raw_objects(
 
     objects: dict[str, Any] = {}
     for index, category_ids in categories_by_image.items():
-        image_uri = f"s3://{BUCKET}/{RAW_PREFIX}train_images/img_{index:03d}.jpg"
-        annotation_uri = (
-            f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/img_{index:03d}.json"
-        )
+        stem = train_stem(index)
+        image_uri = f"s3://{BUCKET}/{RAW_PREFIX}train_images/{stem}.jpg"
+        annotation_uri = f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/{stem}.json"
         objects[image_uri] = {"placeholder": "image bytes"}
         objects[annotation_uri] = annotation_document(index, category_ids)
     for index in range(1, test_image_count + 1):
@@ -276,6 +289,39 @@ def test_two_options_are_stored_in_different_locations():
 # --- 재현성 ----------------------------------------------------------------
 
 
+# 그룹 분할을 넣기 전 구현이 이미지 1~40, category (id-1)%3+1, seed 42, 8:2에서
+# 내놓던 validation image id입니다. 이미지 단위 분할은 예전 산출물을 그대로 다시
+# 만들 수 있어야 하므로 이 값이 바뀌면 안 됩니다.
+IMAGE_SPLIT_VALIDATION_IDS = [4, 5, 10, 11, 12, 26, 33, 37]
+
+
+def test_image_split_reproduces_the_previous_validation_ids():
+    """이미지 분할의 정렬과 난수 입력 순서는 image id 숫자 순서여야 합니다.
+
+    그룹 이름을 `image:<id>` 같은 문자열로 만들면 1, 10, 2처럼 사전식으로 정렬되어
+    seed가 같아도 예전과 다른 split이 나옵니다.
+    """
+
+    images = [
+        {"id": image_id, "file_name": f"img_{image_id:03d}.jpg", "width": 100, "height": 100}
+        for image_id in range(1, 41)
+    ]
+    annotations = [
+        {
+            "id": image_id,
+            "image_id": image_id,
+            "category_id": (image_id - 1) % 3 + 1,
+            "bbox": [1, 1, 10, 10],
+            "iscrowd": 0,
+        }
+        for image_id in range(1, 41)
+    ]
+
+    result = split_images(images, annotations, validation_ratio=0.2, seed=42)
+
+    assert sorted(result.validation_image_ids) == IMAGE_SPLIT_VALIDATION_IDS
+
+
 def test_same_input_seed_and_ratio_produce_the_same_split():
     objects = raw_objects()
 
@@ -383,7 +429,7 @@ def test_category_present_in_only_one_image_is_rejected():
     result, stored = prepare(prepare_config("8:2"), raw_objects(categories_by_image))
 
     assert result["status"] == "error"
-    assert "이미지가 2장 이상 필요합니다" in result["message"]
+    assert "서로 다른 그룹이 2개 이상 필요합니다" in result["message"]
     assert "3" in result["message"]
     assert not [uri for uri in stored if "/processed/" in uri]
 
@@ -565,11 +611,11 @@ def test_duplicate_class_map_names_raise_typed_data_error():
 
 def test_same_basename_in_train_and_test_keeps_the_split_paths_separate():
     objects = raw_objects(test_image_count=1)
-    train_source = f"s3://{BUCKET}/{RAW_PREFIX}train_images/img_001.jpg"
+    train_source = f"s3://{BUCKET}/{RAW_PREFIX}train_images/{train_stem(1)}.jpg"
     train_location = f"s3://{BUCKET}/{RAW_PREFIX}train_images/001.png"
     objects[train_location] = objects.pop(train_source)
     annotation_location = (
-        f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/img_001.json"
+        f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/{train_stem(1)}.json"
     )
     objects[annotation_location]["images"][0]["file_name"] = "001.png"
 
@@ -662,15 +708,18 @@ def test_dataset_summary_records_source_ratio_and_seed():
 
     assert summary_document["source_prefix"] == RAW_PREFIX
     assert summary_document["processed_prefix"] == result["summary"]["processed_prefix"]
-    # checksums는 원본에 따라 값이 달라지므로 아래 전용 test에서 확인합니다.
+    # checksums와 grouping은 원본과 그룹 규칙에 따라 달라지므로 아래 전용 test에서
+    # 확인합니다.
     assert {
         key: value
         for key, value in summary_document["split"].items()
-        if key != "checksums"
+        if key not in {"checksums", "grouping"}
     } == {
-        "method": "deterministic_multilabel_distribution_preserving",
+        "method": "group",
+        "strategy": "deterministic_multilabel_distribution_preserving",
         "split_ratio": "9:1",
         "validation_ratio": 0.1,
+        "validation_image_ratio": 0.1,
         "seed": 11,
     }
     assert summary_document["raw"]["listed_train_images"] == 40
@@ -710,7 +759,7 @@ def test_legacy_four_artifacts_backfill_only_the_missing_test_manifest():
     assert {uri: value for uri, value in stored.items() if uri != test_manifest_uri} == before
     assert stored[test_manifest_uri]["annotations"] == []
     class_map_location = (
-        f"datasets/pill_detection/processed/v1-seed42-8020/"
+        f"{result['summary']['processed_prefix']}"
         f"{preparation.ARTIFACT_FILE_NAMES['class_map_uri']}"
     )
     storage.read_json.assert_has_calls([call(class_map_location)])
@@ -791,6 +840,10 @@ def test_overwrite_option_replaces_existing_artifacts():
             {"prepare": True, "split_ratio": "8:2", "processed_root": "../escape/"},
             "processed_root",
         ),
+        (
+            {"prepare": True, "split_ratio": "8:2", "split_method": "random"},
+            "split_method",
+        ),
     ],
 )
 def test_invalid_preparation_config_returns_error_result(data_section, expected):
@@ -823,7 +876,7 @@ def test_storage_failure_is_reported_without_raising():
 
 def test_broken_annotation_document_returns_error_with_file_name_only():
     objects = raw_objects()
-    objects[f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/img_003.json"] = {
+    objects[f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/{train_stem(3)}.json"] = {
         "images": [],
         "annotations": [],
     }
@@ -831,13 +884,13 @@ def test_broken_annotation_document_returns_error_with_file_name_only():
     result, _ = prepare(prepare_config("8:2"), objects)
 
     assert result["status"] == "error"
-    assert "img_003.json" in result["message"]
+    assert f"{train_stem(3)}.json" in result["message"]
     assert f"s3://{BUCKET}" not in result["message"]
 
 
 def test_image_with_out_of_bounds_bbox_is_excluded_and_reported():
     objects = raw_objects()
-    broken_uri = f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/img_005.json"
+    broken_uri = f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/{train_stem(5)}.json"
     document = objects[broken_uri]
     document["annotations"][0]["bbox"] = [90, 90, 50, 50]
 
@@ -847,11 +900,14 @@ def test_image_with_out_of_bounds_bbox_is_excluded_and_reported():
     assert result["summary"]["excluded_images"] == 1
     summary_document = artifact_document(stored, result, "dataset_summary_uri")
     excluded = summary_document["excluded_images"]
-    assert [entry["file_name"] for entry in excluded] == ["img_005.jpg"]
+    assert [entry["file_name"] for entry in excluded] == [f"{train_stem(5)}.jpg"]
     assert excluded[0]["reasons"][0]["reason"] == "bbox outside image bounds"
     for key in ("train_manifest_uri", "validation_manifest_uri"):
         manifest = artifact_document(stored, result, key)
-        assert all("img_005.jpg" not in image["file_name"] for image in manifest["images"])
+        assert all(
+            f"{train_stem(5)}.jpg" not in image["file_name"]
+            for image in manifest["images"]
+        )
 
 
 # --- 기존 동작 유지 ---------------------------------------------------------
@@ -916,9 +972,10 @@ def build_local_raw(root: Path, image_count: int = 20) -> None:
         directory.mkdir(parents=True, exist_ok=True)
     (test_images / "1.png").write_bytes(image_bytes(17, 19))
     for index in range(1, image_count + 1):
-        (images / f"img_{index:03d}.jpg").write_bytes(b"fake image bytes")
+        stem = train_stem(index)
+        (images / f"{stem}.jpg").write_bytes(b"fake image bytes")
         document = annotation_document(index, [(index - 1) % 2 + 1])
-        (annotations / f"img_{index:03d}.json").write_text(
+        (annotations / f"{stem}.json").write_text(
             json.dumps(document, ensure_ascii=False), encoding="utf-8", newline="\n"
         )
 
@@ -1077,6 +1134,261 @@ def test_split_checksums_match_the_written_manifest_files(
         written = (REPOSITORY_ROOT / result["artifacts"][key]).resolve().read_bytes()
         assert checksums[file_name]["sha256"] == hashlib.sha256(written).hexdigest()
         assert checksums[file_name]["bytes"] == len(written)
+
+
+# --- 그룹 단위 분할 ----------------------------------------------------------
+#
+# 같은 알약 조합을 각도와 조명만 바꿔 여러 장 찍은 원본에서는, 이미지 한 장씩
+# 나누면 거의 같은 사진이 train과 validation 양쪽에 들어가 validation 점수가
+# 실제보다 좋게 나옵니다. 파일 이름 접두사가 같은 이미지를 한 그룹으로 묶어
+# 통째로 한쪽 split에만 넣습니다.
+#
+# 그룹으로 묶어도 모든 category가 양쪽에 나타나야 한다는 규칙은
+# test_every_category_appears_in_both_splits가 이미 지킵니다.
+#
+# 아래 test_one_group_never_lands_in_both_splits는 같은 그룹이 나뉘면 다른 test도
+# 함께 실패하므로 프루닝 기준으로는 지울 수 있지만, 이 작업이 막으려는 문제
+# 자체를 그대로 확인하는 유일한 test라 남겨 둡니다.
+
+
+def grouped_raw_objects(
+    image_count: int = 40,
+    group_size: int = 4,
+    categories_by_image: dict[int, list[int]] | None = None,
+    extra_stems: dict[int, str] | None = None,
+) -> dict[str, Any]:
+    """같은 조합을 여러 장 찍은 원본을 흉내 냅니다.
+
+    `group_size`장마다 조합 코드가 바뀌므로, 접두사가 같은 이미지가 여러 장 있는
+    실제 원본과 같은 모양이 됩니다.
+    """
+
+    objects: dict[str, Any] = {}
+    for index in range(1, image_count + 1):
+        stem = (extra_stems or {}).get(
+            index, train_stem(index, group=(index - 1) // group_size + 1)
+        )
+        if categories_by_image is None:
+            category_ids = [(index - 1) % 3 + 1]
+        else:
+            category_ids = categories_by_image[index]
+        objects[f"s3://{BUCKET}/{RAW_PREFIX}train_images/{stem}.jpg"] = {
+            "placeholder": "image bytes"
+        }
+        objects[f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/{stem}.json"] = (
+            annotation_document(index, category_ids, stem=stem)
+        )
+    for index in range(1, 6):
+        objects[f"s3://{BUCKET}/{RAW_PREFIX}test_images/{index:03d}.png"] = image_bytes(
+            30 + index, 40 + index
+        )
+    return objects
+
+
+def group_names(manifest: dict[str, Any]) -> set[str]:
+    """manifest 안 이미지의 그룹 접두사(첫 `_` 앞부분)를 모읍니다."""
+
+    return {Path(image["file_name"]).name.split("_")[0] for image in manifest["images"]}
+
+
+def test_one_group_never_lands_in_both_splits():
+    """같은 조합을 찍은 형제 사진은 통째로 한쪽 split에만 있어야 합니다."""
+
+    result, stored = prepare(prepare_config("8:2"), grouped_raw_objects())
+
+    assert result["status"] == "ok", result["message"]
+    train_groups = group_names(artifact_document(stored, result, "train_manifest_uri"))
+    validation_groups = group_names(
+        artifact_document(stored, result, "validation_manifest_uri")
+    )
+    assert train_groups and validation_groups
+    assert not train_groups & validation_groups
+
+
+def test_group_split_is_the_default_and_shows_in_the_processed_prefix():
+    """설정 없이도 그룹 분할이고, 이미지 분할 산출물과 다른 곳에 저장됩니다."""
+
+    objects = grouped_raw_objects()
+
+    grouped, _ = prepare(prepare_config("8:2"), objects)
+    by_image, _ = prepare(prepare_config("8:2", split_method="image"), objects)
+
+    assert grouped["summary"]["split_method"] == "group"
+    assert grouped["summary"]["processed_prefix"].endswith("v1-seed42-8020-group/")
+    # 기존 산출물이 있는 경로 이름은 그대로 두어 어제 실험 결과를 덮지 않습니다.
+    assert by_image["summary"]["processed_prefix"].endswith("v1-seed42-8020/")
+    assert grouped["artifacts"] != by_image["artifacts"]
+
+
+def test_image_split_still_separates_siblings_and_stays_available():
+    """`split_method="image"`는 예전 방식 그대로 이미지 한 장씩 나눕니다."""
+
+    result, stored = prepare(
+        prepare_config("8:2", split_method="image"), grouped_raw_objects()
+    )
+
+    assert result["status"] == "ok", result["message"]
+    train_groups = group_names(artifact_document(stored, result, "train_manifest_uri"))
+    validation_groups = group_names(
+        artifact_document(stored, result, "validation_manifest_uri")
+    )
+    assert train_groups & validation_groups
+
+
+def test_file_names_without_the_delimiter_become_their_own_group():
+    """그룹 규칙에 맞지 않는 이름도 실행을 죽이지 않고 한 장짜리 그룹이 됩니다."""
+
+    # 구분자가 아예 없는 이름과, 앞부분이 비어 있는 이름 두 가지입니다. 뒤의 둘은
+    # 접두사가 똑같이 비어 있어서, 이름 전체로 되돌리지 않으면 한 그룹이 됩니다.
+    odd = {
+        1: "no-delimiter-here",
+        2: "_leading-delimiter",
+        3: "_another-leading",
+    }
+
+    result, stored = prepare(
+        prepare_config("8:2"), grouped_raw_objects(extra_stems=odd)
+    )
+
+    assert result["status"] == "ok", result["message"]
+    placed = {
+        Path(image["file_name"]).stem: split
+        for split, key in (
+            ("train", "train_manifest_uri"),
+            ("validation", "validation_manifest_uri"),
+        )
+        for image in artifact_document(stored, result, key)["images"]
+    }
+    # 두 이름은 서로 다른 그룹이므로 같은 split에 묶여 들어갈 이유가 없습니다.
+    assert set(odd.values()) <= set(placed)
+    summary_document = artifact_document(stored, result, "dataset_summary_uri")
+    grouping = summary_document["split"]["grouping"]
+    assert grouping["group_count"] == 13
+    assert grouping["train_groups"] + grouping["validation_groups"] == 13
+
+
+def test_fallback_group_keys_do_not_collide_with_normal_names_or_extensions():
+    """규칙 밖 file은 정상 접두사나 다른 확장자의 file과 합쳐지지 않습니다."""
+
+    images = [
+        {"id": 1, "file_name": "foo.jpg"},
+        {"id": 2, "file_name": "foo_0.jpg"},
+        {"id": 3, "file_name": "foo.png"},
+    ]
+    annotations = [
+        {"id": image["id"], "image_id": image["id"], "category_id": 1}
+        for image in images
+    ]
+
+    result = split_images(
+        images,
+        annotations,
+        validation_ratio=0.2,
+        seed=42,
+        group_rule=GroupRule(delimiter="_", tokens=1),
+    )
+
+    assert result.group_count == 3
+
+
+def test_group_split_backtracks_when_the_greedy_choice_blocks_coverage():
+    """처음 선택이 막다른 길이어도 가능한 category 분할을 다시 찾습니다."""
+
+    category_sets = ({1, 3}, {1}, {2, 4, 5}, {4, 5, 6}, {2}, {3, 6})
+    images: list[dict[str, Any]] = []
+    annotations: list[dict[str, Any]] = []
+    annotation_id = 1
+    image_id = 1
+    for group_index, categories in enumerate(category_sets, start=1):
+        for member_index in range(2):
+            images.append(
+                {
+                    "id": image_id,
+                    "file_name": f"group{group_index}_{member_index}.jpg",
+                }
+            )
+            for category_id in sorted(categories):
+                annotations.append(
+                    {
+                        "id": annotation_id,
+                        "image_id": image_id,
+                        "category_id": category_id,
+                    }
+                )
+                annotation_id += 1
+            image_id += 1
+
+    result = split_images(
+        images,
+        annotations,
+        validation_ratio=0.2,
+        seed=42,
+        group_rule=GroupRule(delimiter="_", tokens=1),
+    )
+
+    assert set(result.train_category_counts) == set(range(1, 7))
+    assert set(result.validation_category_counts) == set(range(1, 7))
+
+
+def test_category_coverage_wins_when_groups_cannot_hit_the_ratio():
+    """category를 모두 담느라 목표 장수를 넘겨도, 실제 비율을 남기고 진행합니다."""
+
+    # 그룹 하나에 category 하나뿐이라, category 3개를 담으려면 목표(8장)보다 많은
+    # 그룹 3개(12장)가 필요합니다.
+    categories_by_image = {index: [(index - 1) // 4 % 3 + 1] for index in range(1, 41)}
+
+    result, stored = prepare(
+        prepare_config("8:2"),
+        grouped_raw_objects(categories_by_image=categories_by_image),
+    )
+
+    assert result["status"] == "ok", result["message"]
+    validation = artifact_document(stored, result, "validation_manifest_uri")
+    assert len(validation["images"]) > 8
+    assert {annotation["category_id"] for annotation in validation["annotations"]} == {
+        1,
+        2,
+        3,
+    }
+    split_document = artifact_document(stored, result, "dataset_summary_uri")["split"]
+    assert split_document["validation_image_ratio"] == pytest.approx(
+        len(validation["images"]) / 40
+    )
+
+
+def test_category_inside_a_single_group_is_rejected():
+    """한 그룹에만 있는 category는 양쪽 split에 넣을 수 없으므로 실패합니다."""
+
+    # category 3은 첫 번째 조합 코드의 이미지에만 나타납니다.
+    categories_by_image = {index: [(index - 1) % 2 + 1] for index in range(1, 41)}
+    categories_by_image[1] = [1, 3]
+    categories_by_image[2] = [2, 3]
+
+    result, stored = prepare(
+        prepare_config("8:2"),
+        grouped_raw_objects(categories_by_image=categories_by_image),
+    )
+
+    assert result["status"] == "error"
+    assert "그룹" in result["message"]
+    assert "3" in result["message"]
+    assert not [uri for uri in stored if "/processed/" in uri]
+
+
+def test_dataset_summary_records_the_split_method_and_group_counts():
+    """어떤 방식으로 몇 개 그룹을 나눴는지 요약만 보고 알 수 있어야 합니다."""
+
+    result, stored = prepare(prepare_config("8:2"), grouped_raw_objects())
+
+    split_document = artifact_document(stored, result, "dataset_summary_uri")["split"]
+    assert split_document["method"] == "group"
+    assert split_document["grouping"] == {
+        "delimiter": "_",
+        "tokens": 1,
+        "group_count": 10,
+        "train_groups": 8,
+        "validation_groups": 2,
+    }
 
 
 def test_pass_through_still_works_when_preparation_is_not_requested():
