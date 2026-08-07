@@ -1405,6 +1405,49 @@ def test_category_inside_a_single_group_lands_in_train_only_and_is_recorded():
     assert by_id[3]["train_image_count"] == 2
 
 
+def test_category_whose_groups_are_all_blocked_becomes_train_only():
+    """그룹이 2개여도 그 그룹이 전부 막혔으면 그 category도 train 전용입니다.
+
+    그룹이 1개뿐인 category를 품은 그룹은 그 category를 train에 남기려고
+    validation 후보에서 빠집니다. 어떤 category의 그룹이 전부 그런 그룹이면
+    그 category 역시 그룹을 쪼개지 않는 한 validation에 갈 수 없으므로,
+    준비를 실패시키지 말고 train 전용으로 두어야 합니다.
+    """
+
+    # 알약 5는 그룹이 2개지만, 한쪽에는 91만 다른 쪽에는 92만 함께 있고 91과 92는
+    # 각각 그룹이 하나뿐이라 두 그룹 모두 validation에 갈 수 없습니다.
+    combinations = {"K-A": (5, 91), "K-B": (5, 92), "K-C": (1, 2), "K-D": (1, 2)}
+    images: list[dict[str, Any]] = []
+    annotations: list[dict[str, Any]] = []
+    annotation_id = 1
+    image_id = 1
+    for code, categories in combinations.items():
+        for member_index in range(4):
+            images.append({"id": image_id, "file_name": f"{code}_{member_index}_70.png"})
+            for category_id in categories:
+                annotations.append(
+                    {
+                        "id": annotation_id,
+                        "image_id": image_id,
+                        "category_id": category_id,
+                    }
+                )
+                annotation_id += 1
+            image_id += 1
+
+    result = split_images(
+        images,
+        annotations,
+        validation_ratio=0.25,
+        seed=42,
+        group_rule=GroupRule(delimiter="_", tokens=1),
+    )
+
+    assert result.train_only_category_ids == (5, 91, 92)
+    assert set(result.validation_category_counts) == {1, 2}
+    assert {5, 91, 92} <= set(result.train_category_counts)
+
+
 def test_split_fails_when_every_group_holds_a_single_group_category():
     """모든 그룹이 train에 묶이면 validation이 비므로 이유를 밝히고 실패합니다."""
 
