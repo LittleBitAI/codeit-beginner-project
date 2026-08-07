@@ -194,7 +194,8 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
       </div>
 
       {/* 평가는 학습이 성공으로 끝난 뒤에만 할 수 있습니다. checkpoint가 있어야 합니다. */}
-      {job.status === 'succeeded' && <EvaluatePanel job={job} />}
+      {/* key를 주어 학습을 바꾸면 이전 학습의 평가 상태가 남지 않게 합니다. */}
+      {job.status === 'succeeded' && <EvaluatePanel key={job.job_id} job={job} />}
 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-start' }}>
         <div style={{ flex: '3 1 380px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
