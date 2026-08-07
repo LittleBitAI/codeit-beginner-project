@@ -135,6 +135,41 @@ test('평가 전에는 mAP 자리가 사라지지 않고 -로 남는다', async 
   expect(await screen.findByText(`${ARCHITECTURE} · mAP@[0.75:0.95] -`)).toBeInTheDocument();
 });
 
+test('field이 빠진 subscription 이벤트가 이미 받아 온 모델명과 mAP를 지우지 않는다', async () => {
+  // AppSync subscription은 mutation이 고른 field만 전달합니다. publisher가 좁게
+  // 고르면 settings·summary·evaluation이 통째로 비어 도착해, 예전에는 heartbeat
+  // 한 번에 모델명과 mAP가 전부 `-`로 바뀌었습니다.
+  cloud.listRuns.mockResolvedValue([run('a', '1', 'succeeded')]);
+  const view = render(<TeamActivity defaults={defaults} />);
+  expect(
+    await screen.findByText(`${ARCHITECTURE} · mAP@[0.75:0.95] 0.7349`),
+  ).toBeInTheDocument();
+
+  state.latestEvent = {
+    ...run('a', '1', 'succeeded'),
+    settings: {},
+    summary: {},
+    evaluation: {},
+  };
+  view.rerender(<TeamActivity defaults={defaults} />);
+
+  expect(
+    await screen.findByText(`${ARCHITECTURE} · mAP@[0.75:0.95] 0.7349`),
+  ).toBeInTheDocument();
+});
+
+test('로그 구독이 끊기면 스트리밍 중이라고 말하지 않는다', async () => {
+  // 상태만 보고 "스트리밍 중"을 그리면 로그가 왜 안 늘어나는지 화면에서 알 수 없습니다.
+  cloud.subscribeLogs.mockImplementation((_team, _id, _next, onError) => {
+    onError(new Error('구독 실패'));
+    return { unsubscribe: vi.fn() };
+  });
+  render(<TeamActivity defaults={defaults} />);
+
+  expect(await screen.findByText(/연결되지 않음/)).toBeInTheDocument();
+  expect(screen.queryByText('스트리밍 중')).toBeNull();
+});
+
 test('로그인이 확인해 준 이름과 직접 적은 이름을 구분해 보여준다', async () => {
   const headless = { ...run('지현 (Colab)', '1'), actorSource: 'iam' as const };
   cloud.listRuns.mockResolvedValue([headless]);
