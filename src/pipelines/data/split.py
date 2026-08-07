@@ -50,13 +50,17 @@ class GroupRule:
         """이미지 위치에서 그룹 이름을 뽑습니다.
 
         구분자가 없거나 앞부분이 비어 있는 이름은 규칙에 맞지 않는 이름입니다.
-        그런 file은 이름 전체를 그룹으로 삼아 그 file 하나만의 그룹이 되게 합니다.
-        원본에 예상 못 한 이름이 하나 섞였다고 준비 실행이 죽으면 안 됩니다.
+        그런 file은 확장자를 포함한 위치 전체를 별도 namespace에 넣어 그 file
+        하나만의 그룹이 되게 합니다. 정상 접두사와 fallback 이름이 우연히 같거나
+        stem이 같고 확장자만 달라도 서로 합쳐지지 않습니다.
         """
 
-        stem = PurePosixPath(str(file_name).replace("\\", "/")).stem
+        path = PurePosixPath(str(file_name).replace("\\", "/"))
+        stem = path.stem
         prefix = self.delimiter.join(stem.split(self.delimiter)[: self.tokens])
-        return prefix or stem
+        if self.delimiter not in stem or not prefix:
+            return f"file:{path.as_posix()}"
+        return f"group:{prefix}"
 
 
 @dataclass(frozen=True)
@@ -197,11 +201,20 @@ def split_images(
             if validation_counts[category_id] < 1
         }
 
-    while uncovered():
-        # 이 단계에는 목표 장수 제한을 두지 않습니다. 그룹이 크면 목표를 넘길 수
-        # 있지만, 한 category가 validation에서 통째로 빠지는 것보다 비율이 조금
-        # 어긋나는 편이 낫습니다. 실제 비율은 요약에 남습니다.
+    failed_coverage_states: set[frozenset[str]] = set()
+
+    def cover_categories() -> bool:
+        """탐욕 점수 순서로 시도하되 막히면 이전 선택으로 돌아갑니다."""
+
+        nonlocal validation_images
         remaining = uncovered()
+        if not remaining:
+            return True
+
+        state = frozenset(validation)
+        if state in failed_coverage_states:
+            return False
+
         rarest = min(remaining, key=lambda value: (category_totals[value], value))
         candidates = [
             name
@@ -211,9 +224,8 @@ def split_images(
             and keeps_train_coverage(name)
         ]
         if not candidates:
-            raise DatasetPreparationError(
-                f"category {rarest}를 train과 validation 양쪽에 넣을 수 없습니다."
-            )
+            failed_coverage_states.add(state)
+            return False
 
         def coverage_score(name: str) -> tuple[float, float, float, int]:
             categories = categories_by_group[name]
@@ -225,10 +237,28 @@ def split_images(
             )
             return (float(gain), scarcity, -float(overshoot), -tie_rank[name])
 
-        chosen = max(candidates, key=coverage_score)
-        validation.add(chosen)
-        validation_images += group_sizes[chosen]
-        validation_counts.update(categories_by_group[chosen])
+        for chosen in sorted(candidates, key=coverage_score, reverse=True):
+            validation.add(chosen)
+            validation_images += group_sizes[chosen]
+            validation_counts.update(categories_by_group[chosen])
+            if cover_categories():
+                return True
+            validation_counts.subtract(categories_by_group[chosen])
+            validation_images -= group_sizes[chosen]
+            validation.remove(chosen)
+
+        failed_coverage_states.add(state)
+        return False
+
+    # 이 단계에는 목표 장수 제한을 두지 않습니다. 그룹이 크면 목표를 넘길 수
+    # 있지만, 한 category가 validation에서 통째로 빠지는 것보다 비율이 조금
+    # 어긋나는 편이 낫습니다. 실제 비율은 요약에 남습니다. 가장 좋은 탐욕 선택이
+    # 뒤 category의 유일한 후보를 막으면 다음 후보로 돌아가 가능한 분할을 찾습니다.
+    if not cover_categories():
+        raise DatasetPreparationError(
+            "모든 category를 train과 validation 양쪽에 넣는 그룹 분할을 찾을 수 "
+            "없습니다."
+        )
 
     while validation_images < target_size:
         # 그룹을 통째로 넣어야 하므로 목표를 지나칠 수 있습니다. 목표에 더

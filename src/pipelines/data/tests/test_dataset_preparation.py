@@ -25,7 +25,7 @@ from src.common.storage import S3Storage
 from src.pipelines.data import preparation, run
 from src.pipelines.data.errors import DataError
 from src.pipelines.data.preparation import REPOSITORY_ROOT
-from src.pipelines.data.split import split_images
+from src.pipelines.data.split import GroupRule, split_images
 from src.pipelines.data.test_manifest import build_test_manifest
 
 
@@ -1265,6 +1265,69 @@ def test_file_names_without_the_delimiter_become_their_own_group():
     grouping = summary_document["split"]["grouping"]
     assert grouping["group_count"] == 13
     assert grouping["train_groups"] + grouping["validation_groups"] == 13
+
+
+def test_fallback_group_keys_do_not_collide_with_normal_names_or_extensions():
+    """규칙 밖 file은 정상 접두사나 다른 확장자의 file과 합쳐지지 않습니다."""
+
+    images = [
+        {"id": 1, "file_name": "foo.jpg"},
+        {"id": 2, "file_name": "foo_0.jpg"},
+        {"id": 3, "file_name": "foo.png"},
+    ]
+    annotations = [
+        {"id": image["id"], "image_id": image["id"], "category_id": 1}
+        for image in images
+    ]
+
+    result = split_images(
+        images,
+        annotations,
+        validation_ratio=0.2,
+        seed=42,
+        group_rule=GroupRule(delimiter="_", tokens=1),
+    )
+
+    assert result.group_count == 3
+
+
+def test_group_split_backtracks_when_the_greedy_choice_blocks_coverage():
+    """처음 선택이 막다른 길이어도 가능한 category 분할을 다시 찾습니다."""
+
+    category_sets = ({1, 3}, {1}, {2, 4, 5}, {4, 5, 6}, {2}, {3, 6})
+    images: list[dict[str, Any]] = []
+    annotations: list[dict[str, Any]] = []
+    annotation_id = 1
+    image_id = 1
+    for group_index, categories in enumerate(category_sets, start=1):
+        for member_index in range(2):
+            images.append(
+                {
+                    "id": image_id,
+                    "file_name": f"group{group_index}_{member_index}.jpg",
+                }
+            )
+            for category_id in sorted(categories):
+                annotations.append(
+                    {
+                        "id": annotation_id,
+                        "image_id": image_id,
+                        "category_id": category_id,
+                    }
+                )
+                annotation_id += 1
+            image_id += 1
+
+    result = split_images(
+        images,
+        annotations,
+        validation_ratio=0.2,
+        seed=42,
+        group_rule=GroupRule(delimiter="_", tokens=1),
+    )
+
+    assert set(result.train_category_counts) == set(range(1, 7))
+    assert set(result.validation_category_counts) == set(range(1, 7))
 
 
 def test_category_coverage_wins_when_groups_cannot_hit_the_ratio():
