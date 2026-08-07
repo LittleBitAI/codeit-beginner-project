@@ -43,10 +43,13 @@ class ProgressState:
         "device",
         "epochs",
         "epochs_by_number",
+        "finished",
         "last_percent",
         "malformed_lines",
+        "reported_completed_epochs",
         "run_id",
         "saw_progress",
+        "stopped_early",
         "suppressed_lines",
         "train_images",
         "validation_images",
@@ -67,6 +70,10 @@ class ProgressState:
         # epoch 번호가 중복되거나 역순으로 와도 안전하도록 dict에 담습니다.
         self.epochs_by_number: dict[int, dict[str, Any]] = {}
         self.malformed_lines = 0
+        self.finished = False
+        # train이 알려 준 실제 수행 횟수입니다. 없으면 받은 epoch 수로 셉니다.
+        self.reported_completed_epochs: int | None = None
+        self.stopped_early: bool | None = None
 
 
 def _level_for(text: str) -> str:
@@ -107,6 +114,24 @@ def _non_negative_int(value: Any) -> int | None:
 
 def _text(value: Any) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
+
+
+def _loss_components(value: Any) -> dict[str, float] | None:
+    """모델이 돌려준 개별 loss를 이름 그대로 담습니다.
+
+    이름은 모델마다 다르므로(Faster R-CNN과 RetinaNet이 서로 다릅니다) 열거하지도
+    공통 이름으로 바꾸지도 않습니다. 쓸 수 있는 항목이 하나도 없으면 빈 dict 대신
+    ``None``을 돌려주어 화면이 없는 값을 지어내지 않게 합니다.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    components: dict[str, float] = {}
+    for name, item in value.items():
+        number = _finite_number(item)
+        if name and number is not None:
+            components[str(name)] = number
+    return components or None
 
 
 def _format_number(value: float | None) -> str:
@@ -160,6 +185,8 @@ def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[
         "epoch": epoch,
         "train_loss": _finite_number(event.get("train_loss")),
         "validation_loss": _finite_number(event.get("validation_loss")),
+        "train_loss_components": _loss_components(event.get("train_loss_components")),
+        "validation_loss_components": _loss_components(event.get("validation_loss_components")),
         "epoch_seconds": _finite_number(event.get("epoch_seconds")),
         "is_best": bool(event.get("is_best")) if isinstance(event.get("is_best"), bool) else None,
     }
@@ -176,10 +203,41 @@ def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[
     )
 
 
+def _apply_training_completed(state: ProgressState, event: dict[str, Any]) -> dict[str, Any]:
+    """학습이 끝났다는 사실과 실제로 돈 epoch 수를 기록합니다.
+
+    조기 종료로 계획보다 일찍 끝나면 받은 epoch 수만으로는 진행률이 24%에 멈춘 것처럼
+    보입니다. 끝났다는 사실을 알아야 100%와 남은 시간 0을 말할 수 있습니다.
+    """
+
+    state.finished = True
+    planned = _positive_int(event.get("planned_epochs"))
+    if planned is not None and state.epochs is None:
+        # run_started를 놓쳤을 때만 씁니다. 계획 epoch는 원래 그 event가 알려 줍니다.
+        state.epochs = planned
+    state.reported_completed_epochs = _positive_int(event.get("completed_epochs"))
+    stopped_early = event.get("stopped_early")
+    state.stopped_early = stopped_early if isinstance(stopped_early, bool) else None
+
+    completed = state.reported_completed_epochs
+    if completed is None:
+        completed = len(state.epochs_by_number)
+    total_text = f"/{state.epochs}" if state.epochs else ""
+    pieces = [f"학습 완료 · {completed}{total_text} epoch"]
+    if state.stopped_early:
+        pieces.append("조기 종료")
+    best_epoch = _positive_int(event.get("best_epoch"))
+    best_loss = _finite_number(event.get("best_validation_loss"))
+    if best_epoch is not None and best_loss is not None:
+        pieces.append(f"최고 val {_format_number(best_loss)} (epoch {best_epoch})")
+    return _log(" · ".join(pieces), level="info")
+
+
 _HANDLERS = {
     "run_started": _apply_run_started,
     "epoch_started": _apply_epoch_started,
     "epoch_completed": _apply_epoch_completed,
+    "training_completed": _apply_training_completed,
 }
 
 
@@ -260,6 +318,9 @@ def consume_line(state: ProgressState, line: str) -> dict[str, Any] | None:
 def _eta_seconds(state: ProgressState) -> float | None:
     """실제로 측정된 epoch 시간이 2건 이상일 때만 남은 시간을 추정합니다."""
 
+    if state.finished:
+        # 조기 종료로 계획 epoch가 남아 있어도 더 기다릴 시간은 없습니다.
+        return 0.0
     if not state.epochs or state.current_epoch is None:
         return None
     durations = [
@@ -292,7 +353,10 @@ def snapshot(state: ProgressState) -> dict[str, Any]:
         }
 
     ordered = [state.epochs_by_number[key] for key in sorted(state.epochs_by_number)]
-    completed = len(ordered)
+    # train이 알려 준 실제 수행 횟수를 우선합니다. 없으면 받은 event 수로 셉니다.
+    completed = state.reported_completed_epochs
+    if completed is None:
+        completed = len(ordered)
     total = state.epochs
     best = None
     scored = [record for record in ordered if record["validation_loss"] is not None]
@@ -316,7 +380,10 @@ def snapshot(state: ProgressState) -> dict[str, Any]:
         "total_epochs": total,
         "current_epoch": state.current_epoch,
         "completed_epochs": completed,
-        "percent": round(completed / total * 100, 1) if total else None,
+        # 끝난 학습은 계획 epoch가 남아 있어도 100%입니다.
+        "finished": state.finished,
+        "stopped_early": state.stopped_early,
+        "percent": 100.0 if state.finished else (round(completed / total * 100, 1) if total else None),
         "eta_seconds": _eta_seconds(state),
         "epochs": ordered,
         "best": best,

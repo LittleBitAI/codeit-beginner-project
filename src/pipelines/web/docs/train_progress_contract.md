@@ -24,9 +24,14 @@ web은 학습을 공개 CLI(`python -m src.main_pipeline --only train`)로만 �
 | --- | --- |
 | `run_started` | `architecture`, `device`, `epochs`, `train_images`, `validation_images`, `class_count` |
 | `epoch_started` | `epoch`, `epochs` |
-| `epoch_completed` | `epoch`, `epochs`, `train_loss`, `validation_loss`, `best_validation_loss`, `best_epoch`, `is_best`, `epoch_seconds` |
+| `epoch_completed` | `epoch`, `epochs`, `train_loss`, `validation_loss`, `train_loss_components`, `validation_loss_components`, `best_validation_loss`, `best_epoch`, `is_best`, `epoch_seconds` |
+| `training_completed` | `planned_epochs`, `completed_epochs`, `stopped_early`, `best_epoch`, `best_validation_loss` |
 
 **새로 만든 어휘가 없습니다.** `epoch`·`train_loss`·`validation_loss`는 `trainer.py`의 `epoch_record` 키 그대로이고, 나머지는 train이 이미 반환하는 `summary`·`artifacts` 키 그대로입니다.
+
+두 `*_components`는 `문자열 -> 유한한 수` mapping입니다. 이름은 모델이 돌려준 것을 그대로 쓰므로(Faster R-CNN과 RetinaNet이 다릅니다) **web은 이름을 열거하지 않고 받은 것을 그립니다.**
+
+`training_completed`는 artifact 저장까지 끝난 뒤 한 번 나옵니다. 조기 종료로 `completed_epochs < planned_epochs`여도 web은 진행률을 100%, 남은 시간을 0으로 만듭니다. 이 event가 없는 실행(취소, 이 계약 이전의 옛 실행)은 예전 그대로 읽힙니다.
 
 `run_started`가 따로 필요한 이유는 `train_images`·`validation_images`·`class_count`가 manifest에서 파생되는 값이라 학습이 끝나기 전에는 web이 알 방법이 없기 때문입니다. `epoch_started`가 없으면 첫 epoch이 20분 걸릴 때 화면이 20분 동안 비어 있습니다.
 
@@ -34,7 +39,7 @@ web은 학습을 공개 CLI(`python -m src.main_pipeline --only train`)로만 �
 
 1. **`run(config)` 반환값이 완전히 동일하다.** 4개 key와 값 모두 그대로입니다.
 2. **stdout에는 아무것도 추가하지 않는다.**
-3. **새 config key를 만들지 않는다.** on/off 플래그를 두면 web이 미러링할 검증 규칙이 하나 늘어 drift 표면만 커집니다.
+3. **config key는 합의한 것만 만든다.** 이 계약을 처음 만들 때는 새 key를 아예 두지 않았습니다. 이후 `contracts/proposals/004-train-observability-and-early-stop.md`로 선택 key `early_stopping` 하나를 합의했고, web은 그 검증 규칙을 `train_config.py`에 복제합니다.
 4. **`training_history.json` 형식을 바꾸지 않는다.** evaluate와 registry가 읽는 파일입니다.
 5. **emitter는 예외 안전해야 한다.** `try/except Exception: pass`로 감쌉니다. web이 학습을 취소하면 pipe가 닫히고 다음 write가 `BrokenPipeError`(Windows에서는 맨 `OSError`)를 냅니다. 이 예외가 학습을 중단시키거나 exit code를 바꾸면 안 됩니다. **여섯 중 가장 중요한 조항입니다.**
 6. **main process만 출력한다.** `num_workers > 0`이면 DataLoader worker가 stderr를 상속하므로 중복 출력이 나오면 안 됩니다.
@@ -52,6 +57,8 @@ web은 학습을 공개 CLI(`python -m src.main_pipeline --only train`)로만 �
 | 모르는 `event` | 원문 로그로 표시 — event를 추가해도 schema 버전을 올릴 필요가 없습니다 |
 | 필드 타입 오류 | 그 필드만 버리고 나머지 event는 살림 |
 | loss가 `NaN`/`inf` | `None`으로 바꿈. 브라우저 `JSON.parse`가 맨 `NaN`에서 실패합니다 |
+| `*_components`가 mapping이 아님 | 그 필드만 `None`. epoch 자체는 살림 |
+| component 값 하나가 수가 아니거나 `NaN` | 그 이름만 버리고 나머지 이름은 살림. 남는 게 없으면 `None` |
 | `epoch` 중복·역순 | last-write-wins로 담고 정렬해 표시. 단조 증가를 가정하지 않음 |
 | 진행 줄이 한 번도 없음 | `available: false` — GUI가 "진행률 정보 없음"을 표시. 가짜 값 없음 |
 

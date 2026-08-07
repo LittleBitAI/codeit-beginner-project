@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 import type { GpuStatus, JobListing } from '../api/types';
 import { ChartLegend, LossChart } from '../components/LossChart';
+import { LossBreakdown } from '../components/LossBreakdown';
 import { EvaluatePanel } from '../components/EvaluatePanel';
 import { LogStream } from '../components/LogStream';
 import {
@@ -90,7 +91,10 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
                     epoch {progress.current_epoch ?? 0} / {progress.total_epochs}
                   </span>
                   <span style={{ font: `400 11px/1 ${font.sans}`, color: color.textMuted }}>
-                    {progress.eta_seconds === null ? (
+                    {progress.finished ? (
+                      // 끝난 학습에 남은 시간을 말하면 아직 도는 것처럼 읽힙니다.
+                      progress.stopped_early ? '조기 종료로 끝남' : '학습 완료'
+                    ) : progress.eta_seconds === null ? (
                       '남은 시간을 추정할 수 없습니다'
                     ) : (
                       <>
@@ -99,10 +103,11 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
                     )}
                   </span>
                 </div>
+                {/* 조기 종료로 계획 epoch가 남아도 끝난 학습은 다 채웁니다. */}
                 <ProgressBar
                   ratio={
-                    progress.total_epochs
-                      ? (progress.completed_epochs ?? 0) / progress.total_epochs
+                    progress.percent !== null && progress.percent !== undefined
+                      ? progress.percent / 100
                       : null
                   }
                 />
@@ -207,6 +212,7 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
             />
             <ChartLegend />
           </Panel>
+          <LossBreakdown epochs={epochs} />
 
           {job.status === 'succeeded' && (
             <Panel title="학습 결과">
