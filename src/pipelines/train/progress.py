@@ -11,6 +11,7 @@ import json
 import math
 import os
 import sys
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
@@ -29,6 +30,10 @@ def _json_safe(value: Any) -> Any:
 
     if isinstance(value, float) and not math.isfinite(value):
         return None
+    if isinstance(value, Mapping):
+        return {str(name): _json_safe(item) for name, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
     return value
 
 
