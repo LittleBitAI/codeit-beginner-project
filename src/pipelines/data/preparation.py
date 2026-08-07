@@ -110,8 +110,9 @@ MAX_READ_WORKERS = 16
 # 1.1에서 `split.checksums`가, 1.2에서 `split.grouping`, `split.strategy`,
 # `split.validation_image_ratio`가 추가됐습니다. 1.2에서 `split.method`는 분할
 # 방식("group"/"image")을 뜻하고, 1.1까지 그 자리에 있던 알고리즘 이름은
-# `split.strategy`로 옮겼습니다. 나머지 key는 그대로입니다.
-SUMMARY_SCHEMA_VERSION = "1.2"
+# `split.strategy`로 옮겼습니다. 1.3에서 `split.train_only_categories`가
+# 추가됐습니다. 나머지 key는 그대로입니다.
+SUMMARY_SCHEMA_VERSION = "1.3"
 CHECKSUM_ALGORITHM = "sha256"
 # hash를 남길 split 산출물입니다. 순서가 요약에 그대로 드러납니다.
 SPLIT_CHECKSUM_KEYS: tuple[tuple[str, str], ...] = (
@@ -536,6 +537,18 @@ def _dataset_summary(
             ),
             "seed": settings.seed,
             "grouping": _grouping_summary(settings.group_rule, split_result),
+            # 그룹이 하나뿐이라 validation에 넣을 수 없어 train에만 둔
+            # category입니다. 이 category들은 validation 지표를 잴 수 없습니다.
+            "train_only_categories": [
+                {
+                    "id": category_id,
+                    "name": name_by_id.get(category_id),
+                    "train_image_count": split_result.train_category_counts.get(
+                        category_id, 0
+                    ),
+                }
+                for category_id in split_result.train_only_category_ids
+            ],
             "checksums": _split_checksums(manifests),
         },
         "raw": {
@@ -556,10 +569,13 @@ def _dataset_summary(
                 "id": category["id"],
                 "name": category["name"],
                 "model_label": model_label_by_id[category["id"]],
-                "train_image_count": split_result.train_category_counts[category["id"]],
-                "validation_image_count": split_result.validation_category_counts[
-                    category["id"]
-                ],
+                # train 전용 category는 validation 수가 0이라 key 자체가 없습니다.
+                "train_image_count": split_result.train_category_counts.get(
+                    category["id"], 0
+                ),
+                "validation_image_count": split_result.validation_category_counts.get(
+                    category["id"], 0
+                ),
             }
             for category in dataset.categories
         ],
@@ -795,10 +811,22 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         "validation_groups": split_result.validation_group_count,
         "excluded_images": len(dataset.excluded_images),
         "category_count": len(dataset.categories),
+        # 그룹이 하나뿐이라 train에만 둔 category입니다. 자세한 내용은
+        # dataset_summary.json의 `split.train_only_categories`에 있습니다.
+        "train_only_categories": list(split_result.train_only_category_ids),
         "test_images_used": 0,
         "test_manifest_images": len(test_manifest["images"]),
     }
     unit = "그룹 단위" if settings.group_rule is not None else "이미지 단위"
+    train_only_note = (
+        ""
+        if not split_result.train_only_category_ids
+        else (
+            f" 그룹이 1개뿐이라 train에만 둔 category "
+            f"{len(split_result.train_only_category_ids)}종은 validation 지표를 "
+            "잴 수 없습니다."
+        )
+    )
     message = (
         f"원본 '{settings.raw_prefix}'에서 split_ratio {settings.split_ratio}"
         f"(validation {settings.validation_ratio}), seed {settings.seed}로 "
@@ -806,7 +834,7 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         f"'{settings.processed_prefix}'에 저장했습니다. "
         f"train {summary['train_images']}장({summary['train_groups']}그룹), "
         f"validation {summary['validation_images']}장"
-        f"({summary['validation_groups']}그룹)."
+        f"({summary['validation_groups']}그룹)." + train_only_note
     )
     return {
         "status": "ok",
