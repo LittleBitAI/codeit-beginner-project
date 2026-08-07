@@ -96,13 +96,20 @@ def test_early_stopping_reaches_train_as_the_object_it_expects():
     assert settings["early_stopping"] == {"patience": 5, "min_delta": 0.01}
 
 
-def test_early_stopping_needs_a_patience():
-    """train은 patience를 필수로 받습니다. 켜 놓고 비우면 학습 전에 막습니다."""
+def test_early_stopping_patience_falls_back_to_the_default_the_form_shows():
+    """칸을 비우면 화면이 "기본값 5"라고 안내한 그 값이 그대로 쓰여야 합니다.
 
-    with pytest.raises(WebValidationError) as error:
-        normalize_train_settings({"early_stopping": True})
+    train은 patience를 필수로 받지만 그것은 train이 받는 object의 규칙입니다.
+    다른 수치 칸과 마찬가지로 web이 자기 기본값을 채워 완성된 object를 보냅니다.
+    여기서 오류를 내면 스위치를 켜자마자 저장이 막혀 아무것도 할 수 없습니다.
+    """
 
-    assert "train.early_stopping_patience" in fields_of(error.value)
+    spec = next(
+        item for item in train_config.field_specs() if item["name"] == "early_stopping_patience"
+    )
+    settings = normalize_train_settings({"early_stopping": True})
+
+    assert settings["early_stopping"]["patience"] == spec["default"]
 
 
 @pytest.mark.parametrize("patience", (0, -1, True, "5", 2.5, None))

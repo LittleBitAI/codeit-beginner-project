@@ -374,14 +374,11 @@ def _normalize_early_stopping(
             collect(errors, f"train.{name}", "조기 종료를 사용할 때만 쓰는 값입니다.")
         return None
 
-    if "early_stopping_patience" not in raw:
-        # train은 patience를 필수로 받습니다. 기본값을 지어내 넣지 않습니다.
-        collect(errors, "train.early_stopping_patience", "1 이상의 정수여야 합니다.")
-        patience = DEFAULT_EARLY_STOPPING_PATIENCE
-    else:
-        patience = _normalize_integer(
-            raw, "early_stopping_patience", DEFAULT_EARLY_STOPPING_PATIENCE, 1, errors
-        )
+    # train은 patience를 필수로 받지만 그건 train이 받는 object의 규칙입니다. 다른 수치
+    # 칸과 똑같이 비어 있으면 화면이 안내한 기본값을 채워 완성된 object를 보냅니다.
+    patience = _normalize_integer(
+        raw, "early_stopping_patience", DEFAULT_EARLY_STOPPING_PATIENCE, 1, errors
+    )
     min_delta = _normalize_float(
         raw, "early_stopping_min_delta", DEFAULT_EARLY_STOPPING_MIN_DELTA, 0.0, errors
     )
