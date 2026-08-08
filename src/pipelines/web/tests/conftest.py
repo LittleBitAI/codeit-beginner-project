@@ -3,11 +3,15 @@
 실제 저장소의 ``artifacts/``를 건드리지 않도록 저장소 root를 ``tmp_path``로 바꿉니다.
 ``paths.config_dir()``와 ``paths.jobs_dir()``는 호출 시점에 module 전역을 읽으므로
 이 방법으로 모든 쓰기 위치가 함께 옮겨집니다.
+
+경로만으로는 부족해서 주변 환경 변수도 함께 걷어 냅니다. 이 pipeline은 storage
+backend와 팀 기록 여부를 ``PILL_`` 환경 변수로 고르기 때문입니다.
 """
 
 from __future__ import annotations
 
 import io
+import os
 import threading
 import time
 
@@ -16,6 +20,34 @@ import pytest
 from src.pipelines.web import paths
 from src.pipelines.web.jobs import manager as manager_module
 from src.pipelines.web.train_config import DATA_ARTIFACT_KEYS
+
+
+# 이 prefix로 시작하는 값은 모두 이 project가 동작을 고르려고 두는 knob입니다.
+PROJECT_ENVIRONMENT_PREFIX = "PILL_"
+
+
+@pytest.fixture(autouse=True)
+def neutral_environment(monkeypatch):
+    """주변 ``PILL_`` 환경 변수를 test 동안 걷어 냅니다.
+
+    개발자 기계에 실제 값이 있으면 ``PILL_STORAGE_S3_BUCKET`` 때문에 registry backend가
+    s3가 되어 test가 팀의 진짜 실험 목록을 읽고, ``PILL_TEAM_SYNC_ENABLED`` 때문에
+    학습 시작이 access token을 요구합니다. CI에는 그 값이 없어 통과하고 개발자 기계에서만
+    깨지므로 원인을 찾기 어렵습니다.
+
+    이름을 나열하지 않고 prefix로 지우는 이유는, 새 knob이 생겼을 때 이 목록을 고치는
+    것을 잊어도 새지 않게 하려는 것입니다. 값이 필요한 test는 본문에서
+    ``monkeypatch.setenv``로 직접 넣습니다. 이 fixture보다 나중에 실행되므로 그대로
+    적용됩니다.
+
+    AWS credential 변수는 건드리지 않습니다. boto3의 기본 chain이 다루는 값이고 web이
+    동작을 고르는 데 쓰지 않습니다.
+    """
+
+    for name in [
+        name for name in os.environ if name.startswith(PROJECT_ENVIRONMENT_PREFIX)
+    ]:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
