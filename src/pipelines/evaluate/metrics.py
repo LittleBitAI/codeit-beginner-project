@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import io
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from typing import Any
 
 import numpy as np
@@ -73,12 +73,19 @@ def filter_predictions(
     *,
     score_threshold: float = 0.0,
     max_detections_per_image: int | None = None,
+    excluded_category_ids: Set[int] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """score threshold와 이미지당 최대 detection 수를 적용합니다."""
+    """score threshold와 이미지당 최대 detection 수를 적용합니다.
+
+    `excluded_category_ids`는 이미지당 상한보다 **먼저** 걸러 냅니다. 상한 뒤에
+    버리면 제외 대상이 상한 칸을 차지한 뒤 사라져, 그 이미지에서 남는 예측이 상한보다
+    적어집니다.
+    """
     kept = [
         dict(prediction)
         for prediction in predictions
         if float(prediction["score"]) >= score_threshold
+        and prediction["category_id"] not in excluded_category_ids
     ]
     kept.sort(key=lambda prediction: -float(prediction["score"]))
     if max_detections_per_image is None:
