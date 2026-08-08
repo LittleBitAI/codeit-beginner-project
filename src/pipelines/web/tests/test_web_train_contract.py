@@ -216,11 +216,23 @@ def test_train_source_supports_every_resume_setting_the_web_sends():
 
     source = read_source("pipeline.py")
     numeric_defaults = call_defaults(source)
-    optional_defaults = get_defaults(source)
     mirrored = normalize_train_settings({})
+    settings = function_node(source, "_settings")
+    read_keys = {
+        node.args[0].value
+        for node in ast.walk(settings)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        )
+    }
 
     assert numeric_defaults["checkpoint_every"] == mirrored["checkpoint_every"]
-    assert "resume_from" in optional_defaults
+    assert "resume_from" in read_keys
 
 
 def test_string_and_boolean_defaults_match_train_source():
