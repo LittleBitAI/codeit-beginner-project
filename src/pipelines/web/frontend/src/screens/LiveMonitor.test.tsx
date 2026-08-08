@@ -7,6 +7,7 @@ import type { JobRecord, Progress } from '../api/types';
 const getJob = vi.fn();
 const logs = vi.fn();
 const gpu = vi.fn();
+const resumeJob = vi.fn();
 
 vi.mock('../api/client', () => ({
   ApiError: class ApiError extends Error {},
@@ -15,6 +16,7 @@ vi.mock('../api/client', () => ({
     logs: (...args: unknown[]) => logs(...args),
     gpu: () => gpu(),
     cancelJob: vi.fn(),
+    resumeJob: (...args: unknown[]) => resumeJob(...args),
   },
 }));
 
@@ -263,5 +265,59 @@ describe('LiveMonitor · epoch별 손실 분해', () => {
 
     await screen.findByText('epoch 2 / 50');
     expect(screen.queryByText(/손실 분해/)).toBeNull();
+  });
+});
+
+describe('LiveMonitor · 중단된 학습', () => {
+  function interrupted(): JobRecord {
+    return {
+      ...makeJob(NO_PROGRESS),
+      status: 'interrupted',
+      status_label: '중단됨',
+      message: '이 서버는 저 학습을 더 이상 관리할 수 없습니다.',
+    };
+  }
+
+  it('이어서 학습을 시작할 수 있다', async () => {
+    getJob.mockResolvedValue(interrupted());
+    resumeJob.mockResolvedValue({
+      config_id: 'c'.repeat(32),
+      run_id: 'web-resumed',
+      resumed_from_job_id: 'a'.repeat(32),
+      resume_from: 'artifacts/experiments/completed/.exp-1.partial/last_checkpoint.pt',
+      started: null,
+      entries: [],
+      paused: false,
+    });
+
+    renderMonitor();
+
+    const button = await screen.findByRole('button', { name: '이어서 학습' });
+    button.click();
+
+    await waitFor(() => expect(resumeJob).toHaveBeenCalledWith('a'.repeat(32)));
+    expect(await screen.findByText(/'web-resumed' 이름으로 대기열에 넣었습니다/)).toBeInTheDocument();
+  });
+
+  it('실패하면 이유를 화면에 남긴다', async () => {
+    getJob.mockResolvedValue(interrupted());
+    resumeJob.mockRejectedValue(new Error('boom'));
+
+    renderMonitor();
+
+    (await screen.findByRole('button', { name: '이어서 학습' })).click();
+
+    expect(
+      await screen.findByText(/이어서 학습을 시작하지 못했습니다/),
+    ).toBeInTheDocument();
+  });
+
+  it('끝난 학습에는 이어서 학습 단추를 두지 않는다', async () => {
+    getJob.mockResolvedValue({ ...makeJob(NO_PROGRESS), status: 'succeeded' });
+
+    renderMonitor();
+
+    await screen.findByText('진행률 정보 없음');
+    expect(screen.queryByRole('button', { name: '이어서 학습' })).toBeNull();
   });
 });

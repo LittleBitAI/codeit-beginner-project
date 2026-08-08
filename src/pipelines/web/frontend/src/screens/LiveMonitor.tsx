@@ -31,6 +31,9 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
   const gpu = usePolling<GpuStatus>(() => api.gpu(), 5000, Boolean(job));
   const [cancelling, setCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const [resuming, setResuming] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
+  const [resumed, setResumed] = useState<string | null>(null);
 
   if (!jobId) {
     return (
@@ -65,6 +68,25 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
       setCancelError(caught instanceof ApiError ? caught.message : '중지 요청이 실패했습니다.');
     } finally {
       setCancelling(false);
+    }
+  }
+
+  async function resume() {
+    setResuming(true);
+    setResumeError(null);
+    try {
+      // epochs를 비워 두면 중단된 실행의 전체 목표를 그대로 이어갑니다.
+      const result = await api.resumeJob(job!.job_id);
+      setResumed(result.run_id);
+      if (result.started) {
+        navigate(`/monitor/${result.started.job_id}`);
+      }
+    } catch (caught) {
+      setResumeError(
+        caught instanceof ApiError ? caught.message : '이어서 학습을 시작하지 못했습니다.',
+      );
+    } finally {
+      setResuming(false);
     }
   }
 
@@ -185,8 +207,20 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
         </AlertRow>
       )}
       {job.status === 'interrupted' && (
-        <AlertRow level="warning" title="서버가 다시 시작되어 상태를 잃었습니다">
-          {job.message ?? '이 학습의 실제 결과는 알 수 없습니다.'}
+        <AlertRow
+          level="warning"
+          title="서버가 다시 시작되어 상태를 잃었습니다"
+          action={
+            <Button onClick={resume} disabled={resuming}>
+              {resuming ? '시작하는 중…' : '이어서 학습'}
+            </Button>
+          }
+        >
+          {job.message ?? '이 학습의 실제 결과는 알 수 없습니다.'} epoch마다 저장한
+          checkpoint가 있으면 그 지점부터 이어서 학습합니다. 결과가 섞이지 않도록 새 실행
+          이름으로 시작하고, 남은 epoch이 아니라 원래 계획한 전체 epoch까지 돕니다.
+          {resumed && ` '${resumed}' 이름으로 대기열에 넣었습니다.`}
+          {resumeError && ` ${resumeError}`}
         </AlertRow>
       )}
 

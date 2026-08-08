@@ -8,6 +8,7 @@ train이 거부하는 값을 여기서 통과시키지 않습니다.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -92,7 +93,13 @@ _INTEGER_FIELDS = (
     ("epochs", 1, 1),
     ("batch_size", 1, 1),
     ("num_workers", 0, 0),
+    ("checkpoint_every", 1, 1),
 )
+# 이어서 학습할 checkpoint의 파일 이름과 작업 폴더 규칙입니다. train이 정한 것을
+# 그대로 옮겼습니다(`src/pipelines/train/pipeline.py`).
+RESUME_CHECKPOINT_NAME = "last_checkpoint.pt"
+WORKING_DIRECTORY_SUFFIX = ".partial"
+RUNNING_PREFIX = "running"
 OPTIMIZER_PROFILES = {
     "AdamW": {
         "learning_rate": 0.0001,
@@ -128,6 +135,10 @@ _FIELD_LABELS = {
         "amp는 GPU에서 절반 정밀도를 섞어 더 빠르고 메모리를 덜 씁니다. device가 cuda여야 합니다.",
     ),
     "seed": ("Random seed", "같은 seed와 같은 데이터면 같은 결과가 나옵니다."),
+    "checkpoint_every": (
+        "Checkpoint 주기",
+        "몇 epoch마다 이어서 할 수 있는 checkpoint를 남길지 정합니다. 1이면 매 epoch입니다.",
+    ),
     "epochs": ("Epochs", "전체 학습 데이터를 몇 번 반복할지 정합니다."),
     "batch_size": ("Batch size", "한 번에 처리할 이미지 수. GPU 메모리에 가장 큰 영향을 줍니다."),
     "num_workers": ("DataLoader workers", "이미지를 읽어 오는 보조 process 수. 0이면 주 process가 직접 읽습니다."),
@@ -466,6 +477,8 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         collect(errors, "train.pretrained", "true 또는 false여야 합니다.")
         pretrained = False
 
+    resume_from = _normalize_resume_from(raw, errors)
+
     run_id = raw.get("run_id") or generate_run_id()
     if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
         collect(
@@ -536,8 +549,12 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         "precision": settings["precision"],
         "seed": settings["seed"],
         "epochs": settings["epochs"],
+        "checkpoint_every": settings["checkpoint_every"],
         "batch_size": settings["batch_size"],
         "num_workers": settings["num_workers"],
+        # 처음부터 학습하는 실행은 key 자체를 넣지 않습니다. train은 없으면 지금과
+        # 완전히 같게 동작합니다.
+        **({"resume_from": resume_from} if resume_from is not None else {}),
         "learning_rate": settings["learning_rate"],
         "weight_decay": settings["weight_decay"],
         "device": settings["device"],
@@ -560,6 +577,40 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
             }
         ),
     }
+
+
+def _normalize_resume_from(raw: dict, errors: list[FieldError]) -> str | None:
+    """이어서 학습할 checkpoint 경로입니다. 없으면 처음부터 학습합니다.
+
+    train은 저장소 안의 상대 경로와 ``s3://`` URI를 받습니다. 같은 규칙으로 미리
+    거르지 않으면 subprocess가 뜬 뒤에야 알게 됩니다.
+    """
+
+    if "resume_from" not in raw:
+        return None
+    value = raw["resume_from"]
+    if not isinstance(value, str) or not value.strip():
+        collect(errors, "train.resume_from", "비어 있지 않은 문자열이어야 합니다.")
+        return None
+
+    text = value.strip()
+    if text.lower().startswith("s3://"):
+        split = urlsplit(text)
+        if not split.netloc or not split.path.strip("/"):
+            collect(errors, "train.resume_from", "s3://bucket/key 형식이어야 합니다.")
+        return text
+    if "://" in text:
+        collect(
+            errors,
+            "train.resume_from",
+            "저장소 기준 상대 경로 또는 s3:// URI만 쓸 수 있습니다.",
+        )
+        return text
+    try:
+        return normalize_relative_posix(text, label="이어서 학습할 checkpoint")
+    except WebPathError as error:
+        collect(errors, "train.resume_from", str(error))
+        return text
 
 
 def _normalize_data_uri(value: Any, key: str, errors: list[FieldError]) -> str:
@@ -624,6 +675,77 @@ def run_id_output_path(settings: dict[str, Any]) -> Path:
     return resolve_within_repo(settings["output_dir"], label="출력 directory") / settings["run_id"]
 
 
+def run_id_working_path(settings: dict[str, Any]) -> Path:
+    """중단된 학습의 checkpoint가 남아 있는 자리입니다.
+
+    train이 학습 중 checkpoint를 두는 폴더와 같은 이름이어야 합니다.
+    """
+
+    parent = resolve_within_repo(settings["output_dir"], label="출력 directory")
+    return parent / f".{settings['run_id']}{WORKING_DIRECTORY_SUFFIX}"
+
+
+def resume_checkpoint_uri(config: dict[str, Any]) -> str:
+    """이 실행을 이어서 하려면 어느 checkpoint를 봐야 하는지 알려 줍니다."""
+
+    train = config["train"]
+    backend = config.get("storage", {}).get("backend")
+    if backend == "s3":
+        bucket = os.environ.get("PILL_STORAGE_S3_BUCKET", "").strip()
+        if not bucket:
+            raise WebValidationError(
+                [
+                    FieldError(
+                        "train.resume_from",
+                        "S3에 올라간 학습을 이어서 하려면 PILL_STORAGE_S3_BUCKET "
+                        "환경 변수가 필요합니다.",
+                    )
+                ]
+            )
+        prefix = train["output_prefix"].strip("/")
+        return (
+            f"s3://{bucket}/{prefix}/{train['run_id']}"
+            f"/{RUNNING_PREFIX}/{RESUME_CHECKPOINT_NAME}"
+        )
+    directory = train["output_dir"].strip("/")
+    return (
+        f"{directory}/.{train['run_id']}{WORKING_DIRECTORY_SUFFIX}"
+        f"/{RESUME_CHECKPOINT_NAME}"
+    )
+
+
+def build_resume_config(
+    config: dict[str, Any],
+    *,
+    run_id: str | None = None,
+    epochs: int | None = None,
+) -> dict[str, Any]:
+    """중단된 실행의 설정을 그대로 두고 이어서 학습할 config를 만듭니다.
+
+    이어서 하는 실행은 **새 이름**을 받습니다. 같은 이름을 다시 쓰면 train이 남아 있는
+    작업 폴더를 보고 시작을 거부하고, 결과도 섞입니다.
+    """
+
+    resumed = copy.deepcopy(config)
+    train = resumed["train"]
+    train["resume_from"] = resume_checkpoint_uri(config)
+    new_run_id = run_id or generate_run_id()
+    if not isinstance(new_run_id, str) or not RUN_ID_PATTERN.fullmatch(new_run_id):
+        raise WebValidationError(
+            [FieldError("train.run_id", "실행 이름에 쓸 수 없는 글자가 있습니다.")]
+        )
+    train["run_id"] = new_run_id
+    if epochs is not None:
+        # train은 epochs를 남은 수가 아니라 전체 목표로 읽고, 이어붙일 epoch보다
+        # 크지 않으면 시작 전에 거부합니다.
+        if not isinstance(epochs, int) or isinstance(epochs, bool) or epochs < 1:
+            raise WebValidationError(
+                [FieldError("train.epochs", "1 이상의 정수여야 합니다.")]
+            )
+        train["epochs"] = epochs
+    return resumed
+
+
 def preflight_warnings(
     settings: dict[str, Any], data_inputs: dict[str, str]
 ) -> list[dict[str, str]]:
@@ -675,6 +797,19 @@ def check_run_id_collision(settings: dict[str, Any], data_inputs: dict[str, str]
                 FieldError(
                     "train.run_id",
                     f"'{settings['run_id']}' 결과가 이미 있습니다. 다른 이름을 쓰세요.",
+                )
+            ]
+        )
+    working = run_id_working_path(settings)
+    # train은 여기가 비어 있지 않으면 시작을 거부합니다. 중단된 학습의 유일한 사본이라
+    # 덮어쓰지 않습니다.
+    if working.is_dir() and any(working.iterdir()):
+        raise WebValidationError(
+            [
+                FieldError(
+                    "train.run_id",
+                    f"'{settings['run_id']}' 학습이 중단된 채로 남아 있습니다. "
+                    "이어서 학습하거나 다른 이름을 쓰세요.",
                 )
             ]
         )

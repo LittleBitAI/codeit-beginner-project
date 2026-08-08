@@ -20,6 +20,7 @@ from ..jobs import get_manager
 from ..jobs.model import TERMINAL_STATUSES, JobRecord
 from ..masking import redact
 from ..train_config import (
+    build_resume_config,
     data_field_specs,
     field_specs,
     read_runtime_config,
@@ -284,6 +285,45 @@ def start_evaluation(job_id: str, payload: EvaluateRequest = Body(...)) -> dict[
     if record.status != "succeeded":
         raise JobConflictError("성공으로 끝난 학습만 평가할 수 있습니다.")
     return {"evaluation": get_evaluation_runner().start(record, payload.model_dump())}
+
+
+class ResumeRequest(BaseModel):
+    """이어서 학습 설정. 비워 두면 중단된 실행의 계획을 그대로 이어갑니다."""
+
+    run_id: str | None = Field(default=None)
+    epochs: int | None = Field(default=None, ge=1)
+
+
+@router.post("/jobs/{job_id}/resume", status_code=201)
+def resume_job(job_id: str, payload: ResumeRequest = Body(...)) -> dict[str, Any]:
+    """중단된 학습을 그 checkpoint에서 이어서 시작합니다.
+
+    이어서 하는 실행은 **새 이름**을 받습니다. 같은 이름을 다시 쓰면 train이 남아 있는
+    작업 폴더를 보고 시작을 거부하고, 결과도 섞입니다. `epochs`는 남은 수가 아니라
+    전체 목표이므로 비워 두면 중단된 실행의 계획을 그대로 씁니다.
+    """
+
+    manager = get_manager()
+    record = manager.get(job_id)
+    if record.status != "interrupted":
+        raise JobConflictError("중단된 학습만 이어서 할 수 있습니다.")
+
+    config = build_resume_config(
+        read_runtime_config(record.config_id),
+        run_id=payload.run_id,
+        epochs=payload.epochs,
+    )
+    config_id = write_runtime_config(config)
+    started = manager.enqueue(config_id)
+    return {
+        "config_id": config_id,
+        "run_id": config["train"]["run_id"],
+        "resumed_from_job_id": record.job_id,
+        "resume_from": config["train"]["resume_from"],
+        "started": public_record(started) if started is not None else None,
+        "entries": manager.queue_entries(),
+        "paused": manager.queue_paused(),
+    }
 
 
 @router.post("/jobs/{job_id}/register")

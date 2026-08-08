@@ -1,0 +1,241 @@
+"""이어서 학습(train.resume_from)을 화면에서 시작하는 부분입니다.
+
+`contracts/proposals/010-web-train-resume-mirror.md`가 요청한 내용입니다. train을
+import할 수 없으므로 검증 규칙은 여기에 복제하고, 이어서 할 checkpoint 경로도 train이
+정한 규칙을 그대로 옮겨 만듭니다.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from src.pipelines.web.errors import WebValidationError
+from src.pipelines.web.train_config import (
+    build_resume_config,
+    field_specs,
+    normalize_train_settings,
+    resume_checkpoint_uri,
+    check_run_id_collision,
+    run_id_working_path,
+)
+
+
+def _settings(**overrides) -> dict:
+    settings = {"run_id": "web-run", "output_dir": "artifacts/experiments/completed"}
+    settings.update(overrides)
+    return settings
+
+
+# --- train 복제본 -----------------------------------------------------------
+
+
+def test_checkpoint_every_matches_the_train_default():
+    """train이 _integer로 받는 기본값과 같아야 합니다.
+
+    test_web_train_contract.py가 train source에서 뽑은 값과 이 값을 대조합니다.
+    """
+
+    assert normalize_train_settings({})["checkpoint_every"] == 1
+
+
+def test_checkpoint_every_appears_on_the_new_experiment_form():
+    names = [spec["name"] for spec in field_specs()]
+
+    assert "checkpoint_every" in names
+
+
+def test_a_run_that_starts_from_scratch_sends_no_resume_from():
+    """train은 key가 없으면 처음부터 학습합니다. 빈 값을 실어 보내면 안 됩니다."""
+
+    assert "resume_from" not in normalize_train_settings({})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "   ",
+        17,
+        "../outside.pt",
+        "https://example.com/checkpoint.pt",
+    ],
+)
+def test_unusable_resume_from_values_are_rejected(value):
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings({"resume_from": value})
+
+    assert any(item["field"] == "train.resume_from" for item in error.value.as_list())
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "artifacts/experiments/completed/.web-run.partial/last_checkpoint.pt",
+        "s3://bucket/experiments/completed/web-run/running/last_checkpoint.pt",
+    ],
+)
+def test_a_usable_resume_from_reaches_train_unchanged(value):
+    assert normalize_train_settings({"resume_from": value})["resume_from"] == value
+
+
+# --- 이름 충돌 --------------------------------------------------------------
+
+
+def test_run_id_collision_also_looks_at_an_interrupted_working_directory(isolated_repo):
+    """train은 작업 폴더가 비어 있지 않으면 시작을 거부합니다.
+
+    화면이 그 자리를 보지 않으면 train과 다른 답을 주게 됩니다.
+    """
+
+    settings = _settings()
+    working = run_id_working_path(settings)
+    working.mkdir(parents=True)
+    (working / "last_checkpoint.pt").write_bytes(b"leftover")
+
+    with pytest.raises(WebValidationError) as error:
+        check_run_id_collision(settings, {"train_manifest_uri": "artifacts/a.json"})
+
+    assert "이어서" in error.value.as_list()[0]["message"]
+
+
+def test_an_empty_working_directory_does_not_block_a_run(isolated_repo):
+    settings = _settings()
+    run_id_working_path(settings).mkdir(parents=True)
+
+    check_run_id_collision(settings, {"train_manifest_uri": "artifacts/a.json"})
+
+
+# --- 이어서 할 checkpoint 경로 ----------------------------------------------
+
+
+def _runtime_config(backend: str) -> dict:
+    storage = (
+        {"backend": "s3", "s3": {"prefix": ""}}
+        if backend == "s3"
+        else {"backend": "local", "local": {"root": "artifacts"}}
+    )
+    return {
+        "project": {"name": "pill-object-detection"},
+        "execution": {"mode": "real"},
+        "storage": storage,
+        "train": {
+            "run_id": "web-run",
+            "epochs": 50,
+            "output_dir": "artifacts/experiments/completed",
+            "output_prefix": "experiments/completed",
+        },
+        "inputs": {"data": {"train_manifest_uri": "artifacts/a.json"}},
+    }
+
+
+def test_local_runs_resume_from_the_working_directory():
+    uri = resume_checkpoint_uri(_runtime_config("local"))
+
+    assert uri == (
+        "artifacts/experiments/completed/.web-run.partial/last_checkpoint.pt"
+    )
+
+
+def test_s3_runs_resume_from_the_running_prefix(monkeypatch):
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "team-bucket")
+
+    uri = resume_checkpoint_uri(_runtime_config("s3"))
+
+    assert uri == (
+        "s3://team-bucket/experiments/completed/web-run/running/last_checkpoint.pt"
+    )
+
+
+def test_s3_runs_say_what_is_missing_without_a_bucket():
+    with pytest.raises(WebValidationError) as error:
+        resume_checkpoint_uri(_runtime_config("s3"))
+
+    assert "PILL_STORAGE_S3_BUCKET" in error.value.as_list()[0]["message"]
+
+
+# --- 이어서 학습 config -----------------------------------------------------
+
+
+def test_resume_config_keeps_the_whole_plan_and_takes_a_new_name():
+    resumed = build_resume_config(_runtime_config("local"))
+
+    train = resumed["train"]
+    assert train["run_id"] != "web-run"
+    # epochs는 남은 수가 아니라 전체 목표입니다. 그대로 둡니다.
+    assert train["epochs"] == 50
+    assert train["resume_from"] == (
+        "artifacts/experiments/completed/.web-run.partial/last_checkpoint.pt"
+    )
+    assert resumed["inputs"] == _runtime_config("local")["inputs"]
+
+
+def test_resume_config_can_extend_the_plan():
+    resumed = build_resume_config(_runtime_config("local"), epochs=80)
+
+    assert resumed["train"]["epochs"] == 80
+
+
+def test_resume_config_does_not_touch_the_source():
+    source = _runtime_config("local")
+
+    build_resume_config(source)
+
+    assert source["train"]["run_id"] == "web-run"
+    assert "resume_from" not in source["train"]
+
+
+def test_resume_config_rejects_a_bad_run_id():
+    with pytest.raises(WebValidationError):
+        build_resume_config(_runtime_config("local"), run_id="이름 with spaces")
+
+
+# --- route ------------------------------------------------------------------
+
+
+def _interrupted_job(client, manager, monkeypatch, fake_process_factory, data_inputs):
+    from src.pipelines.web.jobs import runner
+
+    created = client.post(
+        "/api/train/configs",
+        json={
+            "train": {"run_id": "web-run", "epochs": 50},
+            "inputs": {"data": data_inputs},
+        },
+    )
+    assert created.status_code == 201, created.text
+    config_id = created.json()["config_id"]
+    process = fake_process_factory()
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    started = manager.start(config_id)
+    record = manager.get(started.job_id)
+    record.status = "interrupted"
+    return record
+
+
+def test_resume_route_queues_a_new_run_from_an_interrupted_job(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+
+    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={})
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["run_id"] != "web-run"
+    assert body["resumed_from_job_id"] == record.job_id
+
+
+def test_resume_route_refuses_a_job_that_is_not_interrupted(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.status = "succeeded"
+
+    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={})
+
+    assert response.status_code == 409
+    assert "중단된" in response.text
