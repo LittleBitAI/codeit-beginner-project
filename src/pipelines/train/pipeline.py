@@ -76,6 +76,7 @@ AUGMENTATION_PRESETS = {
         "hue": 0.02,
     },
 }
+PRECISION_MODES = ("fp32", "amp")
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -153,6 +154,24 @@ def _early_stopping(raw: Mapping[str, Any]) -> dict[str, float | int] | None:
     return {"patience": patience, "min_delta": float(min_delta)}
 
 
+def _precision(raw: Mapping[str, Any], device: str) -> dict[str, str | bool]:
+    """요청한 정밀도를 실제 CUDA가 빠르게 지원하는 dtype으로 확정합니다."""
+
+    mode = raw.get("precision", "fp32")
+    if not isinstance(mode, str) or mode not in PRECISION_MODES:
+        raise ValueError("train.precision must be one of: " + ", ".join(PRECISION_MODES))
+    if mode == "fp32":
+        return {"mode": "fp32", "dtype": "fp32", "grad_scaler": False}
+    if device != "cuda":
+        raise ValueError("train.precision='amp' requires train.device='cuda'")
+    native_bf16 = torch.cuda.is_bf16_supported(including_emulation=False)
+    return {
+        "mode": "amp",
+        "dtype": "bf16" if native_bf16 else "fp16",
+        "grad_scaler": not native_bf16,
+    }
+
+
 def _reject_irrelevant_optimizer_settings(
     raw: Mapping[str, Any], optimizer: str
 ) -> None:
@@ -212,6 +231,7 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "augmentation": _augmentation(raw),
         "device": device,
+        "precision": _precision(raw, device),
         "pretrained": pretrained,
         "early_stopping": _early_stopping(raw),
         "output_dir": output_dir,
@@ -305,6 +325,12 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
         "batch_size": settings.get("batch_size"),
         "num_workers": settings.get("num_workers"),
         "device": settings.get("device"),
+        "precision": dict(
+            settings.get(
+                "precision",
+                {"mode": "fp32", "dtype": "fp32", "grad_scaler": False},
+            )
+        ),
         "pretrained": settings.get("pretrained"),
         "early_stopping": (
             dict(settings["early_stopping"])
@@ -470,6 +496,7 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
             "optimizer": settings["optimizer"],
             "augmentation": settings["augmentation"]["preset"],
             "device": settings["device"],
+            "precision": settings["precision"]["dtype"],
             "epochs": settings["epochs"],
             "planned_epochs": settings["epochs"],
             "completed_epochs": completed_epochs,
