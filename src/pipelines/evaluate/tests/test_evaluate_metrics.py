@@ -243,3 +243,34 @@ def test_filter_predictions_without_limit_keeps_every_detection():
     predictions = [_prediction("img-1", 1, [0, 0, 10, 10], score) for score in (0.9, 0.8, 0.7)]
 
     assert len(filter_predictions(predictions, max_detections_per_image=None)) == 3
+
+
+def test_filter_predictions_drops_excluded_categories_before_the_per_image_limit():
+    """제외 대상은 이미지당 상한을 적용하기 **전에** 버립니다.
+
+    상한 뒤에 버리면 제외 대상이 상한 칸을 차지한 뒤 사라져, 그 이미지에서 남는
+    예측이 상한보다 적어집니다. 제출 행 수가 그만큼 줄어듭니다.
+    """
+
+    predictions = [
+        _prediction("img-1", 999999, [0, 0, 10, 10], 0.95),
+        _prediction("img-1", 1, [10, 0, 10, 10], 0.9),
+        _prediction("img-1", 2, [20, 0, 10, 10], 0.8),
+    ]
+
+    filtered = filter_predictions(
+        predictions, max_detections_per_image=2, excluded_category_ids={999999}
+    )
+
+    assert [item["category_id"] for item in filtered] == [1, 2]
+
+
+def test_filter_predictions_keeps_every_category_by_default():
+    """제외 목록을 주지 않으면 동작이 지금과 같습니다."""
+
+    predictions = [
+        _prediction("img-1", 999999, [0, 0, 10, 10], 0.9),
+        _prediction("img-1", 1, [10, 0, 10, 10], 0.8),
+    ]
+
+    assert len(filter_predictions(predictions)) == 2

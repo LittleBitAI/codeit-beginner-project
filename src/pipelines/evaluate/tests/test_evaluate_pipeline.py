@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from src.common import validate_pipeline_result
 from src.pipelines.evaluate import run as public_run
 from src.pipelines.evaluate.pipeline import resolve_settings, run
 
@@ -479,6 +480,86 @@ def test_manifest_with_zero_annotations_is_rejected(base_config: dict, repositor
     assert metrics["evaluated_class_count"] == 0
 
 
+def test_excluded_categories_leave_the_submission_but_stay_in_validation(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """제외 목록은 제출 CSV에만 적용하고 validation 예측은 건드리지 않습니다.
+
+    `기타 알약`처럼 대회에 없는 보조 class는 채점될 수 없으므로 제출에서 빼야 하지만,
+    학습에 쓰는 실제 class이므로 validation 지표에는 남아 있어야 합니다.
+    """
+
+    from src.pipelines.evaluate import pipeline
+
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"].pop("predictions_input_uri")
+    # 1은 validation이 예측하는 category, 3은 test가 예측하는 category입니다.
+    base_config["evaluate"]["submission_excluded_category_ids"] = [1, 3]
+
+    def fake_predict_groups(
+        store, record_groups, *, checkpoint_uri, device, seed, on_progress=None
+    ):
+        return [
+            _normalised_validation_predictions(),
+            [
+                _test_prediction(10, 7, 3.0, 0.95),
+                _test_prediction(10, 3, 1.0, 0.80),
+                _test_prediction(20, 3, 6.0, 0.70),
+                _test_prediction(20, 7, 0.5, 0.60),
+            ],
+        ]
+
+    monkeypatch.setattr(pipeline, "predict_record_groups_with_checkpoint", fake_predict_groups)
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    rows = (
+        (repository_root / result["artifacts"]["submission_uri"])
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    # category 3은 모두 빠지고 남은 행의 annotation_id는 1부터 끊기지 않습니다.
+    assert rows[1:] == [
+        "1,10,7,3.0,2.0,3.0,4.0,0.95",
+        "2,20,7,0.5,2.0,3.0,4.0,0.6",
+    ]
+    assert not any(",3," in row for row in rows[1:])
+
+    # validation 경로는 그대로입니다. category 1을 뺐지만 예측 3개가 모두 남습니다.
+    document = _read_json(repository_root, result["artifacts"]["predictions_uri"])
+    assert document["prediction_count"] == 3
+    assert 1 in {entry["category_id"] for entry in document["predictions"]}
+    metrics = _read_json(repository_root, result["artifacts"]["metrics_uri"])
+    assert metrics["metrics"]["mAP"] is not None
+    # 무엇을 뺐는지 실행 기록에 남습니다. JSON으로 직렬화할 수 있는 list여야 합니다.
+    assert result["summary"]["submission_excluded_category_ids"] == [1, 3]
+    assert validate_pipeline_result(result, pipeline_name="evaluate") is result
+
+
+def test_summary_stays_unchanged_when_no_category_is_excluded(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """설정하지 않은 실행의 summary에는 제외 key가 생기지 않습니다."""
+
+    from src.pipelines.evaluate import pipeline
+
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"].pop("predictions_input_uri")
+
+    def fake_predict_groups(
+        store, record_groups, *, checkpoint_uri, device, seed, on_progress=None
+    ):
+        return [_normalised_validation_predictions(), [_test_prediction(10, 7, 3.0, 0.95)]]
+
+    monkeypatch.setattr(pipeline, "predict_record_groups_with_checkpoint", fake_predict_groups)
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    assert "submission_excluded_category_ids" not in result["summary"]
+
+
 @pytest.mark.parametrize(
     ("settings", "message"),
     [
@@ -489,6 +570,11 @@ def test_manifest_with_zero_annotations_is_rejected(base_config: dict, repositor
         ({"seed": "7"}, "seed"),
         ({"overwrite": "yes"}, "overwrite"),
         ({"device": ""}, "device"),
+        ({"submission_excluded_category_ids": "3"}, "submission_excluded_category_ids"),
+        ({"submission_excluded_category_ids": [-1]}, "submission_excluded_category_ids"),
+        # list가 아닌 값은 순회하다 TypeError가 run() 밖으로 새지 않도록 먼저 막습니다.
+        ({"submission_excluded_category_ids": 3}, "submission_excluded_category_ids"),
+        ({"submission_excluded_category_ids": {"3": 1}}, "submission_excluded_category_ids"),
     ],
 )
 def test_invalid_settings_return_error(

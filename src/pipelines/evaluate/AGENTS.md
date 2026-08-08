@@ -39,17 +39,17 @@ Tests run from contract-shaped fixtures with no upstream pipeline, and checkpoin
 ## Local Rules
 
 - AP and mAP come from pycocotools `COCOeval`. numpy only builds the IoU threshold array and aggregates `evalImgs` — never write the matching logic yourself.
-- The main metric is `mAP@[0.75:0.95]`, and that interval is also the default. `COCOeval` always receives the fixed ten points `0.50:0.95`; the main interval is a slice of them, so `mAP50`/`mAP75`/`mAP50_95` are always available. `evaluate.iou_thresholds` is not injectable — any other value is rejected with a `ConfigurationError` rather than silently ignored.
-- `maxDets` is the configured value (4). Conditions with no ground truth stay `null`, never `0.0`. `COCOeval` writes to stdout, so its calls are wrapped in `redirect_stdout` — web parses the subprocess log. `summarize()` is never called; index `eval` directly.
+- The main metric and default interval is `mAP@[0.75:0.95]`. `COCOeval` always receives the fixed ten points `0.50:0.95` and the main interval is a slice, so `mAP50`/`mAP75`/`mAP50_95` are always available. `evaluate.iou_thresholds` is not injectable — any other value raises `ConfigurationError` instead of being ignored.
+- `maxDets` is the configured value (4). `COCOeval` writes to stdout, so its calls are wrapped in `redirect_stdout` — web parses the log. `summarize()` is never called; index `eval` directly.
 - Progress goes to stderr as `evaluate.progress/1` JSON Lines; the emitter never raises and never writes to stdout.
-- `precision50`/`recall50` are aggregate counts at `score >= 0.5` (previously the last point of the PR curve). The matching GUI label change is requested in `contracts/proposals/`, and this pipeline does not wait for it to merge.
-- `analysis.py` is the diagnosis layer: threshold sweep, best F1, confusion matrix, per-image failures, false-positive causes. All of it reads `evalImgs`; extra IoU comes from `maskUtils.iou`. Three traps:
-  - `gtMatches` reflects matching **before** the score filter, so judging misses with it erases any ground truth that only a low-score detection touched. Use the ids surviving detections actually claimed.
+- `precision50`/`recall50` are aggregate counts at `score >= 0.5`, not the last point of the PR curve. The matching GUI label change is requested in `contracts/proposals/`; this pipeline does not wait for it.
+- `analysis.py` is the diagnosis layer: threshold sweep, best F1, confusion matrix, per-image failures, false-positive causes. All of it reads `evalImgs`; extra IoU from `maskUtils.iou`. Three traps:
+  - `gtMatches` reflects matching **before** the score filter, so judging misses with it erases ground truth that only a low-score detection touched. Use the ids surviving detections claimed.
   - The confusion matrix needs the `useCats = 0` pass; the default pass matches within a class and cannot show a mix-up.
-  - False positives bucket strongest-overlap-first: `duplicate`, `classification`, `localization`, `background`. `duplicate` fits none of the other three and would otherwise inflate one. `LOCALIZATION_IOU_FLOOR` keeps far-off boxes out of `localization`.
+  - False positives bucket strongest-overlap-first: `duplicate`, `classification`, `localization`, `background`. `duplicate` fits none of the others and would otherwise inflate one. `LOCALIZATION_IOU_FLOOR` keeps far-off boxes out of `localization`.
 - Competition runs use the same validation IoU thresholds; test labels and test metrics are never accepted or produced.
-- Reads and writes stay inside the repository. `..` and outside-repository absolute paths are errors.
+- `evaluate.submission_excluded_category_ids` drops those categories from the **submission CSV only**, inside `filter_predictions` *before* the per-image cap so the 4 slots go to scorable rows. Test call only; validation keeps it. Default empty changes nothing.
 - A configuration where both output filenames are identical is rejected before anything runs.
-- If a later write fails, only files **this run created** are removed. A file that already existed and was overwritten on purpose is left alone, and S3 objects are never auto-deleted.
+- If a later write fails, only files **this run created** are removed. A file that already existed and was overwritten on purpose is left alone; S3 objects are never auto-deleted.
 - Every failure is an `EvaluateError` subclass, returned as `status="error"`, never raised out of `run()`.
 - The checkpoint payload you load is a contract with train. If it does not match, stop with a clear error instead of guessing.

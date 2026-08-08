@@ -59,6 +59,8 @@ class Settings:
     iou_thresholds: tuple[float, ...]
     score_threshold: float
     max_detections_per_image: int | None
+    # 제출 CSV에서 뺄 category id입니다. 대회에 없는 보조 class를 여기에 넣습니다.
+    submission_excluded_category_ids: frozenset[int]
     device: str
     seed: int
     overwrite: bool
@@ -129,6 +131,29 @@ def _resolve_iou_thresholds(value: Any, *, competition: bool) -> tuple[float, ..
             f"{list(DEFAULT_IOU_THRESHOLDS)}로 고정입니다."
         )
     return thresholds
+
+
+def _resolve_excluded_category_ids(value: Any) -> frozenset[int]:
+    """제출 CSV에서 뺄 category id 목록을 읽습니다.
+
+    기본값은 빈 집합이라 설정하지 않으면 동작이 달라지지 않습니다.
+    """
+
+    if value is None:
+        return frozenset()
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ConfigurationError(
+            "evaluate.submission_excluded_category_ids는 category id의 list여야 합니다."
+        )
+    identifiers = []
+    for item in value:
+        if not isinstance(item, int) or isinstance(item, bool) or item < 0:
+            raise ConfigurationError(
+                "evaluate.submission_excluded_category_ids의 값은 0 이상의 정수여야 "
+                "합니다."
+            )
+        identifiers.append(item)
+    return frozenset(identifiers)
 
 
 def _resolve_max_detections(value: Any) -> int | None:
@@ -222,6 +247,10 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
     ):
         raise ConfigurationError("evaluate.score_threshold는 0 이상 1 이하의 숫자여야 합니다.")
 
+    submission_excluded_category_ids = _resolve_excluded_category_ids(
+        settings.get("submission_excluded_category_ids")
+    )
+
     seed = settings.get("seed", config.get("seed", DEFAULT_SEED))
     if not isinstance(seed, int) or isinstance(seed, bool):
         raise ConfigurationError("seed는 정수여야 합니다.")
@@ -273,6 +302,7 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         iou_thresholds=iou_thresholds,
         score_threshold=float(score_threshold),
         max_detections_per_image=_resolve_max_detections(settings.get("max_detections_per_image")),
+        submission_excluded_category_ids=submission_excluded_category_ids,
         device=device,
         seed=seed,
         overwrite=overwrite,
@@ -421,10 +451,13 @@ def run(config: dict) -> dict:
         submission_text: str | None = None
         submission_rows = 0
         if test_group_index is not None:
+            # 제외는 test 경로에만 적용합니다. validation 지표에는 보조 class도
+            # 남아 있어야 "대회 밖 알약을 알약으로 잡았는가"를 볼 수 있습니다.
             test_predictions = filter_predictions(
                 generated_groups[test_group_index],
                 score_threshold=settings.score_threshold,
                 max_detections_per_image=settings.max_detections_per_image,
+                excluded_category_ids=settings.submission_excluded_category_ids,
             )
             submission_text = render_submission_csv(
                 test_predictions,
@@ -516,6 +549,17 @@ def run(config: dict) -> dict:
             "seed": settings.seed,
             "device": settings.device,
             "metrics": report["metrics"],
+            # 쓰지 않은 실행의 summary 모양은 그대로 두려고 값이 있을 때만 넣습니다.
+            # `frozenset`은 JSON으로 직렬화할 수 없어 정렬한 list로 바꿉니다.
+            **(
+                {
+                    "submission_excluded_category_ids": sorted(
+                        settings.submission_excluded_category_ids
+                    )
+                }
+                if settings.submission_excluded_category_ids
+                else {}
+            ),
         },
         "message": (
             f"evaluate pipeline 실행 완료 (run_id={settings.run_id}, "
