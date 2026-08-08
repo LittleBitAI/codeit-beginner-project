@@ -1,12 +1,13 @@
 """평가 결과를 원인별로 파고드는 분석 도구입니다.
 
 `metrics.py`가 낸 점수가 "얼마나 좋은가"를 답한다면, 이 모듈은 "왜 그런가"를
-답합니다. 다섯 가지를 냅니다.
+답합니다. 여섯 가지를 냅니다.
 
 - score threshold sweep과 best F1 threshold: 운영에 쓸 confidence 기준 고르기
 - confusion matrix: 어떤 class를 어떤 class로 잘못 불렀는지
 - 이미지별 실패 분석: FP·FN이 몰린 이미지 찾기
 - false positive 원인 분류: 위치가 틀렸는지, class가 틀렸는지, 헛본 것인지
+- class별 요약: 표본이 충분한데 약한 class와 표본이 적어 못 믿을 class 가르기
 
 매칭은 전부 pycocotools가 한 결과(`evalImgs`)를 읽어서 집계하고, IoU가 더 필요한
 곳은 pycocotools의 `maskUtils.iou`를 씁니다. 매칭이나 IoU 기하 계산을 직접
@@ -44,6 +45,27 @@ LOCALIZATION_IOU_FLOOR = 0.1
 
 #: 전체 크기 구간입니다. evalImgs에서 이 구간 항목만 집계합니다.
 AREA_RANGE_ALL = [0.0, 1e10]
+
+#: weak로 보려면 필요한 최소 ground truth 수입니다.
+#:
+#: 이보다 정답이 적으면 AP가 실력이 아니라 표본 수에 흔들립니다. 정답이 하나뿐인
+#: class는 그 하나를 맞히면 AP 1.0, 놓치면 0.0이라 "약한 class" 목록에 섞이면
+#: 개선할 곳을 잘못 가리킵니다.
+MIN_TRUTH_COUNT_FOR_WEAK = 4
+
+#: weak·sparse 목록에 남길 class 수입니다.
+TOP_N_PER_CLASS_SUMMARY = 5
+
+#: 요약 row에 옮겨 담을 per_class field입니다. 여기 없는 field는 복제하지 않습니다.
+_SUMMARY_FIELDS = (
+    "category_id",
+    "name",
+    "ap",
+    "ap50",
+    "ap75",
+    "truth_count",
+    "prediction_count",
+)
 
 
 def _ratio(numerator: int, denominator: int) -> float | None:
@@ -299,6 +321,80 @@ def per_image_breakdown(
     return rows
 
 
+def _summary_row(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """per_class 항목에서 진단에 쓰는 field만 새 dict로 옮깁니다."""
+    return {field: entry[field] for field in _SUMMARY_FIELDS}
+
+
+def _ap_sort_key(row: Mapping[str, Any]) -> tuple[bool, float]:
+    """AP 오름차순 정렬 key입니다. ``None``은 항상 뒤로 갑니다.
+
+    ``None``을 ``0.0``으로 치환하면 측정되지 않은 class가 최저 AP 자리를 차지해
+    "가장 약한 class"로 잘못 보입니다. 그래서 값 대신 ``None`` 여부를 앞자리 key로
+    둡니다. 뒤따르는 실수는 같은 ``None`` 여부끼리만 비교되므로 순서에 영향이
+    없는 자리 채움입니다.
+    """
+    ap = row["ap"]
+    return (ap is None, float(ap) if ap is not None else 0.0)
+
+
+def summarize_per_class(
+    per_class: Sequence[Mapping[str, Any]],
+    *,
+    min_truth_count: int = MIN_TRUTH_COUNT_FOR_WEAK,
+    top_n: int = TOP_N_PER_CLASS_SUMMARY,
+) -> dict[str, Any]:
+    """이미 계산된 ``per_class``를 약한·희소·미측정 class로 나눠 정렬합니다.
+
+    새 지표를 계산하지 않습니다. ``per_class``에 있는 ``ap``와 ``truth_count``를
+    다시 배열할 뿐이고, 입력 리스트와 그 안의 dict는 건드리지 않습니다.
+
+    ``truth_count``와 ``ap``는 뜻이 다르므로 한 점수로 합치지 않습니다.
+    ``truth_count``로 그룹을 가르고 그룹 안에서만 ``ap``로 줄을 세웁니다.
+
+    - ``weak``: ``truth_count >= min_truth_count``. 표본이 충분한데 AP가 낮은
+      class로, AP 오름차순 → truth_count 내림차순 → category_id 오름차순입니다.
+    - ``sparse``: ``0 < truth_count < min_truth_count``. AP가 표본 부족으로
+      흔들릴 수 있어 weak와 섞지 않습니다. truth_count 오름차순 → AP 오름차순 →
+      category_id 오름차순입니다.
+    - ``unmeasured``: ``truth_count == 0``. 성능이 낮은 것이 아니라 잴 정답이
+      없는 상태입니다(``ap``가 ``None``일 수 있습니다). category_id 순으로 전부
+      냅니다. 줄 세울 기준이 없어 잘라 내면 정보만 사라집니다.
+
+    ``counts``는 자르기 전 개수입니다. 목록 길이만 보면 "다섯 개뿐"인지 "다섯 개로
+    잘렸는지" 구분할 수 없습니다. background는 ``per_class``에 없으므로 여기에도
+    없습니다.
+    """
+    weak: list[dict[str, Any]] = []
+    sparse: list[dict[str, Any]] = []
+    unmeasured: list[dict[str, Any]] = []
+    for entry in per_class:
+        row = _summary_row(entry)
+        if row["truth_count"] >= min_truth_count:
+            weak.append(row)
+        elif row["truth_count"] > 0:
+            sparse.append(row)
+        else:
+            unmeasured.append(row)
+
+    weak.sort(key=lambda row: (*_ap_sort_key(row), -row["truth_count"], row["category_id"]))
+    sparse.sort(key=lambda row: (row["truth_count"], *_ap_sort_key(row), row["category_id"]))
+    unmeasured.sort(key=lambda row: row["category_id"])
+
+    return {
+        "min_truth_count": int(min_truth_count),
+        "top_n": int(top_n),
+        "counts": {
+            "weak": len(weak),
+            "sparse": len(sparse),
+            "unmeasured": len(unmeasured),
+        },
+        "weak": weak[:top_n],
+        "sparse": sparse[:top_n],
+        "unmeasured": unmeasured,
+    }
+
+
 def _max_iou(box: Sequence[float], candidates: Sequence[Sequence[float]]) -> float:
     """box와 후보들 사이 IoU의 최댓값입니다. 후보가 없으면 0.0입니다."""
     if not candidates:
@@ -369,12 +465,15 @@ def classify_false_positives(
 __all__ = [
     "BACKGROUND_LABEL",
     "LOCALIZATION_IOU_FLOOR",
+    "MIN_TRUTH_COUNT_FOR_WEAK",
     "SWEEP_THRESHOLDS",
+    "TOP_N_PER_CLASS_SUMMARY",
     "best_f1_threshold",
     "build_confusion_matrix",
     "classify_false_positives",
     "f1_score",
     "per_image_breakdown",
     "summarize_matches",
+    "summarize_per_class",
     "sweep_score_thresholds",
 ]

@@ -6,7 +6,13 @@ import json
 
 import pytest
 
-from src.pipelines.evaluate.analysis import SWEEP_THRESHOLDS, best_f1_threshold
+from src.pipelines.evaluate.analysis import (
+    MIN_TRUTH_COUNT_FOR_WEAK,
+    SWEEP_THRESHOLDS,
+    TOP_N_PER_CLASS_SUMMARY,
+    best_f1_threshold,
+    summarize_per_class,
+)
 from src.pipelines.evaluate.metrics import ANALYSIS_SCORE_THRESHOLD, evaluate_detections
 
 
@@ -233,6 +239,166 @@ def test_duplicate_detection_is_counted_separately():
     assert sum(breakdown.values()) == report["analysis"]["by_iou"]["0.50"]["fp"]
 
 
+# --- 6. class별 요약 -------------------------------------------------------
+
+
+def _class_entry(
+    category_id: int, *, ap: float | None, truth_count: int, prediction_count: int = 0
+) -> dict:
+    """per_class 항목 중 요약이 읽는 field만 갖춘 최소 dict입니다."""
+    return {
+        "category_id": category_id,
+        "name": f"class-{category_id}",
+        "ap": ap,
+        "ap50": ap,
+        "ap75": ap,
+        "truth_count": truth_count,
+        "prediction_count": prediction_count,
+    }
+
+
+def test_truth_count_boundary_splits_weak_from_sparse():
+    """정답 수 4는 weak, 1~3은 sparse입니다. 둘은 겹치지 않습니다.
+
+    sparse의 AP는 표본이 적어 믿을 수 없으므로, AP가 아니라 표본 수가 앞자리
+    기준입니다. 그래서 AP 순서와 표본 순서를 일부러 어긋나게 두었습니다.
+    """
+    assert MIN_TRUTH_COUNT_FOR_WEAK == 4
+    summary = summarize_per_class(
+        [
+            _class_entry(1, ap=0.2, truth_count=4),
+            _class_entry(2, ap=0.1, truth_count=3),
+            _class_entry(3, ap=0.9, truth_count=1),
+        ]
+    )
+
+    assert [row["category_id"] for row in summary["weak"]] == [1]
+    # AP가 가장 높아도 표본이 가장 적은 3이 앞입니다.
+    assert [row["category_id"] for row in summary["sparse"]] == [3, 2]
+
+
+def test_unmeasured_separates_classes_without_truth():
+    """정답이 없어 측정되지 않은 class는 약한 class로 취급하지 않습니다.
+
+    unmeasured는 줄 세울 기준이 없어(category_id 순) 잘라 내면 정보만 사라지므로
+    top N을 적용하지 않습니다. 그래서 일부러 top N보다 많이 넣습니다.
+    """
+    ghosts = [
+        _class_entry(order, ap=None, truth_count=0, prediction_count=1)
+        for order in range(2, 2 + TOP_N_PER_CLASS_SUMMARY + 1)
+    ]
+
+    summary = summarize_per_class([_class_entry(1, ap=0.4, truth_count=8), *ghosts])
+
+    assert [row["category_id"] for row in summary["weak"]] == [1]
+    assert [row["category_id"] for row in summary["unmeasured"]] == [
+        row["category_id"] for row in ghosts
+    ]
+    assert summary["counts"] == {"weak": 1, "sparse": 0, "unmeasured": len(ghosts)}
+    # ap=0으로 치환하지 않고 원래 값을 그대로 냅니다.
+    assert summary["unmeasured"][0]["ap"] is None
+
+
+def test_null_ap_never_leads_weak_or_sparse():
+    """ap=null을 0으로 보면 측정되지 않은 class가 항상 최악으로 보입니다.
+
+    정답 수가 충분한데 ap가 null인 경우는 실제로는 나오지 않지만, 그 가정이
+    깨져도 null이 최저 AP 자리를 차지하지 않아야 합니다.
+    """
+    summary = summarize_per_class(
+        [
+            _class_entry(1, ap=None, truth_count=10),
+            _class_entry(2, ap=0.3, truth_count=10),
+            _class_entry(3, ap=None, truth_count=2),
+            _class_entry(4, ap=0.3, truth_count=2),
+        ]
+    )
+
+    assert [row["category_id"] for row in summary["weak"]] == [2, 1]
+    assert [row["category_id"] for row in summary["sparse"]] == [4, 3]
+    assert summary["weak"][-1]["ap"] is None
+
+
+def test_tie_breakers_follow_the_documented_order():
+    """AP가 같으면 표본이 많은 쪽, 완전 동점이면 category_id가 작은 쪽입니다."""
+    summary = summarize_per_class(
+        [
+            _class_entry(7, ap=0.2, truth_count=5),
+            _class_entry(3, ap=0.2, truth_count=20),
+            _class_entry(1, ap=0.2, truth_count=5),
+        ]
+    )
+
+    assert [row["category_id"] for row in summary["weak"]] == [3, 1, 7]
+
+
+def test_top_n_keeps_the_lowest_ap_and_counts_report_the_total():
+    """AP가 가장 낮은 쪽만 남기고, 몇 개가 잘렸는지는 알 수 있어야 합니다.
+
+    category_id 순서와 AP 순서를 일부러 어긋나게 두어, 잘라 내기 전에 AP
+    오름차순으로 정렬했는지까지 이 test가 함께 지킵니다.
+    """
+    entries = [
+        _class_entry(order, ap=(8 - order) / 100, truth_count=10) for order in range(1, 8)
+    ]
+
+    summary = summarize_per_class(entries)
+    assert TOP_N_PER_CLASS_SUMMARY == 5
+    # AP가 가장 낮은 다섯 개입니다. category_id 순서가 아닙니다.
+    assert [row["category_id"] for row in summary["weak"]] == [7, 6, 5, 4, 3]
+    assert summary["counts"]["weak"] == 7
+
+    smaller = summarize_per_class(entries, top_n=2)
+    assert [row["category_id"] for row in smaller["weak"]] == [7, 6]
+    assert smaller["top_n"] == 2
+    assert smaller["counts"]["weak"] == 7
+
+
+def test_summary_reuses_per_class_without_reordering_it():
+    """요약을 붙여도 per_class 배열은 category_id 순서를 유지해야 합니다."""
+    records = [
+        _record("img-1", [{"category_id": 2, "bbox": [10, 10, 20, 20]}]),
+        _record("img-2", [{"category_id": 1, "bbox": [10, 10, 20, 20]}]),
+    ]
+    predictions = [_prediction("img-1", 2, [10, 10, 20, 20], 0.9)]
+
+    report = evaluate_detections(records, predictions, class_names={1: "a", 2: "b"})
+    summary = report["analysis"]["per_class_summary"]
+
+    assert [item["category_id"] for item in report["per_class"]] == [1, 2]
+    # 요약 row는 per_class의 값을 그대로 옮긴 것입니다.
+    for group in ("weak", "sparse", "unmeasured"):
+        for row in summary[group]:
+            source = next(
+                item
+                for item in report["per_class"]
+                if item["category_id"] == row["category_id"]
+            )
+            assert row == {field: source[field] for field in row}
+    # background는 per_class에 없으므로 요약에도 없습니다.
+    assert all(
+        row["name"] != "background"
+        for group in ("weak", "sparse", "unmeasured")
+        for row in summary[group]
+    )
+
+
+def test_per_class_summary_survives_the_empty_prediction_path():
+    """예측이 0건이어도 같은 모양이어야 소비자가 분기하지 않습니다."""
+    records = [
+        _record("img-1", [{"category_id": 1, "bbox": [10, 10, 20, 20]}] * 4),
+        _record("img-2", [{"category_id": 2, "bbox": [10, 10, 20, 20]}] * 2),
+    ]
+
+    summary = evaluate_detections(records, [])["analysis"]["per_class_summary"]
+
+    # 정답이 있는데 하나도 못 맞혔으므로 미계산(None)이 아니라 0.0입니다.
+    assert [row["category_id"] for row in summary["weak"]] == [1]
+    assert summary["weak"][0]["ap"] == 0.0
+    assert [row["category_id"] for row in summary["sparse"]] == [2]
+    assert summary["unmeasured"] == []
+
+
 # --- 산출물 계약 -----------------------------------------------------------
 
 
@@ -258,3 +424,13 @@ def test_analysis_shape_is_the_same_without_predictions():
         assert set(empty[key]) == set(filled[key]) == {"0.50", "0.75"}
     assert empty["best_f1"]["0.50"] is None
     assert empty["per_image"]["0.50"][0]["fn"] == 1
+    # class별 요약은 IoU에 종속되지 않아 IoU별로 나누지 않습니다.
+    for report in (empty, filled):
+        assert set(report["per_class_summary"]) == {
+            "min_truth_count",
+            "top_n",
+            "counts",
+            "weak",
+            "sparse",
+            "unmeasured",
+        }
