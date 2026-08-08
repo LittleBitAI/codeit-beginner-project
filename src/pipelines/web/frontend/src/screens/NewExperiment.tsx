@@ -34,6 +34,7 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
       'architecture',
       'optimizer',
       'augmentation',
+      'precision',
       'run_id',
       'seed',
       'device',

@@ -66,6 +66,28 @@ describe('NewExperiment · Train capability 호환', () => {
     expect(field).toHaveValue('pill_basic');
   });
 
+  it('연산 정밀도를 화면에서 고를 수 있다', () => {
+    // train이 amp를 받아도 화면에 칸이 없으면 fp32로만 학습됩니다.
+    const defaults: Defaults = {
+      ...LEGACY_DEFAULTS,
+      fields: [
+        { name: 'precision', type: 'enum', default: 'fp32', choices: ['fp32', 'amp'], label: '연산 정밀도', hint: '' },
+      ],
+    };
+    render(
+      <MemoryRouter>
+        <DraftProvider>
+          <NewExperiment defaults={defaults} source={null} />
+        </DraftProvider>
+      </MemoryRouter>,
+    );
+
+    const field = screen.getByLabelText('연산 정밀도');
+    expect(field).toHaveValue('fp32');
+    fireEvent.change(field, { target: { value: 'amp' } });
+    expect(field).toHaveValue('amp');
+  });
+
   it('boolean 칸은 서버가 알려 준 기본값으로 시작한다', () => {
     // 예전에는 무조건 "사용하지 않음"으로 시작해, 서버가 기본값을 바꿔도 화면이
     // 따라가지 않았습니다.
