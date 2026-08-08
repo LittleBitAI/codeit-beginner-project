@@ -49,6 +49,7 @@ def test_defaults_expose_every_train_field(client):
         "architecture",
         "optimizer",
         "augmentation",
+        "precision",
         "seed",
         "epochs",
         "batch_size",

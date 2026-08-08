@@ -16,13 +16,16 @@ from pathlib import Path
 
 import pytest
 
+from src.pipelines.web import train_config
 from src.pipelines.web.api.routes_train import ARCHITECTURE
 from src.pipelines.web.train_capabilities import (
     DEFAULT_AUGMENTATION,
+    DEFAULT_PRECISION,
     LEGACY_OPTIMIZER,
     SUPPORTED_ARCHITECTURES,
     SUPPORTED_AUGMENTATIONS,
     SUPPORTED_OPTIMIZERS,
+    SUPPORTED_PRECISIONS,
 )
 from src.pipelines.web.train_config import (
     DATA_ARTIFACT_KEYS,
@@ -151,6 +154,35 @@ def test_augmentation_choices_match_train_source():
     assert SUPPORTED_AUGMENTATIONS == tuple(presets)
     # train은 값이 없으면 none을 씁니다. 화면 기본값도 같아야 합니다.
     assert DEFAULT_AUGMENTATION in presets
+
+
+def test_precision_choices_match_train_source():
+    """화면이 보여 주는 정밀도가 train이 실제로 받는 이름과 같아야 합니다."""
+
+    modes = module_constant(read_source("pipeline.py"), "PRECISION_MODES")
+    assert SUPPORTED_PRECISIONS == tuple(modes)
+    # train은 값이 없으면 fp32를 씁니다. 화면 기본값도 같아야 합니다.
+    assert DEFAULT_PRECISION in modes
+
+
+def test_unknown_precision_is_rejected_before_training_starts():
+    with pytest.raises(Exception, match="precision"):
+        normalize_train_settings({"precision": "bf16"})
+
+
+def test_amp_on_cpu_is_rejected_because_train_requires_cuda():
+    """train은 amp에 device='cuda'를 요구합니다. subprocess까지 가서 실패할 이유가 없습니다."""
+
+    with pytest.raises(Exception, match="precision"):
+        normalize_train_settings({"precision": "amp", "device": "cpu"})
+
+
+def test_amp_is_accepted_when_the_machine_has_cuda(monkeypatch):
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
+
+    settings = normalize_train_settings({"precision": "amp", "device": "cuda"})
+
+    assert settings["precision"] == "amp"
 
 
 def test_optimizer_profiles_match_train_source():

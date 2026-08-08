@@ -37,12 +37,14 @@ from .paths import (
 )
 from .train_capabilities import (
     DEFAULT_AUGMENTATION,
+    DEFAULT_PRECISION,
     LEGACY_ARCHITECTURE,
     LEGACY_OPTIMIZER,
     NEW_EXPERIMENT_OPTIMIZER,
     SUPPORTED_ARCHITECTURES,
     SUPPORTED_AUGMENTATIONS,
     SUPPORTED_OPTIMIZERS,
+    SUPPORTED_PRECISIONS,
 )
 
 
@@ -121,6 +123,10 @@ _FIELD_LABELS = {
         "증강 preset",
         "학습 split에만 적용합니다. 데이터가 적을 때 pill_basic이 과적합을 줄여 줍니다.",
     ),
+    "precision": (
+        "연산 정밀도",
+        "amp는 GPU에서 절반 정밀도를 섞어 더 빠르고 메모리를 덜 씁니다. device가 cuda여야 합니다.",
+    ),
     "seed": ("Random seed", "같은 seed와 같은 데이터면 같은 결과가 나옵니다."),
     "epochs": ("Epochs", "전체 학습 데이터를 몇 번 반복할지 정합니다."),
     "batch_size": ("Batch size", "한 번에 처리할 이미지 수. GPU 메모리에 가장 큰 영향을 줍니다."),
@@ -181,6 +187,7 @@ def field_specs() -> list[dict[str, Any]]:
         ("architecture", LEGACY_ARCHITECTURE, SUPPORTED_ARCHITECTURES),
         ("optimizer", NEW_EXPERIMENT_OPTIMIZER, SUPPORTED_OPTIMIZERS),
         ("augmentation", DEFAULT_AUGMENTATION, SUPPORTED_AUGMENTATIONS),
+        ("precision", DEFAULT_PRECISION, SUPPORTED_PRECISIONS),
     ):
         label, hint = _FIELD_LABELS[name]
         specs.append(
@@ -416,6 +423,15 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         )
         augmentation = DEFAULT_AUGMENTATION
 
+    precision = raw.get("precision", DEFAULT_PRECISION)
+    if not isinstance(precision, str) or precision not in SUPPORTED_PRECISIONS:
+        collect(
+            errors,
+            "train.precision",
+            f"{', '.join(SUPPORTED_PRECISIONS)} 중 하나여야 합니다.",
+        )
+        precision = DEFAULT_PRECISION
+
     optimizer = raw.get("optimizer", LEGACY_OPTIMIZER)
     if not isinstance(optimizer, str) or optimizer not in SUPPORTED_OPTIMIZERS:
         collect(
@@ -438,6 +454,12 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         device = "cpu"
     elif device == "cuda" and not cuda_is_available():
         collect(errors, "train.device", "CUDA를 사용할 수 없는 환경입니다.")
+
+    if precision == "amp" and device != "cuda":
+        # train이 같은 조건을 거부합니다. 여기서 잡지 않으면 subprocess가 뜬 뒤에야
+        # 알게 되고, 화면에는 어느 칸이 잘못됐는지 남지 않습니다.
+        collect(errors, "train.precision", "amp는 device가 cuda일 때만 쓸 수 있습니다.")
+        precision = DEFAULT_PRECISION
 
     pretrained = raw.get("pretrained", False)
     if not isinstance(pretrained, bool):
@@ -475,6 +497,7 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         "architecture": architecture,
         "optimizer": optimizer,
         "augmentation": augmentation,
+        "precision": precision,
         "device": device,
         "pretrained": pretrained,
         "early_stopping": _normalize_early_stopping(raw, errors),
@@ -509,6 +532,8 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         "optimizer": settings["optimizer"],
         # train은 preset key 하나만 든 object를 받고 다른 key가 있으면 거부합니다.
         "augmentation": {"preset": settings["augmentation"]},
+        # 문자열 하나입니다. amp가 bf16이 될지 fp16이 될지는 train이 GPU를 보고 정합니다.
+        "precision": settings["precision"],
         "seed": settings["seed"],
         "epochs": settings["epochs"],
         "batch_size": settings["batch_size"],
