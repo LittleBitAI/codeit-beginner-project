@@ -6,6 +6,8 @@ import type {
   EvaluateProgress,
   EvaluationState,
   JobRecord,
+  PerClassRow,
+  PerClassSummary,
 } from '../api/types';
 import { color, font, radius } from '../design/tokens';
 import { formatDuration, useElapsedSeconds } from '../hooks/useElapsedSeconds';
@@ -203,6 +205,7 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
         {state && state.status !== 'idle' && (
           <>
             <EvaluationResult state={state} submissionRequested={resultUsedSubmission} />
+            {state.status === 'succeeded' && <WeakClasses jobId={job.job_id} />}
             {state.status === 'succeeded' && state.registration?.status === 'succeeded' && (
               <AlertRow level="success" title="Registry 등록 완료">
                 평가 결과가 실험 비교 목록에 등록됐습니다.
@@ -328,6 +331,134 @@ function EvaluationRunning({ state }: { state: EvaluationState }) {
         />
       </div>
     </AlertRow>
+  );
+}
+
+/**
+ * 57개 class 중 어디가 약한지 보여 줍니다.
+ *
+ * 전체 mAP는 이미 0.96 언저리라 설정을 바꿔도 거의 움직이지 않습니다. 개선할 곳은
+ * class별로 봐야 보이는데, 목록을 category_id 순으로 늘어놓으면 눈으로 훑어야 합니다.
+ * evaluate가 정렬해 둔 결과를 그대로 그립니다.
+ */
+function WeakClasses({ jobId }: { jobId: string }) {
+  const [open, setOpen] = useState(false);
+  const [summary, setSummary] = useState<PerClassSummary | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  // 결과 파일은 confusion matrix까지 들어 650KB가 넘습니다. 펼칠 때만 읽습니다.
+  useEffect(() => {
+    if (!open || loaded) return;
+    let alive = true;
+    void api
+      .evaluationPerClass(jobId)
+      .then((body) => {
+        if (!alive) return;
+        setSummary(body.summary);
+        setLoaded(true);
+      })
+      .catch(() => {
+        if (alive) setFailed(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, loaded, jobId]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        style={{
+          alignSelf: 'flex-start',
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          cursor: 'pointer',
+          font: `600 11.5px/1 ${font.sans}`,
+          color: color.tealDark,
+        }}
+      >
+        {open ? '▾' : '▸'} 약한 class 보기
+      </button>
+
+      {open && failed && (
+        <span style={{ font: `400 11px/1.6 ${font.sans}`, color: color.textMuted }}>
+          class별 요약을 불러오지 못했습니다.
+        </span>
+      )}
+      {open && !failed && !loaded && (
+        <span style={{ font: `400 11px/1.6 ${font.sans}`, color: color.textMuted }}>
+          불러오는 중입니다.
+        </span>
+      )}
+      {open && loaded && summary === null && (
+        <span style={{ font: `400 11px/1.6 ${font.sans}`, color: color.textMuted }}>
+          이 평가 결과에는 class별 요약이 없습니다. 요약이 생기기 전에 만든 결과입니다.
+        </span>
+      )}
+      {open && summary !== null && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <ClassTable
+            title={`표본이 충분한데 약한 class (전체 ${summary.counts.weak}개 중 ${summary.weak.length}개)`}
+            rows={summary.weak}
+          />
+          {summary.sparse.length > 0 && (
+            <ClassTable
+              title={`정답이 ${summary.min_truth_count}개 미만이라 AP를 믿기 어려운 class (전체 ${summary.counts.sparse}개 중 ${summary.sparse.length}개)`}
+              rows={summary.sparse}
+            />
+          )}
+          {summary.unmeasured.length > 0 && (
+            <ClassTable
+              title={`검증 정답이 없어 재지 못한 class (${summary.counts.unmeasured}개)`}
+              rows={summary.unmeasured}
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClassTable({ title, rows }: { title: string; rows: PerClassRow[] }) {
+  const cell = { padding: '5px 8px', font: `400 11px/1.4 ${font.mono}`, color: color.text };
+  const head = {
+    ...cell,
+    font: `600 10px/1.4 ${font.sans}`,
+    color: color.textMuted,
+    textAlign: 'left' as const,
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+      <span style={{ font: `600 11px/1.4 ${font.sans}`, color: color.textStrong }}>{title}</span>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', minWidth: 420 }}>
+          <thead>
+            <tr>
+              <th style={head}>class</th>
+              <th style={head}>AP</th>
+              <th style={head}>AP50</th>
+              <th style={head}>정답</th>
+              <th style={head}>예측</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.category_id} style={{ borderTop: `1px solid ${color.borderInner}` }}>
+                <td style={{ ...cell, font: `400 11px/1.4 ${font.sans}` }}>{row.name}</td>
+                <td style={cell}>{metricText(row.ap)}</td>
+                <td style={cell}>{metricText(row.ap50)}</td>
+                <td style={cell}>{row.truth_count}</td>
+                <td style={cell}>{row.prediction_count}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 

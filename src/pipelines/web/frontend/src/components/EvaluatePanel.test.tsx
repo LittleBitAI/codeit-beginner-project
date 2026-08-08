@@ -6,12 +6,14 @@ import type { EvaluateProgress, EvaluationState, JobRecord, Progress } from '../
 const evaluationStatus = vi.fn();
 const startEvaluation = vi.fn();
 const retryRegistration = vi.fn();
+const evaluationPerClass = vi.fn();
 
 vi.mock('../api/client', () => ({
   api: {
     evaluationStatus: (...args: unknown[]) => evaluationStatus(...args),
     startEvaluation: (...args: unknown[]) => startEvaluation(...args),
     retryRegistration: (...args: unknown[]) => retryRegistration(...args),
+    evaluationPerClass: (...args: unknown[]) => evaluationPerClass(...args),
   },
 }));
 
@@ -73,6 +75,82 @@ beforeEach(() => {
   vi.clearAllMocks();
   startEvaluation.mockResolvedValue({ evaluation: { status: 'running' } });
   retryRegistration.mockResolvedValue({ registration: { status: 'succeeded' } });
+  evaluationPerClass.mockResolvedValue({ summary: null });
+});
+
+const PER_CLASS = {
+  min_truth_count: 4,
+  top_n: 5,
+  counts: { weak: 12, sparse: 3, unmeasured: 0 },
+  weak: [
+    {
+      category_id: 19552,
+      name: '트루비타정 60mg/병',
+      ap: 0.6506,
+      ap50: 0.6733,
+      ap75: 0.66,
+      truth_count: 87,
+      prediction_count: 59,
+    },
+  ],
+  sparse: [
+    {
+      category_id: 3351,
+      name: '일양하이트린정 2mg',
+      ap: 0.9212,
+      ap50: 0.9388,
+      ap75: 0.93,
+      truth_count: 2,
+      prediction_count: 2,
+    },
+  ],
+  unmeasured: [],
+};
+
+describe('EvaluatePanel · 약한 class 요약', () => {
+  it('펼치기 전에는 650KB짜리 결과 파일을 읽지 않는다', async () => {
+    evaluationStatus.mockResolvedValue({ evaluation: succeeded(false) });
+
+    render(<EvaluatePanel job={job(false)} />);
+
+    await screen.findByText(/약한 class/);
+    expect(evaluationPerClass).not.toHaveBeenCalled();
+  });
+
+  it('펼치면 표본이 충분한데 약한 class를 먼저 보여 준다', async () => {
+    evaluationStatus.mockResolvedValue({ evaluation: succeeded(false) });
+    evaluationPerClass.mockResolvedValue({ summary: PER_CLASS });
+
+    render(<EvaluatePanel job={job(false)} />);
+    fireEvent.click(await screen.findByRole('button', { name: /약한 class/ }));
+
+    expect(await screen.findByText('트루비타정 60mg/병')).toBeInTheDocument();
+    expect(screen.getByText('0.6506')).toBeInTheDocument();
+    // 정답이 87개라 표본 부족이 아니라는 것이 같이 보여야 판단이 됩니다.
+    expect(screen.getByText('87')).toBeInTheDocument();
+  });
+
+  it('표본이 적어 못 믿을 class는 약한 class와 섞지 않는다', async () => {
+    evaluationStatus.mockResolvedValue({ evaluation: succeeded(false) });
+    evaluationPerClass.mockResolvedValue({ summary: PER_CLASS });
+
+    render(<EvaluatePanel job={job(false)} />);
+    fireEvent.click(await screen.findByRole('button', { name: /약한 class/ }));
+
+    await screen.findByText('트루비타정 60mg/병');
+    expect(screen.getByText(/정답이 4개 미만/)).toBeInTheDocument();
+    expect(screen.getByText('일양하이트린정 2mg')).toBeInTheDocument();
+  });
+
+  it('요약이 없는 예전 평가에는 표 대신 이유를 알려 준다', async () => {
+    evaluationStatus.mockResolvedValue({ evaluation: succeeded(false) });
+    evaluationPerClass.mockResolvedValue({ summary: null });
+
+    render(<EvaluatePanel job={job(false)} />);
+    fireEvent.click(await screen.findByRole('button', { name: /약한 class/ }));
+
+    expect(await screen.findByText(/class별 요약이 없습니다/)).toBeInTheDocument();
+  });
 });
 
 describe('EvaluatePanel · 대회 제출 흐름', () => {

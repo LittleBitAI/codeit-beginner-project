@@ -404,6 +404,34 @@ export interface EvaluateProgress {
   malformed_lines?: number;
 }
 
+/** evaluate가 per_class를 다시 배열해 준 한 줄입니다. 새 지표가 아닙니다. */
+export interface PerClassRow {
+  category_id: number;
+  name: string;
+  ap: number | null;
+  ap50: number | null;
+  ap75: number | null;
+  truth_count: number;
+  prediction_count: number;
+}
+
+/**
+ * 57개 class 중 어디가 약한지 evaluate가 갈라 놓은 결과입니다.
+ *
+ * `weak`와 `sparse`를 섞지 않는 것이 핵심입니다. 정답이 몇 개뿐인 class는 AP가
+ * 실력이 아니라 표본 수에 흔들려서, 같이 세우면 고칠 곳을 잘못 가리킵니다.
+ */
+export interface PerClassSummary {
+  /** weak로 보려면 필요한 최소 정답 수 */
+  min_truth_count: number;
+  /** weak/sparse 목록에 남긴 최대 줄 수 */
+  top_n: number;
+  counts: { weak: number; sparse: number; unmeasured: number };
+  weak: PerClassRow[];
+  sparse: PerClassRow[];
+  unmeasured: PerClassRow[];
+}
+
 export interface EvaluationState {
   status: 'idle' | 'running' | 'succeeded' | 'failed';
   job_id?: string | null;
