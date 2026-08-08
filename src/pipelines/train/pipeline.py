@@ -18,6 +18,7 @@ import torch
 from src.common import S3Storage, Storage, StorageError, create_storage
 
 from .dataset import CocoDetectionDataset, REPOSITORY_ROOT, load_class_map, read_json_artifact
+from .image_cache import ImageCacheSession
 from .model import ARCHITECTURE, SUPPORTED_ARCHITECTURES, build_model
 from .progress import ProgressEmitter
 from .trainer import SUPPORTED_OPTIMIZERS, set_seed, train_model
@@ -430,19 +431,16 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(dataset_summary, Mapping):
         raise ValueError("dataset summary must be a JSON object")
 
-    cache_root = REPOSITORY_ROOT / "artifacts"
-    cache_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="train-images-", dir=cache_root) as directory:
-        cache = Path(directory)
+    with ImageCacheSession(dataset_summary) as image_cache:
         train_dataset = CocoDetectionDataset(
             data["train_manifest_uri"],
             class_map,
             storage,
-            cache / "train",
+            image_cache,
             augmentation=settings["augmentation"],
         )
         validation_dataset = CocoDetectionDataset(
-            data["validation_manifest_uri"], class_map, storage, cache / "validation"
+            data["validation_manifest_uri"], class_map, storage, image_cache
         )
         overlap = train_dataset.image_locations & validation_dataset.image_locations
         if overlap:

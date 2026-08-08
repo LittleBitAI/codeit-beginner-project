@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -18,6 +17,8 @@ from torch.utils.data import Dataset
 from torchvision.transforms import functional as transform_functional
 
 from src.common import LocalStorage, Storage
+
+from .image_cache import ImageCacheSession
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -193,13 +194,13 @@ class CocoDetectionDataset(Dataset):
         manifest_uri: str,
         class_map: Mapping[str, int],
         storage: Storage,
-        cache_directory: Path,
+        image_cache: ImageCacheSession,
         augmentation: Mapping[str, Any] | None = None,
     ) -> None:
         self.manifest_uri = manifest_uri
         self.class_map = dict(class_map)
         self.storage = storage
-        self.cache_directory = cache_directory
+        self.image_cache = image_cache
         self.augmentation = DetectionAugmentation(augmentation) if augmentation else None
         document = read_json_artifact(manifest_uri, storage)
         if not isinstance(document, Mapping):
@@ -328,13 +329,7 @@ class CocoDetectionDataset(Dataset):
     def _local_image_path(self, location: str) -> Path:
         if not _is_s3(location):
             return _local_artifact_path(location, self.storage)
-        suffix = Path(urlsplit(location).path).suffix or ".image"
-        digest = hashlib.sha256(location.encode("utf-8")).hexdigest()
-        destination = self.cache_directory / f"{digest}{suffix}"
-        if not destination.is_file():
-            self.cache_directory.mkdir(parents=True, exist_ok=True)
-            self.storage.download_file(location, destination)
-        return destination
+        return self.image_cache.fetch(location, self.storage)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         image_record = self._images[index]
