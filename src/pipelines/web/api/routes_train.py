@@ -147,11 +147,18 @@ def compare_experiments(payload: CompareExperimentsRequest = Body(...)) -> dict[
 def start_job(
     payload: StartJobRequest = Body(...), authorization: str | None = Header(default=None)
 ) -> dict[str, Any]:
+    token = _bearer_token(authorization)
+    record = get_manager().start(payload.config_id, access_token=token)
+    return public_record(record)
+
+
+def _bearer_token(authorization: str | None) -> str | None:
+    """Authorization header에서 browser login token만 꺼냅니다."""
+
     token = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
-    record = get_manager().start(payload.config_id, access_token=token)
-    return public_record(record)
+    return token or None
 
 
 @router.get("/queue")
@@ -295,7 +302,11 @@ class ResumeRequest(BaseModel):
 
 
 @router.post("/jobs/{job_id}/resume", status_code=201)
-def resume_job(job_id: str, payload: ResumeRequest = Body(...)) -> dict[str, Any]:
+def resume_job(
+    job_id: str,
+    payload: ResumeRequest = Body(...),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
     """중단된 학습을 그 checkpoint에서 이어서 시작합니다.
 
     이어서 하는 실행은 **새 이름**을 받습니다. 같은 이름을 다시 쓰면 train이 남아 있는
@@ -314,7 +325,7 @@ def resume_job(job_id: str, payload: ResumeRequest = Body(...)) -> dict[str, Any
         epochs=payload.epochs,
     )
     config_id = write_runtime_config(config)
-    started = manager.enqueue(config_id)
+    started = manager.enqueue(config_id, access_token=_bearer_token(authorization))
     return {
         "config_id": config_id,
         "run_id": config["train"]["run_id"],

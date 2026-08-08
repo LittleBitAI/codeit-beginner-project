@@ -702,11 +702,32 @@ def resume_checkpoint_uri(config: dict[str, Any]) -> str:
                     )
                 ]
             )
-        prefix = train["output_prefix"].strip("/")
-        return (
-            f"s3://{bucket}/{prefix}/{train['run_id']}"
-            f"/{RUNNING_PREFIX}/{RESUME_CHECKPOINT_NAME}"
+        storage = config.get("storage")
+        s3 = storage.get("s3") if isinstance(storage, dict) else None
+        configured_prefix = s3.get("prefix") if isinstance(s3, dict) else None
+        common_prefix = next(
+            (
+                str(value).strip().strip("/")
+                for value in (
+                    os.environ.get("PILL_STORAGE_S3_PREFIX"),
+                    configured_prefix,
+                )
+                if value is not None and str(value).strip()
+            ),
+            "",
         )
+        key = "/".join(
+            part
+            for part in (
+                common_prefix,
+                train["output_prefix"].strip("/"),
+                train["run_id"],
+                RUNNING_PREFIX,
+                RESUME_CHECKPOINT_NAME,
+            )
+            if part
+        )
+        return f"s3://{bucket}/{key}"
     directory = train["output_dir"].strip("/")
     return (
         f"{directory}/.{train['run_id']}{WORKING_DIRECTORY_SUFFIX}"

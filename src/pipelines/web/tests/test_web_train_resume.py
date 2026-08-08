@@ -146,6 +146,18 @@ def test_s3_runs_resume_from_the_running_prefix(monkeypatch):
     )
 
 
+def test_s3_runs_resume_from_the_common_storage_prefix(monkeypatch):
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "team-bucket")
+    monkeypatch.setenv("PILL_STORAGE_S3_PREFIX", "/team-space/")
+
+    uri = resume_checkpoint_uri(_runtime_config("s3"))
+
+    assert uri == (
+        "s3://team-bucket/team-space/experiments/completed/"
+        "web-run/running/last_checkpoint.pt"
+    )
+
+
 def test_s3_runs_say_what_is_missing_without_a_bucket():
     with pytest.raises(WebValidationError) as error:
         resume_checkpoint_uri(_runtime_config("s3"))
@@ -225,6 +237,39 @@ def test_resume_route_queues_a_new_run_from_an_interrupted_job(
     body = response.json()
     assert body["run_id"] != "web-run"
     assert body["resumed_from_job_id"] == record.job_id
+
+
+def test_resume_route_passes_the_login_token_to_the_started_run(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    from src.pipelines.web import team_sync
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    received_tokens = []
+
+    class TokenCheckingSync:
+        def create_run(self, *, access_token, **_kwargs):
+            received_tokens.append(access_token)
+            return None
+
+        def enqueue_update(self, _record):
+            return None
+
+        def enqueue_log(self, _record, _entry):
+            return None
+
+    monkeypatch.setattr(team_sync, "get_team_sync", lambda: TokenCheckingSync())
+
+    response = client.post(
+        f"/api/train/jobs/{record.job_id}/resume",
+        json={},
+        headers={"Authorization": "Bearer user-token"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert received_tokens == ["user-token"]
 
 
 def test_resume_route_refuses_a_job_that_is_not_interrupted(
