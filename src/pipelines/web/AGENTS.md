@@ -38,6 +38,7 @@ The server binds to localhost on purpose. Exposing it to other hosts is a delibe
 ## Local Rules
 
 - `artifacts/web/` and port 8000 are shared runtime state. Two people running the server from one clone will collide, so only one at a time. Tests avoid this by pointing the repository root at a temporary directory.
+- This pipeline picks its storage backend and whether to record to the team from `PILL_` environment variables, so tests must not inherit them. An autouse fixture strips every `PILL_` name; a test that needs one sets it with `monkeypatch.setenv`. Without that, `PILL_STORAGE_S3_BUCKET` makes the experiment list read the team's real registry and `PILL_TEAM_SYNC_ENABLED` makes starting a job demand a token — green on CI, red only on a developer machine.
 - Subprocess output must be drained continuously, or a large log deadlocks the reader thread. A test guards this.
 - Cancelling a job must report cancelled, not failed.
 - A request must never resolve to a path outside the repository; traversal attempts return 404.
