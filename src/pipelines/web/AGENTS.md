@@ -43,4 +43,5 @@ The server binds to localhost on purpose. Exposing it to other hosts is a delibe
 - Cancelling a job must report cancelled, not failed.
 - A request must never resolve to a path outside the repository; traversal attempts return 404.
 - Probing for a GPU must not initialise a CUDA context.
+- Evaluation runs on the GPU when one is present. `evaluate` itself defaults to `cpu`, which inferred a 2,942-image run in about 55 minutes and hit `EVALUATE_TIMEOUT_SECONDS`; the same run takes about 2 minutes on a GPU. `resolve_device` picks the device and rejects `cuda` on a machine without one, so the failure arrives before the inference instead of after it.
 - The frontend is the least-tested part of the repository. New screens need tests; do not assume the Python tests cover them.

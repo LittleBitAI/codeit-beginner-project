@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 from . import team_sync
 from .errors import FieldError, JobConflictError, WebValidationError
 from .evaluate_progress import EvaluateProgressState, consume_line, snapshot
+from .gpu import cuda_is_available
 from .jobs import runner
 from .jobs.model import JobRecord
 from .masking import sanitize_line
@@ -37,6 +38,32 @@ __all__ = [
 
 # 이미지마다 추론을 돌리므로 학습만큼은 아니어도 오래 걸릴 수 있습니다.
 EVALUATE_TIMEOUT_SECONDS = 60 * 60
+
+# evaluate가 받아들이는 device입니다. train과 같은 두 값만 씁니다.
+SUPPORTED_DEVICES = ("cpu", "cuda")
+
+
+def resolve_device(device: Any) -> str:
+    """평가를 어디서 돌릴지 정합니다. 고르지 않았으면 GPU가 있을 때 GPU를 씁니다.
+
+    evaluate의 기본값은 `cpu`인데, 검증 2100장에 test 842장이면 CPU 추론만 55분이라
+    `EVALUATE_TIMEOUT_SECONDS`를 넘겨 "시간 안에 끝나지 않았습니다"로 실패합니다.
+    같은 작업이 GPU에서는 2분입니다. 그래서 화면에서 시작하는 평가는 GPU가 있으면
+    GPU를 기본으로 씁니다.
+    """
+
+    if device is None or device == "":
+        return "cuda" if cuda_is_available() else "cpu"
+    if not isinstance(device, str) or device not in SUPPORTED_DEVICES:
+        allowed = " 또는 ".join(f"'{name}'" for name in SUPPORTED_DEVICES)
+        raise WebValidationError([FieldError("device", f"{allowed}여야 합니다.")])
+    if device == "cuda" and not cuda_is_available():
+        # 추론을 다 돌린 뒤 subprocess 안에서 실패하면 그 시간을 통째로 버립니다.
+        raise WebValidationError(
+            [FieldError("device", "이 컴퓨터에서는 GPU를 쓸 수 없습니다.")]
+        )
+    return device
+
 
 STATUS_IDLE = "idle"
 STATUS_RUNNING = "running"
@@ -124,8 +151,7 @@ def build_evaluate_config(
         "max_detections_per_image": max_detections_per_image,
         "overwrite": bool(overwrite),
     }
-    if device:
-        settings["device"] = device
+    settings["device"] = resolve_device(device)
     if s3_bucket is not None and data_inputs.get("test_manifest_uri"):
         settings["submission_uri"] = (
             f"s3://{s3_bucket}/submissions/{run_id}/submission.csv"

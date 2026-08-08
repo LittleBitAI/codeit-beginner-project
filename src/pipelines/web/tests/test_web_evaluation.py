@@ -155,6 +155,54 @@ def test_test_manifest_is_forwarded_for_submission_generation():
     assert config["inputs"]["data"]["test_manifest_uri"].endswith("test_manifest.json")
 
 
+def test_device_defaults_to_gpu_when_one_is_available(monkeypatch):
+    """평가는 이미지 한 장씩 추론합니다. GPU를 두고 CPU로 도는 것이 기본이면 안 됩니다.
+
+    검증 2100장에 test 842장이면 CPU에서 추론만 55분이라 실행 제한을 넘깁니다.
+    """
+
+    monkeypatch.setattr(evaluation, "cuda_is_available", lambda: True)
+
+    config = evaluation.build_evaluate_config(make_record())
+
+    assert config["evaluate"]["device"] == "cuda"
+
+
+def test_device_falls_back_to_cpu_when_no_gpu_is_present(monkeypatch):
+    monkeypatch.setattr(evaluation, "cuda_is_available", lambda: False)
+
+    config = evaluation.build_evaluate_config(make_record())
+
+    assert config["evaluate"]["device"] == "cpu"
+
+
+def test_chosen_device_wins_over_the_detected_one(monkeypatch):
+    """GPU가 있어도 사람이 CPU를 고르면 그대로 따릅니다."""
+
+    monkeypatch.setattr(evaluation, "cuda_is_available", lambda: True)
+
+    config = evaluation.build_evaluate_config(make_record(), device="cpu")
+
+    assert config["evaluate"]["device"] == "cpu"
+
+
+@pytest.mark.parametrize("bad", ["gpu", "cuda:0", "tpu", " ", 1])
+def test_device_outside_the_contract_is_rejected(bad, monkeypatch):
+    monkeypatch.setattr(evaluation, "cuda_is_available", lambda: True)
+
+    with pytest.raises(WebValidationError):
+        evaluation.build_evaluate_config(make_record(), device=bad)
+
+
+def test_choosing_gpu_without_one_is_rejected_before_the_run(monkeypatch):
+    """추론을 다 돌린 뒤 subprocess 안에서 실패하면 몇십 분을 버립니다."""
+
+    monkeypatch.setattr(evaluation, "cuda_is_available", lambda: False)
+
+    with pytest.raises(WebValidationError):
+        evaluation.build_evaluate_config(make_record(), device="cuda")
+
+
 def test_test_manifest_can_be_attached_to_an_existing_training():
     record = make_record(remote=True)
 

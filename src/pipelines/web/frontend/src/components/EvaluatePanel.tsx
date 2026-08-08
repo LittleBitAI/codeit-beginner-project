@@ -38,6 +38,8 @@ function metricText(value: number | null | undefined): string {
 export function EvaluatePanel({ job }: { job: JobRecord }) {
   const recordedTestManifest = job.data_inputs.test_manifest_uri ?? '';
   const [threshold, setThreshold] = useState('0.0');
+  // 빈 값은 "서버가 정한다"입니다. GPU가 있으면 서버가 GPU를 고릅니다.
+  const [device, setDevice] = useState('');
   const [overwrite, setOverwrite] = useState(false);
   const [testManifestUri, setTestManifestUri] = useState(recordedTestManifest);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +71,8 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
       await api.startEvaluation(job.job_id, {
         score_threshold: Number(threshold),
         overwrite,
+        // 고르지 않았으면 아예 보내지 않아 서버가 GPU 유무를 보고 정하게 둡니다.
+        ...(device ? { device } : {}),
         ...(recordedTestManifest || !attachedTestManifest
           ? {}
           : { test_manifest_uri: attachedTestManifest }),
@@ -149,6 +153,27 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
                 onChange={(event) => setThreshold(event.target.value)}
                 style={controlStyle}
               />
+            </Field>
+          </div>
+          <div style={{ width: 190 }}>
+            <Field
+              label="연산 장치"
+              hint={
+                device === 'cpu'
+                  ? 'CPU는 이미지 한 장에 1초 넘게 걸려 오래 걸립니다.'
+                  : '자동은 GPU가 있으면 GPU를 씁니다.'
+              }
+            >
+              <select
+                value={device}
+                disabled={running}
+                onChange={(event) => setDevice(event.target.value)}
+                style={controlStyle}
+              >
+                <option value="">자동</option>
+                <option value="cuda">GPU (cuda)</option>
+                <option value="cpu">CPU</option>
+              </select>
             </Field>
           </div>
           <label
