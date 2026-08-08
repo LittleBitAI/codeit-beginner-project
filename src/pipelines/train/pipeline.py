@@ -8,7 +8,8 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -410,6 +411,26 @@ def _working_directory(settings: Mapping[str, Any]) -> Path:
     return _repo_output(settings["output_dir"]) / f".{settings['run_id']}.partial"
 
 
+@contextmanager
+def _claim_run(settings: Mapping[str, Any]) -> Iterator[None]:
+    """같은 이름의 local 학습 하나만 입력을 읽도록 원자적으로 표시합니다."""
+
+    parent = _repo_output(settings["output_dir"])
+    parent.mkdir(parents=True, exist_ok=True)
+    claim = parent / f".{settings['run_id']}.claim"
+    try:
+        with claim.open("xb"):
+            pass
+    except FileExistsError as error:
+        raise FileExistsError(
+            f"training run is already active: {settings['run_id']}"
+        ) from error
+    try:
+        yield
+    finally:
+        claim.unlink(missing_ok=True)
+
+
 def _s3_run_prefix(settings: Mapping[str, Any]) -> str:
     return f"{settings['output_prefix']}/{settings['run_id']}"
 
@@ -689,6 +710,13 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
     data = _data_inputs(config)
     storage = create_storage(config)
     _reject_existing_run(settings, storage)
+    with _claim_run(settings):
+        return _execute_claimed(settings, data, storage)
+
+
+def _execute_claimed(
+    settings: dict[str, Any], data: dict[str, str], storage: Storage
+) -> dict[str, Any]:
     class_map = load_class_map(data["class_map_uri"], storage)
     dataset_summary = read_json_artifact(data["dataset_summary_uri"], storage)
     if not isinstance(dataset_summary, Mapping):

@@ -1,6 +1,7 @@
 import copy
 import io
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1035,6 +1036,49 @@ def test_no_working_directory_when_the_run_fails_before_the_first_epoch(local_co
 
     assert result["status"] == "error"
     assert not _working_directory(local_config).exists()
+
+
+def test_same_local_run_id_is_claimed_before_reading_inputs(
+    local_config, monkeypatch
+):
+    """동시에 시작한 두 학습이 같은 partial checkpoint를 공유하면 안 됩니다."""
+
+    original = pipeline.load_class_map
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def blocking_load_class_map(*args, **kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            this_call = calls
+        if this_call == 1:
+            first_entered.set()
+            if not release_first.wait(10):
+                raise RuntimeError("동시 실행 test가 첫 실행을 놓아주지 않았습니다.")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "load_class_map", blocking_load_class_map)
+    first_result = {}
+    first_thread = threading.Thread(
+        target=lambda: first_result.update(train.run(copy.deepcopy(local_config))),
+        daemon=True,
+    )
+    first_thread.start()
+    try:
+        assert first_entered.wait(10), "첫 실행이 입력을 읽기 시작하지 않았습니다."
+        second_result = train.run(copy.deepcopy(local_config))
+    finally:
+        release_first.set()
+        first_thread.join(timeout=10)
+
+    assert not first_thread.is_alive()
+    assert second_result["status"] == "error"
+    assert "already active" in second_result["message"]
+    assert calls == 1
+    assert first_result["status"] == "ok", first_result["message"]
 
 
 def test_run_refuses_to_start_when_an_interrupted_run_is_still_on_disk(local_config):
