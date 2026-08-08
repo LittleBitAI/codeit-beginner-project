@@ -15,7 +15,7 @@ from torchvision.models.detection import FasterRCNN, RetinaNet
 
 from src.common import LocalStorage, S3Storage, StorageError
 from src.pipelines import train
-from src.pipelines.train import pipeline
+from src.pipelines.train import pipeline, trainer as trainer_module
 from src.pipelines.train.dataset import DetectionAugmentation, REPOSITORY_ROOT, load_class_map
 from src.pipelines.train.model import SUPPORTED_ARCHITECTURES, build_model
 from src.pipelines.train import progress as progress_module
@@ -260,6 +260,7 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
             "batch_size",
             "num_workers",
             "device",
+            "precision",
             "pretrained",
             "early_stopping",
         }
@@ -288,6 +289,11 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
         assert recorded["batch_size"] == 1
         assert recorded["num_workers"] == 0
         assert recorded["device"] == "cpu"
+        assert recorded["precision"] == {
+            "mode": "fp32",
+            "dtype": "fp32",
+            "grad_scaler": False,
+        }
         assert recorded["pretrained"] is False
         assert recorded["early_stopping"] is None
         assert 1 <= checkpoint["epoch"] <= recorded["epochs"]
@@ -379,6 +385,7 @@ def test_explicit_adamw_run_records_effective_reproducibility_settings(local_con
         ("optimizer", "Lion", "train.optimizer must be one of"),
         ("architecture", "unknown_detector", "train.architecture must be one of"),
         ("augmentation", {"preset": "unsafe_crop"}, "augmentation.preset must be one of"),
+        ("precision", "bf16", "train.precision must be one of"),
         ("weight_decay", -1.0, "train.weight_decay must be a number"),
     ],
 )
@@ -458,6 +465,38 @@ def test_adam_beta_bounds_are_validated_when_the_setting_is_meaningful(local_con
     assert result["status"] == "error"
     assert result["artifacts"] == {}
     assert "train.beta1 must be a number >= 0.0 and < 1.0" in result["message"]
+
+
+def test_amp_precision_requires_cuda(local_config):
+    local_config["train"]["precision"] = "amp"
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert "train.precision='amp' requires train.device='cuda'" in result["message"]
+
+
+@pytest.mark.parametrize(
+    ("bf16_supported", "dtype", "grad_scaler"),
+    [(True, "bf16", False), (False, "fp16", True)],
+)
+def test_amp_precision_chooses_only_native_bf16(
+    monkeypatch, bf16_supported, dtype, grad_scaler
+):
+    support = Mock(return_value=bf16_supported)
+    monkeypatch.setattr(pipeline.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(pipeline.torch.cuda, "is_bf16_supported", support)
+
+    settings = pipeline._settings(
+        {"train": {"device": "cuda", "precision": "amp"}}
+    )
+
+    assert settings["precision"] == {
+        "mode": "amp",
+        "dtype": dtype,
+        "grad_scaler": grad_scaler,
+    }
+    support.assert_called_once_with(including_emulation=False)
 
 
 def _progress_events(captured_stderr: str) -> list[dict]:
@@ -1074,6 +1113,101 @@ def test_validation_does_not_update_batch_norm_running_statistics():
     )
 
     assert torch.allclose(model.batch_norm.running_mean, torch.full((3,), 0.1))
+
+
+def test_fp16_runtime_uses_autocast_and_grad_scaler(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class AutocastContext:
+        def __enter__(self):
+            calls.append(("autocast_enter", None))
+
+        def __exit__(self, *args):
+            calls.append(("autocast_exit", None))
+
+    class FakeScaler:
+        def scale(self, loss):
+            calls.append(("scale", loss))
+            return loss
+
+        def step(self, optimizer):
+            calls.append(("step", optimizer))
+            optimizer.step()
+
+        def update(self):
+            calls.append(("update", None))
+
+    scaler = FakeScaler()
+    scaler_factory = Mock(return_value=scaler)
+    autocast = Mock(return_value=AutocastContext())
+    monkeypatch.setattr(trainer_module.torch.amp, "GradScaler", scaler_factory)
+    monkeypatch.setattr(trainer_module.torch, "autocast", autocast)
+    parameter = nn.Parameter(torch.tensor(1.0))
+    optimizer = torch.optim.SGD([parameter], lr=0.1)
+    runtime = trainer_module._PrecisionRuntime(
+        {"mode": "amp", "dtype": "fp16", "grad_scaler": True},
+        torch.device("cuda"),
+    )
+
+    with runtime.autocast():
+        loss = parameter.square()
+    runtime.backward_and_step(loss, optimizer)
+
+    autocast.assert_called_once_with(device_type="cuda", dtype=torch.float16)
+    scaler_factory.assert_called_once_with("cuda", enabled=True)
+    assert [name for name, _ in calls] == [
+        "autocast_enter",
+        "autocast_exit",
+        "scale",
+        "step",
+        "update",
+    ]
+
+
+def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
+    calls = {"autocast": 0, "backward_and_step": 0}
+
+    class Runtime:
+        def autocast(self):
+            class Context:
+                def __enter__(self):
+                    calls["autocast"] += 1
+
+                def __exit__(self, *args):
+                    return None
+
+            return Context()
+
+        def backward_and_step(self, loss, optimizer):
+            calls["backward_and_step"] += 1
+            loss.backward()
+            optimizer.step()
+
+    monkeypatch.setattr(
+        trainer_module,
+        "_PrecisionRuntime",
+        lambda precision, device: Runtime(),
+    )
+    settings = {
+        "seed": 17,
+        "device": "cpu",
+        "batch_size": 1,
+        "num_workers": 0,
+        "learning_rate": 0.01,
+        "momentum": 0.0,
+        "weight_decay": 0.0,
+        "epochs": 1,
+        "precision": {"mode": "amp", "dtype": "fp16", "grad_scaler": True},
+    }
+
+    train_model(
+        TinyDetector(),
+        InMemoryDetectionDataset(1.0),
+        InMemoryDetectionDataset(0.0),
+        settings,
+    )
+
+    assert calls == {"autocast": 2, "backward_and_step": 1}
 
 
 def test_s3_publisher_returns_attempt_uris_and_writes_completion_marker(

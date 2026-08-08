@@ -7,6 +7,7 @@ import math
 import random
 import time
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Any
 
 import numpy as np
@@ -19,6 +20,43 @@ from .progress import ProgressEmitter
 
 
 SUPPORTED_OPTIMIZERS = ("AdamW", "SGD", "Adam")
+
+
+class _PrecisionRuntime:
+    """정규화된 정밀도 설정을 autocast와 optimizer step에 적용합니다."""
+
+    def __init__(self, precision: Mapping[str, Any], device: torch.device) -> None:
+        self._device = device
+        dtype_name = precision.get("dtype", "fp32")
+        self._dtype = {
+            "fp16": torch.float16,
+            "bf16": torch.bfloat16,
+        }.get(dtype_name)
+        self._scaler = (
+            torch.amp.GradScaler("cuda", enabled=True)
+            if precision.get("grad_scaler") is True
+            else None
+        )
+
+    def autocast(self) -> Any:
+        """AMP가 꺼져 있으면 기존 fp32 실행 context를 그대로 돌려줍니다."""
+
+        if self._dtype is None:
+            return nullcontext()
+        return torch.autocast(device_type=self._device.type, dtype=self._dtype)
+
+    def backward_and_step(
+        self, loss: torch.Tensor, optimizer: torch.optim.Optimizer
+    ) -> None:
+        """fp16은 scale하고, 나머지 dtype은 기존 backward/step을 사용합니다."""
+
+        if self._scaler is None:
+            loss.backward()
+            optimizer.step()
+            return
+        self._scaler.scale(loss).backward()
+        self._scaler.step(optimizer)
+        self._scaler.update()
 
 
 def build_optimizer(
@@ -154,6 +192,13 @@ def _train_model(
     if not parameters:
         raise RuntimeError("model has no trainable parameters")
     optimizer = build_optimizer(parameters, settings)
+    precision = _PrecisionRuntime(
+        settings.get(
+            "precision",
+            {"mode": "fp32", "dtype": "fp32", "grad_scaler": False},
+        ),
+        device,
+    )
 
     history: list[dict[str, Any]] = []
     best_loss = math.inf
@@ -171,9 +216,9 @@ def _train_model(
         train_component_totals: dict[str, float] = {}
         for step, (images, targets) in enumerate(train_loader, start=1):
             optimizer.zero_grad(set_to_none=True)
-            loss, components = _loss(model, images, targets, device)
-            loss.backward()
-            optimizer.step()
+            with precision.autocast():
+                loss, components = _loss(model, images, targets, device)
+            precision.backward_and_step(loss, optimizer)
             train_total += float(loss.detach().cpu())
             _add_components(train_component_totals, components, phase="train")
             if progress is not None:
@@ -191,7 +236,8 @@ def _train_model(
         validation_component_totals: dict[str, float] = {}
         with torch.no_grad():
             for step, (images, targets) in enumerate(validation_loader, start=1):
-                loss, components = _loss(model, images, targets, device)
+                with precision.autocast():
+                    loss, components = _loss(model, images, targets, device)
                 validation_total += float(loss.detach().cpu())
                 _add_components(
                     validation_component_totals,
