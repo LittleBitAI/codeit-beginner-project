@@ -290,3 +290,21 @@ def test_cleanup_enforces_size_limit_oldest_first(tmp_path):
 
     assert not oldest.exists()
     assert newer.exists()
+
+
+def test_cleanup_enforces_size_limit_after_current_lease_is_released(tmp_path):
+    cache_root = tmp_path / "persistent"
+
+    with ImageCacheSession(
+        _summary(),
+        cache_root=cache_root,
+        temporary_root=tmp_path / "temporary",
+        max_cache_bytes=10,
+        ttl_seconds=1_000.0,
+        now=lambda: 500.0,
+    ) as cache:
+        namespace = cache.namespace
+        (namespace / "payload").write_bytes(b"x" * 20)
+        assert namespace.exists()
+
+    assert not namespace.exists()

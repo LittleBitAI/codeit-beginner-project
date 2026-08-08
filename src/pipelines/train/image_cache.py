@@ -194,13 +194,17 @@ class ImageCacheSession:
         if self._temporary is not None:
             self._temporary.cleanup()
             return
+        trash: list[Path] = []
         try:
             with _process_lock(self._cache_root / ".cleanup.lock"):
                 self._remove_lease()
                 (self.namespace / ".last_used").touch()
+                trash = self._cleanup_locked()
         except OSError:
             # 남은 lease는 TTL 이후 stale lease로 정리됩니다.
             return
+        for path in trash:
+            shutil.rmtree(path, ignore_errors=True)
 
     def _start_temporary(self) -> None:
         self._persistent = False
