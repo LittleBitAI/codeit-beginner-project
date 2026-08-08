@@ -211,6 +211,18 @@ def test_numeric_defaults_match_train_source():
         assert mirrored[name] == expected, f"train.{name} 기본값이 어긋났습니다."
 
 
+def test_train_source_supports_every_resume_setting_the_web_sends():
+    """#110 없이 #111만 배포해 201 뒤 처음부터 학습하는 일을 막습니다."""
+
+    source = read_source("pipeline.py")
+    numeric_defaults = call_defaults(source)
+    optional_defaults = get_defaults(source)
+    mirrored = normalize_train_settings({})
+
+    assert numeric_defaults["checkpoint_every"] == mirrored["checkpoint_every"]
+    assert "resume_from" in optional_defaults
+
+
 def test_string_and_boolean_defaults_match_train_source():
     train_defaults = get_defaults(read_source("pipeline.py"))
 
