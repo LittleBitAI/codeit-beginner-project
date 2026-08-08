@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 from PIL import Image
 
-from src.common import StorageError
+from src.common import S3Storage, StorageError
 from src.pipelines.train import image_cache as image_cache_module
 from src.pipelines.train.image_cache import ImageCacheSession
 
@@ -90,6 +90,47 @@ def test_manifest_checksum_change_invalidates_the_cache(tmp_path):
         changed.fetch("s3://bucket/images/pill.png", storage)
 
     assert storage.download_file.call_count == 2
+
+
+def test_s3_object_identity_change_invalidates_the_cached_image(tmp_path):
+    client = Mock()
+    client.head_object.side_effect = [
+        {"ETag": '"old-etag"', "VersionId": "old-version"},
+        {"ETag": '"old-etag"', "VersionId": "old-version"},
+        {"ETag": '"old-etag"', "VersionId": "old-version"},
+        {"ETag": '"new-etag"', "VersionId": "new-version"},
+        {"ETag": '"new-etag"', "VersionId": "new-version"},
+    ]
+
+    def download(bucket, key, destination):
+        color = "red" if client.download_file.call_count == 1 else "blue"
+        Image.new("RGB", (3, 2), color=color).save(destination, format="BMP")
+
+    client.download_file.side_effect = download
+    storage = S3Storage("bucket", client=client)
+    cache_root = tmp_path / "persistent"
+    temporary_root = tmp_path / "temporary"
+
+    with ImageCacheSession(
+        _summary(), cache_root=cache_root, temporary_root=temporary_root
+    ) as first:
+        first_path = first.fetch("s3://bucket/images/pill.png", storage)
+    with ImageCacheSession(
+        _summary(), cache_root=cache_root, temporary_root=temporary_root
+    ) as unchanged:
+        unchanged_path = unchanged.fetch("s3://bucket/images/pill.png", storage)
+    with ImageCacheSession(
+        _summary(), cache_root=cache_root, temporary_root=temporary_root
+    ) as changed:
+        changed_path = changed.fetch("s3://bucket/images/pill.png", storage)
+
+    assert first_path == unchanged_path
+    assert changed_path != first_path
+    assert first_path.stat().st_size == changed_path.stat().st_size
+    with Image.open(first_path) as first_image, Image.open(changed_path) as changed_image:
+        assert first_image.getpixel((0, 0)) == (255, 0, 0)
+        assert changed_image.getpixel((0, 0)) == (0, 0, 255)
+    assert client.download_file.call_count == 2
 
 
 def test_legacy_summary_uses_a_fresh_temporary_cache_each_run(tmp_path):

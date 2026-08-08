@@ -13,12 +13,12 @@ from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 from PIL import Image
 
-from src.common import Storage
+from src.common import S3Storage, Storage
 
 from .errors import TrainError
 
@@ -31,6 +31,7 @@ MAX_CACHE_BYTES = 50 * 1024**3
 _VERSION_SEGMENT = re.compile(r"v[0-9]+")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _MANIFEST_FILES = ("train_manifest.json", "validation_manifest.json")
+_DOWNLOAD_IDENTITY_ATTEMPTS = 3
 
 
 def _dataset_fingerprint(summary: Mapping[str, Any]) -> str | None:
@@ -62,6 +63,37 @@ def _dataset_fingerprint(summary: Mapping[str, Any]) -> str | None:
     payload = {"source_prefix": source_prefix, "manifests": manifest_hashes}
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _s3_object_identity(location: str, storage: Storage) -> str | None:
+    """S3 객체 내용 변경을 구분할 수 있는 metadata를 정규화합니다."""
+
+    if not isinstance(storage, S3Storage):
+        return None
+    parsed = urlsplit(location)
+    if parsed.scheme.lower() != "s3" or parsed.netloc != storage.bucket:
+        raise TrainError("image cache S3 URI does not match the configured bucket")
+    key = unquote(parsed.path.lstrip("/"))
+    try:
+        metadata = storage.client.head_object(Bucket=parsed.netloc, Key=key)
+    except Exception as error:
+        raise TrainError("S3 image metadata lookup failed") from error
+
+    identity = {
+        name: metadata[name]
+        for name in (
+            "VersionId",
+            "ETag",
+            "ChecksumSHA256",
+            "ChecksumSHA1",
+            "ChecksumCRC32C",
+            "ChecksumCRC32",
+        )
+        if isinstance(metadata.get(name), str) and metadata[name]
+    }
+    if not identity:
+        raise TrainError("S3 image metadata has no content identity")
+    return json.dumps(identity, sort_keys=True, separators=(",", ":"))
 
 
 @contextmanager
@@ -128,6 +160,7 @@ class ImageCacheSession:
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
         self._lease: Path | None = None
         self._persistent = False
+        self._object_identities: dict[str, str] = {}
         self.namespace = temporary_root
 
     def __enter__(self) -> ImageCacheSession:
@@ -246,30 +279,48 @@ class ImageCacheSession:
 
         self._touch()
         suffix = Path(urlsplit(location).path).suffix or ".image"
-        digest = hashlib.sha256(location.encode("utf-8")).hexdigest()
         objects = self.namespace / "objects"
-        entry = objects / digest
-        destination = entry / f"image{suffix}"
-        if destination.is_file():
-            return destination
-
         objects.mkdir(parents=True, exist_ok=True)
-        temporary = Path(
-            tempfile.mkdtemp(prefix=f".{digest}-", suffix=".tmp", dir=objects)
-        )
-        downloaded = temporary / f"image{suffix}"
-        try:
-            storage.download_file(location, downloaded)
-            with Image.open(downloaded) as image:
-                image.verify()
+        for _ in range(_DOWNLOAD_IDENTITY_ATTEMPTS):
+            identity = self._object_identities.get(location)
+            if identity is None:
+                identity = _s3_object_identity(location, storage)
+                if identity is not None:
+                    self._object_identities[location] = identity
+            cache_key = json.dumps(
+                {"location": location, "object_identity": identity},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            digest = hashlib.sha256(cache_key).hexdigest()
+            entry = objects / digest
+            destination = entry / f"image{suffix}"
+            if destination.is_file():
+                return destination
+
+            temporary = Path(
+                tempfile.mkdtemp(prefix=f".{digest}-", suffix=".tmp", dir=objects)
+            )
+            downloaded = temporary / f"image{suffix}"
             try:
-                temporary.rename(entry)
-            except OSError as error:
+                storage.download_file(location, downloaded)
+                with Image.open(downloaded) as image:
+                    image.verify()
+                if identity is not None:
+                    downloaded_identity = _s3_object_identity(location, storage)
+                    if downloaded_identity != identity:
+                        if downloaded_identity is not None:
+                            self._object_identities[location] = downloaded_identity
+                        continue
+                try:
+                    temporary.rename(entry)
+                except OSError as error:
+                    if not destination.is_file():
+                        raise TrainError("image cache publish failed") from error
                 if not destination.is_file():
-                    raise TrainError("image cache publish failed") from error
-            if not destination.is_file():
-                raise TrainError("image cache publish failed")
-            return destination
-        finally:
-            if temporary.exists():
-                shutil.rmtree(temporary, ignore_errors=True)
+                    raise TrainError("image cache publish failed")
+                return destination
+            finally:
+                if temporary.exists():
+                    shutil.rmtree(temporary, ignore_errors=True)
+        raise TrainError("S3 image changed repeatedly during cache download")
