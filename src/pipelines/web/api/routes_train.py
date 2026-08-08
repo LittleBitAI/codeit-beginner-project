@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from .. import train_capabilities
 from ..errors import FieldError, JobConflictError, WebValidationError
+from ..evaluate_metrics import read_per_class_summary
 from ..evaluation import DEFAULT_MAX_DETECTIONS, get_evaluation_runner
 from .. import experiments
 from ..gpu import cuda_is_available
@@ -214,6 +215,18 @@ def evaluation_status(job_id: str) -> dict[str, Any]:
 
     record = get_manager().get(job_id)  # 없는 job이면 404
     return {"evaluation": get_evaluation_runner().status_for(record)}
+
+
+@router.get("/jobs/{job_id}/evaluate/per-class")
+def evaluation_per_class(job_id: str) -> dict[str, Any]:
+    """평가 결과의 class별 요약입니다. 없으면 `summary`가 `null`입니다.
+
+    metrics.json은 confusion matrix까지 들어 650KB가 넘으므로 상태 polling에 얹지
+    않고, 화면이 이 표를 펼칠 때만 부릅니다.
+    """
+
+    record = get_manager().get(job_id)  # 없는 job이면 404
+    return {"summary": read_per_class_summary(record.evaluation)}
 
 
 @router.post("/jobs/{job_id}/evaluate", status_code=202)

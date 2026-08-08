@@ -4,6 +4,7 @@ import type {
   DataVerification,
   Defaults,
   EvaluationState,
+  PerClassSummary,
   ExperimentComparisonResult,
   ExperimentListing,
   GpuStatus,
@@ -117,6 +118,12 @@ export const api = {
 
   evaluationStatus: (jobId: string) =>
     request<{ evaluation: EvaluationState }>(`/api/train/jobs/${jobId}/evaluate`),
+
+  // metrics.json이 650KB라 상태 polling에 얹지 않고 표를 펼칠 때만 부릅니다.
+  evaluationPerClass: (jobId: string) =>
+    request<{ summary: PerClassSummary | null }>(
+      `/api/train/jobs/${jobId}/evaluate/per-class`,
+    ),
 
   startEvaluation: (
     jobId: string,
