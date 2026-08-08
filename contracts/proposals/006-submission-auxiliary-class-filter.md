@@ -2,9 +2,12 @@
 
 ## 상태와 목적
 
-제안. `005`의 `competition-plus-other` label 공간을 쓰면 대회에 없는 알약 62종이
+반영됨. `005`의 `competition-plus-other` label 공간을 쓰면 대회에 없는 알약 62종이
 `기타 알약`(`category_id` `999999`) 한 class로 묶인다. 이 class는 학습과 validation에서는
-정상적인 class지만 **대회 제출 CSV에 실려서는 안 된다.** 지금 evaluate는 걸러내지 않는다.
+정상적인 class지만 **대회 제출 CSV에 실려서는 안 됐다.** evaluate가 걸러내지 않았다.
+
+아래 요청은 `evaluate.submission_excluded_category_ids`로 구현되었다. 이 문서는 왜
+그렇게 만들었는지와 지켜야 하는 순서를 남겨 두기 위해 그대로 둔다.
 
 ## 무엇이 문제인가
 
@@ -73,8 +76,8 @@ class의 지표는 "대회 밖 알약을 알약으로 잡아냈는가"를 보여
 
 ## 언제 필요한가
 
-`competition-plus-other`로 만든 산출물로 **첫 제출을 만들기 전**이다. 그때까지는 영향이
-없고, `full` 산출물만 쓴다면 이 변경은 필요하지 않다.
+`competition-plus-other` 산출물로 제출을 만들 때 `[999999]`를 설정한다. `full` 산출물만
+쓰거나 설정하지 않으면 기본값이 빈 목록이라 동작이 달라지지 않는다.
 
 ## 호환성
 
