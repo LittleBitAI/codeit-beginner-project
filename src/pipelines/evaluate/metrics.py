@@ -30,6 +30,7 @@ from .analysis import (
     classify_false_positives,
     per_image_breakdown,
     summarize_matches,
+    summarize_per_class,
     sweep_score_thresholds,
 )
 from .errors import MetricError
@@ -204,6 +205,7 @@ def _empty_analysis(
     records: Sequence[Mapping[str, Any]],
     truth_counts: Mapping[int, int],
     class_names: Mapping[int, str],
+    per_class: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     """예측이 하나도 없을 때의 보조 지표입니다.
 
@@ -259,6 +261,7 @@ def _empty_analysis(
         },
         # F1을 계산할 수 있는 지점이 하나도 없습니다.
         "best_f1": {label: None for label in labels},
+        "per_class_summary": summarize_per_class(per_class),
         "per_image": {label: per_image for label in labels},
         "error_breakdown": {
             label: {"localization": 0, "classification": 0, "background": 0, "duplicate": 0}
@@ -323,7 +326,7 @@ def _report_without_predictions(
             "precision75": None,
             "recall75": zero_if_scored,
         },
-        "analysis": _empty_analysis(records, truth_counts, class_names),
+        "analysis": _empty_analysis(records, truth_counts, class_names, per_class),
         "per_class": per_class,
     }
 
@@ -532,6 +535,9 @@ def evaluate_detections(
             "confusion_matrix": confusion,
             "score_sweep": sweeps,
             "best_f1": best_f1,
+            # per_class를 다시 배열한 것뿐이라 IoU별로 나누지 않습니다. ap는 이미
+            # 메인 구간 평균이고 truth_count는 IoU와 무관합니다.
+            "per_class_summary": summarize_per_class(per_class),
             "per_image": per_image,
             "error_breakdown": error_breakdown,
         },
