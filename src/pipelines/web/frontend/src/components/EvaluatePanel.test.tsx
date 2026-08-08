@@ -118,6 +118,43 @@ describe('EvaluatePanel · 대회 제출 흐름', () => {
     );
   });
 
+  it('연산 장치를 고르지 않으면 서버가 정하도록 비워서 보낸다', async () => {
+    evaluationStatus.mockResolvedValue({ evaluation: succeeded(false) });
+
+    render(<EvaluatePanel job={job(true)} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '평가 및 submission 생성' }));
+
+    await waitFor(() => expect(startEvaluation).toHaveBeenCalled());
+    expect(startEvaluation.mock.calls[0]![1]).not.toHaveProperty('device');
+  });
+
+  it('CPU를 고르면 그대로 실어 보낸다', async () => {
+    evaluationStatus.mockResolvedValue({ evaluation: succeeded(false) });
+
+    render(<EvaluatePanel job={job(true)} />);
+
+    fireEvent.change(await screen.findByLabelText(/연산 장치/), { target: { value: 'cpu' } });
+    fireEvent.click(screen.getByRole('button', { name: '평가 및 submission 생성' }));
+
+    await waitFor(() =>
+      expect(startEvaluation).toHaveBeenCalledWith(
+        'a'.repeat(32),
+        expect.objectContaining({ device: 'cpu' }),
+      ),
+    );
+  });
+
+  it('CPU가 느리다는 것을 고를 때 알려 준다', async () => {
+    evaluationStatus.mockResolvedValue({ evaluation: succeeded(false) });
+
+    render(<EvaluatePanel job={job(true)} />);
+
+    fireEvent.change(await screen.findByLabelText(/연산 장치/), { target: { value: 'cpu' } });
+
+    expect(screen.getByText(/오래 걸립니다|느립니다/)).toBeInTheDocument();
+  });
+
   it('덮어쓰기를 체크하면 기존 평가 파일 안내를 숨긴다', async () => {
     evaluationStatus.mockResolvedValue({ evaluation: succeeded(false) });
 
