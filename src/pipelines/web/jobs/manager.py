@@ -21,7 +21,7 @@ from uuid import uuid4
 from ..errors import JobConflictError, JobNotFoundError
 from ..masking import sanitize_line
 from ..paths import REPOSITORY_ROOT
-from ..progress import ProgressState, consume_line, snapshot
+from ..progress import ProgressState, consume_line, snapshot, take_quiet_change
 from ..train_config import config_relative_path, read_runtime_config
 from .. import team_sync
 from . import runner, store
@@ -264,8 +264,13 @@ class JobManager:
                         continue
                     state = self._progress
                     entry = consume_line(state, line) if state is not None else None
+                    # batch 진행은 log를 만들지 않으므로, log 줄만 보고 갱신하면 긴
+                    # epoch 동안 화면이 멈춰 있습니다. 표시가 남지 않도록 log 줄이
+                    # 있을 때도 반드시 물어봅니다.
+                    quiet = take_quiet_change(state) if state is not None else False
                     if entry is not None:
                         self._emit(job_id, stream_name, entry["level"], entry["text"])
+                    if entry is not None or quiet:
                         record = self._records.get(job_id)
                         if record is not None and state is not None:
                             record.progress = snapshot(state)
