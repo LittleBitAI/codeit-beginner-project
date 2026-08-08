@@ -15,8 +15,8 @@ from src.pipelines.web import evaluate_metrics
 def state(**overrides):
     base = {
         "status": "succeeded",
-        "artifacts": {"metrics_uri": "artifacts/evaluate/run-1/metrics.json"},
-        "storage": {"backend": "local", "local": {"root": "artifacts"}},
+        "artifacts": {"metrics_uri": "s3://bucket/experiments/run-1/evaluate/metrics.json"},
+        "storage": {"backend": "s3", "s3": {"prefix": ""}},
     }
     base.update(overrides)
     return base
@@ -80,7 +80,7 @@ def test_reads_the_summary_block_out_of_the_metrics_artifact(storage):
     result = evaluate_metrics.read_per_class_summary(state())
 
     assert result == SUMMARY
-    assert fake.reads == ["artifacts/evaluate/run-1/metrics.json"]
+    assert fake.reads == ["s3://bucket/experiments/run-1/evaluate/metrics.json"]
 
 
 def test_older_results_without_the_block_report_nothing_instead_of_guessing(storage):
@@ -119,6 +119,52 @@ def test_a_summary_of_the_wrong_shape_is_refused(storage):
     storage(document(per_class_summary=[1, 2, 3]))
 
     assert evaluate_metrics.read_per_class_summary(state()) is None
+
+
+def test_a_local_result_is_read_from_the_repository_not_through_the_storage_root(
+    isolated_repo, monkeypatch
+):
+    """로컬 평가 결과의 metrics_uri는 저장소 기준 상대 경로입니다.
+
+    그대로 `create_storage`에 넘기면 backend가 root(`artifacts`)를 앞에 덧붙여
+    `artifacts/artifacts/...`를 찾다가 실패하고, 화면에는 "요약이 없습니다"로
+    보입니다. 실제로 그렇게 조용히 비어 보인 적이 있어 이 test를 넣었습니다.
+    """
+
+    target = isolated_repo / "artifacts" / "evaluate" / "run-1"
+    target.mkdir(parents=True)
+    (target / "metrics.json").write_text(
+        json.dumps({"analysis": {"per_class_summary": SUMMARY}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        evaluate_metrics, "create_storage", _refuse_storage("로컬은 storage로 읽지 않습니다")
+    )
+
+    assert (
+        evaluate_metrics.read_per_class_summary(
+            state(artifacts={"metrics_uri": "artifacts/evaluate/run-1/metrics.json"})
+        )
+        == SUMMARY
+    )
+
+
+def _refuse_storage(message):
+    def factory(config):
+        raise AssertionError(message)
+
+    return factory
+
+
+@pytest.mark.parametrize("escaping", ["../../secrets.json", "/etc/passwd", "C:/secrets.json"])
+def test_a_local_path_outside_the_repository_is_refused(escaping, isolated_repo):
+    """평가 기록이 어떤 이유로든 저장소 밖을 가리키면 읽지 않습니다."""
+
+    assert (
+        evaluate_metrics.read_per_class_summary(
+            state(artifacts={"metrics_uri": escaping})
+        )
+        is None
+    )
 
 
 def test_the_whole_document_is_not_handed_to_the_browser(storage):

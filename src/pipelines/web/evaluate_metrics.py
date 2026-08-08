@@ -13,10 +13,13 @@ evaluate를 import하지는 않습니다. evaluate가 artifact로 공개한 `met
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
 from src.common import create_storage
+
+from .paths import resolve_within_repo
 
 
 __all__ = ["SUMMARY_KEYS", "read_per_class_summary"]
@@ -30,6 +33,23 @@ SUMMARY_KEYS = frozenset(
 
 def _text(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _read_document(uri: str, storage_config: Mapping[str, Any]) -> Any:
+    """평가 결과 파일 하나를 읽습니다. 원격과 로컬을 다르게 다룹니다.
+
+    로컬 실행의 `metrics_uri`는 `artifacts/evaluate/<run>/metrics.json`처럼 **저장소
+    기준 상대 경로**입니다. 이것을 그대로 storage backend에 넘기면 backend가 자기
+    root(`artifacts`)를 앞에 다시 붙여 `artifacts/artifacts/...`를 찾다가 실패합니다.
+    그러면 화면에는 오류가 아니라 "요약이 없습니다"로 보입니다.
+
+    그래서 로컬은 저장소 안으로 확정한 경로에서 직접 읽고, 원격만 backend에 맡깁니다.
+    `resolve_within_repo`가 저장소 밖을 가리키는 경로를 거부합니다.
+    """
+
+    if "://" in uri:
+        return create_storage({"storage": dict(storage_config)}).read_json(uri)
+    return json.loads(resolve_within_repo(uri, label="metrics_uri").read_text(encoding="utf-8"))
 
 
 def read_per_class_summary(evaluation: Any) -> dict[str, Any] | None:
@@ -55,7 +75,7 @@ def read_per_class_summary(evaluation: Any) -> dict[str, Any] | None:
         if uri is None:
             return None
 
-        document = create_storage({"storage": dict(storage_config)}).read_json(uri)
+        document = _read_document(uri, storage_config)
         if not isinstance(document, Mapping):
             return None
         analysis = document.get("analysis")
