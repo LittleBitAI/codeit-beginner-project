@@ -22,9 +22,9 @@ It requires the four data artifacts in `config["inputs"]["data"]`.
 
 Checkpoints and history go to the configured repository-relative output directory, or to the configured S3 prefix.
 
-While training runs, both checkpoints live in a working directory named `.<run_id>.partial` beside the final one, rewritten every `checkpoint_every` epochs through a temporary file so a crash mid-write keeps the previous copy. A local run renames that directory into place. An S3 run keeps it local too — `output_dir` needs disk even there — and removes it once the upload succeeds.
+During training, `.<run_id>.partial` sits beside the final output. Every `checkpoint_every` epochs, each file is replaced from a temporary file. Last is self-contained and replaced before best, so a failed best replacement remains resumable. Local renames the directory into place. S3 also keeps it locally until upload succeeds, so `output_dir` needs disk.
 
-The S3 mirror `<prefix>/<run_id>/running/last_checkpoint.pt` is **one** object carrying the best weights inside `resume_state`. S3 cannot swap two objects at once, and a half-updated pair leaves epochs that disagree and a copy nobody can resume from. Both backends publish the same final artifacts, `resume_state` included.
+The S3 mirror `<prefix>/<run_id>/running/last_checkpoint.pt` is **one** self-contained object. Its first conditional write claims the `run_id`; only the winner overwrites it. This avoids a half-updated pair. Both backends publish the same self-contained last artifact.
 
 Published files are never overwritten, and a run stops before its first batch when the same `run_id` already has a non-empty working directory, an S3 `running/` checkpoint, or a finished result. The S3 checks carry the weight: a new Colab runtime has an empty disk, so only the bucket knows an interrupted run is there.
 
@@ -35,8 +35,8 @@ Published files are never overwritten, and a run stops before its first batch wh
 - Reject optimizer-specific settings that the selected optimizer does not use; never ignore them silently.
 - Augmentation defaults to `none`. `pill_basic` applies only to the train split and must update bounding boxes with geometric transforms.
 - Checkpoints record the normalized model, optimizer, augmentation, and seed settings under `training_config`. Keep that metadata JSON-safe and free of storage credentials.
-- `resume_from` continues an interrupted run from its `last_checkpoint.pt`, which carries `resume_state`. It also reads the `best_checkpoint.pt` written beside it, so the resumed run can still publish a best epoch from before the interruption. `epochs` counts the whole run, not the part that remains.
-- Every reason a resume cannot work is checked before the first batch: a missing `resume_state`, a history with gaps, a different architecture or class map, `epochs` no larger than the resumed epoch, and patience already used up.
+- `resume_from` continues an interrupted run from its self-contained `last_checkpoint.pt`, including the best epoch from before interruption. `epochs` counts the whole run, not the part that remains.
+- Every reason a resume cannot work is checked before the first batch: a missing `resume_state`, a history with gaps, different architecture, class map, or optimizer settings, missing AMP scaler state, `epochs` no larger than the resumed epoch, and patience already used up.
 
 ## Run and Test
 

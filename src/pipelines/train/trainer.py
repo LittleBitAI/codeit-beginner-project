@@ -20,7 +20,7 @@ from .progress import ProgressEmitter
 
 
 SUPPORTED_OPTIMIZERS = ("AdamW", "SGD", "Adam")
-RESUME_STATE_VERSION = 1
+RESUME_STATE_VERSION = 2
 
 
 class _PrecisionRuntime:
@@ -58,6 +58,28 @@ class _PrecisionRuntime:
         self._scaler.scale(loss).backward()
         self._scaler.step(optimizer)
         self._scaler.update()
+
+    def state_dict(self) -> dict[str, Any] | None:
+        """fp16 GradScaler 상태를 checkpoint에 넣을 수 있게 복사합니다."""
+
+        if self._scaler is None:
+            return None
+        return copy.deepcopy(self._scaler.state_dict())
+
+    def load_state_dict(self, state: Mapping[str, Any] | None) -> None:
+        """재개한 정밀도와 일치하는 GradScaler 상태를 되돌립니다."""
+
+        if self._scaler is None:
+            if state is not None:
+                raise ValueError(
+                    "resume checkpoint has GradScaler state but current precision does not"
+                )
+            return
+        if not isinstance(state, Mapping):
+            raise ValueError(
+                "resume checkpoint is missing GradScaler state required by current precision"
+            )
+        self._scaler.load_state_dict(copy.deepcopy(dict(state)))
 
 
 def build_optimizer(
@@ -311,6 +333,7 @@ def _train_model(
             math.inf if reference_loss is None else float(reference_loss)
         )
         epochs_without_improvement = int(stopping["epochs_without_improvement"])
+        precision.load_state_dict(state["grad_scaler_state_dict"])
         restore_rng(state["rng"], generator)
         start_epoch = int(state["completed_epoch"]) + 1
     for epoch in range(start_epoch, settings["epochs"] + 1):
@@ -432,6 +455,7 @@ def _train_model(
                         ),
                         "epochs_without_improvement": epochs_without_improvement,
                     },
+                    "grad_scaler_state_dict": precision.state_dict(),
                     "rng": capture_rng(generator),
                 },
             )

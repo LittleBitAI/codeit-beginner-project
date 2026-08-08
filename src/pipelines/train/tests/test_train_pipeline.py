@@ -989,6 +989,38 @@ def test_interrupted_training_leaves_a_resumable_working_checkpoint(
     assert (working / "best_checkpoint.pt").is_file()
 
 
+def test_local_last_stays_resumable_if_publishing_the_best_checkpoint_is_interrupted(
+    local_config, monkeypatch
+):
+    """두 파일 사이에서 중단돼도 이미 쓴 last 하나만으로 이어갈 수 있어야 합니다."""
+
+    replace_checkpoint = pipeline._replace_checkpoint
+
+    def interrupt_best(path, value):
+        if path.name == "best_checkpoint.pt":
+            raise OSError("simulated interruption while publishing best")
+        replace_checkpoint(path, value)
+
+    monkeypatch.setattr(pipeline, "_replace_checkpoint", interrupt_best)
+    local_config["train"]["epochs"] = 2
+
+    interrupted = train.run(local_config)
+
+    assert interrupted["status"] == "error"
+    last_path = _working_directory(local_config) / "last_checkpoint.pt"
+    last = _load(last_path)
+    assert "model_state_dict" in last["resume_state"]["best"]
+    assert not (_working_directory(local_config) / "best_checkpoint.pt").exists()
+
+    monkeypatch.setattr(pipeline, "_replace_checkpoint", replace_checkpoint)
+    resumed = _resume_config(local_config, last_path)
+    resumed["train"]["epochs"] = 3
+
+    result = train.run(resumed)
+
+    assert result["status"] == "ok", result["message"]
+
+
 def test_a_successful_run_leaves_no_working_directory_behind(local_config):
     result = train.run(local_config)
 
@@ -1229,6 +1261,39 @@ def test_run_rejects_resuming_past_the_planned_epochs(local_config, tmp_path):
 
     assert result["status"] == "error"
     assert "train.epochs" in result["message"]
+
+
+def test_run_rejects_changed_optimizer_settings_before_building_the_model(
+    local_config, monkeypatch
+):
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+    resumed = _resume_config(local_config, source)
+    resumed["train"].update({"epochs": 4, "learning_rate": 0.123})
+    build_model_spy = Mock()
+    monkeypatch.setattr(pipeline, "build_model", build_model_spy)
+
+    result = train.run(resumed)
+
+    assert result["status"] == "error"
+    assert "optimizer settings" in result["message"]
+    build_model_spy.assert_not_called()
+
+
+def test_run_rejects_absolute_resume_path_before_recording_it(local_config):
+    local_config["train"]["resume_from"] = str(
+        (REPOSITORY_ROOT / "artifacts" / "private-checkpoint.pt").resolve()
+    )
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert "repository-relative POSIX" in result["message"]
 
 
 def test_run_reports_missing_input_artifacts_without_partial_success():
@@ -1478,8 +1543,9 @@ def test_checkpoint_every_thins_out_the_resumable_state():
 def test_resumable_state_carries_what_the_next_run_cannot_recompute():
     _, best, state = _collect_checkpoints(epochs=1)[-1]
 
-    assert state["version"] == 1
+    assert state["version"] == trainer_module.RESUME_STATE_VERSION
     assert set(state["rng"]) == {"python", "numpy", "torch", "cuda", "dataloader"}
+    assert state["grad_scaler_state_dict"] is None
     assert set(state["early_stopping"]) == {
         "reference_loss",
         "epochs_without_improvement",
@@ -1538,6 +1604,33 @@ def test_fp16_runtime_uses_autocast_and_grad_scaler(monkeypatch):
     ]
 
 
+def test_fp16_runtime_saves_and_restores_grad_scaler_state(monkeypatch):
+    loaded: list[dict] = []
+
+    class FakeScaler:
+        def state_dict(self):
+            return {"scale": 128.0, "growth_tracker": 7}
+
+        def load_state_dict(self, state):
+            loaded.append(dict(state))
+
+    monkeypatch.setattr(
+        trainer_module.torch.amp,
+        "GradScaler",
+        Mock(return_value=FakeScaler()),
+    )
+    runtime = trainer_module._PrecisionRuntime(
+        {"mode": "amp", "dtype": "fp16", "grad_scaler": True},
+        torch.device("cuda"),
+    )
+
+    saved = runtime.state_dict()
+    runtime.load_state_dict({"scale": 32.0, "growth_tracker": 11})
+
+    assert saved == {"scale": 128.0, "growth_tracker": 7}
+    assert loaded == [{"scale": 32.0, "growth_tracker": 11}]
+
+
 def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
     calls = {"autocast": 0, "backward_and_step": 0}
 
@@ -1556,6 +1649,12 @@ def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
             calls["backward_and_step"] += 1
             loss.backward()
             optimizer.step()
+
+        def state_dict(self):
+            return None
+
+        def load_state_dict(self, state):
+            assert state is None
 
     monkeypatch.setattr(
         trainer_module,
@@ -1739,6 +1838,25 @@ def test_s3_run_publishes_a_last_checkpoint_that_can_be_resumed(
     )
     document = torch.load(io.BytesIO(published), map_location="cpu", weights_only=True)
     assert document["resume_state"]["completed_epoch"] == 2
+
+
+def test_s3_run_claims_the_running_checkpoint_before_overwriting_it(
+    local_config, monkeypatch
+):
+    storage, _ = _recording_s3_storage()
+    monkeypatch.setattr(pipeline, "create_storage", lambda config: storage)
+
+    result = train.run(local_config)
+
+    assert result["status"] == "ok", result["message"]
+    running_writes = [
+        call.kwargs
+        for call in storage.client.put_object.call_args_list
+        if call.kwargs["Key"].endswith("/running/last_checkpoint.pt")
+    ]
+    assert len(running_writes) == 2
+    assert running_writes[0]["IfNoneMatch"] == "*"
+    assert "IfNoneMatch" not in running_writes[1]
 
 
 def test_s3_publisher_returns_attempt_uris_and_writes_completion_marker(

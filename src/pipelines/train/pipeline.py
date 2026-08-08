@@ -228,6 +228,13 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         not isinstance(resume_from, str) or not resume_from.strip()
     ):
         raise ValueError("train.resume_from must be a non-empty checkpoint path")
+    resume_path = Path(resume_from) if isinstance(resume_from, str) else None
+    if isinstance(resume_from, str) and not _is_s3(resume_from) and (
+        resume_path.is_absolute() or bool(resume_path.drive) or "\\" in resume_from
+    ):
+        raise ValueError(
+            "train.resume_from must be a repository-relative POSIX path or an S3 URI"
+        )
     run_id = raw.get("run_id") or datetime.now(timezone.utc).strftime("train-%Y%m%dT%H%M%S%fZ")
     if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
         raise ValueError("train.run_id contains unsupported characters")
@@ -510,11 +517,26 @@ def _load_resume(
         raise ValueError(
             "resume checkpoint was trained with a different train.architecture"
         )
+    training_config = checkpoint.get("training_config")
+    recorded_optimizer = (
+        training_config.get("optimizer")
+        if isinstance(training_config, Mapping)
+        else None
+    )
+    expected_optimizer = _training_config(settings)["optimizer"]
+    if not isinstance(recorded_optimizer, Mapping) or dict(
+        recorded_optimizer
+    ) != expected_optimizer:
+        raise ValueError(
+            "resume checkpoint optimizer settings do not match current train optimizer settings"
+        )
     if checkpoint.get("num_classes") != len(class_map) + 1 or dict(
         checkpoint.get("class_map") or {}
     ) != dict(class_map):
         raise ValueError("resume checkpoint was trained with a different class map")
     early_stopping = settings.get("early_stopping")
+    if "grad_scaler_state_dict" not in state:
+        raise ValueError("resume_state is missing grad_scaler_state_dict")
     if (
         early_stopping is not None
         and state["early_stopping"]["epochs_without_improvement"]
@@ -547,21 +569,12 @@ def _load_resume(
     return {"checkpoint": checkpoint, "best": best}
 
 
-def _mirror_to_s3(
-    storage: S3Storage,
-    last_payload: Mapping[str, Any],
-    best: Mapping[str, Any],
-    settings: Mapping[str, Any],
-) -> None:
-    """이어서 할 상태를 S3에 **한 object로** 올립니다.
+def _with_embedded_best(
+    last_payload: Mapping[str, Any], best: Mapping[str, Any]
+) -> dict[str, Any]:
+    """옆 best 파일이 없어도 이어서 할 수 있는 last checkpoint를 만듭니다."""
 
-    S3는 여러 object를 한 번에 바꿀 수 없습니다. best와 last를 따로 올리면 하나만
-    성공했을 때 두 파일의 epoch이 어긋나고, bucket에 남은 유일한 사본을 이어서 쓸 수
-    없게 됩니다. 그래서 이 사본에는 best 가중치까지 담습니다. 로컬 작업 폴더는 두
-    파일을 나란히 두므로 그쪽은 커지지 않습니다.
-    """
-
-    payload = {
+    return {
         **last_payload,
         "resume_state": {
             **last_payload["resume_state"],
@@ -572,13 +585,34 @@ def _mirror_to_s3(
             },
         },
     }
+
+
+def _mirror_to_s3(
+    storage: S3Storage,
+    last_payload: Mapping[str, Any],
+    best: Mapping[str, Any],
+    settings: Mapping[str, Any],
+    *,
+    overwrite: bool = False,
+) -> None:
+    """이어서 할 상태를 S3에 **한 object로** 올립니다.
+
+    S3는 여러 object를 한 번에 바꿀 수 없습니다. best와 last를 따로 올리면 하나만
+    성공했을 때 두 파일의 epoch이 어긋나고, bucket에 남은 유일한 사본을 이어서 쓸 수
+    없게 됩니다. 그래서 이 사본에는 best 가중치까지 담습니다. 로컬 작업 폴더는 두
+    파일을 나란히 두지만 last도 같은 이유로 self-contained 상태를 유지합니다.
+    """
+
+    payload = _with_embedded_best(last_payload, best)
     destination = f"{_s3_run_prefix(settings)}/running/{WORKING_CHECKPOINT_NAMES[-1]}"
     scratch_root = REPOSITORY_ROOT / "artifacts"
     scratch_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="train-mirror-", dir=scratch_root) as directory:
         path = Path(directory) / WORKING_CHECKPOINT_NAMES[-1]
         _write_checkpoint(path, payload)
-        storage.upload_file(path, destination, overwrite=True)
+        # 첫 checkpoint는 If-None-Match로 run_id 소유권까지 얻습니다. 같은 이름의 두
+        # 작업이 사전 exists 검사를 동시에 통과해도 하나만 이 object를 만들 수 있습니다.
+        storage.upload_file(path, destination, overwrite=overwrite)
 
 
 def _publish_local(
@@ -683,6 +717,7 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
         # 마지막으로 남긴 resume_state입니다. S3 게시가 이것을 그대로 써야 backend에
         # 따라 최종 last checkpoint의 내용이 달라지지 않습니다.
         latest: dict[str, Any] = {}
+        s3_mirror_owned = False
 
         def write_checkpoints(
             last: dict[str, Any],
@@ -691,15 +726,11 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
         ) -> None:
             """Epoch이 끝날 때마다 이어서 할 수 있는 checkpoint를 남깁니다."""
 
+            nonlocal s3_mirror_owned
+
             # 폴더는 첫 epoch을 마친 뒤에 만듭니다. 학습 전에 터진 실행은 아무것도
             # 남기지 않는다는 기존 성질을 그대로 지킵니다.
             working_directory.mkdir(parents=True, exist_ok=True)
-            if written_best.get("epoch") != best["epoch"]:
-                _replace_checkpoint(
-                    working_directory / "best_checkpoint.pt",
-                    _checkpoint_payload(best, settings, class_map, category_ids),
-                )
-                written_best["epoch"] = best["epoch"]
             payload = _checkpoint_payload(last, settings, class_map, category_ids)
             payload["resume_state"] = {
                 **resume_state,
@@ -708,10 +739,28 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
                     "resume_from": settings["resume_from"],
                 },
             }
-            _replace_checkpoint(working_directory / "last_checkpoint.pt", payload)
-            latest["resume_state"] = payload["resume_state"]
+            resumable_payload = _with_embedded_best(payload, best)
+            # last를 먼저 바꿉니다. 이후 best 저장에서 중단돼도 last 안의 best 가중치로
+            # 이어서 할 수 있고, last 자체를 쓰다 중단되면 os.replace 전 사본이 남습니다.
+            _replace_checkpoint(
+                working_directory / "last_checkpoint.pt", resumable_payload
+            )
+            if written_best.get("epoch") != best["epoch"]:
+                _replace_checkpoint(
+                    working_directory / "best_checkpoint.pt",
+                    _checkpoint_payload(best, settings, class_map, category_ids),
+                )
+                written_best["epoch"] = best["epoch"]
+            latest["resume_state"] = resumable_payload["resume_state"]
             if isinstance(storage, S3Storage):
-                _mirror_to_s3(storage, payload, best, settings)
+                _mirror_to_s3(
+                    storage,
+                    resumable_payload,
+                    best,
+                    settings,
+                    overwrite=s3_mirror_owned,
+                )
+                s3_mirror_owned = True
 
         progress = ProgressEmitter(settings["run_id"])
         progress.emit(
