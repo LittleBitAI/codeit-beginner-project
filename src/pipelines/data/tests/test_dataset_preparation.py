@@ -1221,6 +1221,36 @@ def test_one_group_never_lands_in_both_splits():
     assert not train_groups & validation_groups
 
 
+def test_processed_prefix_takes_its_version_from_the_raw_prefix():
+    """산출물 directory 이름의 버전은 원본 prefix에서 옵니다.
+
+    이름이 `v1`로 고정되어 있으면 `raw/v2`로 만든 산출물이 `raw/v1` 산출물과 같은
+    자리를 노리고, `overwrite`를 켠 실행이 대회 원본 산출물을 덮습니다.
+    """
+
+    settings = preparation.resolve_settings(
+        prepare_config("8:2", raw_prefix="datasets/pill_detection/raw/v2/original/")
+    )
+
+    assert settings.processed_prefix.endswith("v2-seed42-8020-group/")
+    # 기본값(raw/v1)은 이름이 그대로여서 이미 만들어 둔 산출물을 옮기지 않아도 됩니다.
+    assert preparation.resolve_settings(prepare_config("8:2")).processed_prefix.endswith(
+        "v1-seed42-8020-group/"
+    )
+
+
+def test_raw_prefix_without_a_version_segment_is_rejected():
+    """버전을 못 읽으면 산출물 이름을 정할 수 없으므로 시작하지 않습니다.
+
+    조용히 다른 dataset과 같은 directory를 쓰는 것보다 먼저 멈추는 편이 안전합니다.
+    """
+
+    with pytest.raises(DataError, match="버전"):
+        preparation.resolve_settings(
+            prepare_config("8:2", raw_prefix="datasets/pill_detection/raw-experimental/")
+        )
+
+
 def test_group_split_is_the_default_and_shows_in_the_processed_prefix():
     """설정 없이도 그룹 분할이고, 이미지 분할 산출물과 다른 곳에 저장됩니다."""
 

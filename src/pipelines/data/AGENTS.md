@@ -27,21 +27,19 @@ The dummy result is unchanged. With `prepare == false`, legacy pass-through stil
 
 ## Outputs
 
-Prepared artifacts land under the processed dataset prefix, in a directory whose name encodes the split ratio, the seed, and the split method, so those runs can never overwrite each other. Local URIs come back repository-relative; S3 URIs are passed through unchanged. Nothing is overwritten unless `overwrite` is set.
+Prepared artifacts land under `data.processed_root` (default `datasets/pill_detection/processed/`), in a directory named for the source dataset version, split ratio, seed, and split method. The version is the `v<number>` segment of `raw_prefix` (`raw/v2/original/` → `v2-…`); a prefix without one is rejected rather than guessed, so two sources can never aim at one directory. Local URIs come back repository-relative; S3 URIs pass through unchanged. Nothing is overwritten unless `overwrite` is set.
 
 `test_manifest.json` is generated from decoded `test_images/` dimensions and the same class-map object written to `class_map.json`. It has no annotations.
 
-`dataset_summary.json` records under `split.checksums` the sha256 and byte size of both split manifests, computed from the exact bytes storage writes, so `sha256sum` on the stored file returns the same digest. Same source, seed, and ratio reproduce the same digests; a changed source changes the digest even when seed and ratio stayed fixed (`schema_version` `1.1`).
+`dataset_summary.json` records under `split.checksums` the sha256 and byte size of both split manifests, computed from the exact bytes storage writes, so `sha256sum` on the stored file matches. Same source, seed, and ratio reproduce the same digests; a changed source changes the digest even when seed and ratio stayed fixed (`schema_version` `1.1`).
 
-The split unit is a **group**, not one image: the source shoots each pill combination repeatedly at different angles, and sibling shots split apart inflate validation. The group name is the file name up to the first `_` — the combination code (`GROUP_KEY_DELIMITER`, `GROUP_KEY_TOKENS`) — derived from the name, never listed per file, and a group lands in one split only. A name that does not fit the rule (no delimiter, empty prefix) becomes its own one-image group instead of failing the run.
+The split unit is a **group**, not one image: the source shoots each pill combination repeatedly at different angles, and sibling shots split apart inflate validation. The group name is the file name up to the first `_` — the combination code (`GROUP_KEY_DELIMITER`, `GROUP_KEY_TOKENS`) — never listed per file, and a group lands in one split only. A name that does not fit (no delimiter, empty prefix) becomes its own one-image group instead of failing.
 
-Because a group moves whole, the ratio comes last: leakage, then category coverage, then class distribution, then the target count. A category that cannot reach validation without splitting a group — one group, or only groups blocked by one — stays in train, listed in `split.train_only_categories` (`schema_version` `1.3`). Covering the rest may push validation past the target; the fill step stops at the closest reachable point, and `split.validation_image_ratio` records what the run produced. `split.py` states the trade-off in full.
+Because a group moves whole, the ratio comes last: leakage, then category coverage, then class distribution, then the target count. A category that cannot reach validation without splitting a group — one group, or only groups blocked by one — stays in train, listed in `split.train_only_categories` (`schema_version` `1.3`). Covering the rest may push validation past the target; the fill step stops at the closest reachable point, recorded in `split.validation_image_ratio`. `split.py` states the trade-off in full.
 
-`data.split_method` is `"group"` (default) or `"image"` (the previous image-level split), and it is part of the directory name: `v1-seed42-8020-group/` beside the untouched `v1-seed42-8020/`. `split.method` and `split.grouping` (rule, group counts) say which data a model was trained on; adding them made `schema_version` `1.2`.
+`data.split_method` is `"group"` (default) or `"image"` (the previous image-level split), part of the directory name (`…-group/` beside `…-8020/`). `split.method` and `split.grouping` (rule, group counts) say which data a model was trained on; adding them made `schema_version` `1.2`.
 
-With `overwrite == false`, an exact legacy set of four artifacts is a safe backfill case:
-the pipeline reads its class map and writes only the missing test manifest. Any other
-partial set still fails, and an existing file is never replaced.
+With `overwrite == false`, an exact legacy set of four artifacts is the Scope backfill case: only the missing test manifest is written. Any other partial set fails, and an existing file is never replaced.
 
 ## Run and Test
 

@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -63,6 +64,8 @@ DEFAULT_RAW_PREFIX = "datasets/pill_detection/raw/v1/"
 DEFAULT_PROCESSED_ROOT = "datasets/pill_detection/processed/"
 DEFAULT_SEED = 42
 DATASET_PREFIX = "datasets/"
+# 산출물 directory 이름에 쓸 dataset 버전 segment입니다: `v1`, `v2`, …
+_VERSION_SEGMENT = re.compile(r"v\d+")
 
 # 이번 작업의 핵심: validation 비율은 아래 두 값 중 하나만 허용합니다.
 SPLIT_RATIO_OPTIONS: dict[str, float] = {"8:2": 0.2, "9:1": 0.1}
@@ -242,6 +245,24 @@ def _group_rule(split_method: str) -> GroupRule | None:
     return GroupRule(delimiter=GROUP_KEY_DELIMITER, tokens=GROUP_KEY_TOKENS)
 
 
+def _dataset_version(raw_prefix: str) -> str:
+    """원본 prefix에서 dataset 버전 segment(`v1`, `v2`, …)를 읽습니다.
+
+    산출물 directory 이름에 들어가는 값입니다. 여기서 원본을 구분하지 못하면 서로
+    다른 원본으로 만든 산출물이 같은 directory를 노리고, `overwrite`를 켠 실행이
+    남의 산출물을 덮습니다. `raw/v2/original/`처럼 뒤에 segment가 더 붙어도 같은
+    버전으로 봅니다.
+    """
+
+    for part in raw_prefix.strip("/").split("/"):
+        if _VERSION_SEGMENT.fullmatch(part):
+            return part
+    raise DatasetPreparationError(
+        "config['data']['raw_prefix']에서 dataset 버전을 읽지 못했습니다. "
+        f"'v1'처럼 v와 숫자로 된 segment가 있어야 합니다: '{raw_prefix}'"
+    )
+
+
 def resolve_settings(config: Any) -> PreparationSettings:
     """준비 경로 설정을 읽고 검증합니다."""
 
@@ -254,10 +275,11 @@ def resolve_settings(config: Any) -> PreparationSettings:
     processed_root = _normalized_prefix(
         section.get("processed_root"), "processed_root", DEFAULT_PROCESSED_ROOT
     )
-    # 비율과 seed, 분할 방식이 directory 이름에 들어가므로 8:2와 9:1, 그리고
-    # 그룹 분할과 이미지 분할 산출물은 서로 덮어쓰지 않고 함께 남습니다.
+    # 원본 버전과 비율, seed, 분할 방식이 directory 이름에 들어가므로 서로 다른
+    # 원본이나 설정으로 만든 산출물은 덮어쓰지 않고 함께 남습니다.
     processed_prefix = (
-        f"{processed_root}v1-seed{seed}-{_RATIO_DIRECTORY_TOKENS[split_ratio]}"
+        f"{processed_root}{_dataset_version(raw_prefix)}-seed{seed}"
+        f"-{_RATIO_DIRECTORY_TOKENS[split_ratio]}"
         f"{_METHOD_DIRECTORY_TOKENS[split_method]}/"
     )
     return PreparationSettings(
