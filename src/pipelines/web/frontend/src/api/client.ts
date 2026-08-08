@@ -123,9 +123,10 @@ export const api = {
 
   teamConfig: () => request<TeamConfig>('/api/team/config'),
 
-  resumeJob: (jobId: string, epochs?: number | null) =>
+  resumeJob: (jobId: string, epochs?: number | null, accessToken?: string | null) =>
     request<ResumeResult>(`/api/train/jobs/${jobId}/resume`, {
       method: 'POST',
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
       body: JSON.stringify(epochs == null ? {} : { epochs }),
     }),
 

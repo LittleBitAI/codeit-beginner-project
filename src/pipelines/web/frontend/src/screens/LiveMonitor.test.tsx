@@ -8,6 +8,7 @@ const getJob = vi.fn();
 const logs = vi.fn();
 const gpu = vi.fn();
 const resumeJob = vi.fn();
+const getAccessToken = vi.fn();
 
 vi.mock('../api/client', () => ({
   ApiError: class ApiError extends Error {},
@@ -18,6 +19,10 @@ vi.mock('../api/client', () => ({
     cancelJob: vi.fn(),
     resumeJob: (...args: unknown[]) => resumeJob(...args),
   },
+}));
+
+vi.mock('../team/TeamContext', () => ({
+  useTeam: () => ({ getAccessToken }),
 }));
 
 const { LiveMonitor } = await import('./LiveMonitor');
@@ -73,6 +78,7 @@ beforeEach(() => {
     telemetry: { source: 'unavailable', reason: 'nvidia_smi_not_found', message: 'nvidia-smi를 찾지 못했습니다.', devices: [] },
     queried_at: '2026-08-05T00:00:00Z',
   });
+  getAccessToken.mockResolvedValue('browser-token');
 });
 
 describe('LiveMonitor · 진행 로그가 없을 때', () => {
@@ -295,7 +301,9 @@ describe('LiveMonitor · 중단된 학습', () => {
     const button = await screen.findByRole('button', { name: '이어서 학습' });
     button.click();
 
-    await waitFor(() => expect(resumeJob).toHaveBeenCalledWith('a'.repeat(32)));
+    await waitFor(() =>
+      expect(resumeJob).toHaveBeenCalledWith('a'.repeat(32), undefined, 'browser-token'),
+    );
     expect(await screen.findByText(/'web-resumed' 이름으로 대기열에 넣었습니다/)).toBeInTheDocument();
   });
 

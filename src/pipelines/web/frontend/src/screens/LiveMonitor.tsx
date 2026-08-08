@@ -21,9 +21,11 @@ import { color, font } from '../design/tokens';
 import { useJobStream } from '../hooks/useJobStream';
 import { usePolling } from '../hooks/usePolling';
 import { duration, loss, megabytes, percent } from '../lib/format';
+import { useTeam } from '../team/TeamContext';
 
 export function LiveMonitor({ listing }: { listing: JobListing | null }) {
   const navigate = useNavigate();
+  const team = useTeam();
   const params = useParams<{ jobId?: string }>();
   const fallback = listing?.active_job_id ?? listing?.jobs[0]?.job_id;
   const jobId = params.jobId ?? fallback;
@@ -76,7 +78,7 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
     setResumeError(null);
     try {
       // epochs를 비워 두면 중단된 실행의 전체 목표를 그대로 이어갑니다.
-      const result = await api.resumeJob(job!.job_id);
+      const result = await api.resumeJob(job!.job_id, undefined, await team.getAccessToken());
       setResumed(result.run_id);
       if (result.started) {
         navigate(`/monitor/${result.started.job_id}`);
