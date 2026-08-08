@@ -6,7 +6,7 @@ import copy
 import math
 import random
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from typing import Any
 
@@ -20,6 +20,7 @@ from .progress import ProgressEmitter
 
 
 SUPPORTED_OPTIMIZERS = ("AdamW", "SGD", "Adam")
+RESUME_STATE_VERSION = 1
 
 
 class _PrecisionRuntime:
@@ -89,6 +90,60 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def capture_rng(generator: torch.Generator) -> dict[str, Any]:
+    """이어서 학습할 때 되돌릴 난수 상태를 모읍니다.
+
+    checkpoint는 ``weights_only=True``로 다시 읽으므로 tensor와 기본 자료형만 담습니다.
+    numpy 상태는 ndarray를 품고 있어서 평범한 정수 list로 바꿉니다.
+    """
+
+    python_version, python_keys, python_gauss = random.getstate()
+    numpy_name, numpy_keys, numpy_position, numpy_has_gauss, numpy_gauss = (
+        np.random.get_state()
+    )
+    return {
+        "python": [python_version, [int(key) for key in python_keys], python_gauss],
+        "numpy": [
+            numpy_name,
+            [int(key) for key in numpy_keys],
+            int(numpy_position),
+            int(numpy_has_gauss),
+            float(numpy_gauss),
+        ],
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+        "dataloader": generator.get_state(),
+    }
+
+
+def restore_rng(state: Mapping[str, Any], generator: torch.Generator) -> None:
+    """``capture_rng``가 남긴 상태를 그대로 되돌립니다."""
+
+    python_version, python_keys, python_gauss = state["python"]
+    random.setstate((python_version, tuple(python_keys), python_gauss))
+    numpy_name, numpy_keys, numpy_position, numpy_has_gauss, numpy_gauss = state["numpy"]
+    np.random.set_state(
+        (
+            numpy_name,
+            np.array(numpy_keys, dtype=np.uint32),
+            numpy_position,
+            numpy_has_gauss,
+            numpy_gauss,
+        )
+    )
+    torch.set_rng_state(state["torch"].cpu())
+    cuda_states = list(state["cuda"])
+    # GPU가 없는 기계에서 이어서 하거나 GPU 개수가 다르면 되돌릴 수 없습니다.
+    # 그때는 CPU 쪽 상태만 되돌리고 CUDA는 seed 그대로 둡니다.
+    if (
+        cuda_states
+        and torch.cuda.is_available()
+        and len(cuda_states) == torch.cuda.device_count()
+    ):
+        torch.cuda.set_rng_state_all(cuda_states)
+    generator.set_state(state["dataloader"].cpu())
+
+
 def _collate(batch: list[Any]) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     return tuple(zip(*batch))
 
@@ -148,6 +203,21 @@ def _state_on_cpu(model: nn.Module) -> dict[str, torch.Tensor]:
     return {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
 
 
+def _checkpoint(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    *,
+    epoch: int,
+    validation_loss: float,
+) -> dict[str, Any]:
+    return {
+        "epoch": epoch,
+        "model_state_dict": _state_on_cpu(model),
+        "optimizer_state_dict": copy.deepcopy(optimizer.state_dict()),
+        "validation_loss": validation_loss,
+    }
+
+
 def _freeze_batch_norm(model: nn.Module) -> None:
     """Prevent validation images from changing BatchNorm running statistics."""
     batch_norm_types = (
@@ -167,6 +237,11 @@ def _train_model(
     validation_dataset: Dataset,
     settings: Mapping[str, Any],
     progress: ProgressEmitter | None = None,
+    *,
+    resume: Mapping[str, Any] | None = None,
+    on_checkpoint: (
+        Callable[[dict[str, Any], dict[str, Any], dict[str, Any]], None] | None
+    ) = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     seed = settings["seed"]
     device = torch.device(settings["device"])
@@ -207,7 +282,38 @@ def _train_model(
     early_stopping = settings.get("early_stopping")
     early_reference_loss = math.inf
     epochs_without_improvement = 0
-    for epoch in range(1, settings["epochs"] + 1):
+    start_epoch = 1
+    checkpoint_every = settings.get("checkpoint_every", 1)
+    if resume is not None:
+        # 모델과 optimizer를 평소대로 만든 뒤 되돌립니다. 순서가 바뀌면 optimizer가
+        # 되돌린 parameter가 아니라 새로 만든 parameter를 가리키게 됩니다.
+        checkpoint = resume["checkpoint"]
+        model.load_state_dict(dict(checkpoint["model_state_dict"]))
+        optimizer.load_state_dict(copy.deepcopy(dict(checkpoint["optimizer_state_dict"])))
+        state = checkpoint["resume_state"]
+        history = [dict(entry) for entry in state["history"]]
+        # 이어붙이기 이전의 best 가중치는 옆에 있는 best_checkpoint.pt에서 옵니다.
+        # 그래야 이어서 한 실행도 그때의 best를 그대로 다시 공개할 수 있습니다.
+        best_source = resume["best"]
+        best_loss = float(state["best"]["validation_loss"])
+        best_epoch = int(state["best"]["epoch"])
+        best_checkpoint = {
+            "epoch": best_epoch,
+            "model_state_dict": dict(best_source["model_state_dict"]),
+            "optimizer_state_dict": copy.deepcopy(
+                dict(best_source["optimizer_state_dict"])
+            ),
+            "validation_loss": best_loss,
+        }
+        stopping = state["early_stopping"]
+        reference_loss = stopping["reference_loss"]
+        early_reference_loss = (
+            math.inf if reference_loss is None else float(reference_loss)
+        )
+        epochs_without_improvement = int(stopping["epochs_without_improvement"])
+        restore_rng(state["rng"], generator)
+        start_epoch = int(state["completed_epoch"]) + 1
+    for epoch in range(start_epoch, settings["epochs"] + 1):
         epoch_started_at = time.perf_counter()
         if progress is not None:
             progress.emit("epoch_started", epoch=epoch, epochs=settings["epochs"])
@@ -273,12 +379,9 @@ def _train_model(
         if is_best:
             best_loss = validation_loss
             best_epoch = epoch
-            best_checkpoint = {
-                "epoch": epoch,
-                "model_state_dict": _state_on_cpu(model),
-                "optimizer_state_dict": copy.deepcopy(optimizer.state_dict()),
-                "validation_loss": validation_loss,
-            }
+            best_checkpoint = _checkpoint(
+                model, optimizer, epoch=epoch, validation_loss=validation_loss
+            )
         should_stop = False
         if early_stopping is not None:
             min_delta = early_stopping["min_delta"]
@@ -302,17 +405,47 @@ def _train_model(
                 is_best=is_best,
                 epoch_seconds=round(time.perf_counter() - epoch_started_at, 3),
             )
+        # 마지막 epoch은 주기와 상관없이 남깁니다. 그래야 작업 폴더의 checkpoint가
+        # 학습이 끝난 실제 상태와 같아지고, 그대로 공개할 수 있습니다.
+        is_final_epoch = should_stop or epoch == settings["epochs"]
+        if on_checkpoint is not None and (
+            is_final_epoch or epoch % checkpoint_every == 0
+        ):
+            on_checkpoint(
+                _checkpoint(
+                    model, optimizer, epoch=epoch, validation_loss=validation_loss
+                ),
+                best_checkpoint,
+                {
+                    "version": RESUME_STATE_VERSION,
+                    "completed_epoch": epoch,
+                    "history": [dict(entry) for entry in history],
+                    # 가중치는 담지 않습니다. best_checkpoint.pt가 바로 옆에 있고,
+                    # 매 epoch 모델 하나를 통째로 더 쓰면 파일이 두 배가 됩니다.
+                    "best": {"epoch": best_epoch, "validation_loss": best_loss},
+                    "early_stopping": {
+                        # math.inf는 JSON으로도 못 나가고 읽는 쪽도 헷갈립니다.
+                        "reference_loss": (
+                            None
+                            if math.isinf(early_reference_loss)
+                            else early_reference_loss
+                        ),
+                        "epochs_without_improvement": epochs_without_improvement,
+                    },
+                    "rng": capture_rng(generator),
+                },
+            )
         if should_stop:
             break
 
     if best_checkpoint is None:
         raise RuntimeError("training completed without a best checkpoint")
-    last_checkpoint = {
-        "epoch": history[-1]["epoch"],
-        "model_state_dict": _state_on_cpu(model),
-        "optimizer_state_dict": copy.deepcopy(optimizer.state_dict()),
-        "validation_loss": history[-1]["validation_loss"],
-    }
+    last_checkpoint = _checkpoint(
+        model,
+        optimizer,
+        epoch=history[-1]["epoch"],
+        validation_loss=history[-1]["validation_loss"],
+    )
     return best_checkpoint, last_checkpoint, history
 
 
@@ -322,6 +455,11 @@ def train_model(
     validation_dataset: Dataset,
     settings: Mapping[str, Any],
     progress: ProgressEmitter | None = None,
+    *,
+    resume: Mapping[str, Any] | None = None,
+    on_checkpoint: (
+        Callable[[dict[str, Any], dict[str, Any], dict[str, Any]], None] | None
+    ) = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Train deterministically without leaving the global algorithm mode changed."""
     previous_deterministic = torch.are_deterministic_algorithms_enabled()
@@ -329,7 +467,15 @@ def train_model(
     try:
         set_seed(settings["seed"])
         torch.use_deterministic_algorithms(True, warn_only=True)
-        return _train_model(model, train_dataset, validation_dataset, settings, progress)
+        return _train_model(
+            model,
+            train_dataset,
+            validation_dataset,
+            settings,
+            progress,
+            resume=resume,
+            on_checkpoint=on_checkpoint,
+        )
     finally:
         torch.use_deterministic_algorithms(
             previous_deterministic,

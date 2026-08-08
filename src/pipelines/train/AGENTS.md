@@ -20,7 +20,11 @@ It requires the four data artifacts in `config["inputs"]["data"]`.
 
 ## Outputs
 
-Checkpoints and history go to the configured repository-relative output directory, or to the configured S3 prefix. Checkpoints are written into a temporary directory and moved into place, so an interrupted run never leaves a half-written checkpoint behind. Existing files are not overwritten.
+Checkpoints and history go to the configured repository-relative output directory, or to the configured S3 prefix.
+
+While training runs, both checkpoints live in a working directory named `.<run_id>.partial` beside the final one, rewritten every `checkpoint_every` epochs through a temporary file so a crash mid-write keeps the previous copy. A successful local run renames that directory into place; an S3 run uploads from memory, mirrors the working checkpoints under `<prefix>/<run_id>/running/`, and removes the directory afterwards. On an S3 backend the working directory is still local, so `output_dir` needs disk even there.
+
+Published files are never overwritten. A non-empty working directory from an earlier run of the same `run_id` stops the run instead of being reused, because that directory is the only copy of an interrupted run.
 
 ## Configurable Training
 
@@ -29,6 +33,8 @@ Checkpoints and history go to the configured repository-relative output director
 - Reject optimizer-specific settings that the selected optimizer does not use; never ignore them silently.
 - Augmentation defaults to `none`. `pill_basic` applies only to the train split and must update bounding boxes with geometric transforms.
 - Checkpoints record the normalized model, optimizer, augmentation, and seed settings under `training_config`. Keep that metadata JSON-safe and free of storage credentials.
+- `resume_from` continues an interrupted run from its `last_checkpoint.pt`, which carries `resume_state`. It also reads the `best_checkpoint.pt` written beside it, so the resumed run can still publish a best epoch from before the interruption. `epochs` counts the whole run, not the part that remains.
+- Every reason a resume cannot work is checked before the first batch: a missing `resume_state`, a history with gaps, a different architecture or class map, `epochs` no larger than the resumed epoch, and patience already used up.
 
 ## Run and Test
 
@@ -45,3 +51,5 @@ Tests train a tiny model on CPU. They need no GPU and no AWS.
 - `progress.py` emits `train.progress/1` JSON Lines on **stderr**. stdout belongs to the single JSON document `main_pipeline` prints — never write there. The emitter swallows every exception on purpose: progress output must never be able to fail a training run.
 - Validation must not update BatchNorm running statistics. A test guards this.
 - A seeded run must reproduce. If you introduce randomness, seed it.
+- **A resumed run must reproduce an uninterrupted one.** One test compares four epochs against two plus two; a second one breaks the random-state restore on purpose and requires the two to diverge, so the first test cannot pass by accident. The guarantee is CPU-only: deterministic algorithms run with `warn_only=True`, so CUDA kernels may still differ.
+- Nobody deletes an orphaned `.<run_id>.partial`. It holds the only copy of an interrupted run, so removing it is a person's decision.
