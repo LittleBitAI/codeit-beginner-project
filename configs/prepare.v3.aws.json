@@ -1,0 +1,23 @@
+{
+  "project": {
+    "name": "pill-object-detection"
+  },
+  "environment": {
+    "name": "aws",
+    "artifact_store": "s3"
+  },
+  "storage": {
+    "backend": "s3",
+    "s3": {
+      "prefix": ""
+    }
+  },
+  "data": {
+    "prepare": true,
+    "raw_prefix": "datasets/pill_detection/raw/v3/original/",
+    "split_ratio": "8:2",
+    "seed": 42,
+    "split_method": "group",
+    "overwrite": false
+  }
+}
