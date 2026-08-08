@@ -1,0 +1,213 @@
+"""학습 대기열: 저장한 설정 여러 개를 직렬로 돌립니다.
+
+용도는 "돌려 놓고 자러 가기"입니다. 그래서 자는 동안 사람이 개입하지 않아도 되는
+쪽으로 규칙을 정했습니다. 실제 학습은 하지 않고 subprocess를 patch합니다.
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from src.pipelines.web.errors import JobNotFoundError
+from src.pipelines.web.jobs import runner
+from src.pipelines.web.jobs.manager import JobManager
+from src.pipelines.web.train_config import (
+    build_runtime_config,
+    normalize_data_inputs,
+    normalize_train_settings,
+    write_runtime_config,
+)
+
+
+TRAIN_STDOUT = (
+    '{"status": "ok", "artifacts": {"train": {"run_id": "r"}}, '
+    '"summary": {"train": {}}, "message": "완료"}'
+)
+
+
+@pytest.fixture
+def config_ids(isolated_repo, data_inputs):
+    """서로 다른 run_id를 가진 설정 세 개를 저장해 둡니다."""
+
+    made = []
+    for name in ("first", "second", "third"):
+        config = build_runtime_config(
+            normalize_train_settings({"run_id": name, "epochs": 1}),
+            normalize_data_inputs(data_inputs),
+        )
+        made.append(write_runtime_config(config))
+    return made
+
+
+def wait_until(condition, timeout: float = 10.0, what: str = "조건"):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = condition()
+        if value:
+            return value
+        time.sleep(0.02)
+    raise AssertionError(f"{what}이(가) {timeout}초 안에 이뤄지지 않았습니다.")
+
+
+def finished_run_ids(manager: JobManager) -> list[str]:
+    return [
+        record.run_id
+        for record in sorted(manager.list_jobs(), key=lambda item: item.created_at)
+        if not record.is_active()
+    ]
+
+
+# --- 직렬 실행 --------------------------------------------------------------
+
+
+def test_first_entry_starts_at_once_and_the_rest_wait(
+    manager, config_ids, monkeypatch, fake_process_factory
+):
+    monkeypatch.setattr(
+        runner, "spawn", lambda *a, **k: fake_process_factory(stdout=TRAIN_STDOUT)
+    )
+
+    for config_id in config_ids:
+        manager.enqueue(config_id)
+
+    wait_until(
+        lambda: len(finished_run_ids(manager)) == 3, what="세 학습이 모두 끝나는 것"
+    )
+    # 넣은 순서대로, 한 번에 하나씩입니다.
+    assert finished_run_ids(manager) == ["first", "second", "third"]
+    assert manager.queue_entries() == []
+
+
+def test_a_failed_training_does_not_strand_the_rest(
+    manager, config_ids, monkeypatch, fake_process_factory
+):
+    """자는 동안 하나가 실패했다고 나머지가 안 돌면 밤을 통째로 버립니다."""
+
+    spawns = {"count": 0}
+
+    def spawn(*args, **kwargs):
+        spawns["count"] += 1
+        if spawns["count"] == 1:
+            return fake_process_factory(stdout="깨진 출력", exit_code=1)
+        return fake_process_factory(stdout=TRAIN_STDOUT)
+
+    monkeypatch.setattr(runner, "spawn", spawn)
+
+    for config_id in config_ids:
+        manager.enqueue(config_id)
+
+    wait_until(lambda: len(finished_run_ids(manager)) == 3, what="세 학습 종료")
+    statuses = {
+        record.run_id: record.status for record in manager.list_jobs()
+    }
+    assert statuses["first"] == "failed"
+    assert statuses["second"] == "succeeded"
+    assert statuses["third"] == "succeeded"
+
+
+# --- 중지 ------------------------------------------------------------------
+
+
+def test_cancelling_the_running_job_holds_the_queue(
+    manager, config_ids, monkeypatch, fake_process_factory
+):
+    """중지를 눌렀는데 다음 학습이 곧바로 뜨면 멈춘 것이 아닙니다.
+
+    자연스럽게 끝났을 때만 다음으로 넘어가고, 사람이 중지하면 대기열은 멈춰 섭니다.
+    """
+
+    process = fake_process_factory(stdout="", exit_code=1, block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    monkeypatch.setattr(runner, "terminate_tree", lambda proc: proc.release(1))
+
+    started = manager.enqueue(config_ids[0])
+    manager.enqueue(config_ids[1])
+    wait_until(lambda: manager._process is not None, what="process 시작")
+    manager.cancel(started.job_id)
+
+    wait_until(lambda: manager.get(started.job_id).status == "cancelled", what="취소 반영")
+    assert manager.queue_entries()[0]["run_id"] == "second"  # 여전히 기다립니다
+    assert manager.queue_paused() is True
+
+
+def test_a_held_queue_starts_again_when_asked(
+    manager, config_ids, monkeypatch, fake_process_factory
+):
+    process = fake_process_factory(stdout="", exit_code=1, block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    monkeypatch.setattr(runner, "terminate_tree", lambda proc: proc.release(1))
+
+    started = manager.enqueue(config_ids[0])
+    manager.enqueue(config_ids[1])
+    wait_until(lambda: manager._process is not None, what="process 시작")
+    manager.cancel(started.job_id)
+    wait_until(lambda: manager.queue_paused(), what="대기열 멈춤")
+
+    monkeypatch.setattr(
+        runner, "spawn", lambda *a, **k: fake_process_factory(stdout=TRAIN_STDOUT)
+    )
+    manager.resume_queue()
+
+    wait_until(lambda: "second" in finished_run_ids(manager), what="다음 학습 실행")
+    assert manager.queue_paused() is False
+
+
+# --- 대기열 편집 ------------------------------------------------------------
+
+
+def test_waiting_entries_can_be_removed(manager, config_ids, monkeypatch, fake_process_factory):
+    process = fake_process_factory(stdout="", exit_code=0, block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+
+    manager.enqueue(config_ids[0])
+    manager.enqueue(config_ids[1])
+    manager.enqueue(config_ids[2])
+    entries = manager.queue_entries()
+
+    manager.remove_from_queue(entries[0]["entry_id"])
+
+    assert [item["run_id"] for item in manager.queue_entries()] == ["third"]
+    process.release(0)
+
+
+def test_removing_something_that_is_not_waiting_says_so(manager, config_ids):
+    with pytest.raises(JobNotFoundError):
+        manager.remove_from_queue("없는-항목")
+
+
+def test_an_unknown_config_is_refused_before_it_reaches_the_queue(manager, isolated_repo):
+    """대기열에 넣을 때 걸러야 자는 동안 조용히 건너뛰는 항목이 생기지 않습니다."""
+
+    with pytest.raises(Exception):
+        manager.enqueue("0" * 32)
+
+    assert manager.queue_entries() == []
+
+
+# --- 서버가 다시 떴을 때 ----------------------------------------------------
+
+
+def test_a_restart_keeps_the_queue_but_does_not_start_it(
+    manager, config_ids, monkeypatch, fake_process_factory
+):
+    """자는 동안 서버가 다시 떴다고 대기열이 사라지면 아침에 아무것도 없습니다.
+
+    다만 서버가 뜨자마자 GPU 학습이 저절로 시작되면 그것도 곤란하므로, 목록은
+    남기고 시작은 사람이 시킵니다.
+    """
+
+    process = fake_process_factory(stdout="", exit_code=0, block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    manager.enqueue(config_ids[0])
+    manager.enqueue(config_ids[1])
+    # 첫 학습이 아직 도는 동안 확인합니다. 끝나 버리면 두 번째가 이미 시작됩니다.
+    wait_until(lambda: manager._process is not None, what="process 시작")
+
+    fresh = JobManager()
+    fresh.load()
+
+    assert [item["run_id"] for item in fresh.queue_entries()] == ["second"]
+    assert fresh.queue_paused() is True
+    process.release(0)

@@ -220,6 +220,55 @@ def test_start_job_rejects_second_job_with_409(
     process.release()
 
 
+def test_queue_accepts_a_second_setting_instead_of_refusing_it(
+    client, valid_payload, monkeypatch, fake_process_factory
+):
+    """`/jobs`는 409로 거부하지만 대기열은 줄을 세웁니다. 그것이 이 기능의 목적입니다."""
+
+    process = fake_process_factory(block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    config_id = create_config(client, valid_payload)
+
+    first = client.post("/api/train/queue", json={"config_id": config_id})
+    second = client.post("/api/train/queue", json={"config_id": config_id})
+
+    assert first.status_code == 201
+    assert first.json()["started"] is not None  # 비어 있었으니 곧바로 시작
+    assert second.status_code == 201
+    assert second.json()["started"] is None  # 뒤에 줄을 섭니다
+    assert len(second.json()["entries"]) == 1
+    process.release()
+
+
+def test_queue_entry_can_be_taken_out_again(
+    client, valid_payload, monkeypatch, fake_process_factory
+):
+    process = fake_process_factory(block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    config_id = create_config(client, valid_payload)
+    client.post("/api/train/queue", json={"config_id": config_id})
+    entry_id = client.post("/api/train/queue", json={"config_id": config_id}).json()[
+        "entries"
+    ][0]["entry_id"]
+
+    response = client.delete(f"/api/train/queue/{entry_id}")
+
+    assert response.status_code == 200
+    assert response.json()["entries"] == []
+    assert client.get("/api/train/queue").json()["entries"] == []
+    process.release()
+
+
+def test_queue_with_unknown_config_returns_404(client):
+    response = client.post("/api/train/queue", json={"config_id": "0" * 32})
+
+    assert response.status_code == 404
+
+
+def test_removing_a_queue_entry_that_is_gone_returns_404(client):
+    assert client.delete("/api/train/queue/none").status_code == 404
+
+
 def test_start_job_with_unknown_config_returns_404(client):
     response = client.post("/api/train/jobs", json={"config_id": "0" * 32})
 

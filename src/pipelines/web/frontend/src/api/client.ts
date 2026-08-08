@@ -5,6 +5,7 @@ import type {
   Defaults,
   EvaluationState,
   PerClassSummary,
+  QueueState,
   ExperimentComparisonResult,
   ExperimentListing,
   GpuStatus,
@@ -105,6 +106,19 @@ export const api = {
       headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
       body: JSON.stringify({ config_id: configId }),
     }),
+
+  readQueue: () => request<QueueState>('/api/train/queue'),
+
+  addToQueue: (configId: string) =>
+    request<QueueState>('/api/train/queue', {
+      method: 'POST',
+      body: JSON.stringify({ config_id: configId }),
+    }),
+
+  removeFromQueue: (entryId: string) =>
+    request<QueueState>(`/api/train/queue/${entryId}`, { method: 'DELETE' }),
+
+  resumeQueue: () => request<QueueState>('/api/train/queue/resume', { method: 'POST' }),
 
   teamConfig: () => request<TeamConfig>('/api/team/config'),
 
