@@ -11,12 +11,14 @@ import json
 import math
 import os
 import sys
+import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 
 SCHEMA = "train.progress/1"
+STEP_PROGRESS_INTERVAL_SECONDS = 5.0
 
 
 def _timestamp() -> str:
@@ -40,9 +42,18 @@ def _json_safe(value: Any) -> Any:
 class ProgressEmitter:
     """학습을 방해하지 않고 진행 상황 한 건을 한 줄로 기록합니다."""
 
-    def __init__(self, run_id: str, stream: Any | None = None) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        stream: Any | None = None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._run_id = run_id
         self._stream = stream
+        self._clock = clock
+        self._step_phase: tuple[int, str] | None = None
+        self._last_step_emitted_at: float | None = None
         # DataLoader worker는 stderr를 상속하므로, emitter를 만든 process에서만
         # 출력해 중복 줄이 나오지 않게 합니다.
         self._pid = os.getpid()
@@ -69,4 +80,42 @@ class ProgressEmitter:
         except Exception:
             # 학습 취소로 pipe가 닫히면 BrokenPipeError(Windows에서는 OSError)가
             # 납니다. 진행 로그 실패가 학습이나 exit code를 바꾸면 안 됩니다.
+            return
+
+    def emit_step_progress(
+        self,
+        *,
+        epoch: int,
+        epochs: int,
+        phase: str,
+        step: int,
+        total_steps: int,
+    ) -> None:
+        """각 phase의 첫·마지막 step과 5초 간격의 중간 step을 기록합니다."""
+
+        try:
+            now = self._clock()
+            phase_key = (epoch, phase)
+            if phase_key != self._step_phase:
+                self._step_phase = phase_key
+                self._last_step_emitted_at = None
+            should_emit = (
+                step == 1
+                or step == total_steps
+                or self._last_step_emitted_at is None
+                or now - self._last_step_emitted_at >= STEP_PROGRESS_INTERVAL_SECONDS
+            )
+            if not should_emit:
+                return
+            self._last_step_emitted_at = now
+            self.emit(
+                "step_progress",
+                epoch=epoch,
+                epochs=epochs,
+                phase=phase,
+                step=step,
+                total_steps=total_steps,
+            )
+        except Exception:
+            # clock이나 출력 stream이 실패해도 학습 결과에는 영향을 주지 않습니다.
             return

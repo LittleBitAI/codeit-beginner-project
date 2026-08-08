@@ -169,20 +169,28 @@ def _train_model(
         model.train()
         train_total = 0.0
         train_component_totals: dict[str, float] = {}
-        for images, targets in train_loader:
+        for step, (images, targets) in enumerate(train_loader, start=1):
             optimizer.zero_grad(set_to_none=True)
             loss, components = _loss(model, images, targets, device)
             loss.backward()
             optimizer.step()
             train_total += float(loss.detach().cpu())
             _add_components(train_component_totals, components, phase="train")
+            if progress is not None:
+                progress.emit_step_progress(
+                    epoch=epoch,
+                    epochs=settings["epochs"],
+                    phase="train",
+                    step=step,
+                    total_steps=len(train_loader),
+                )
 
         model.train()
         _freeze_batch_norm(model)
         validation_total = 0.0
         validation_component_totals: dict[str, float] = {}
         with torch.no_grad():
-            for images, targets in validation_loader:
+            for step, (images, targets) in enumerate(validation_loader, start=1):
                 loss, components = _loss(model, images, targets, device)
                 validation_total += float(loss.detach().cpu())
                 _add_components(
@@ -190,6 +198,14 @@ def _train_model(
                     components,
                     phase="validation",
                 )
+                if progress is not None:
+                    progress.emit_step_progress(
+                        epoch=epoch,
+                        epochs=settings["epochs"],
+                        phase="validation",
+                        step=step,
+                        total_steps=len(validation_loader),
+                    )
 
         train_loss = train_total / len(train_loader)
         validation_loss = validation_total / len(validation_loader)

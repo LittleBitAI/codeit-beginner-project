@@ -489,8 +489,12 @@ def test_run_emits_progress_events_on_stderr_and_leaves_stdout_empty(
     assert [event["event"] for event in events] == [
         "run_started",
         "epoch_started",
+        "step_progress",
+        "step_progress",
         "epoch_completed",
         "epoch_started",
+        "step_progress",
+        "step_progress",
         "epoch_completed",
         "training_completed",
     ]
@@ -498,7 +502,10 @@ def test_run_emits_progress_events_on_stderr_and_leaves_stdout_empty(
     for event in events:
         datetime.strptime(event["ts"], "%Y-%m-%dT%H:%M:%S.%fZ")
 
-    started, _, first, _, last, completed = events
+    started = events[0]
+    first = events[4]
+    last = events[8]
+    completed = events[9]
     assert started == {
         "schema": SCHEMA,
         "event": "run_started",
@@ -511,6 +518,34 @@ def test_run_emits_progress_events_on_stderr_and_leaves_stdout_empty(
         "class_count": 1,
         "ts": started["ts"],
     }
+    assert [
+        {
+            "epoch": event["epoch"],
+            "epochs": event["epochs"],
+            "phase": event["phase"],
+            "step": event["step"],
+            "total_steps": event["total_steps"],
+        }
+        for event in events
+        if event["event"] == "step_progress"
+    ] == [
+        {"epoch": 1, "epochs": 2, "phase": "train", "step": 1, "total_steps": 1},
+        {
+            "epoch": 1,
+            "epochs": 2,
+            "phase": "validation",
+            "step": 1,
+            "total_steps": 1,
+        },
+        {"epoch": 2, "epochs": 2, "phase": "train", "step": 1, "total_steps": 1},
+        {
+            "epoch": 2,
+            "epochs": 2,
+            "phase": "validation",
+            "step": 1,
+            "total_steps": 1,
+        },
+    ]
     assert set(first) == {
         "schema",
         "event",
@@ -688,6 +723,41 @@ def test_progress_emitter_writes_null_instead_of_invalid_json_numbers():
     payload = json.loads(line)
     assert payload["train_loss"] is None
     assert payload["validation_loss"] is None
+
+
+def test_step_progress_emits_first_timed_last_and_new_phase_events():
+    stream = io.StringIO()
+    moments = iter([0.0, 4.9, 5.0, 5.1, 5.1])
+    emitter = ProgressEmitter("step-run", stream, clock=lambda: next(moments))
+
+    for step in range(1, 5):
+        emitter.emit_step_progress(
+            epoch=2,
+            epochs=3,
+            phase="train",
+            step=step,
+            total_steps=4,
+        )
+    emitter.emit_step_progress(
+        epoch=2,
+        epochs=3,
+        phase="validation",
+        step=1,
+        total_steps=1,
+    )
+
+    events = _progress_events(stream.getvalue())
+    assert [
+        (event["phase"], event["step"], event["total_steps"])
+        for event in events
+    ] == [
+        ("train", 1, 4),
+        ("train", 3, 4),
+        ("train", 4, 4),
+        ("validation", 1, 1),
+    ]
+    assert all(event["event"] == "step_progress" for event in events)
+    assert all((event["epoch"], event["epochs"]) == (2, 3) for event in events)
 
 
 def test_load_class_map_converts_category_ids_in_sorted_order_without_mutating_input():
