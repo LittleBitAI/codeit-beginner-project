@@ -15,11 +15,14 @@ from typing import Any
 from .masking import sanitize_line
 
 
-__all__ = ["ProgressState", "consume_line", "snapshot"]
+__all__ = ["ProgressState", "consume_line", "snapshot", "take_quiet_change"]
 
 
 SCHEMA_PREFIX = "train.progress/"
 SUPPORTED_MAJOR = "1"
+
+# ``step_progress``가 쓰는 phase입니다. 계약에 없는 이름은 화면에 보여 주지 않습니다.
+STEP_PHASES = ("train", "validation")
 
 _WARNING_MARKERS = ("[w]", "warning", "warn:", "userwarning", "futurewarning", "deprecat")
 _ERROR_MARKERS = ("[e]", "error", "traceback", "exception", "failed", "cuda out of memory")
@@ -46,9 +49,11 @@ class ProgressState:
         "finished",
         "last_percent",
         "malformed_lines",
+        "quiet_change",
         "reported_completed_epochs",
         "run_id",
         "saw_progress",
+        "step",
         "stopped_early",
         "suppressed_lines",
         "train_images",
@@ -70,6 +75,10 @@ class ProgressState:
         # epoch 번호가 중복되거나 역순으로 와도 안전하도록 dict에 담습니다.
         self.epochs_by_number: dict[int, dict[str, Any]] = {}
         self.malformed_lines = 0
+        # 지금 지나고 있는 epoch 안의 batch 위치입니다. epoch 경계에서 지웁니다.
+        self.step: dict[str, Any] | None = None
+        # log 줄 없이 상태만 바뀌었다는 표시입니다. `take_quiet_change`가 읽고 지웁니다.
+        self.quiet_change = False
         self.finished = False
         # train이 알려 준 실제 수행 횟수입니다. 없으면 받은 epoch 수로 셉니다.
         self.reported_completed_epochs: int | None = None
@@ -168,8 +177,44 @@ def _apply_epoch_started(state: ProgressState, event: dict[str, Any]) -> dict[st
         state.malformed_lines += 1
         return None
     state.current_epoch = epoch
+    # 새 epoch은 batch 0부터 다시 셉니다.
+    state.step = None
     total_text = f"/{state.epochs}" if state.epochs else ""
     return _log(f"epoch {epoch}{total_text} 시작", level="info")
+
+
+def _apply_step_progress(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:
+    """지금 epoch 안에서 몇 번째 batch를 지나고 있는지 기록합니다.
+
+    **log 줄을 만들지 않습니다.** 이 event는 phase마다 5초에 한 번씩 나오므로 그대로
+    남기면 긴 학습에서 정작 중요한 경고와 오류가 묻힙니다. 위치는 진행 막대로 보여
+    줍니다. 대신 화면이 갱신되도록 `quiet_change`를 세워 둡니다.
+    """
+
+    total_epochs = _positive_int(event.get("epochs"))
+    if total_epochs is not None:
+        state.epochs = total_epochs
+    epoch = _positive_int(event.get("epoch"))
+    if epoch is not None:
+        # epoch_started를 놓쳤어도 몇 번째 epoch인지는 알 수 있습니다.
+        state.current_epoch = epoch
+
+    phase = _text(event.get("phase"))
+    step = _positive_int(event.get("step"))
+    total_steps = _positive_int(event.get("total_steps"))
+    if phase not in STEP_PHASES or step is None or total_steps is None or step > total_steps:
+        # 위치를 지어내느니 batch 표시를 접습니다. epoch 진행률은 그대로 남습니다.
+        state.malformed_lines += 1
+        return None
+
+    state.step = {
+        "phase": phase,
+        "step": step,
+        "total_steps": total_steps,
+        "percent": round(step / total_steps * 100, 1),
+    }
+    state.quiet_change = True
+    return None
 
 
 def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:
@@ -193,6 +238,8 @@ def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[
     # 같은 epoch이 다시 오면 나중 값으로 덮어씁니다.
     state.epochs_by_number[epoch] = record
     state.current_epoch = epoch
+    # 끝난 epoch의 batch 위치가 남아 있으면 아직 도는 것처럼 읽힙니다.
+    state.step = None
 
     total_text = f"/{state.epochs}" if state.epochs else ""
     best_mark = " · 최고 기록" if record["is_best"] else ""
@@ -211,6 +258,7 @@ def _apply_training_completed(state: ProgressState, event: dict[str, Any]) -> di
     """
 
     state.finished = True
+    state.step = None
     planned = _positive_int(event.get("planned_epochs"))
     if planned is not None and state.epochs is None:
         # run_started를 놓쳤을 때만 씁니다. 계획 epoch는 원래 그 event가 알려 줍니다.
@@ -236,9 +284,22 @@ def _apply_training_completed(state: ProgressState, event: dict[str, Any]) -> di
 _HANDLERS = {
     "run_started": _apply_run_started,
     "epoch_started": _apply_epoch_started,
+    "step_progress": _apply_step_progress,
     "epoch_completed": _apply_epoch_completed,
     "training_completed": _apply_training_completed,
 }
+
+
+def take_quiet_change(state: ProgressState) -> bool:
+    """log 줄 없이 상태만 바뀌었는지 알려 주고 표시를 지웁니다.
+
+    `consume_line`이 ``None``을 돌려주는 경우는 두 가지입니다. 하나는 버릴 줄이고,
+    다른 하나는 log에 남기지 않는 batch 진행입니다. 뒤쪽은 화면을 갱신해야 합니다.
+    """
+
+    changed = state.quiet_change
+    state.quiet_change = False
+    return changed
 
 
 def _consume_plain_line(state: ProgressState, text: str) -> dict[str, Any] | None:
@@ -348,6 +409,7 @@ def snapshot(state: ProgressState) -> dict[str, Any]:
             "epochs": [],
             "total_epochs": None,
             "current_epoch": None,
+            "step": None,
             "eta_seconds": None,
             "suppressed_lines": state.suppressed_lines,
         }
@@ -379,6 +441,8 @@ def snapshot(state: ProgressState) -> dict[str, Any]:
         "class_count": state.class_count,
         "total_epochs": total,
         "current_epoch": state.current_epoch,
+        # 지금 지나는 batch 위치입니다. 계약 이전의 실행과 epoch 사이에서는 None입니다.
+        "step": state.step,
         "completed_epochs": completed,
         # 끝난 학습은 계획 epoch가 남아 있어도 100%입니다.
         "finished": state.finished,

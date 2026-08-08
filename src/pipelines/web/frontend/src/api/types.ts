@@ -80,6 +80,14 @@ export interface EpochRecord {
   is_best: boolean | null;
 }
 
+/** 지금 지나고 있는 epoch 안의 batch 위치입니다. */
+export interface StepProgress {
+  phase: 'train' | 'validation';
+  step: number;
+  total_steps: number;
+  percent: number;
+}
+
 export interface Progress {
   available: boolean;
   reason: string | null;
@@ -92,6 +100,8 @@ export interface Progress {
   class_count?: number | null;
   total_epochs: number | null;
   current_epoch: number | null;
+  /** step event가 없는 예전 실행과 epoch 사이에서는 null입니다. */
+  step?: StepProgress | null;
   completed_epochs?: number;
   /** train이 완료 event를 보냈는지. 조기 종료여도 true입니다. */
   finished?: boolean;

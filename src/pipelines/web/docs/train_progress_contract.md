@@ -24,6 +24,7 @@ web은 학습을 공개 CLI(`python -m src.main_pipeline --only train`)로만 �
 | --- | --- |
 | `run_started` | `architecture`, `device`, `epochs`, `train_images`, `validation_images`, `class_count` |
 | `epoch_started` | `epoch`, `epochs` |
+| `step_progress` | `epoch`, `epochs`, `phase`, `step`, `total_steps` |
 | `epoch_completed` | `epoch`, `epochs`, `train_loss`, `validation_loss`, `train_loss_components`, `validation_loss_components`, `best_validation_loss`, `best_epoch`, `is_best`, `epoch_seconds` |
 | `training_completed` | `planned_epochs`, `completed_epochs`, `stopped_early`, `best_epoch`, `best_validation_loss` |
 
@@ -32,6 +33,14 @@ web은 학습을 공개 CLI(`python -m src.main_pipeline --only train`)로만 �
 두 `*_components`는 `문자열 -> 유한한 수` mapping입니다. 이름은 모델이 돌려준 것을 그대로 쓰므로(Faster R-CNN과 RetinaNet이 다릅니다) **web은 이름을 열거하지 않고 받은 것을 그립니다.**
 
 `training_completed`는 artifact 저장까지 끝난 뒤 한 번 나옵니다. 조기 종료로 `completed_epochs < planned_epochs`여도 web은 진행률을 100%, 남은 시간을 0으로 만듭니다. 이 event가 없는 실행(취소, 이 계약 이전의 옛 실행)은 예전 그대로 읽힙니다.
+
+## epoch 안의 batch 진행 (`step_progress`)
+
+`contracts/proposals/007-train-step-progress-display.md`로 뒤에 합의한 **선택 event**입니다. `phase`는 `train` 또는 `validation`, `step`은 그 phase에서 끝낸 batch 수(1부터), `total_steps`는 그 DataLoader의 전체 batch 수입니다. 각 phase의 첫·마지막 batch는 항상 나오고 중간은 5초 간격입니다. 순서는 `epoch_started`, train, validation, `epoch_completed`입니다.
+
+epoch 하나가 20분씩 걸리면 epoch 막대만으로는 학습이 멈춘 것과 도는 것을 구별할 수 없습니다. web은 epoch 막대 **아래에 두 번째 막대**를 그리고, `epoch_started`·`epoch_completed`·`training_completed`에서 그 위치를 지웁니다. 끝난 epoch의 batch 위치가 남아 있으면 아직 도는 것처럼 읽히기 때문입니다. **전체 진행률은 여전히 끝난 epoch 수로만 셉니다.** 이 event가 없는 예전 실행은 epoch 진행률만 보여 줍니다.
+
+**web은 이 event를 log에 남기지 않습니다.** 5초에 한 번씩 쌓이면 중요한 경고와 오류가 묻힙니다. 그래서 `consume_line`이 `None`을 돌려주는데, log 줄만 보고 화면을 갱신하면 긴 epoch 동안 아무것도 움직이지 않습니다. `take_quiet_change(state)`가 상태만 바뀐 경우를 알려 주고, `jobs/manager.py`가 그때도 snapshot을 만듭니다.
 
 `run_started`가 따로 필요한 이유는 `train_images`·`validation_images`·`class_count`가 manifest에서 파생되는 값이라 학습이 끝나기 전에는 web이 알 방법이 없기 때문입니다. `epoch_started`가 없으면 첫 epoch이 20분 걸릴 때 화면이 20분 동안 비어 있습니다.
 
@@ -60,6 +69,7 @@ web은 학습을 공개 CLI(`python -m src.main_pipeline --only train`)로만 �
 | `*_components`가 mapping이 아님 | 그 필드만 `None`. epoch 자체는 살림 |
 | component 값 하나가 수가 아니거나 `NaN` | 그 이름만 버리고 나머지 이름은 살림. 남는 게 없으면 `None` |
 | `epoch` 중복·역순 | last-write-wins로 담고 정렬해 표시. 단조 증가를 가정하지 않음 |
+| `step_progress`의 `phase`가 계약 밖이거나 `step`이 1 미만·`total_steps` 초과 | batch 표시만 접고 `malformed_lines`를 셈. epoch 진행률은 그대로 |
 | 진행 줄이 한 번도 없음 | `available: false` — GUI가 "진행률 정보 없음"을 표시. 가짜 값 없음 |
 
 남은 시간은 `epoch_completed`가 2건 이상 쌓였을 때 실제 `epoch_seconds` 평균으로만 계산합니다. 그 전에는 추정하지 않습니다.

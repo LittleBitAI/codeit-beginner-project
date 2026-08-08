@@ -153,6 +153,48 @@ describe('LiveMonitor · 진행 로그가 있을 때', () => {
   });
 });
 
+describe('LiveMonitor · epoch 안의 batch 진행', () => {
+  it('지금 몇 번째 batch인지 phase와 함께 보여 준다', async () => {
+    getJob.mockResolvedValue(
+      makeJob({
+        ...withProgress,
+        step: { phase: 'train', step: 12, total_steps: 100, percent: 12 },
+      }),
+    );
+
+    renderMonitor();
+
+    expect(await screen.findByText('학습 batch 12 / 100')).toBeInTheDocument();
+    // epoch 막대와 batch 막대가 각각 자기 진행률을 말합니다.
+    const bars = screen.getAllByRole('progressbar');
+    expect(bars.map((bar) => bar.getAttribute('aria-valuenow'))).toEqual(['4', '12']);
+  });
+
+  it('validation phase도 이름 그대로 알려 준다', async () => {
+    getJob.mockResolvedValue(
+      makeJob({
+        ...withProgress,
+        step: { phase: 'validation', step: 5, total_steps: 20, percent: 25 },
+      }),
+    );
+
+    renderMonitor();
+
+    expect(await screen.findByText('검증 batch 5 / 20')).toBeInTheDocument();
+  });
+
+  it('batch 정보가 없는 예전 실행에는 자리를 만들지 않는다', async () => {
+    getJob.mockResolvedValue(makeJob(withProgress));
+
+    renderMonitor();
+
+    await screen.findByText('epoch 2 / 50');
+    // 설정 줄의 `batch 2`(batch_size)와 헷갈리지 않도록 진행 형식으로만 찾습니다.
+    expect(screen.queryByText(/batch \d+ \/ \d+/)).toBeNull();
+    expect(screen.getAllByRole('progressbar')).toHaveLength(1);
+  });
+});
+
 describe('LiveMonitor · 조기 종료로 끝났을 때', () => {
   const stoppedEarly: Progress = {
     ...withProgress,

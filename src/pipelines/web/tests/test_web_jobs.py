@@ -433,6 +433,53 @@ def test_reader_threads_do_not_deadlock_on_large_output(manager, config_id, monk
     assert len(stderr_lines) == 4000
 
 
+# --- 진행 상태 갱신 ----------------------------------------------------------
+
+
+def progress_line(event: str, **fields) -> str:
+    return json.dumps({"schema": "train.progress/1", "event": event, **fields})
+
+
+def wait_for_step(manager: JobManager, job_id: str, timeout: float = 5.0) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        step = manager.get(job_id).progress.get("step")
+        if step is not None:
+            return step
+        time.sleep(0.01)
+    raise AssertionError("batch 진행이 시간 안에 기록에 반영되지 않았습니다.")
+
+
+def test_batch_progress_reaches_the_record_even_though_it_writes_no_log(
+    manager, config_id, monkeypatch, fake_process_factory
+):
+    """batch 진행은 log 줄을 만들지 않습니다. 그래서 화면 갱신이 멈추면 안 됩니다.
+
+    학습이 아직 도는 동안 확인합니다. 끝난 뒤에는 어차피 한 번 더 갱신되므로,
+    끝난 기록만 보면 흐르는 동안 갱신되지 않는 문제를 잡지 못합니다.
+    """
+
+    stderr = "".join(
+        line + "\n"
+        for line in [
+            progress_line("epoch_started", epoch=1, epochs=2),
+            progress_line("step_progress", epoch=1, epochs=2, phase="train", step=7, total_steps=20),
+        ]
+    )
+    process = fake_process_factory(stderr=stderr, block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+
+    started = manager.start(config_id)
+    step = wait_for_step(manager, started.job_id)
+    process.release(0)
+    wait_for_finish(manager, started.job_id)
+
+    assert step == {"phase": "train", "step": 7, "total_steps": 20, "percent": 35.0}
+    # 5초에 한 번씩 나오는 event가 log를 채우면 경고와 오류가 묻힙니다.
+    logs = store.read_logs(started.job_id)
+    assert not any("step_progress" in line["text"] for line in logs["lines"])
+
+
 # --- 저장과 복구 ------------------------------------------------------------
 
 

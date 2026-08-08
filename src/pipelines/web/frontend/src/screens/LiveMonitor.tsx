@@ -111,6 +111,22 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
                       : null
                   }
                 />
+                {/* epoch 하나가 20분씩 걸리면 위 막대만으로는 멈춘 것과 구별되지 않습니다.
+                    train이 batch 위치를 알려 준 실행에서만 두 번째 막대를 그립니다. */}
+                {progress.step && (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+                      <span style={{ font: `400 11px/1 ${font.mono}`, color: color.textMuted }}>
+                        {progress.step.phase === 'validation' ? '검증' : '학습'} batch{' '}
+                        {progress.step.step} / {progress.step.total_steps}
+                      </span>
+                      <span style={{ font: `400 11px/1 ${font.mono}`, color: color.textMuted }}>
+                        {percent(progress.step.percent)}
+                      </span>
+                    </div>
+                    <ProgressBar ratio={progress.step.percent / 100} tint={color.tealDark} />
+                  </>
+                )}
               </>
             ) : (
               <>

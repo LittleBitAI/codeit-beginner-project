@@ -90,6 +90,106 @@ def test_epoch_completed_produces_readable_log_line():
     assert entry["level"] == "info"
 
 
+# --- epoch 안의 batch 진행 ---------------------------------------------------
+
+
+def test_step_progress_reports_batch_position_without_writing_a_log_line():
+    """진행 상태는 갱신하되 log에는 남기지 않습니다.
+
+    step event는 phase마다 5초에 한 번씩 나오므로 log에 그대로 남기면 정작 중요한
+    경고와 오류가 묻힙니다. 위치는 진행 막대로 보여 주면 충분합니다.
+    """
+
+    state = ProgressState()
+    consume_line(state, line("epoch_started", epoch=2, epochs=50))
+
+    entry = consume_line(
+        state,
+        line("step_progress", epoch=2, epochs=50, phase="train", step=12, total_steps=100),
+    )
+
+    assert entry is None
+    assert snapshot(state)["step"] == {
+        "phase": "train",
+        "step": 12,
+        "total_steps": 100,
+        "percent": 12.0,
+    }
+
+
+def test_step_progress_follows_the_phase_from_train_to_validation():
+    state = feed(
+        line("epoch_started", epoch=2, epochs=50),
+        line("step_progress", epoch=2, epochs=50, phase="train", step=100, total_steps=100),
+        line("step_progress", epoch=2, epochs=50, phase="validation", step=5, total_steps=20),
+    )
+
+    assert snapshot(state)["step"] == {
+        "phase": "validation",
+        "step": 5,
+        "total_steps": 20,
+        "percent": 25.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "closing",
+    [
+        line("epoch_started", epoch=3, epochs=50),
+        line("epoch_completed", epoch=2, epochs=50, validation_loss=0.5),
+        line("training_completed", planned_epochs=50, completed_epochs=2),
+    ],
+)
+def test_step_position_is_cleared_when_the_epoch_or_run_ends(closing):
+    """끝난 epoch의 batch 위치가 화면에 남아 있으면 아직 도는 것처럼 읽힙니다."""
+
+    state = feed(
+        line("epoch_started", epoch=2, epochs=50),
+        line("step_progress", epoch=2, epochs=50, phase="train", step=40, total_steps=100),
+        closing,
+    )
+
+    assert snapshot(state)["step"] is None
+
+
+def test_epoch_percent_ignores_batch_position():
+    """전체 진행률은 끝난 epoch 수로만 셉니다. batch는 별도로 보여 줍니다."""
+
+    state = feed(
+        line("epoch_completed", epoch=1, epochs=10, validation_loss=0.5),
+        line("epoch_started", epoch=2, epochs=10),
+        line("step_progress", epoch=2, epochs=10, phase="train", step=50, total_steps=100),
+    )
+
+    assert snapshot(state)["percent"] == 10.0
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"phase": "backward", "step": 3, "total_steps": 10},  # 계약에 없는 phase
+        {"phase": "train", "step": 0, "total_steps": 10},  # step은 1부터입니다
+        {"phase": "train", "step": 11, "total_steps": 10},  # 전체보다 큰 위치
+        {"phase": "train", "step": "3", "total_steps": 10},  # 수가 아님
+        {"phase": "train", "step": 3},  # total_steps 없음
+        {"step": 3, "total_steps": 10},  # phase 없음
+    ],
+)
+def test_broken_step_progress_is_ignored_without_losing_the_run(broken):
+    """잘못된 step event 하나가 학습 진행 표시를 망가뜨리면 안 됩니다."""
+
+    state = feed(
+        line("epoch_started", epoch=2, epochs=50),
+        line("step_progress", epoch=2, epochs=50, **broken),
+        line("epoch_completed", epoch=2, epochs=50, validation_loss=0.5),
+    )
+
+    result = snapshot(state)
+    assert result["step"] is None
+    assert result["completed_epochs"] == 1
+    assert result["malformed_lines"] == 1
+
+
 # --- 학습 완료 --------------------------------------------------------------
 
 
