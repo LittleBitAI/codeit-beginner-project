@@ -1882,6 +1882,63 @@ def test_s3_mirror_writes_one_self_contained_object(tmp_path):
     assert "model_state_dict" not in last_payload["resume_state"]["best"]
 
 
+def test_s3_checkpoint_scratch_rejects_an_artifacts_directory_link(
+    tmp_path, monkeypatch
+):
+    """S3 checkpoint를 받거나 쓸 때 저장소 밖 junction을 따라가면 안 됩니다."""
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    artifacts = repository / "artifacts"
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(artifacts), str(outside)],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    else:
+        artifacts.symlink_to(outside, target_is_directory=True)
+
+    storage, _ = _recording_s3_storage()
+    storage.download_file = Mock()
+    best = {
+        "epoch": 1,
+        "model_state_dict": {},
+        "optimizer_state_dict": {},
+    }
+    last = {
+        "epoch": 1,
+        "resume_state": {"best": {"epoch": 1}},
+    }
+    monkeypatch.setattr(pipeline, "REPOSITORY_ROOT", repository)
+    try:
+        with pytest.raises(ValueError, match="scratch directory"):
+            pipeline._read_checkpoint(
+                "s3://bucket/checkpoint.pt", storage, label="train.resume_from"
+            )
+        with pytest.raises(ValueError, match="scratch directory"):
+            pipeline._mirror_to_s3(
+                storage,
+                last,
+                best,
+                {"run_id": "linked", "output_prefix": "experiments"},
+            )
+
+        storage.download_file.assert_not_called()
+        storage.client.upload_file.assert_not_called()
+        assert not any(outside.iterdir())
+    finally:
+        if os.path.lexists(artifacts):
+            if os.name == "nt":
+                os.rmdir(artifacts)
+            else:
+                artifacts.unlink()
+
+
 def test_resume_reads_best_weights_embedded_in_a_single_checkpoint(
     local_config, tmp_path
 ):

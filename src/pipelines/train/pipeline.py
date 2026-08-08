@@ -429,6 +429,43 @@ def _validate_working_directory(path: Path) -> None:
 
 
 @contextmanager
+def _temporary_checkpoint_directory(prefix: str) -> Iterator[Path]:
+    """S3 checkpoint 임시 파일을 저장소 안의 일반 폴더에만 둡니다."""
+
+    scratch_root = REPOSITORY_ROOT / "artifacts"
+    if os.path.lexists(scratch_root):
+        attributes = getattr(scratch_root.lstat(), "st_file_attributes", 0)
+        reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if scratch_root.is_symlink() or attributes & reparse_point:
+            raise ValueError(
+                "training checkpoint scratch directory must not be a symbolic link "
+                "or reparse point"
+            )
+        if not scratch_root.is_dir():
+            raise ValueError("training checkpoint scratch directory must be a directory")
+    else:
+        scratch_root.mkdir()
+    try:
+        scratch_root.resolve(strict=True).relative_to(REPOSITORY_ROOT.resolve(strict=True))
+    except ValueError as error:
+        raise ValueError(
+            "training checkpoint scratch directory leaves the repository"
+        ) from error
+
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=scratch_root) as directory:
+        temporary = Path(directory)
+        try:
+            temporary.resolve(strict=True).relative_to(
+                REPOSITORY_ROOT.resolve(strict=True)
+            )
+        except ValueError as error:
+            raise ValueError(
+                "training checkpoint scratch directory leaves the repository"
+            ) from error
+        yield temporary
+
+
+@contextmanager
 def _claim_run(settings: Mapping[str, Any]) -> Iterator[None]:
     """같은 이름의 local 학습 하나만 입력을 읽도록 원자적으로 표시합니다."""
 
@@ -517,12 +554,8 @@ def _read_checkpoint(location: str, storage: Storage, *, label: str) -> dict[str
     """
 
     if _is_s3(location):
-        scratch_root = REPOSITORY_ROOT / "artifacts"
-        scratch_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            prefix="train-resume-", dir=scratch_root
-        ) as directory:
-            path = Path(directory) / "checkpoint.pt"
+        with _temporary_checkpoint_directory("train-resume-") as temporary:
+            path = temporary / "checkpoint.pt"
             storage.download_file(location, path)
             return _load_checkpoint(path, location, label=label)
     return _load_checkpoint(_local_artifact_path(location, storage), location, label=label)
@@ -670,10 +703,8 @@ def _mirror_to_s3(
 
     payload = _with_embedded_best(last_payload, best)
     destination = f"{_s3_run_prefix(settings)}/running/{WORKING_CHECKPOINT_NAMES[-1]}"
-    scratch_root = REPOSITORY_ROOT / "artifacts"
-    scratch_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="train-mirror-", dir=scratch_root) as directory:
-        path = Path(directory) / WORKING_CHECKPOINT_NAMES[-1]
+    with _temporary_checkpoint_directory("train-mirror-") as temporary:
+        path = temporary / WORKING_CHECKPOINT_NAMES[-1]
         _write_checkpoint(path, payload)
         # 첫 checkpoint는 If-None-Match로 run_id 소유권까지 얻습니다. 같은 이름의 두
         # 작업이 사전 exists 검사를 동시에 통과해도 하나만 이 object를 만들 수 있습니다.
@@ -727,10 +758,7 @@ def _publish_s3(
         "training_history_uri": f"{attempt_prefix}/training_history.json",
     }
 
-    scratch_root = REPOSITORY_ROOT / "artifacts"
-    scratch_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="train-upload-", dir=scratch_root) as directory:
-        temporary = Path(directory)
+    with _temporary_checkpoint_directory("train-upload-") as temporary:
         best_path = temporary / "best_checkpoint.pt"
         last_path = temporary / "last_checkpoint.pt"
         _write_checkpoint(best_path, best)
