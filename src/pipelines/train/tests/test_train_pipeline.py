@@ -1636,6 +1636,111 @@ def test_s3_run_starts_when_the_run_id_is_free(tmp_path):
     pipeline._reject_existing_run(_s3_settings(tmp_path), _s3_storage_with(set()))
 
 
+def _recording_s3_storage() -> tuple[S3Storage, dict]:
+    """올라간 object를 그대로 모아 두는 S3Storage를 만듭니다."""
+
+    uploaded: dict[str, bytes] = {}
+    client = Mock()
+    client.head_object.side_effect = ClientError(
+        {"Error": {"Code": "404", "Message": "missing"}}, "HeadObject"
+    )
+
+    def put_object(**request):
+        body = request["Body"]
+        uploaded[request["Key"]] = body.read() if hasattr(body, "read") else body
+
+    client.put_object.side_effect = put_object
+    client.upload_file.side_effect = lambda source, bucket, key, **_: uploaded.update(
+        {key: Path(source).read_bytes()}
+    )
+    return S3Storage("bucket", client=client), uploaded
+
+
+def test_s3_mirror_writes_one_self_contained_object(tmp_path):
+    """S3는 여러 object를 한 번에 바꿀 수 없습니다.
+
+    best와 last를 따로 올리면 하나만 성공했을 때 짝이 어긋나고, bucket에 남은 유일한
+    사본을 이어서 쓸 수 없게 됩니다. 그래서 한 파일에 best 가중치까지 담습니다.
+    """
+
+    storage, uploaded = _recording_s3_storage()
+    best = {
+        "epoch": 2,
+        "validation_loss": 0.5,
+        "model_state_dict": {"weight": torch.tensor(2.0)},
+        "optimizer_state_dict": {"param_groups": []},
+    }
+    last_payload = {
+        "epoch": 3,
+        "model_state_dict": {"weight": torch.tensor(3.0)},
+        "resume_state": {
+            "completed_epoch": 3,
+            "best": {"epoch": 2, "validation_loss": 0.5},
+        },
+    }
+
+    pipeline._mirror_to_s3(storage, last_payload, best, _s3_settings(tmp_path))
+
+    assert list(uploaded) == [
+        "experiments/completed/colab-run/running/last_checkpoint.pt"
+    ]
+    mirrored = torch.load(
+        io.BytesIO(next(iter(uploaded.values()))), map_location="cpu", weights_only=True
+    )
+    mirrored_best = mirrored["resume_state"]["best"]
+    assert mirrored_best["epoch"] == 2
+    assert torch.equal(mirrored_best["model_state_dict"]["weight"], torch.tensor(2.0))
+    # 원래 payload를 건드리면 로컬 작업 파일까지 두 배가 됩니다.
+    assert "model_state_dict" not in last_payload["resume_state"]["best"]
+
+
+def test_resume_reads_best_weights_embedded_in_a_single_checkpoint(
+    local_config, tmp_path
+):
+    """S3에서 받은 한 파일짜리 checkpoint는 옆 파일 없이도 이어서 할 수 있어야 합니다."""
+
+    train.run(local_config)
+    finished = REPOSITORY_ROOT / local_config["train"]["output_dir"] / "cpu-smoke"
+    last = _load(finished / "last_checkpoint.pt")
+    best = _load(finished / "best_checkpoint.pt")
+    last["resume_state"]["best"] = {
+        **last["resume_state"]["best"],
+        "model_state_dict": best["model_state_dict"],
+        "optimizer_state_dict": best["optimizer_state_dict"],
+    }
+    alone = tmp_path / "downloaded" / "last_checkpoint.pt"
+    alone.parent.mkdir(parents=True)
+    torch.save(last, alone)
+
+    resumed = _resume_config(local_config, alone)
+    resumed["train"]["epochs"] = 4
+    result = train.run(resumed)
+
+    assert result["status"] == "ok", result["message"]
+    assert result["summary"]["resumed_at_epoch"] == 2
+
+
+def test_s3_run_publishes_a_last_checkpoint_that_can_be_resumed(
+    local_config, monkeypatch
+):
+    """backend에 따라 최종 artifact의 내용이 달라지면 안 됩니다."""
+
+    storage, uploaded = _recording_s3_storage()
+    monkeypatch.setattr(pipeline, "create_storage", lambda config: storage)
+
+    result = train.run(local_config)
+
+    assert result["status"] == "ok", result["message"]
+    # 학습 중 올린 running/ 사본이 아니라 공개된 artifact를 봐야 합니다.
+    published = next(
+        value
+        for key, value in uploaded.items()
+        if "/attempts/" in key and key.endswith("last_checkpoint.pt")
+    )
+    document = torch.load(io.BytesIO(published), map_location="cpu", weights_only=True)
+    assert document["resume_state"]["completed_epoch"] == 2
+
+
 def test_s3_publisher_returns_attempt_uris_and_writes_completion_marker(
     tmp_path, monkeypatch
 ):

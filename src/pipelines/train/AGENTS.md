@@ -22,9 +22,11 @@ It requires the four data artifacts in `config["inputs"]["data"]`.
 
 Checkpoints and history go to the configured repository-relative output directory, or to the configured S3 prefix.
 
-While training runs, both checkpoints live in a working directory named `.<run_id>.partial` beside the final one, rewritten every `checkpoint_every` epochs through a temporary file so a crash mid-write keeps the previous copy. A successful local run renames that directory into place; an S3 run uploads from memory, mirrors the working checkpoints under `<prefix>/<run_id>/running/`, and removes the directory afterwards. On an S3 backend the working directory is still local, so `output_dir` needs disk even there.
+While training runs, both checkpoints live in a working directory named `.<run_id>.partial` beside the final one, rewritten every `checkpoint_every` epochs through a temporary file so a crash mid-write keeps the previous copy. A local run renames that directory into place. An S3 run keeps it local too — `output_dir` needs disk even there — and removes it once the upload succeeds.
 
-Published files are never overwritten. A run also stops before its first batch when the same `run_id` already has a non-empty working directory, an S3 `running/` checkpoint, or a finished result. The S3 checks carry the weight: a new Colab runtime has an empty disk, so only the bucket still knows that an interrupted run is there, and overwriting it would destroy the one copy this whole feature exists to keep.
+The S3 mirror `<prefix>/<run_id>/running/last_checkpoint.pt` is **one** object carrying the best weights inside `resume_state`. S3 cannot swap two objects at once, and a half-updated pair leaves epochs that disagree and a copy nobody can resume from. Both backends publish the same final artifacts, `resume_state` included.
+
+Published files are never overwritten, and a run stops before its first batch when the same `run_id` already has a non-empty working directory, an S3 `running/` checkpoint, or a finished result. The S3 checks carry the weight: a new Colab runtime has an empty disk, so only the bucket knows an interrupted run is there.
 
 ## Configurable Training
 

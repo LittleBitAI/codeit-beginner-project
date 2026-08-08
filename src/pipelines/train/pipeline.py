@@ -525,13 +525,21 @@ def _load_resume(
             "resume checkpoint already used up train.early_stopping.patience; "
             "raise patience or drop early_stopping"
         )
-    best = _read_checkpoint(
-        _sibling_best_uri(location), storage, label="best_checkpoint.pt next to train.resume_from"
-    )
-    if best.get("epoch") != state["best"]["epoch"]:
-        raise ValueError(
-            "best_checkpoint.pt next to train.resume_from does not match resume_state.best"
+    recorded_best = state["best"]
+    if "model_state_dict" in recorded_best:
+        # S3에서 받은 사본은 한 파일 안에 best 가중치까지 들고 있습니다.
+        best = dict(recorded_best)
+    else:
+        best = _read_checkpoint(
+            _sibling_best_uri(location),
+            storage,
+            label="best_checkpoint.pt next to train.resume_from",
         )
+        if best.get("epoch") != recorded_best["epoch"]:
+            raise ValueError(
+                "best_checkpoint.pt next to train.resume_from does not match "
+                "resume_state.best"
+            )
     settings["resume"] = {
         "resumed_from": location,
         "resumed_at_epoch": completed_epoch,
@@ -539,19 +547,38 @@ def _load_resume(
     return {"checkpoint": checkpoint, "best": best}
 
 
-def _upload_working_checkpoints(
-    storage: S3Storage, working_directory: Path, settings: Mapping[str, Any]
+def _mirror_to_s3(
+    storage: S3Storage,
+    last_payload: Mapping[str, Any],
+    best: Mapping[str, Any],
+    settings: Mapping[str, Any],
 ) -> None:
-    """학습 중 checkpoint를 S3의 같은 key에 덮어씁니다.
+    """이어서 할 상태를 S3에 **한 object로** 올립니다.
 
-    key가 하나이므로 실행당 남는 object는 epoch 수와 무관하게 두 개입니다.
+    S3는 여러 object를 한 번에 바꿀 수 없습니다. best와 last를 따로 올리면 하나만
+    성공했을 때 두 파일의 epoch이 어긋나고, bucket에 남은 유일한 사본을 이어서 쓸 수
+    없게 됩니다. 그래서 이 사본에는 best 가중치까지 담습니다. 로컬 작업 폴더는 두
+    파일을 나란히 두므로 그쪽은 커지지 않습니다.
     """
 
-    prefix = f"{_s3_run_prefix(settings)}/running"
-    for name in WORKING_CHECKPOINT_NAMES:
-        path = working_directory / name
-        if path.is_file():
-            storage.upload_file(path, f"{prefix}/{name}", overwrite=True)
+    payload = {
+        **last_payload,
+        "resume_state": {
+            **last_payload["resume_state"],
+            "best": {
+                **last_payload["resume_state"]["best"],
+                "model_state_dict": best["model_state_dict"],
+                "optimizer_state_dict": best["optimizer_state_dict"],
+            },
+        },
+    }
+    destination = f"{_s3_run_prefix(settings)}/running/{WORKING_CHECKPOINT_NAMES[-1]}"
+    scratch_root = REPOSITORY_ROOT / "artifacts"
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="train-mirror-", dir=scratch_root) as directory:
+        path = Path(directory) / WORKING_CHECKPOINT_NAMES[-1]
+        _write_checkpoint(path, payload)
+        storage.upload_file(path, destination, overwrite=True)
 
 
 def _publish_local(
@@ -653,6 +680,9 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
         category_ids = train_dataset.category_ids
         working_directory = _working_directory(settings)
         written_best: dict[str, int] = {}
+        # 마지막으로 남긴 resume_state입니다. S3 게시가 이것을 그대로 써야 backend에
+        # 따라 최종 last checkpoint의 내용이 달라지지 않습니다.
+        latest: dict[str, Any] = {}
 
         def write_checkpoints(
             last: dict[str, Any],
@@ -679,8 +709,9 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
                 },
             }
             _replace_checkpoint(working_directory / "last_checkpoint.pt", payload)
+            latest["resume_state"] = payload["resume_state"]
             if isinstance(storage, S3Storage):
-                _upload_working_checkpoints(storage, working_directory, settings)
+                _mirror_to_s3(storage, payload, best, settings)
 
         progress = ProgressEmitter(settings["run_id"])
         progress.emit(
@@ -711,6 +742,8 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(storage, S3Storage):
         best_payload = _checkpoint_payload(best, settings, class_map, category_ids)
         last_payload = _checkpoint_payload(last, settings, class_map, category_ids)
+        # 로컬은 작업 파일을 그대로 옮기므로 이미 들어 있습니다. S3도 같아야 합니다.
+        last_payload["resume_state"] = latest["resume_state"]
         artifact_uris = _publish_s3(storage, best_payload, last_payload, history, settings)
         # 업로드가 끝났으므로 이 실행의 작업 폴더는 더 이상 이어서 할 대상이 아닙니다.
         shutil.rmtree(_working_directory(settings), ignore_errors=True)
