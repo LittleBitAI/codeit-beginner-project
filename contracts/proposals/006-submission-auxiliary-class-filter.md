@@ -49,7 +49,18 @@ evaluate.submission_excluded_category_ids: [999999]   # 기본값 []
   1부터 붙이므로, 만들어진 뒤에 행을 지우면 번호에 구멍이 생긴다. 대회 요구사항은
   로우 개수만큼의 고유한 값이다.
 
-## validation 지표는 그대로 두기를 바란다
+## 이미지당 detection 상한보다 먼저 걸러 주기를 바란다
+
+`filter_predictions`는 score로 한 번 걸러 정렬한 뒤 이미지당 `max_detections_per_image`
+개만 남긴다. 기본값은 **4**다. 제외를 이 상한보다 **나중에** 적용하면 `기타 알약` 예측이
+4칸 중 일부를 차지한 뒤 버려져, 그 이미지에서 제출되는 실제 예측이 4개보다 줄어든다.
+상한 앞에서 걸러야 4칸을 대회 class로 채울 수 있다. 점수에 직접 영향을 주는 순서다.
+
+## validation 경로에는 적용하지 말아 주기를 바란다
+
+`filter_predictions`는 validation(`pipeline.py`의 첫 호출)과 test(두 번째 호출) 두 곳에서
+쓰인다. 제외는 **test 호출에만** 넘겨야 한다. validation에도 적용하면 아래 지표 항목이
+함께 바뀐다.
 
 `기타 알약`은 학습에 쓰는 실제 class이므로 validation mAP에는 포함되는 것이 맞다. 그
 class의 지표는 "대회 밖 알약을 알약으로 잡아냈는가"를 보여 주는 정보다. 빼야 하는 것은
