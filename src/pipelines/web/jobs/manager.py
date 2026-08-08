@@ -88,6 +88,11 @@ class JobManager:
         self._log_handle: Any = None
         self._stdout_chunks: list[str] = []
         self._loaded = False
+        # 아직 시작하지 않은 대기열입니다. 앞에서부터 하나씩 꺼내 씁니다.
+        self._queue: list[dict[str, Any]] = []
+        # 멈춘 대기열은 앞 학습이 끝나도 다음을 시작하지 않습니다. 사람이 중지를
+        # 눌렀는데 곧바로 다음 학습이 뜨면 멈춘 것이 아니기 때문입니다.
+        self._queue_paused = True
 
     # ------------------------------------------------------------------ 조회
 
@@ -111,6 +116,11 @@ class JobManager:
                     except OSError:
                         pass
                 self._records[record.job_id] = record
+            saved = store.load_queue()
+            self._queue = saved["entries"]
+            # 목록은 살리되 시작은 사람이 시킵니다. 서버가 뜨자마자 GPU 학습이
+            # 저절로 시작되면 곤란합니다.
+            self._queue_paused = saved["paused"]
             self._loaded = True
 
     def list_jobs(self) -> list[JobRecord]:
@@ -137,6 +147,100 @@ class JobManager:
     def logs(self, job_id: str, *, after: int = 0, limit: int = 500) -> dict[str, Any]:
         self.get(job_id)  # 없는 job이면 여기서 404가 납니다.
         return store.read_logs(job_id, after=after, limit=limit)
+
+    # ------------------------------------------------------------------ 대기열
+
+    def queue_entries(self) -> list[dict[str, Any]]:
+        """아직 시작하지 않은 항목을 기다리는 순서대로 돌려줍니다."""
+
+        self.load()
+        with self._lock:
+            return [dict(item) for item in self._queue]
+
+    def queue_paused(self) -> bool:
+        self.load()
+        with self._lock:
+            return self._queue_paused
+
+    def _save_queue(self) -> None:
+        """lock을 쥔 채로 부릅니다."""
+
+        store.save_queue({"entries": [dict(item) for item in self._queue]})
+
+    def enqueue(self, config_id: str, *, access_token: str | None = None) -> JobRecord | None:
+        """설정 하나를 대기열에 넣습니다. 비어 있으면 곧바로 시작합니다.
+
+        시작한 경우에만 `JobRecord`를 돌려줍니다. 뒤에 줄을 선 경우는 `None`입니다.
+        """
+
+        self.load()
+        # 없는 설정은 여기서 걸러야, 자는 동안 조용히 건너뛰는 항목이 생기지 않습니다.
+        config = read_runtime_config(config_id)
+        run_id = str((config.get("train") or {}).get("run_id") or "")
+        with self._lock:
+            self._queue.append(
+                {
+                    "entry_id": uuid4().hex,
+                    "config_id": config_id,
+                    "run_id": run_id,
+                    "queued_at": utc_now_text(),
+                }
+            )
+            self._queue_paused = False
+            self._save_queue()
+        return self._start_next()
+
+    def remove_from_queue(self, entry_id: str) -> None:
+        """아직 시작하지 않은 항목 하나를 뺍니다. 실행 중인 학습은 대상이 아닙니다."""
+
+        self.load()
+        with self._lock:
+            remaining = [item for item in self._queue if item["entry_id"] != entry_id]
+            if len(remaining) == len(self._queue):
+                raise JobNotFoundError("대기열에서 그 항목을 찾을 수 없습니다.")
+            self._queue = remaining
+            self._save_queue()
+
+    def clear_queue(self) -> None:
+        """기다리는 항목을 모두 비웁니다. 실행 중인 학습은 그대로 둡니다."""
+
+        self.load()
+        with self._lock:
+            self._queue = []
+            self._save_queue()
+
+    def resume_queue(self) -> JobRecord | None:
+        """멈춰 있던 대기열을 다시 돌립니다."""
+
+        self.load()
+        with self._lock:
+            self._queue_paused = False
+        return self._start_next()
+
+    def _start_next(self) -> JobRecord | None:
+        """비어 있고 멈추지 않았으면 다음 항목을 시작합니다.
+
+        `start()`가 lock을 다시 잡으므로 lock을 쥐지 않은 상태에서 불러야 합니다.
+        """
+
+        while True:
+            with self._lock:
+                if self._active_job_id is not None or self._queue_paused or not self._queue:
+                    return None
+                entry = self._queue.pop(0)
+                self._save_queue()
+            try:
+                return self.start(entry["config_id"])
+            except JobConflictError:
+                # 그 사이 다른 학습이 시작됐습니다. 이 항목을 되돌리고 물러납니다.
+                with self._lock:
+                    self._queue.insert(0, entry)
+                    self._save_queue()
+                return None
+            except Exception:
+                # 설정을 읽지 못하는 등으로 시작하지 못한 항목은 건너뜁니다. 하나가
+                # 막혀 뒤의 학습이 통째로 밀리면 밤을 버립니다.
+                continue
 
     # ------------------------------------------------------------------ 실행
 
@@ -333,11 +437,20 @@ class JobManager:
         except Exception as error:  # spawn 실패 등
             self._finalize_error(job_id, error)
         finally:
+            cancelled = False
             with self._lock:
                 self._close_log()
                 self._process = None
                 if self._active_job_id == job_id:
                     self._active_job_id = None
+                cancelled = self._cancel_requested
+                if cancelled:
+                    # 중지를 눌렀는데 다음 학습이 곧바로 뜨면 멈춘 것이 아닙니다.
+                    self._queue_paused = True
+            # 실패해도 다음으로 넘어갑니다. 자는 동안 하나가 OOM으로 죽었다고
+            # 나머지가 안 돌면 밤을 통째로 버립니다.
+            if not cancelled:
+                self._start_next()
 
     # ------------------------------------------------------------------ 종료
 

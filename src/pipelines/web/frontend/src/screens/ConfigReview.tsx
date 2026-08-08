@@ -23,6 +23,7 @@ export function ConfigReview({
   const { saved } = useDraft();
   const team = useTeam();
   const [starting, setStarting] = useState(false);
+  const [queueing, setQueueing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   if (!saved) {
@@ -58,6 +59,21 @@ export function ConfigReview({
     `출력 경로 '${String(train.output_dir)}'가 저장소를 벗어나지 않습니다.`,
     train.device === 'cuda' ? 'CUDA를 사용할 수 있습니다.' : 'CPU로 실행합니다.',
   ];
+
+  async function addToQueue() {
+    setQueueing(true);
+    setError(null);
+    try {
+      const queue = await api.addToQueue(saved!.config_id);
+      onStarted();
+      // 비어 있었으면 곧바로 시작되므로 그 학습 화면으로, 줄을 섰으면 개요로 갑니다.
+      navigate(queue.started ? `/monitor/${queue.started.job_id}` : '/');
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : '대기열에 넣지 못했습니다.');
+    } finally {
+      setQueueing(false);
+    }
+  }
 
   async function start() {
     setStarting(true);
@@ -276,6 +292,14 @@ export function ConfigReview({
               style={{ padding: '11px 0', font: `600 12.5px/1 ${font.sans}`, borderRadius: radius.control }}
             >
               {starting ? '시작하는 중…' : '학습 시작'}
+            </Button>
+            {/* 여러 설정을 줄 세워 두고 자러 갈 때 씁니다. 비어 있으면 곧바로 시작합니다. */}
+            <Button
+              disabled={busy || starting || queueing}
+              onClick={() => void addToQueue()}
+              style={{ padding: '9px 0' }}
+            >
+              {queueing ? '넣는 중…' : '대기열에 추가'}
             </Button>
             <Button onClick={() => navigate('/new')} style={{ padding: '9px 0' }}>
               ← 설정으로 돌아가기

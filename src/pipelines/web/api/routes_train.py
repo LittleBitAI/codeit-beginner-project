@@ -153,6 +153,47 @@ def start_job(
     return public_record(record)
 
 
+@router.get("/queue")
+def read_queue() -> dict[str, Any]:
+    """아직 시작하지 않은 학습과, 대기열이 멈춰 있는지를 알려 줍니다."""
+
+    manager = get_manager()
+    return {"entries": manager.queue_entries(), "paused": manager.queue_paused()}
+
+
+@router.post("/queue", status_code=201)
+def add_to_queue(payload: StartJobRequest = Body(...)) -> dict[str, Any]:
+    """설정 하나를 대기열에 넣습니다. 비어 있으면 곧바로 시작합니다."""
+
+    manager = get_manager()
+    started = manager.enqueue(payload.config_id)
+    return {
+        "started": public_record(started) if started is not None else None,
+        "entries": manager.queue_entries(),
+        "paused": manager.queue_paused(),
+    }
+
+
+@router.delete("/queue/{entry_id}")
+def remove_queue_entry(entry_id: str) -> dict[str, Any]:
+    manager = get_manager()
+    manager.remove_from_queue(entry_id)  # 없으면 404
+    return {"entries": manager.queue_entries(), "paused": manager.queue_paused()}
+
+
+@router.post("/queue/resume", status_code=202)
+def resume_queue() -> dict[str, Any]:
+    """중지나 서버 재시작으로 멈춘 대기열을 다시 돌립니다."""
+
+    manager = get_manager()
+    started = manager.resume_queue()
+    return {
+        "started": public_record(started) if started is not None else None,
+        "entries": manager.queue_entries(),
+        "paused": manager.queue_paused(),
+    }
+
+
 @router.get("/jobs/{job_id}")
 def get_job(job_id: str) -> dict[str, Any]:
     return public_record(get_manager().get(job_id))

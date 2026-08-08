@@ -15,11 +15,13 @@ from typing import Any, Iterable
 
 from ..errors import JobNotFoundError
 from ..masking import redact, sanitize_line
-from ..paths import jobs_dir
+from ..paths import jobs_dir, web_state_dir
 from .model import JobRecord
 
 
 __all__ = [
+    "load_queue",
+    "save_queue",
     "append_log",
     "job_directory",
     "load_all_records",
@@ -164,4 +166,47 @@ def make_log_entry(sequence: int, stream_name: str, level: str, text: str, times
         "level": level,
         "text": sanitize_line(text),
         "ts": timestamp,
+    }
+
+
+_QUEUE_NAME = "queue.json"
+
+
+def _queue_path() -> Path:
+    return web_state_dir() / _QUEUE_NAME
+
+
+def save_queue(state: dict[str, Any]) -> None:
+    """대기열을 저장합니다. 서버가 다시 떠도 목록이 남아야 합니다.
+
+    "돌려 놓고 자러 가기"가 이 기능의 용도라, 자는 동안 서버가 한 번 죽었다고
+    아침에 아무것도 남아 있지 않으면 곤란합니다.
+    """
+
+    try:
+        _write_atomic(
+            _queue_path(),
+            json.dumps(state, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        )
+    except OSError:
+        # 대기열을 못 남긴다고 지금 도는 학습을 실패시키지는 않습니다.
+        pass
+
+
+def load_queue() -> dict[str, Any]:
+    """저장된 대기열을 읽습니다. 없거나 깨졌으면 빈 대기열입니다."""
+
+    try:
+        value = json.loads(_queue_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"entries": [], "paused": True}
+    if not isinstance(value, dict):
+        return {"entries": [], "paused": True}
+    entries = value.get("entries")
+    return {
+        "entries": [item for item in entries if isinstance(item, dict)]
+        if isinstance(entries, list)
+        else [],
+        # 서버가 다시 떴을 때 GPU 학습이 저절로 시작되면 곤란하므로 멈춘 채로 읽습니다.
+        "paused": True,
     }

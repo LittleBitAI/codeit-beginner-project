@@ -432,6 +432,22 @@ export interface PerClassSummary {
   unmeasured: PerClassRow[];
 }
 
+/** 아직 시작하지 않은 학습 하나입니다. */
+export interface QueueEntry {
+  entry_id: string;
+  config_id: string;
+  run_id: string;
+  queued_at: string;
+}
+
+export interface QueueState {
+  entries: QueueEntry[];
+  /** 멈춘 대기열은 앞 학습이 끝나도 다음을 시작하지 않습니다. */
+  paused: boolean;
+  /** 대기열에 넣자마자 시작된 학습. 뒤에 줄을 선 경우에는 null입니다. */
+  started?: JobRecord | null;
+}
+
 export interface EvaluationState {
   status: 'idle' | 'running' | 'succeeded' | 'failed';
   job_id?: string | null;

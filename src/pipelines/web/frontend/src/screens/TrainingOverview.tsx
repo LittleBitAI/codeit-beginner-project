@@ -2,7 +2,14 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { api } from '../api/client';
-import type { DataSource, GpuStatus, JobListing, JobRecord, JobStatus } from '../api/types';
+import type {
+  DataSource,
+  GpuStatus,
+  JobListing,
+  JobRecord,
+  JobStatus,
+  QueueState,
+} from '../api/types';
 import { DataSourcePanel } from '../components/DataSourcePanel';
 import {
   AlertRow,
@@ -118,6 +125,8 @@ export function TrainingOverview({
         onSelected={onSourceSelected}
         onPrepared={onPrepared}
       />
+
+      <TrainingQueue />
 
       <Panel
         title="학습 실행"
@@ -250,5 +259,91 @@ function JobRow({ job, onOpen }: { job: JobRecord; onOpen: () => void }) {
         </span>
       ))}
     </div>
+  );
+}
+
+/**
+ * 아직 시작하지 않은 학습들. 여러 설정을 줄 세워 놓고 자러 갈 때 씁니다.
+ *
+ * 앞 학습이 자연스럽게 끝나면 실패했더라도 다음으로 넘어갑니다. 하나가 OOM으로
+ * 죽었다고 나머지가 안 돌면 밤을 통째로 버리기 때문입니다. 대신 사람이 중지를
+ * 누르거나 서버가 다시 뜨면 멈춰 서서, 다시 돌릴지 사람이 정하게 합니다.
+ */
+function TrainingQueue() {
+  const queue = usePolling<QueueState>(() => api.readQueue(), 3000);
+  const [busy, setBusy] = useState(false);
+  const entries = queue.data?.entries ?? [];
+  const paused = Boolean(queue.data?.paused);
+
+  if (entries.length === 0) return null;
+
+  async function act(action: () => Promise<unknown>) {
+    setBusy(true);
+    try {
+      await action();
+      queue.refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel
+      title={`학습 대기열 (${entries.length})`}
+      right={
+        paused ? (
+          <Button
+            kind="primary"
+            disabled={busy}
+            onClick={() => void act(() => api.resumeQueue())}
+          >
+            대기열 다시 돌리기
+          </Button>
+        ) : (
+          <span style={{ font: `400 11px/1 ${font.sans}`, color: color.textMuted }}>
+            앞 학습이 끝나면 위에서부터 차례로 시작합니다
+          </span>
+        )
+      }
+    >
+      {paused && (
+        <div style={{ marginBottom: 10 }}>
+          <AlertRow level="warning" title="대기열이 멈춰 있습니다">
+            중지했거나 서버가 다시 시작돼서 멈췄습니다. 눌러야 다음 학습이 시작됩니다.
+          </AlertRow>
+        </div>
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {entries.map((entry, index) => (
+          <div
+            key={entry.entry_id}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              padding: '7px 10px',
+              border: `1px solid ${color.borderInner}`,
+              borderRadius: 5,
+            }}
+          >
+            <span style={{ font: `600 11px/1 ${font.mono}`, color: color.textMuted, width: 18 }}>
+              {index + 1}
+            </span>
+            <span style={{ font: `600 12px/1 ${font.mono}`, color: color.text, flex: 1 }}>
+              {entry.run_id || '(이름 없음)'}
+            </span>
+            <span style={{ font: `400 10.5px/1 ${font.sans}`, color: color.textMuted }}>
+              {startedAt(entry.queued_at)} 추가
+            </span>
+            <Button
+              disabled={busy}
+              onClick={() => void act(() => api.removeFromQueue(entry.entry_id))}
+            >
+              빼기
+            </Button>
+          </div>
+        ))}
+      </div>
+    </Panel>
   );
 }
