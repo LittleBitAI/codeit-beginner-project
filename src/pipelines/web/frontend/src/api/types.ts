@@ -448,6 +448,19 @@ export interface QueueState {
   started?: JobRecord | null;
 }
 
+/** 중단된 학습을 이어서 시작한 결과입니다. */
+export interface ResumeResult {
+  config_id: string;
+  /** 이어서 하는 실행의 새 이름입니다. 중단된 실행과 섞이지 않게 새로 만듭니다. */
+  run_id: string;
+  resumed_from_job_id: string;
+  /** train이 읽을 checkpoint 경로입니다. */
+  resume_from: string;
+  started?: JobRecord | null;
+  entries: QueueEntry[];
+  paused: boolean;
+}
+
 export interface EvaluationState {
   status: 'idle' | 'running' | 'succeeded' | 'failed';
   job_id?: string | null;

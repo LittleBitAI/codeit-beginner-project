@@ -6,6 +6,7 @@ import type {
   EvaluationState,
   PerClassSummary,
   QueueState,
+  ResumeResult,
   ExperimentComparisonResult,
   ExperimentListing,
   GpuStatus,
@@ -121,6 +122,12 @@ export const api = {
   resumeQueue: () => request<QueueState>('/api/train/queue/resume', { method: 'POST' }),
 
   teamConfig: () => request<TeamConfig>('/api/team/config'),
+
+  resumeJob: (jobId: string, epochs?: number | null) =>
+    request<ResumeResult>(`/api/train/jobs/${jobId}/resume`, {
+      method: 'POST',
+      body: JSON.stringify(epochs == null ? {} : { epochs }),
+    }),
 
   cancelJob: (jobId: string) =>
     request<JobRecord>(`/api/train/jobs/${jobId}/cancel`, { method: 'POST' }),
