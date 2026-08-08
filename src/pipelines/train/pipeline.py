@@ -92,6 +92,8 @@ AUGMENTATION_PRESETS = {
     },
 }
 PRECISION_MODES = ("fp32", "amp")
+# 학습 중 작업 폴더에 두는 파일입니다. 마지막 것이 이어서 학습할 대상입니다.
+WORKING_CHECKPOINT_NAMES = ("best_checkpoint.pt", "last_checkpoint.pt")
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -401,10 +403,28 @@ def _working_directory(settings: Mapping[str, Any]) -> Path:
     return _repo_output(settings["output_dir"]) / f".{settings['run_id']}.partial"
 
 
+def _s3_run_prefix(settings: Mapping[str, Any]) -> str:
+    return f"{settings['output_prefix']}/{settings['run_id']}"
+
+
 def _reject_existing_run(settings: Mapping[str, Any], storage: Storage) -> None:
     """이름 충돌을 몇 시간 학습한 뒤가 아니라 시작 전에 알려 줍니다."""
 
-    if not isinstance(storage, S3Storage) and _final_directory(settings).exists():
+    if isinstance(storage, S3Storage):
+        prefix = _s3_run_prefix(settings)
+        if storage.exists(f"{prefix}/completed.json"):
+            raise FileExistsError(
+                f"training run artifact already exists: {settings['run_id']}"
+            )
+        running = f"{prefix}/running/{WORKING_CHECKPOINT_NAMES[-1]}"
+        if storage.exists(running):
+            # 이 key를 덮어쓰면 중단된 학습의 유일한 사본이 사라집니다. Colab은
+            # runtime이 바뀌면 로컬 작업 폴더가 없으므로 S3를 직접 봐야 압니다.
+            raise FileExistsError(
+                "an interrupted run with the same run_id is still on S3; resume from "
+                f"it or remove it: {running}"
+            )
+    elif _final_directory(settings).exists():
         raise FileExistsError(
             f"training run artifact already exists: {settings['run_id']}"
         )
@@ -527,8 +547,8 @@ def _upload_working_checkpoints(
     key가 하나이므로 실행당 남는 object는 epoch 수와 무관하게 두 개입니다.
     """
 
-    prefix = f"{settings['output_prefix']}/{settings['run_id']}/running"
-    for name in ("best_checkpoint.pt", "last_checkpoint.pt"):
+    prefix = f"{_s3_run_prefix(settings)}/running"
+    for name in WORKING_CHECKPOINT_NAMES:
         path = working_directory / name
         if path.is_file():
             storage.upload_file(path, f"{prefix}/{name}", overwrite=True)
@@ -569,7 +589,7 @@ def _publish_s3(
     history: list[dict[str, Any]],
     settings: Mapping[str, Any],
 ) -> dict[str, str]:
-    prefix = f"{settings['output_prefix']}/{settings['run_id']}"
+    prefix = _s3_run_prefix(settings)
     completion_destination = f"{prefix}/completed.json"
     if storage.exists(completion_destination):
         raise FileExistsError(f"training run artifact already exists: {settings['run_id']}")

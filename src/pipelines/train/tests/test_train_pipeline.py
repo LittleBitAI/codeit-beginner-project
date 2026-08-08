@@ -1584,6 +1584,58 @@ def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
     assert calls == {"autocast": 2, "backward_and_step": 1}
 
 
+def _s3_storage_with(existing: set[str]) -> S3Storage:
+    """주어진 key만 있는 것처럼 구는 S3Storage를 만듭니다."""
+
+    client = Mock()
+
+    def head_object(**request):
+        if request["Key"] in existing:
+            return {}
+        raise ClientError(
+            {"Error": {"Code": "404", "Message": "missing"}}, "HeadObject"
+        )
+
+    client.head_object.side_effect = head_object
+    return S3Storage("bucket", client=client)
+
+
+def _s3_settings(tmp_path) -> dict:
+    return {
+        "run_id": "colab-run",
+        "output_prefix": "experiments/completed",
+        "output_dir": _relative(tmp_path / "outputs"),
+    }
+
+
+def test_s3_run_refuses_to_overwrite_an_interrupted_run_of_the_same_name(tmp_path):
+    """Colab은 runtime이 바뀌면 로컬 작업 폴더가 없습니다.
+
+    그때 같은 run_id로 다시 돌리면 S3의 running checkpoint를 덮어쓰게 되는데, 그게
+    중단된 학습의 유일한 사본입니다. 로컬을 볼 수 없으니 S3를 직접 봐야 합니다.
+    """
+
+    storage = _s3_storage_with(
+        {"experiments/completed/colab-run/running/last_checkpoint.pt"}
+    )
+
+    with pytest.raises(FileExistsError, match="still on S3"):
+        pipeline._reject_existing_run(_s3_settings(tmp_path), storage)
+
+
+def test_s3_run_reports_a_finished_run_of_the_same_name_before_training(tmp_path):
+    """몇 시간 학습한 뒤가 아니라 시작하기 전에 알려 줘야 합니다."""
+
+    storage = _s3_storage_with({"experiments/completed/colab-run/completed.json"})
+
+    with pytest.raises(FileExistsError, match="already exists: colab-run"):
+        pipeline._reject_existing_run(_s3_settings(tmp_path), storage)
+
+
+def test_s3_run_starts_when_the_run_id_is_free(tmp_path):
+    pipeline._reject_existing_run(_s3_settings(tmp_path), _s3_storage_with(set()))
+
+
 def test_s3_publisher_returns_attempt_uris_and_writes_completion_marker(
     tmp_path, monkeypatch
 ):
