@@ -7,6 +7,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -411,6 +412,22 @@ def _working_directory(settings: Mapping[str, Any]) -> Path:
     return _repo_output(settings["output_dir"]) / f".{settings['run_id']}.partial"
 
 
+def _validate_working_directory(path: Path) -> None:
+    """작업 폴더가 link를 거쳐 저장소 밖으로 나가지 않는지 확인합니다."""
+
+    if os.path.lexists(path):
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+        reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if path.is_symlink() or attributes & reparse_point:
+            raise ValueError(
+                "training working directory must not be a symbolic link or reparse point"
+            )
+    try:
+        path.resolve(strict=False).relative_to(REPOSITORY_ROOT)
+    except ValueError as error:
+        raise ValueError("training working directory leaves the repository") from error
+
+
 @contextmanager
 def _claim_run(settings: Mapping[str, Any]) -> Iterator[None]:
     """같은 이름의 local 학습 하나만 입력을 읽도록 원자적으로 표시합니다."""
@@ -429,6 +446,32 @@ def _claim_run(settings: Mapping[str, Any]) -> Iterator[None]:
         yield
     finally:
         claim.unlink(missing_ok=True)
+
+
+@contextmanager
+def _own_working_directory(settings: Mapping[str, Any]) -> Iterator[Path]:
+    """검사한 local 작업 폴더를 원자적으로 만들고 빈 폴더만 정리합니다."""
+
+    working = _working_directory(settings)
+    _validate_working_directory(working)
+    try:
+        working.mkdir()
+    except FileExistsError as error:
+        _validate_working_directory(working)
+        raise FileExistsError(
+            "an interrupted run with the same run_id is still on disk; resume from "
+            f"it or remove it: {working.relative_to(REPOSITORY_ROOT).as_posix()}"
+        ) from error
+    try:
+        yield working
+    finally:
+        try:
+            working.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # checkpoint가 하나라도 생긴 중단 실행은 이어서 할 수 있도록 남깁니다.
+            pass
 
 
 def _s3_run_prefix(settings: Mapping[str, Any]) -> str:
@@ -457,7 +500,8 @@ def _reject_existing_run(settings: Mapping[str, Any], storage: Storage) -> None:
             f"training run artifact already exists: {settings['run_id']}"
         )
     working = _working_directory(settings)
-    if working.is_dir() and any(working.iterdir()):
+    _validate_working_directory(working)
+    if os.path.lexists(working):
         # 여기를 덮어쓰면 이 기능이 지키려던 바로 그 파일이 사라집니다.
         location = working.relative_to(REPOSITORY_ROOT).as_posix()
         raise FileExistsError(
@@ -643,6 +687,7 @@ def _publish_local(
 ) -> dict[str, str]:
     """작업 폴더에 이미 있는 checkpoint에 history를 더해 폴더째 옮깁니다."""
 
+    _validate_working_directory(working_directory)
     final_directory = _final_directory(settings)
     # 학습이 몇 시간 걸리는 동안 같은 이름이 생겼을 수 있어 옮기기 직전에 다시 봅니다.
     if final_directory.exists():
@@ -709,13 +754,17 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
     settings = _settings(config)
     data = _data_inputs(config)
     storage = create_storage(config)
-    _reject_existing_run(settings, storage)
     with _claim_run(settings):
-        return _execute_claimed(settings, data, storage)
+        _reject_existing_run(settings, storage)
+        with _own_working_directory(settings) as working_directory:
+            return _execute_claimed(settings, data, storage, working_directory)
 
 
 def _execute_claimed(
-    settings: dict[str, Any], data: dict[str, str], storage: Storage
+    settings: dict[str, Any],
+    data: dict[str, str],
+    storage: Storage,
+    working_directory: Path,
 ) -> dict[str, Any]:
     class_map = load_class_map(data["class_map_uri"], storage)
     dataset_summary = read_json_artifact(data["dataset_summary_uri"], storage)
@@ -740,7 +789,6 @@ def _execute_claimed(
         if train_dataset.category_ids != validation_dataset.category_ids:
             raise ValueError("train and validation COCO category ids must match")
         category_ids = train_dataset.category_ids
-        working_directory = _working_directory(settings)
         written_best: dict[str, int] = {}
         # 마지막으로 남긴 resume_state입니다. S3 게시가 이것을 그대로 써야 backend에
         # 따라 최종 last checkpoint의 내용이 달라지지 않습니다.
@@ -756,9 +804,7 @@ def _execute_claimed(
 
             nonlocal s3_mirror_owned
 
-            # 폴더는 첫 epoch을 마친 뒤에 만듭니다. 학습 전에 터진 실행은 아무것도
-            # 남기지 않는다는 기존 성질을 그대로 지킵니다.
-            working_directory.mkdir(parents=True, exist_ok=True)
+            _validate_working_directory(working_directory)
             payload = _checkpoint_payload(last, settings, class_map, category_ids)
             payload["resume_state"] = {
                 **resume_state,

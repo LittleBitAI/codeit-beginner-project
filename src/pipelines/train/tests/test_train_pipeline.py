@@ -1,6 +1,9 @@
 import copy
 import io
 import json
+import os
+import subprocess
+import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -1079,6 +1082,48 @@ def test_same_local_run_id_is_claimed_before_reading_inputs(
     assert "already active" in second_result["message"]
     assert calls == 1
     assert first_result["status"] == "ok", first_result["message"]
+
+
+def test_run_rejects_a_working_directory_link_before_reading_inputs(
+    local_config, monkeypatch
+):
+    """외부를 가리키는 작업 폴더로 checkpoint가 저장소 밖에 쓰이면 안 됩니다."""
+
+    working = _working_directory(local_config)
+    working.parent.mkdir(parents=True, exist_ok=True)
+    inputs_read = False
+
+    def record_input_read(*args, **kwargs):
+        nonlocal inputs_read
+        inputs_read = True
+        raise RuntimeError("작업 폴더 검사 전에 입력을 읽었습니다.")
+
+    monkeypatch.setattr(pipeline, "load_class_map", record_input_read)
+    with tempfile.TemporaryDirectory(prefix="train-working-link-") as directory:
+        target = Path(directory)
+        if os.name == "nt":
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(working), str(target)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+        else:
+            working.symlink_to(target, target_is_directory=True)
+        try:
+            result = train.run(local_config)
+
+            assert result["status"] == "error"
+            assert "working directory" in result["message"]
+            assert not inputs_read
+            assert not any(target.iterdir())
+        finally:
+            if working.exists():
+                if os.name == "nt":
+                    os.rmdir(working)
+                else:
+                    working.unlink()
 
 
 def test_run_refuses_to_start_when_an_interrupted_run_is_still_on_disk(local_config):
