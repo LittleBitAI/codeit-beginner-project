@@ -34,6 +34,7 @@ Published files are never overwritten, and a run stops before its first batch wh
 - Supported optimizers are AdamW, SGD, and Adam. A missing optimizer means legacy SGD, while new callers should explicitly send AdamW.
 - Reject optimizer-specific settings that the selected optimizer does not use; never ignore them silently.
 - Augmentation defaults to `none`. `pill_basic` applies only to the train split and must update bounding boxes with geometric transforms.
+- `precision` is `fp32`, `amp`, `fp16`, or `bf16`; all but `fp32` need CUDA. `amp` takes native bf16 else fp16 plus a scaler, and `bf16` is refused rather than emulated.
 - Checkpoints record the normalized model, optimizer, augmentation, and seed settings under `training_config`. Keep that metadata JSON-safe and free of storage credentials.
 - `resume_from` continues an interrupted run from its self-contained `last_checkpoint.pt`, including the best epoch from before interruption. `epochs` counts the whole run, not the part that remains.
 - Every reason a resume cannot work is checked before the first batch: a missing `resume_state`, a history with gaps, different architecture, class map, or optimizer settings, missing AMP scaler state, `epochs` no larger than the resumed epoch, and patience already used up.

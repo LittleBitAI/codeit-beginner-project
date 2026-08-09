@@ -391,7 +391,7 @@ def test_explicit_adamw_run_records_effective_reproducibility_settings(local_con
         ("optimizer", "Lion", "train.optimizer must be one of"),
         ("architecture", "unknown_detector", "train.architecture must be one of"),
         ("augmentation", {"preset": "unsafe_crop"}, "augmentation.preset must be one of"),
-        ("precision", "bf16", "train.precision must be one of"),
+        ("precision", "fp8", "train.precision must be one of"),
         ("weight_decay", -1.0, "train.weight_decay must be a number"),
     ],
 )
@@ -473,15 +473,6 @@ def test_adam_beta_bounds_are_validated_when_the_setting_is_meaningful(local_con
     assert "train.beta1 must be a number >= 0.0 and < 1.0" in result["message"]
 
 
-def test_amp_precision_requires_cuda(local_config):
-    local_config["train"]["precision"] = "amp"
-
-    result = train.run(local_config)
-
-    assert result["status"] == "error"
-    assert "train.precision='amp' requires train.device='cuda'" in result["message"]
-
-
 @pytest.mark.parametrize(
     ("bf16_supported", "dtype", "grad_scaler"),
     [(True, "bf16", False), (False, "fp16", True)],
@@ -503,6 +494,93 @@ def test_amp_precision_chooses_only_native_bf16(
         "grad_scaler": grad_scaler,
     }
     support.assert_called_once_with(including_emulation=False)
+
+
+@pytest.mark.parametrize("mode", ["amp", "fp16", "bf16"])
+def test_every_mixed_precision_mode_requires_cuda(local_config, mode):
+    """절반 정밀도는 CUDA에서만 의미가 있습니다. CPU면 시작 전에 막습니다."""
+
+    local_config["train"]["precision"] = mode
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert f"train.precision='{mode}' requires train.device='cuda'" in result["message"]
+
+
+def test_fp16_can_be_chosen_directly_and_never_asks_about_bf16(monkeypatch):
+    """T4처럼 bf16이 없는 GPU에서 쓸 수 있는, 고르면 그대로 되는 선택지입니다.
+
+    fp16은 어느 CUDA GPU에서나 되므로 bf16 지원 여부를 물어볼 이유가 없습니다.
+    """
+
+    support = Mock(return_value=False)
+    monkeypatch.setattr(pipeline.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(pipeline.torch.cuda, "is_bf16_supported", support)
+
+    settings = pipeline._settings({"train": {"device": "cuda", "precision": "fp16"}})
+
+    assert settings["precision"] == {
+        "mode": "fp16",
+        "dtype": "fp16",
+        "grad_scaler": True,
+    }
+    support.assert_not_called()
+
+
+def test_bf16_is_accepted_on_a_gpu_that_supports_it_natively(monkeypatch):
+    monkeypatch.setattr(pipeline.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        pipeline.torch.cuda, "is_bf16_supported", Mock(return_value=True)
+    )
+
+    settings = pipeline._settings({"train": {"device": "cuda", "precision": "bf16"}})
+
+    assert settings["precision"] == {
+        "mode": "bf16",
+        "dtype": "bf16",
+        "grad_scaler": False,
+    }
+
+
+def test_bf16_is_refused_on_a_gpu_that_cannot_do_it_natively(monkeypatch):
+    """T4에서 bf16을 고르면 조용히 느려지는 대신 이유를 말하고 멈춥니다.
+
+    emulation으로 도는 bf16은 밤새 돌린 학습을 통째로 버리게 만들 만큼 느립니다.
+    """
+
+    monkeypatch.setattr(pipeline.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        pipeline.torch.cuda, "is_bf16_supported", Mock(return_value=False)
+    )
+
+    with pytest.raises(ValueError, match="native bfloat16"):
+        pipeline._settings({"train": {"device": "cuda", "precision": "bf16"}})
+
+
+def test_native_bf16_probe_falls_back_when_torch_cannot_answer(monkeypatch):
+    """``including_emulation``이 없는 옛 torch에서도 emulation을 골라 주면 안 됩니다.
+
+    그 인자가 없는 torch의 ``is_bf16_supported()``는 T4에서도 True를 돌려줍니다.
+    그대로 믿으면 T4가 bf16 emulation으로 학습합니다. 인자를 거부하면 compute
+    capability로 직접 판단합니다.
+    """
+
+    def old_torch(*_args, **kwargs):
+        if "including_emulation" in kwargs:
+            raise TypeError("unexpected keyword argument 'including_emulation'")
+        return True
+
+    monkeypatch.setattr(pipeline.torch.cuda, "is_bf16_supported", old_torch)
+    monkeypatch.setattr(
+        pipeline.torch.cuda, "get_device_capability", lambda: (7, 5)
+    )
+    assert pipeline._native_bf16_supported() is False
+
+    monkeypatch.setattr(
+        pipeline.torch.cuda, "get_device_capability", lambda: (8, 6)
+    )
+    assert pipeline._native_bf16_supported() is True
 
 
 def _progress_events(captured_stderr: str) -> list[dict]:

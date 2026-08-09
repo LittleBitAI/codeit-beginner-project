@@ -28,6 +28,77 @@ def smi_available(monkeypatch):
     monkeypatch.setattr(gpu, "_resolve_nvidia_smi", lambda: "/usr/bin/nvidia-smi")
 
 
+# --- bf16 지원 여부 ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("compute_cap", "supported"),
+    [
+        ("8.6\n", True),  # RTX 3080 (Ampere)
+        ("7.5\n", False),  # T4 (Turing) — bf16은 emulation으로만 됩니다
+    ],
+)
+def test_native_bf16_comes_from_compute_capability(
+    monkeypatch, smi_available, compute_cap, supported
+):
+    """bf16을 하드웨어로 처리하는 것은 Ampere(8.0)부터입니다.
+
+    ``torch.cuda.is_bf16_supported()``는 CUDA context를 만들어 VRAM을 붙잡으므로,
+    별도 process인 nvidia-smi에게 묻습니다.
+    """
+
+    monkeypatch.setattr(
+        gpu, "run_nvidia_smi_compute_cap", lambda executable: completed(compute_cap)
+    )
+
+    assert gpu.native_bf16_supported() is supported
+
+
+def test_native_bf16_is_unknown_without_nvidia_smi(monkeypatch):
+    """모르면 모른다고 답합니다. 모르는 것을 '지원 안 함'으로 세면 안 됩니다.
+
+    Colab처럼 실제로는 bf16이 되는 곳에서 저장 자체를 막게 됩니다.
+    """
+
+    monkeypatch.setattr(gpu, "_resolve_nvidia_smi", lambda: None)
+
+    assert gpu.native_bf16_supported() is None
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        lambda executable: completed("", returncode=9),
+        lambda executable: completed("[N/A]\n"),
+        lambda executable: (_ for _ in ()).throw(FileNotFoundError("nvidia-smi")),
+    ],
+)
+def test_native_bf16_is_unknown_when_nvidia_smi_cannot_answer(
+    monkeypatch, smi_available, outcome
+):
+    monkeypatch.setattr(gpu, "run_nvidia_smi_compute_cap", outcome)
+
+    assert gpu.native_bf16_supported() is None
+
+
+def test_native_bf16_probe_never_touches_torch(monkeypatch, smi_available):
+    """torch를 건드리면 CUDA context가 생겨 학습 child가 쓸 VRAM을 뺏습니다."""
+
+    exploding = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_bf16_supported=lambda **_: pytest.fail("torch를 건드렸습니다"),
+            get_device_capability=lambda: pytest.fail("torch를 건드렸습니다"),
+            is_available=lambda: pytest.fail("torch를 건드렸습니다"),
+        )
+    )
+    monkeypatch.setitem(__import__("sys").modules, "torch", exploding)
+    monkeypatch.setattr(
+        gpu, "run_nvidia_smi_compute_cap", lambda executable: completed("7.5\n")
+    )
+
+    assert gpu.native_bf16_supported() is False
+
+
 # --- 정상 조회 --------------------------------------------------------------
 
 

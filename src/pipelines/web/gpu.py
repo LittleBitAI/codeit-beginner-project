@@ -20,7 +20,13 @@ from .masking import sanitize_line
 from .paths import repository_root
 
 
-__all__ = ["cuda_is_available", "probe", "run_nvidia_smi"]
+__all__ = [
+    "cuda_is_available",
+    "native_bf16_supported",
+    "probe",
+    "run_nvidia_smi",
+    "run_nvidia_smi_compute_cap",
+]
 
 
 NVIDIA_SMI_QUERY = (
@@ -28,6 +34,10 @@ NVIDIA_SMI_QUERY = (
 )
 NVIDIA_SMI_TIMEOUT_SECONDS = 5
 _NOT_AVAILABLE = {"[n/a]", "n/a", "[not supported]", "not supported", ""}
+
+# bf16을 하드웨어로 처리하기 시작한 세대입니다. Ampere가 8.0, 그 앞의 Turing(T4)은 7.5라
+# bf16이 emulation으로만 됩니다.
+NATIVE_BF16_COMPUTE_CAPABILITY = 8
 
 
 def _now() -> str:
@@ -101,6 +111,50 @@ def run_nvidia_smi(executable: str) -> subprocess.CompletedProcess[str]:
         errors="replace",
         timeout=NVIDIA_SMI_TIMEOUT_SECONDS,
     )
+
+
+def run_nvidia_smi_compute_cap(executable: str) -> subprocess.CompletedProcess[str]:
+    """GPU의 compute capability만 묻습니다. shell을 쓰지 않습니다."""
+
+    return subprocess.run(
+        [executable, "--query-gpu=compute_cap", "--format=csv,noheader,nounits"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=NVIDIA_SMI_TIMEOUT_SECONDS,
+    )
+
+
+def native_bf16_supported() -> bool | None:
+    """이 컴퓨터의 GPU가 bf16을 하드웨어로 처리하는지 봅니다.
+
+    ``torch.cuda.is_bf16_supported()``는 CUDA를 초기화하면서 VRAM을 수백 MB 영구히
+    잡아, 정작 학습 child process가 그만큼 쓰지 못하게 됩니다. 이 module의 다른
+    함수들과 같은 이유로 여기서도 torch를 건드리지 않고, 별도 process인 nvidia-smi
+    에게 compute capability를 묻습니다.
+
+    알 수 없으면 ``None``입니다. 모르는 것을 "지원하지 않음"으로 세면 nvidia-smi가
+    없는 컴퓨터에서 실제로는 되는 bf16까지 막게 되므로, 그때는 GPU를 직접 보는
+    train이 판단하게 둡니다.
+    """
+
+    executable = _resolve_nvidia_smi()
+    if executable is None:
+        return None
+    try:
+        completed = run_nvidia_smi_compute_cap(executable)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+
+    for line in (completed.stdout or "").splitlines():
+        capability = _parse_number(line.split(".")[0])
+        if capability is not None:
+            # GPU가 여럿이면 첫 번째를 봅니다. 학습도 첫 번째에서 돕니다.
+            return capability >= NATIVE_BF16_COMPUTE_CAPABILITY
+    return None
 
 
 def _parse_number(value: str) -> int | None:
