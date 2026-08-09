@@ -261,6 +261,7 @@ def test_public_config_never_contains_credentials():
         "user_pool_client_id",
         "cognito_domain",
         "actor",
+        "unattended_actor",
     }
     assert not any("secret" in key or "credential" in key for key in public)
 
@@ -289,6 +290,7 @@ def test_team_config_endpoint_is_disabled_by_default(client):
         "user_pool_client_id": None,
         "cognito_domain": None,
         "actor": None,
+        "unattended_actor": None,
     }
 
 
@@ -389,3 +391,149 @@ def test_other_http_failures_are_still_connection_errors(monkeypatch):
         _transport().execute("query { __typename }", {}, access_token="good-token")
 
     assert not isinstance(error.value, TeamSyncAuthError)
+
+
+# --- 밤새 도는 대기열: 만료된 token을 IAM으로 대신하기 ---------------------
+
+
+class RefusingThenAcceptingTransport(FakeTransport):
+    """Cognito token은 거절하고 IAM은 받아들이는 AppSync를 흉내 냅니다.
+
+    실제 AppSync가 만료된 access token에 401을 주고, 같은 mutation을 SigV4로 보내면
+    받아 주는 상황과 같습니다.
+    """
+
+    def execute(self, query, variables, *, access_token=None, iam=False):
+        if access_token:
+            raise TeamSyncAuthError("로그인이 만료됐습니다.")
+        return super().execute(query, variables, access_token=access_token, iam=iam)
+
+
+def _create_run(sync: TeamSync, token: str | None) -> str | None:
+    return sync.create_run(
+        access_token=token,
+        local_job_id="j" * 32,
+        run_id="overnight-2",
+        settings={"epochs": 1},
+        data_inputs={},
+    )
+
+
+def test_an_expired_queue_token_falls_back_to_iam_when_an_unattended_actor_is_named():
+    """밤새 도는 대기열이 한 시간 뒤 멈추지 않게 합니다.
+
+    Cognito access token은 기본 한 시간만 삽니다. 그런데 대기열은 앞 학습이 끝난
+    뒤에야 다음 항목을 시작하므로, 학습이 한 시간을 넘기면 저장해 둔 token은 반드시
+    죽어 있습니다. 그러면 사람이 아침에 버튼을 눌러 줄 때까지 아무것도 돌지 않습니다.
+
+    진행 상황과 로그는 이미 IAM으로 올라가고 있어 이 컴퓨터의 AWS credential은
+    항상 유효합니다. 시작 기록만 브라우저 token을 고집할 이유가 없으므로, 이름을
+    지정해 둔 경우에 한해 IAM으로 대신 기록합니다.
+    """
+
+    transport = RefusingThenAcceptingTransport()
+    config = TeamSyncConfig(
+        **{**enabled_config().__dict__, "unattended_actor_name": "야간 대기열"}
+    )
+    sync = TeamSync(config, transport=transport)
+
+    cloud_run_id = _create_run(sync, "expired-token")
+
+    assert cloud_run_id is not None
+    assert len(transport.calls) == 1  # token 시도는 거절돼 기록되지 않았습니다
+    fallback = transport.calls[0]
+    assert fallback["iam"] is True
+    assert fallback["access_token"] is None
+    # 누가 돌렸는지는 남겨야 합니다. 이름 없이 남은 기록은 팀 화면에서 쓸모가 없습니다.
+    assert fallback["variables"]["input"]["actorName"] == "야간 대기열"
+
+
+def test_an_expired_token_still_fails_when_no_unattended_actor_is_named():
+    """이름을 지정하지 않았으면 조용히 다른 사람으로 기록하지 않습니다.
+
+    누구의 학습인지 지어내는 것보다 멈춰 서서 다시 로그인하라고 하는 편이 낫습니다.
+    """
+
+    transport = RefusingThenAcceptingTransport()
+    sync = TeamSync(enabled_config(), transport=transport)
+
+    with pytest.raises(TeamSyncAuthError):
+        _create_run(sync, "expired-token")
+
+    assert transport.calls == []
+
+
+def test_a_valid_token_never_reaches_the_iam_fallback():
+    """로그인이 살아 있으면 그 사람 이름으로 기록되어야 합니다."""
+
+    transport = FakeTransport()
+    config = TeamSyncConfig(
+        **{**enabled_config().__dict__, "unattended_actor_name": "야간 대기열"}
+    )
+    sync = TeamSync(config, transport=transport)
+
+    assert _create_run(sync, "good-token") is not None
+
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["access_token"] == "good-token"
+    assert transport.calls[0]["iam"] is False
+    # token이 있으면 claims가 이깁니다. 이름을 같이 보내면 안 됩니다.
+    assert "actorName" not in transport.calls[0]["variables"]["input"]
+
+
+def test_the_unattended_name_never_removes_the_login_gate():
+    """무인용 이름을 켜도 로그인 화면은 그대로 있어야 합니다.
+
+    화면은 `config.actor`가 있으면 "여기는 로그인할 수 없는 환경"으로 읽고 로그인
+    관문을 걷어 냅니다(`TeamGate.tsx`). Colab에는 그것이 맞지만, 로그인이 되는 PC에서
+    밤샘 대기열을 켜자고 그 값을 쓰면 사람이 로그인을 잊은 채로 쓰게 되고 학습이
+    본인 이름 대신 그 이름으로 기록됩니다. 두 값을 나눠 둔 이유가 이것이라, 새 값이
+    `actor`로 새어 나가지 않는지 여기서 지킵니다.
+    """
+
+    config = TeamSyncConfig.from_environment(
+        {
+            "PILL_TEAM_SYNC_ENABLED": "true",
+            "PILL_TEAM_ID": "pill-team",
+            "PILL_TEAM_APPSYNC_URL": "https://example/graphql",
+            "PILL_TEAM_COGNITO_USER_POOL_ID": "pool",
+            "PILL_TEAM_COGNITO_CLIENT_ID": "client",
+            "PILL_TEAM_COGNITO_DOMAIN": "domain",
+            "PILL_TEAM_UNATTENDED_ACTOR": "다솔 야간 대기열",
+        }
+    )
+
+    assert config.unattended_actor_name == "다솔 야간 대기열"
+    assert config.actor_name is None
+    # 화면이 관문을 여닫는 데 쓰는 값입니다. 여기 묻으면 로그인이 사라집니다.
+    assert config.public_dict()["actor"] is None
+    assert config.public_dict()["unattended_actor"] == "다솔 야간 대기열"
+
+
+def test_colab_keeps_using_the_actor_name_without_a_token():
+    """Colab은 token 자체가 없습니다. 기존 경로가 그대로 열려 있어야 합니다."""
+
+    transport = FakeTransport()
+    config = TeamSyncConfig(**{**enabled_config().__dict__, "actor_name": "지현 (Colab)"})
+    sync = TeamSync(config, transport=transport)
+
+    assert _create_run(sync, None) is not None
+
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["iam"] is True
+    assert transport.calls[0]["variables"]["input"]["actorName"] == "지현 (Colab)"
+    # Colab 화면은 로그인 관문을 건너뛰어야 합니다.
+    assert config.public_dict()["actor"] == "지현 (Colab)"
+
+
+def test_the_colab_name_alone_does_not_open_the_expired_token_fallback():
+    """두 값을 나눈 만큼, Colab용 이름이 만료 token을 대신 처리하지는 않습니다."""
+
+    transport = RefusingThenAcceptingTransport()
+    config = TeamSyncConfig(**{**enabled_config().__dict__, "actor_name": "지현 (Colab)"})
+    sync = TeamSync(config, transport=transport)
+
+    with pytest.raises(TeamSyncAuthError):
+        _create_run(sync, "expired-token")
+
+    assert transport.calls == []
