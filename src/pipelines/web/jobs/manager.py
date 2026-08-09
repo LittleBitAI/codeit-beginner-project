@@ -79,6 +79,9 @@ class JobManager:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        # 대기열에서 다음 항목을 꺼내 시작하는 구간 전체를 한 번에 하나만 지나갑니다.
+        # `_lock`과 달리 `start()`가 끝날 때까지 놓지 않으므로 순서가 뒤집히지 않습니다.
+        self._start_lock = threading.Lock()
         self._records: dict[str, JobRecord] = {}
         self._active_job_id: str | None = None
         self._process: subprocess.Popen[str] | None = None
@@ -221,11 +224,32 @@ class JobManager:
             self._queue_access_tokens.clear()
             self._save_queue()
 
-    def resume_queue(self) -> JobRecord | None:
-        """멈춰 있던 대기열을 다시 돌립니다."""
+    def resume_queue(self, *, access_token: str | None = None) -> JobRecord | None:
+        """멈춰 있던 대기열을 다시 돌립니다.
+
+        받은 token을 기다리는 항목 **전체에 덮어씁니다.** 두 가지를 한꺼번에 처리해야
+        하기 때문입니다.
+
+        하나는 서버 재시작입니다. memory에만 두던 token이 사라지므로 항목에 token이
+        아예 없습니다. 첫 항목에만 붙이면 그것이 끝난 뒤 다음 항목에서 또 멈춰, 밤새
+        돌리라고 만든 목록을 사람이 하나씩 눌러 깨워야 합니다.
+
+        다른 하나는 **만료**입니다. Cognito access token의 수명은 기본 한 시간이라
+        앞 학습이 그보다 길면 다음 항목이 쥔 token은 이미 죽어 있습니다. AppSync가
+        401로 거절하면 대기열은 멈추면서 그 만료된 token을 도로 항목에 붙여 둡니다.
+        여기서 비어 있을 때만 채우면 죽은 token이 살아남아, 사람이 새로 로그인해
+        다시 돌리기를 눌러도 같은 401이 반복됩니다. 서버를 다시 띄우기 전에는
+        복구할 방법이 없어집니다.
+
+        덮어써도 되는 이유는 다시 돌리기를 누른 사람이 곧 그 학습들을 시작한
+        사람이기 때문입니다. 팀 기록에도 그 사람으로 남는 것이 맞습니다.
+        """
 
         self.load()
         with self._lock:
+            if access_token:
+                for item in self._queue:
+                    self._queue_access_tokens[item["entry_id"]] = access_token
             self._queue_paused = False
         return self._start_next()
 
@@ -233,7 +257,23 @@ class JobManager:
         """비어 있고 멈추지 않았으면 다음 항목을 시작합니다.
 
         `start()`가 lock을 다시 잡으므로 lock을 쥐지 않은 상태에서 불러야 합니다.
+
+        꺼내기와 시작 사이를 `_start_lock`으로 묶습니다. 항목을 꺼내는 동안만 `_lock`을
+        쥐면, 앞 학습이 끝난 thread가 두 번째를 꺼내 아직 `start()`에 닿기 전에, 세 번째를
+        넣는 thread가 "지금 도는 학습이 없다"를 보고 세 번째를 먼저 시작할 수 있습니다.
+        진 쪽은 `JobConflictError`를 받고 자기 항목을 맨 앞으로 되돌리므로 아무것도
+        잃지는 않지만, 순서가 뒤집힙니다. 밤새 돌리려고 정해 둔 차례가 그대로 지켜지지
+        않으면 대기열을 쓰는 이유가 없습니다.
+
+        `_start_lock`을 먼저 잡고 그 안에서 `_lock`을 잡습니다. `enqueue`·`resume_queue`·
+        job thread 모두 `_lock`을 놓은 뒤에 이 함수를 부르므로 반대 순서는 생기지 않습니다.
         """
+
+        with self._start_lock:
+            return self._start_next_locked()
+
+    def _start_next_locked(self) -> JobRecord | None:
+        """`_start_lock`을 쥔 채로만 부릅니다."""
 
         while True:
             with self._lock:

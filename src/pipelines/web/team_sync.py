@@ -201,6 +201,15 @@ class GraphQLTransport:
 
         try:
             response = httpx.post(self.config.endpoint, content=body, headers=headers, timeout=15.0)
+            # 만료된 Cognito token에 AppSync는 401 UnauthorizedException을 돌려줍니다.
+            # 그것까지 "연결하지 못했습니다"로 옮기면, 다시 로그인하면 되는 상황에서
+            # network와 서버를 뒤지게 됩니다. 대기열은 이 오류를 만난 자리에서 멈추므로
+            # 무엇을 해야 풀리는지가 메시지에 담겨야 합니다.
+            if response.status_code in {401, 403}:
+                raise TeamSyncAuthError(
+                    "팀 기록 로그인이 만료되었거나 거부되었습니다. 다시 로그인한 뒤"
+                    " 대기열을 다시 돌려 주세요."
+                )
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as error:
