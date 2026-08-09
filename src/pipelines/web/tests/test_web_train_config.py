@@ -61,6 +61,49 @@ def test_form_starts_with_pretrained_turned_on():
     assert spec["default"] is True
 
 
+def _device_spec() -> dict:
+    return next(item for item in train_config.field_specs() if item["name"] == "device")
+
+
+def test_device_form_default_is_cuda_when_this_computer_has_one(monkeypatch):
+    """GPU가 있는데 폼이 cpu로 시작하면 매번 사람이 바꿔 줘야 합니다.
+
+    이 화면은 GPU가 달린 컴퓨터에서 학습을 돌리려고 만든 것입니다. 바꾸는 것을
+    잊으면 몇 분이면 끝날 학습이 몇 시간짜리가 됩니다.
+    """
+
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
+
+    assert _device_spec()["default"] == "cuda"
+
+
+def test_device_form_default_falls_back_to_cpu_without_cuda(monkeypatch):
+    """CUDA가 없는 컴퓨터에서 cuda로 채우면 저장 자체가 막힙니다.
+
+    device 검증이 'CUDA를 사용할 수 없는 환경입니다'로 거부하므로, 폼이 처음부터
+    저장할 수 없는 값을 들고 시작하게 됩니다.
+    """
+
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: False)
+
+    assert _device_spec()["default"] == "cpu"
+
+
+def test_train_device_default_stays_cpu(monkeypatch):
+    """폼 기본값만 바꿉니다. train의 기본값은 건드리지 않습니다.
+
+    train은 GPU가 없는 곳에서도 돌아야 하고, test_web_train_contract.py가 web의
+    정규화 기본값과 train source를 대조합니다. pretrained와 같은 구조입니다.
+    """
+
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
+
+    assert normalize_train_settings({"device": "cuda"})["device"] == "cuda"
+    # 값을 주지 않았을 때의 fallback은 train과 같아야 합니다.
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: False)
+    assert normalize_train_settings({})["device"] == "cpu"
+
+
 def test_generated_run_id_matches_train_pattern(monkeypatch):
     from datetime import datetime, timezone
 
