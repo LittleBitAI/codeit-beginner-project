@@ -49,11 +49,13 @@ export function toPayload(draft: Draft, fields: FieldSpec[]): ConfigDraftPayload
     const raw = draft.train[spec.name];
     if (raw === undefined || raw.trim() === '') {
       // 새 enum 선택은 명시적으로 저장해 legacy config와 구분합니다.
-      if (
-        spec.type === 'enum' &&
-        spec.name !== 'device' &&
-        typeof spec.default === 'string'
-      ) {
+      //
+      // device도 예외가 아닙니다. 예전에는 device만 빼고 보냈는데, GPU가 있는
+      // 컴퓨터에서 서버가 device=cuda와 precision=amp를 짝으로 내려 주면서
+      // 화면에는 cuda가 보이는데 payload에는 없는 상태가 됐습니다. 서버는 값이
+      // 없으면 train 기본값 cpu를 쓰므로, 폼을 열자마자 "amp 정밀도는 device가
+      // cuda일 때만" 오류가 떴습니다. **화면이 보여 주는 값을 그대로 보냅니다.**
+      if (spec.type === 'enum' && typeof spec.default === 'string') {
         train[spec.name] = spec.default;
       }
       // boolean도 마찬가지입니다. 손대지 않았다고 빼 버리면 서버 fallback이
