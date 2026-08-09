@@ -9,6 +9,7 @@ import re
 import shutil
 import stat
 import tempfile
+import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -961,11 +962,36 @@ def _execute_claimed(
         if train_dataset.category_ids != validation_dataset.category_ids:
             raise ValueError("train and validation COCO category ids must match")
         category_ids = train_dataset.category_ids
+        # 런타임이 바뀌면 cache가 비어 있어 이미지를 한 장씩 다시 받게 됩니다. 묶음이
+        # 이미 있으면 그것 하나로 채웁니다. 없으면 평소대로 받고, 다 차면 남깁니다.
+        image_count = len(
+            train_dataset.image_locations | validation_dataset.image_locations
+        )
+        image_cache.seed_from_archive(storage)
+        archive_uploads: list[threading.Thread] = []
         written_best: dict[str, int] = {}
         # 마지막으로 남긴 resume_state입니다. S3 게시가 이것을 그대로 써야 backend에
         # 따라 최종 last checkpoint의 내용이 달라지지 않습니다.
         latest: dict[str, Any] = {}
         s3_mirror_owned = False
+
+        def publish_image_cache_archive() -> None:
+            """Epoch을 한 번 다 돌면 cache가 다 찬 상태입니다. 그때 한 번만 올립니다.
+
+            다음 실행이 이미지를 한 장씩 받지 않게 하려는 것뿐이라 학습을 멈추지 않고
+            뒤에서 올리고, 실패해도 학습에는 영향이 없습니다.
+            """
+
+            if archive_uploads or image_cache.archive_uri is None:
+                return
+            thread = threading.Thread(
+                target=image_cache.publish_archive,
+                args=(storage,),
+                kwargs={"expected_entries": image_count},
+                name=f"image-cache-archive-{settings['run_id']}",
+            )
+            archive_uploads.append(thread)
+            thread.start()
 
         def write_checkpoints(
             last: dict[str, Any],
@@ -1007,6 +1033,7 @@ def _execute_claimed(
                     overwrite=s3_mirror_owned,
                 )
                 s3_mirror_owned = True
+            publish_image_cache_archive()
 
         progress = ProgressEmitter(settings["run_id"])
         progress.emit(
@@ -1024,15 +1051,20 @@ def _execute_claimed(
             architecture=settings["architecture"],
             pretrained=settings["pretrained"],
         )
-        best, last, history = train_model(
-            model,
-            train_dataset,
-            validation_dataset,
-            settings,
-            progress,
-            resume=resume,
-            on_checkpoint=write_checkpoints,
-        )
+        try:
+            best, last, history = train_model(
+                model,
+                train_dataset,
+                validation_dataset,
+                settings,
+                progress,
+                resume=resume,
+                on_checkpoint=write_checkpoints,
+            )
+        finally:
+            # 올리다 만 채로 process가 끝나면 bucket에 완성되지 않은 조각이 남습니다.
+            for upload in archive_uploads:
+                upload.join()
 
     if isinstance(storage, S3Storage):
         best_payload = _checkpoint_payload(best, settings, class_map, category_ids)
