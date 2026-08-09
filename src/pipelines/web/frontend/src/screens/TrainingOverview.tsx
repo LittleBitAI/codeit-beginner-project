@@ -71,7 +71,7 @@ export function TrainingOverview({
   const telemetryDown = gpu.data && gpu.data.telemetry.source !== 'nvidia-smi';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1560 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1320 }}>
       <ScreenIntro
         title="지금 무엇이 돌고 있고 무엇이 끝났는지 봅니다"
         terms={[
@@ -138,7 +138,7 @@ export function TrainingOverview({
                 {item.label}
               </Chip>
             ))}
-            <span style={{ font: `400 11px/1 ${font.mono}`, color: color.textMuted, marginLeft: 4 }}>
+            <span style={{ font: `400 12px/1 ${font.mono}`, color: color.textMuted, marginLeft: 4 }}>
               {visible.length}건
             </span>
           </div>
@@ -173,7 +173,7 @@ export function TrainingOverview({
                   <span
                     key={heading}
                     style={{
-                      font: `600 10px/1.3 ${font.mono}`,
+                      font: `600 11px/1.3 ${font.mono}`,
                       letterSpacing: '.04em',
                       color: '#66707E',
                       padding: '9px 12px',
@@ -222,6 +222,8 @@ function JobRow({ job, onOpen }: { job: JobRecord; onOpen: () => void }) {
     <div
       role="button"
       tabIndex={0}
+      // global.css가 이 표시를 보고 마우스를 올렸을 때 배경을 바꿉니다.
+      data-row=""
       onClick={onOpen}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') onOpen();
@@ -235,15 +237,15 @@ function JobRow({ job, onOpen }: { job: JobRecord; onOpen: () => void }) {
       }}
     >
       <span style={{ padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 1 }}>
-        <span style={{ font: `600 12px/1.3 ${font.sans}`, color: color.text }}>{job.run_id}</span>
-        <span style={{ font: `400 10px/1.35 ${font.mono}`, color: color.textFaint }}>
+        <span style={{ font: `600 12.5px/1.3 ${font.sans}`, color: color.text }}>{job.run_id}</span>
+        <span style={{ font: `400 11px/1.35 ${font.mono}`, color: color.textFaint }}>
           {job.job_id.slice(0, 8)}
         </span>
       </span>
       {cells.slice(1, 3).map((value, index) => (
         <span
           key={index}
-          style={{ padding: '8px 12px', font: `400 11px/1.3 ${font.mono}`, color: color.textStrong }}
+          style={{ padding: '8px 12px', font: `400 12px/1.3 ${font.mono}`, color: color.textStrong }}
         >
           {value}
         </span>
@@ -254,7 +256,7 @@ function JobRow({ job, onOpen }: { job: JobRecord; onOpen: () => void }) {
       {cells.slice(4).map((value, index) => (
         <span
           key={index}
-          style={{ padding: '8px 12px', font: `400 11px/1.3 ${font.mono}`, color: color.textStrong }}
+          style={{ padding: '8px 12px', font: `400 12px/1.3 ${font.mono}`, color: color.textStrong }}
         >
           {value}
         </span>
@@ -304,7 +306,7 @@ function TrainingQueue() {
             대기열 다시 돌리기
           </Button>
         ) : (
-          <span style={{ font: `400 11px/1 ${font.sans}`, color: color.textMuted }}>
+          <span style={{ font: `400 12px/1 ${font.sans}`, color: color.textMuted }}>
             앞 학습이 끝나면 위에서부터 차례로 시작합니다
           </span>
         )
@@ -330,13 +332,13 @@ function TrainingQueue() {
               borderRadius: 5,
             }}
           >
-            <span style={{ font: `600 11px/1 ${font.mono}`, color: color.textMuted, width: 18 }}>
+            <span style={{ font: `600 12px/1 ${font.mono}`, color: color.textMuted, width: 18 }}>
               {index + 1}
             </span>
-            <span style={{ font: `600 12px/1 ${font.mono}`, color: color.text, flex: 1 }}>
+            <span style={{ font: `600 12.5px/1 ${font.mono}`, color: color.text, flex: 1 }}>
               {entry.run_id || '(이름 없음)'}
             </span>
-            <span style={{ font: `400 10.5px/1 ${font.sans}`, color: color.textMuted }}>
+            <span style={{ font: `400 11.5px/1 ${font.sans}`, color: color.textMuted }}>
               {startedAt(entry.queued_at)} 추가
             </span>
             <Button

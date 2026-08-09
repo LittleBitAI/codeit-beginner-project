@@ -129,7 +129,7 @@ export function NewExperiment({
     item.fields.some((name) => messageFor(errors, `train.${name}`) !== undefined);
 
   return (
-    <div style={{ maxWidth: 1560 }}>
+    <div style={{ maxWidth: 1320 }}>
       <ScreenIntro
         title="학습에 쓸 설정을 만듭니다"
         terms={[
@@ -260,13 +260,13 @@ export function NewExperiment({
                     flexWrap: 'wrap',
                   }}
                 >
-                  <span style={{ font: `600 12px/1 ${font.sans}`, color: color.text }}>
+                  <span style={{ font: `600 12.5px/1 ${font.sans}`, color: color.text }}>
                     data pipeline artifact
                   </span>
                   {source?.complete && (
                     <span
                       style={{
-                        font: `400 10.5px/1.4 ${font.mono}`,
+                        font: `400 11.5px/1.4 ${font.mono}`,
                         color: color.textMuted,
                         overflowWrap: 'anywhere',
                       }}
@@ -276,7 +276,7 @@ export function NewExperiment({
                   )}
                 </div>
                 {!source?.complete && (
-                  <span style={{ font: `400 11px/1.6 ${font.sans}`, color: color.textBody }}>
+                  <span style={{ font: `400 12px/1.6 ${font.sans}`, color: color.textBody }}>
                     학습 개요 화면에서 전처리 데이터셋을 고르면 이 네 칸이 자동으로 채워집니다.
                   </span>
                 )}
@@ -320,7 +320,7 @@ export function NewExperiment({
                   <span style={{ marginTop: 2 }}>
                     <IconShield color={color.textBody} />
                   </span>
-                  <span style={{ font: `400 11.5px/1.55 ${font.sans}`, color: color.textBody }}>
+                  <span style={{ font: `400 12.5px/1.55 ${font.sans}`, color: color.textBody }}>
                     이 네 값은 data pipeline이 만든 결과의 위치입니다. 저장소 기준 상대 경로나{' '}
                     <code style={{ fontFamily: font.mono }}>s3://bucket/key</code> 형식만 받습니다.
                     절대 경로와 <code style={{ fontFamily: font.mono }}>..</code>는 거부됩니다.
@@ -330,7 +330,7 @@ export function NewExperiment({
             )}
 
             {tab === 'output' && (
-              <span style={{ font: `400 11.5px/1.55 ${font.sans}`, color: color.textBody }}>
+              <span style={{ font: `400 12.5px/1.55 ${font.sans}`, color: color.textBody }}>
                 data 입력이 <code style={{ fontFamily: font.mono }}>s3://</code>면 S3 backend로,
                 아니면 로컬 디스크로 저장합니다. S3 bucket 이름은 환경 변수에서 읽으며 설정 파일에 남기지
                 않습니다.
@@ -349,7 +349,7 @@ export function NewExperiment({
                 padding: '13px 15px',
                 maxHeight: 330,
                 overflow: 'auto',
-                font: `400 10.5px/1.65 ${font.mono}`,
+                font: `400 11.5px/1.65 ${font.mono}`,
               }}
             >
               {JSON.stringify(result?.normalized ?? payload, null, 2)}
@@ -398,7 +398,7 @@ export function NewExperiment({
             </Button>
             <span
               style={{
-                font: `400 10.5px/1.5 ${font.sans}`,
+                font: `400 11.5px/1.5 ${font.sans}`,
                 color: color.textMuted,
                 textAlign: 'center',
               }}

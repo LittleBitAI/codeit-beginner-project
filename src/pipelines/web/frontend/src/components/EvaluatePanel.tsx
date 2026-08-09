@@ -103,7 +103,7 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
   return (
     <Panel title="평가">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <span style={{ font: `400 11.5px/1.7 ${font.sans}`, color: color.textBody }}>
+        <span style={{ font: `400 12.5px/1.7 ${font.sans}`, color: color.textBody }}>
           학습이 남긴 checkpoint로 검증 이미지를 다시 추론해 성능을 잽니다.
           {submissionRequested
             ? ' 대회 test 이미지도 정답 label 없이 추론해 submission.csv를 함께 만듭니다.'
@@ -183,7 +183,7 @@ export function EvaluatePanel({ job }: { job: JobRecord }) {
               display: 'flex',
               alignItems: 'center',
               gap: 6,
-              font: `400 11.5px/1 ${font.sans}`,
+              font: `400 12.5px/1 ${font.sans}`,
               color: color.textStrong,
               paddingBottom: 9,
             }}
@@ -270,7 +270,7 @@ function EvaluateProgressView({
   // 여기서 가짜 진행률을 그리면 없는 정보를 지어내는 것입니다.
   if (!progress?.available) {
     return (
-      <span style={{ font: `400 11.5px/1.6 ${font.sans}`, color: color.textBody }}>
+      <span style={{ font: `400 12.5px/1.6 ${font.sans}`, color: color.textBody }}>
         {fallback} 검증 이미지와 test 이미지 수만큼 추론하므로 잠시 걸립니다.
       </span>
     );
@@ -285,19 +285,19 @@ function EvaluateProgressView({
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
         {progress.stage_label && (
-          <span style={{ font: `600 12px/1 ${font.sans}`, color: color.text }}>
+          <span style={{ font: `600 12.5px/1 ${font.sans}`, color: color.text }}>
             {progress.stage_label}
           </span>
         )}
         {predict && predict.done !== null && (
-          <span style={{ font: `500 11.5px/1 ${font.mono}`, color: color.textBody }}>
+          <span style={{ font: `500 12.5px/1 ${font.mono}`, color: color.textBody }}>
             {predict.total !== null && predict.total !== undefined
               ? `${predict.done} / ${predict.total}`
               : `${predict.done}장`}
           </span>
         )}
         {eta !== null && eta !== undefined && (
-          <span style={{ font: `400 10.5px/1 ${font.sans}`, color: color.textMuted }}>
+          <span style={{ font: `400 11.5px/1 ${font.sans}`, color: color.textMuted }}>
             남은 시간 약 {formatDuration(eta)}
           </span>
         )}
@@ -324,7 +324,7 @@ function EvaluateProgressView({
       {images && (
         // 842장을 한 장씩 추론하므로 20분 넘게 걸리는 것이 정상입니다. 그 사실을
         // 숫자로 보여 주어야 사람이 멈춘 줄 알고 취소하지 않습니다.
-        <span style={{ font: `400 10.5px/1.45 ${font.mono}`, color: color.textMuted }}>
+        <span style={{ font: `400 11.5px/1.45 ${font.mono}`, color: color.textMuted }}>
           추론 대상 · 검증 이미지 {images.validation_images ?? '-'}장 · test 이미지{' '}
           {images.test_images ?? '-'}장
         </span>
@@ -342,10 +342,10 @@ function EvaluationRunning({ state }: { state: EvaluationState }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {elapsed !== null && (
           <div style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
-            <span style={{ font: `500 10px/1.3 ${font.mono}`, color: color.textMuted }}>
+            <span style={{ font: `500 11px/1.3 ${font.mono}`, color: color.textMuted }}>
               경과 시간
             </span>
-            <span style={{ font: `600 12px/1 ${font.mono}`, color: color.text }}>
+            <span style={{ font: `600 12.5px/1 ${font.mono}`, color: color.text }}>
               {formatDuration(elapsed)}
             </span>
           </div>
@@ -402,7 +402,7 @@ function WeakClasses({ jobId }: { jobId: string }) {
           border: 'none',
           padding: 0,
           cursor: 'pointer',
-          font: `600 11.5px/1 ${font.sans}`,
+          font: `600 12.5px/1 ${font.sans}`,
           color: color.tealDark,
         }}
       >
@@ -410,17 +410,17 @@ function WeakClasses({ jobId }: { jobId: string }) {
       </button>
 
       {open && failed && (
-        <span style={{ font: `400 11px/1.6 ${font.sans}`, color: color.textMuted }}>
+        <span style={{ font: `400 12px/1.6 ${font.sans}`, color: color.textMuted }}>
           class별 요약을 불러오지 못했습니다.
         </span>
       )}
       {open && !failed && !loaded && (
-        <span style={{ font: `400 11px/1.6 ${font.sans}`, color: color.textMuted }}>
+        <span style={{ font: `400 12px/1.6 ${font.sans}`, color: color.textMuted }}>
           불러오는 중입니다.
         </span>
       )}
       {open && loaded && summary === null && (
-        <span style={{ font: `400 11px/1.6 ${font.sans}`, color: color.textMuted }}>
+        <span style={{ font: `400 12px/1.6 ${font.sans}`, color: color.textMuted }}>
           이 평가 결과에는 class별 요약이 없습니다. 요약이 생기기 전에 만든 결과입니다.
         </span>
       )}
@@ -449,16 +449,16 @@ function WeakClasses({ jobId }: { jobId: string }) {
 }
 
 function ClassTable({ title, rows }: { title: string; rows: PerClassRow[] }) {
-  const cell = { padding: '5px 8px', font: `400 11px/1.4 ${font.mono}`, color: color.text };
+  const cell = { padding: '5px 8px', font: `400 12px/1.4 ${font.mono}`, color: color.text };
   const head = {
     ...cell,
-    font: `600 10px/1.4 ${font.sans}`,
+    font: `600 11px/1.4 ${font.sans}`,
     color: color.textMuted,
     textAlign: 'left' as const,
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-      <span style={{ font: `600 11px/1.4 ${font.sans}`, color: color.textStrong }}>{title}</span>
+      <span style={{ font: `600 12px/1.4 ${font.sans}`, color: color.textStrong }}>{title}</span>
       <div style={{ overflowX: 'auto' }}>
         <table style={{ borderCollapse: 'collapse', minWidth: 420 }}>
           <thead>
@@ -473,7 +473,7 @@ function ClassTable({ title, rows }: { title: string; rows: PerClassRow[] }) {
           <tbody>
             {rows.map((row) => (
               <tr key={row.category_id} style={{ borderTop: `1px solid ${color.borderInner}` }}>
-                <td style={{ ...cell, font: `400 11px/1.4 ${font.sans}` }}>{row.name}</td>
+                <td style={{ ...cell, font: `400 12px/1.4 ${font.sans}` }}>{row.name}</td>
                 <td style={cell}>{metricText(row.ap)}</td>
                 <td style={cell}>{metricText(row.ap50)}</td>
                 <td style={cell}>{row.truth_count}</td>
@@ -578,10 +578,10 @@ function EvaluationResult({
           .filter(([, value]) => value !== undefined && value !== null)
           .map(([label, value]) => (
             <span key={String(label)} style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
-              <span style={{ font: `500 10px/1.3 ${font.mono}`, color: color.textMuted }}>
+              <span style={{ font: `500 11px/1.3 ${font.mono}`, color: color.textMuted }}>
                 {String(label)}
               </span>
-              <span style={{ font: `600 12px/1 ${font.mono}`, color: color.text }}>
+              <span style={{ font: `600 12.5px/1 ${font.mono}`, color: color.text }}>
                 {String(value)}
               </span>
             </span>
@@ -601,13 +601,13 @@ function EvaluationResult({
           {otherArtifacts.map(([key, uri]) => (
             <div key={key} style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
               <span
-                style={{ font: `500 10.5px/1.5 ${font.mono}`, color: color.textMuted, minWidth: 130 }}
+                style={{ font: `500 11.5px/1.5 ${font.mono}`, color: color.textMuted, minWidth: 130 }}
               >
                 {key}
               </span>
               <span
                 style={{
-                  font: `400 11px/1.5 ${font.mono}`,
+                  font: `400 12px/1.5 ${font.mono}`,
                   color: color.textStrong,
                   overflowWrap: 'anywhere',
                 }}

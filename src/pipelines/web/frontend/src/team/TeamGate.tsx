@@ -24,7 +24,7 @@ export function TeamGate({ children }: { children: ReactNode }) {
       }}
     >
       <Panel title="팀 학습 관제판 로그인" style={{ width: 'min(440px, 100%)' }}>
-        <p style={{ font: `400 13px/1.7 ${font.sans}`, color: color.textBody, marginTop: 0 }}>
+        <p style={{ font: `400 13.5px/1.7 ${font.sans}`, color: color.textBody, marginTop: 0 }}>
           관리자에게 초대받은 팀원만 학습 설정, 실시간 로그와 결과를 볼 수 있습니다.
         </p>
         {team.error && <p style={{ color: color.red }}>{team.error}</p>}

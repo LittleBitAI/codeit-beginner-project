@@ -94,7 +94,7 @@ export function DataSourcePanel({
       }
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <span style={{ font: `400 12px/1.7 ${font.sans}`, color: color.textBody }}>
+        <span style={{ font: `400 12.5px/1.7 ${font.sans}`, color: color.textBody }}>
           data pipeline이 만든 결과가 있는 위치를 한 번만 고르면, 그 안에서 학습에 필요한
           JSON 4개와 선택 test manifest를 찾아 기억합니다. 새 실험을 만들 때 자동으로 채워집니다.
           로컬 폴더와 S3 위치를 모두 받고, 파일 이름이 달라도 내용을 보고 찾습니다.
@@ -108,7 +108,7 @@ export function DataSourcePanel({
                 <Button onClick={() => void verify({ data: source.data })} disabled={verifying}>
                   {verifying ? 'data pipeline 실행 중…' : 'data pipeline으로 검증'}
                 </Button>
-                <span style={{ font: `400 10.5px/1.5 ${font.sans}`, color: color.textMuted }}>
+                <span style={{ font: `400 11.5px/1.5 ${font.sans}`, color: color.textMuted }}>
                   python -m src.main_pipeline --only data 를 실제로 실행해, 필수 4개와 선택 test
                   manifest가 다음 단계로 넘어갈 수 있는지 확인합니다.
                 </span>
@@ -147,7 +147,7 @@ export function DataSourcePanel({
                 이 폴더 사용
               </Button>
             </div>
-            <span style={{ font: `400 10.5px/1.5 ${font.sans}`, color: color.textMuted }}>
+            <span style={{ font: `400 11.5px/1.5 ${font.sans}`, color: color.textMuted }}>
               저장소 기준 상대 경로 또는 <code style={{ fontFamily: font.mono }}>s3://bucket/prefix/</code>
               를 받습니다. 이미 S3에 준비해 둔 산출물이 있으면 그 위치를 그대로 넣으세요.
               절대 경로와 ..는 거부됩니다.
@@ -208,7 +208,7 @@ function SelectedSummary({ source }: { source: DataSource }) {
         <IconCheck size={13} color={color.green} />
         <span
           style={{
-            font: `500 12px/1.4 ${font.mono}`,
+            font: `500 12.5px/1.4 ${font.mono}`,
             color: color.text,
             overflowWrap: 'anywhere',
           }}
@@ -217,7 +217,7 @@ function SelectedSummary({ source }: { source: DataSource }) {
         </span>
         <span
           style={{
-            font: `600 10px/1.3 ${font.mono}`,
+            font: `600 11px/1.3 ${font.mono}`,
             color: color.tealDark,
             background: color.tealTint,
             borderRadius: radius.badge,
@@ -242,7 +242,7 @@ function MatchTable({ source, heading }: { source: DataSource; heading: string |
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       {heading && (
-        <span style={{ font: `600 11.5px/1 ${font.sans}`, color: color.textStrong }}>{heading}</span>
+        <span style={{ font: `600 12.5px/1 ${font.sans}`, color: color.textStrong }}>{heading}</span>
       )}
       <div
         style={{
@@ -266,7 +266,7 @@ function MatchTable({ source, heading }: { source: DataSource; heading: string |
                 alignItems: 'center',
               }}
             >
-              <span style={{ font: `500 11px/1.4 ${font.sans}`, color: color.textStrong }}>
+              <span style={{ font: `500 12px/1.4 ${font.sans}`, color: color.textStrong }}>
                 {source.labels[key] ?? key}
               </span>
               <span
@@ -274,7 +274,7 @@ function MatchTable({ source, heading }: { source: DataSource; heading: string |
                   display: 'flex',
                   alignItems: 'center',
                   gap: 6,
-                  font: `400 11px/1.4 ${font.mono}`,
+                  font: `400 12px/1.4 ${font.mono}`,
                   color: entry ? color.text : color.red,
                   overflowWrap: 'anywhere',
                 }}
@@ -297,7 +297,7 @@ function MatchTable({ source, heading }: { source: DataSource; heading: string |
             display: 'flex',
             gap: 6,
             alignItems: 'flex-start',
-            font: `400 11px/1.5 ${font.sans}`,
+            font: `400 12px/1.5 ${font.sans}`,
             color: color.amber,
           }}
         >

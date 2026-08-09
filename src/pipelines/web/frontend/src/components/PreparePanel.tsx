@@ -71,10 +71,10 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
       }}
     >
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <span style={{ font: `600 12px/1 ${font.sans}`, color: color.text }}>
+        <span style={{ font: `600 12.5px/1 ${font.sans}`, color: color.text }}>
           원본에서 직접 준비하기
         </span>
-        <span style={{ font: `400 11.5px/1.6 ${font.sans}`, color: color.textBody }}>
+        <span style={{ font: `400 12.5px/1.6 ${font.sans}`, color: color.textBody }}>
           이미 만들어 둔 폴더를 고르는 대신, data pipeline이 원본을 읽어 학습용 JSON 4개와
           대회용 test manifest를 새로 만들게 합니다. 학습과 검증을 몇 대 몇으로 나눌지 여기서 정합니다.
         </span>
@@ -82,7 +82,7 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
 
       <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 5, minWidth: 190 }}>
-          <span style={{ font: `600 11.5px/1 ${font.sans}`, color: color.textStrong }}>
+          <span style={{ font: `600 12.5px/1 ${font.sans}`, color: color.textStrong }}>
             학습 : 검증 비율
           </span>
           <div
@@ -104,7 +104,7 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
                   style={{
                     flex: 1,
                     padding: '8px 0',
-                    font: `600 12px/1 ${font.mono}`,
+                    font: `600 12.5px/1 ${font.mono}`,
                     color: active ? '#fff' : color.textBody,
                     background: active ? color.primary : color.surface,
                     border: 'none',
@@ -118,7 +118,7 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
               );
             })}
           </div>
-          <span style={{ font: `400 10.5px/1.45 ${font.sans}`, color: color.textMuted }}>
+          <span style={{ font: `400 11.5px/1.45 ${font.sans}`, color: color.textMuted }}>
             8:2는 검증에 20%, 9:1은 10%를 씁니다.
           </span>
         </div>
@@ -143,7 +143,7 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
             display: 'flex',
             alignItems: 'center',
             gap: 6,
-            font: `400 11.5px/1 ${font.sans}`,
+            font: `400 12.5px/1 ${font.sans}`,
             color: color.textStrong,
             paddingBottom: 9,
           }}
@@ -219,7 +219,7 @@ function StorageChoice({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-      <span style={{ font: `600 11.5px/1 ${font.sans}`, color: color.textStrong }}>
+      <span style={{ font: `600 12.5px/1 ${font.sans}`, color: color.textStrong }}>
         원본을 읽을 곳
       </span>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -246,7 +246,7 @@ function StorageChoice({
             >
               <span
                 style={{
-                  font: `600 11.5px/1 ${font.sans}`,
+                  font: `600 12.5px/1 ${font.sans}`,
                   color: active ? color.primaryHover : color.textStrong,
                 }}
               >
@@ -254,7 +254,7 @@ function StorageChoice({
               </span>
               <span
                 style={{
-                  font: `400 10px/1.35 ${font.mono}`,
+                  font: `400 11px/1.35 ${font.mono}`,
                   color: color.textMuted,
                   overflowWrap: 'anywhere',
                 }}
@@ -266,7 +266,7 @@ function StorageChoice({
         })}
       </div>
       {storage.forced_backend && (
-        <span style={{ font: `400 10.5px/1.5 ${font.sans}`, color: color.amber }}>
+        <span style={{ font: `400 11.5px/1.5 ${font.sans}`, color: color.amber }}>
           환경 변수 PILL_STORAGE_BACKEND={storage.forced_backend} 가 설정돼 있어 여기 선택보다
           우선합니다.
         </span>
@@ -287,7 +287,7 @@ function PreparationProgressView({
   // 여기서 가짜 진행률을 그리면 없는 정보를 지어내는 것입니다.
   if (!progress?.available) {
     return (
-      <span style={{ font: `400 11.5px/1.6 ${font.sans}`, color: color.textBody }}>
+      <span style={{ font: `400 12.5px/1.6 ${font.sans}`, color: color.textBody }}>
         {fallback} 원본이 크면 몇 분 걸릴 수 있습니다.
       </span>
     );
@@ -301,19 +301,19 @@ function PreparationProgressView({
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
         {progress.stage_label && (
-          <span style={{ font: `600 12px/1 ${font.sans}`, color: color.text }}>
+          <span style={{ font: `600 12.5px/1 ${font.sans}`, color: color.text }}>
             {progress.stage_label}
           </span>
         )}
         {read && read.done !== null && (
-          <span style={{ font: `500 11.5px/1 ${font.mono}`, color: color.textBody }}>
+          <span style={{ font: `500 12.5px/1 ${font.mono}`, color: color.textBody }}>
             {read.total !== null && read.total !== undefined
               ? `${read.done} / ${read.total}`
               : `${read.done}개`}
           </span>
         )}
         {eta !== null && eta !== undefined && (
-          <span style={{ font: `400 10.5px/1 ${font.sans}`, color: color.textMuted }}>
+          <span style={{ font: `400 11.5px/1 ${font.sans}`, color: color.textMuted }}>
             남은 시간 약 {formatDuration(eta)}
           </span>
         )}
@@ -338,7 +338,7 @@ function PreparationProgressView({
       )}
 
       {progress.sources && (
-        <span style={{ font: `400 10.5px/1.45 ${font.mono}`, color: color.textMuted }}>
+        <span style={{ font: `400 11.5px/1.45 ${font.mono}`, color: color.textMuted }}>
           원본 · 학습 이미지 {progress.sources.train_images ?? '-'} · annotation{' '}
           {progress.sources.annotations ?? '-'} · test 이미지 {progress.sources.test_images ?? '-'}
         </span>
@@ -356,10 +356,10 @@ function PreparationResult({ state }: { state: PreparationState }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {elapsed !== null && (
             <div style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
-              <span style={{ font: `500 10px/1.3 ${font.mono}`, color: color.textMuted }}>
+              <span style={{ font: `500 11px/1.3 ${font.mono}`, color: color.textMuted }}>
                 경과 시간
               </span>
-              <span style={{ font: `600 12px/1 ${font.mono}`, color: color.text }}>
+              <span style={{ font: `600 12.5px/1 ${font.mono}`, color: color.text }}>
                 {formatDuration(elapsed)}
               </span>
             </div>
@@ -413,10 +413,10 @@ function PreparationResult({ state }: { state: PreparationState }) {
           .filter(([, value]) => value !== undefined && value !== null)
           .map(([label, value]) => (
             <span key={label} style={{ display: 'flex', gap: 6, alignItems: 'baseline' }}>
-              <span style={{ font: `500 10px/1.3 ${font.mono}`, color: color.textMuted }}>
+              <span style={{ font: `500 11px/1.3 ${font.mono}`, color: color.textMuted }}>
                 {label}
               </span>
-              <span style={{ font: `600 12px/1 ${font.mono}`, color: color.text }}>
+              <span style={{ font: `600 12.5px/1 ${font.mono}`, color: color.text }}>
                 {String(value)}
               </span>
             </span>

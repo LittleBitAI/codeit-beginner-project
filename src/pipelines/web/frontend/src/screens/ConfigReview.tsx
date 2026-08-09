@@ -90,7 +90,7 @@ export function ConfigReview({
   }
 
   return (
-    <div style={{ maxWidth: 1300, display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div style={{ maxWidth: 1320, display: 'flex', flexDirection: 'column', gap: 14 }}>
       <ScreenIntro title="GPU 시간을 쓰기 전 마지막 확인입니다">
         아래 문장은 저장된 설정을 그대로 풀어 쓴 것입니다. 시작하면 이 설정으로 학습 process가 실행되고,
         끝날 때까지 다른 학습은 바로 시작되지 않습니다. 지금 도는 학습이 있으면 대기열에 넣어 두세요.
@@ -138,12 +138,12 @@ export function ConfigReview({
                 minWidth: 0,
               }}
             >
-              <span style={{ font: `500 10px/1.3 ${font.mono}`, color: color.textMuted }}>
+              <span style={{ font: `500 11px/1.3 ${font.mono}`, color: color.textMuted }}>
                 {label}
               </span>
               <span
                 style={{
-                  font: `600 12.5px/1.2 ${font.mono}`,
+                  font: `600 13px/1.2 ${font.mono}`,
                   color: color.text,
                   overflowWrap: 'anywhere',
                 }}
@@ -155,7 +155,7 @@ export function ConfigReview({
         </div>
         <p
           style={{
-            font: `400 13px/1.75 ${font.sans}`,
+            font: `400 13.5px/1.75 ${font.sans}`,
             color: color.textStrong,
             borderTop: `1px solid ${color.borderInner}`,
             paddingTop: 13,
@@ -176,14 +176,14 @@ export function ConfigReview({
             gap: 5,
           }}
         >
-          <span style={{ font: `600 11.5px/1 ${font.sans}`, color: color.textStrong }}>
+          <span style={{ font: `600 12.5px/1 ${font.sans}`, color: color.textStrong }}>
             이 학습이 읽을 데이터
           </span>
           {Object.entries(saved.config.inputs?.data ?? {}).map(([key, uri]) => (
             <div key={key} style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
               <span
                 style={{
-                  font: `500 10.5px/1.5 ${font.mono}`,
+                  font: `500 11.5px/1.5 ${font.mono}`,
                   color: color.textMuted,
                   minWidth: 170,
                 }}
@@ -192,7 +192,7 @@ export function ConfigReview({
               </span>
               <span
                 style={{
-                  font: `400 11px/1.5 ${font.mono}`,
+                  font: `400 12px/1.5 ${font.mono}`,
                   color: color.textStrong,
                   overflowWrap: 'anywhere',
                 }}
@@ -207,7 +207,7 @@ export function ConfigReview({
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, alignItems: 'flex-start' }}>
         <Panel title="기본값과 다른 항목" style={{ flex: '2 1 340px' }} bodyStyle={{ padding: 0 }}>
           {diff.length === 0 ? (
-            <div style={{ padding: '20px 16px', font: `400 12px/1.6 ${font.sans}`, color: color.textBody }}>
+            <div style={{ padding: '20px 16px', font: `400 12.5px/1.6 ${font.sans}`, color: color.textBody }}>
               모든 값이 기본값과 같습니다.
             </div>
           ) : (
@@ -215,7 +215,7 @@ export function ConfigReview({
               style={{
                 background: color.navy,
                 padding: '14px 0',
-                font: `400 11px/1.75 ${font.mono}`,
+                font: `400 12px/1.75 ${font.mono}`,
                 maxHeight: 420,
                 overflow: 'auto',
               }}
@@ -258,7 +258,7 @@ export function ConfigReview({
                   <span style={{ marginTop: 2 }}>
                     <IconCheck size={12} color={color.green} />
                   </span>
-                  <span style={{ font: `400 11.5px/1.5 ${font.sans}`, color: color.textStrong }}>
+                  <span style={{ font: `400 12.5px/1.5 ${font.sans}`, color: color.textStrong }}>
                     {text}
                   </span>
                 </div>
@@ -290,7 +290,7 @@ export function ConfigReview({
               kind="teal"
               disabled={busy || starting}
               onClick={() => void start()}
-              style={{ padding: '11px 0', font: `600 12.5px/1 ${font.sans}`, borderRadius: radius.control }}
+              style={{ padding: '11px 0', font: `600 13px/1 ${font.sans}`, borderRadius: radius.control }}
             >
               {starting ? '시작하는 중…' : '학습 시작'}
             </Button>

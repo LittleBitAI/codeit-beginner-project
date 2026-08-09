@@ -66,7 +66,7 @@ export function LogStream({
             flex: 'none',
           }}
         />
-        <span style={{ font: `400 10.5px/1.4 ${font.sans}`, color: color.textMuted }}>
+        <span style={{ font: `400 11.5px/1.4 ${font.sans}`, color: color.textMuted }}>
           {streaming ? '스트리밍 중' : `연결되지 않음 · ${lines.length}줄`}
         </span>
       </div>
@@ -75,7 +75,7 @@ export function LogStream({
 }
 
 const typeLine = {
-  font: `400 10.5px/1.6 ${font.mono}`,
+  font: `400 11.5px/1.6 ${font.mono}`,
   whiteSpace: 'pre-wrap' as const,
   overflowWrap: 'anywhere' as const,
 };

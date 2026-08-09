@@ -93,7 +93,7 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
   }
 
   return (
-    <div style={{ maxWidth: 1560, display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div style={{ maxWidth: 1320, display: 'flex', flexDirection: 'column', gap: 12 }}>
       <Panel bodyStyle={{ padding: '14px 18px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
@@ -111,10 +111,10 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
             {progress.available && progress.total_epochs ? (
               <>
                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
-                  <span style={{ font: `600 12px/1 ${font.mono}`, color: color.text }}>
+                  <span style={{ font: `600 12.5px/1 ${font.mono}`, color: color.text }}>
                     epoch {progress.current_epoch ?? 0} / {progress.total_epochs}
                   </span>
-                  <span style={{ font: `400 11px/1 ${font.sans}`, color: color.textMuted }}>
+                  <span style={{ font: `400 12px/1 ${font.sans}`, color: color.textMuted }}>
                     {progress.finished ? (
                       // 끝난 학습에 남은 시간을 말하면 아직 도는 것처럼 읽힙니다.
                       progress.stopped_early ? '조기 종료로 끝남' : '학습 완료'
@@ -140,11 +140,11 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
                 {progress.step && (
                   <>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
-                      <span style={{ font: `400 11px/1 ${font.mono}`, color: color.textMuted }}>
+                      <span style={{ font: `400 12px/1 ${font.mono}`, color: color.textMuted }}>
                         {progress.step.phase === 'validation' ? '검증' : '학습'} batch{' '}
                         {progress.step.step} / {progress.step.total_steps}
                       </span>
-                      <span style={{ font: `400 11px/1 ${font.mono}`, color: color.textMuted }}>
+                      <span style={{ font: `400 12px/1 ${font.mono}`, color: color.textMuted }}>
                         {percent(progress.step.percent)}
                       </span>
                     </div>
@@ -154,11 +154,11 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
               </>
             ) : (
               <>
-                <span style={{ font: `600 12px/1 ${font.mono}`, color: color.textMuted }}>
+                <span style={{ font: `600 12.5px/1 ${font.mono}`, color: color.textMuted }}>
                   진행률 정보 없음
                 </span>
                 <ProgressBar ratio={null} />
-                <span style={{ font: `400 10.5px/1.5 ${font.sans}`, color: color.textMuted }}>
+                <span style={{ font: `400 11.5px/1.5 ${font.sans}`, color: color.textMuted }}>
                   {progress.message ??
                     'train pipeline이 진행 로그를 제공하지 않아 몇 번째 epoch인지 알 수 없습니다.'}
                 </span>
@@ -177,7 +177,7 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
         <div
           style={{
             marginTop: 10,
-            font: `400 11px/1.5 ${font.mono}`,
+            font: `400 12px/1.5 ${font.mono}`,
             color: color.textMuted,
             display: 'flex',
             gap: 14,
@@ -278,10 +278,10 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
                 >
                   {Object.entries(job.summary).map(([key, value]) => (
                     <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                      <span style={{ font: `500 10px/1.3 ${font.mono}`, color: color.textMuted }}>
+                      <span style={{ font: `500 11px/1.3 ${font.mono}`, color: color.textMuted }}>
                         {key}
                       </span>
-                      <span style={{ font: `600 12px/1.2 ${font.mono}`, color: color.text }}>
+                      <span style={{ font: `600 12.5px/1.2 ${font.mono}`, color: color.text }}>
                         {typeof value === 'number' ? value.toString() : String(value)}
                       </span>
                     </div>
@@ -300,7 +300,7 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
                     <div key={key} style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                       <span
                         style={{
-                          font: `500 10.5px/1.5 ${font.mono}`,
+                          font: `500 11.5px/1.5 ${font.mono}`,
                           color: color.textMuted,
                           minWidth: 160,
                         }}
@@ -309,7 +309,7 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
                       </span>
                       <span
                         style={{
-                          font: `400 11px/1.5 ${font.mono}`,
+                          font: `400 12px/1.5 ${font.mono}`,
                           color: color.textStrong,
                           overflowWrap: 'anywhere',
                         }}
@@ -327,12 +327,12 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
         <div style={{ flex: '2 1 286px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
           <Panel title="GPU">
             {telemetryDown ? (
-              <span style={{ font: `400 11.5px/1.6 ${font.sans}`, color: color.textBody }}>
+              <span style={{ font: `400 12.5px/1.6 ${font.sans}`, color: color.textBody }}>
                 {gpu.data?.telemetry.message ?? 'GPU 사용률 정보를 가져올 수 없습니다.'}
               </span>
             ) : device ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <span style={{ font: `600 12px/1.2 ${font.mono}`, color: color.text }}>
+                <span style={{ font: `600 12.5px/1.2 ${font.mono}`, color: color.text }}>
                   {device.name}
                 </span>
                 <LabeledBar
@@ -350,14 +350,14 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
                   }
                 />
                 <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span style={{ font: `400 10px/1 ${font.mono}`, color: color.textMuted }}>온도</span>
-                  <span style={{ font: `600 12px/1 ${font.mono}`, color: color.text }}>
+                  <span style={{ font: `400 11px/1 ${font.mono}`, color: color.textMuted }}>온도</span>
+                  <span style={{ font: `600 12.5px/1 ${font.mono}`, color: color.text }}>
                     {device.temperature_c === null ? '-' : `${device.temperature_c}°C`}
                   </span>
                 </div>
               </div>
             ) : (
-              <span style={{ font: `400 11.5px/1.6 ${font.sans}`, color: color.textBody }}>
+              <span style={{ font: `400 12.5px/1.6 ${font.sans}`, color: color.textBody }}>
                 GPU 정보를 불러오는 중입니다.
               </span>
             )}
@@ -385,8 +385,8 @@ function LabeledBar({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-        <span style={{ font: `400 10px/1 ${font.mono}`, color: color.textMuted }}>{label}</span>
-        <span style={{ font: `600 11px/1 ${font.mono}`, color: color.text }}>{text}</span>
+        <span style={{ font: `400 11px/1 ${font.mono}`, color: color.textMuted }}>{label}</span>
+        <span style={{ font: `600 12px/1 ${font.mono}`, color: color.text }}>{text}</span>
       </div>
       <ProgressBar ratio={ratio} tint={tint} />
     </div>

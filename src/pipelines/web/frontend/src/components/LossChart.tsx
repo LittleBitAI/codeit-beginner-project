@@ -33,7 +33,7 @@ export function LossChart({
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          font: `400 12px/1.6 ${font.sans}`,
+          font: `400 12.5px/1.6 ${font.sans}`,
           color: color.textMuted,
           textAlign: 'center',
         }}
@@ -143,7 +143,7 @@ export function ChartLegend() {
             display: 'flex',
             alignItems: 'center',
             gap: 5,
-            font: `400 10.5px/1 ${font.mono}`,
+            font: `400 11.5px/1 ${font.mono}`,
             color: color.textBody,
           }}
         >

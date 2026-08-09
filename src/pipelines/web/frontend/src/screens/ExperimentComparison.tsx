@@ -261,10 +261,10 @@ function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) 
                 key={experiment.experiment_id}
                 style={{ padding: '10px 13px', display: 'flex', flexDirection: 'column', gap: 2 }}
               >
-                <span style={{ font: `600 12px/1.35 ${font.sans}`, color: color.text }}>
+                <span style={{ font: `600 12.5px/1.35 ${font.sans}`, color: color.text }}>
                   {experiment.run_id}
                 </span>
-                <span style={{ font: `400 10px/1.3 ${font.mono}`, color: color.textFaint }}>
+                <span style={{ font: `400 11px/1.3 ${font.mono}`, color: color.textFaint }}>
                   {experiment.experiment_id.slice(0, 8)}
                 </span>
               </span>
@@ -284,7 +284,7 @@ function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) 
                 <span
                   style={{
                     padding: '9px 13px',
-                    font: `600 10.5px/1.4 ${font.mono}`,
+                    font: `600 11.5px/1.4 ${font.mono}`,
                     color: color.textMuted,
                     background: color.surfaceAlt,
                   }}
@@ -301,7 +301,7 @@ function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) 
                       data-best={isBest ? 'true' : undefined}
                       style={{
                         padding: '9px 13px',
-                        font: `500 11.5px/1.4 ${font.mono}`,
+                        font: `500 12.5px/1.4 ${font.mono}`,
                         color: isBest ? color.greenDark : color.textStrong,
                         background: isBest ? color.greenTint : undefined,
                         display: 'flex',
@@ -352,7 +352,7 @@ function TabButton({
       onClick={onClick}
       aria-pressed={active}
       style={{
-        font: `600 11.5px/1 ${font.sans}`,
+        font: `600 12.5px/1 ${font.sans}`,
         padding: '7px 12px',
         borderRadius: radius.control,
         cursor: 'pointer',
@@ -425,7 +425,7 @@ export function ExperimentComparison() {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1720 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1320 }}>
       <ScreenIntro
         title="실험 설정과 결과를 같은 기준으로 나란히 봅니다"
         terms={[
@@ -447,7 +447,7 @@ export function ExperimentComparison() {
         title="비교할 실험"
         right={
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span style={{ font: `400 11px/1 ${font.mono}`, color: color.textMuted }}>
+            <span style={{ font: `400 12px/1 ${font.mono}`, color: color.textMuted }}>
               {selectedIds.length}개 선택
             </span>
             <Button
@@ -491,16 +491,16 @@ export function ExperimentComparison() {
                     aria-label={`${experiment.run_id} 비교 선택`}
                   />
                   <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-                    <span style={{ font: `600 12px/1.35 ${font.sans}`, color: color.text }}>
+                    <span style={{ font: `600 12.5px/1.35 ${font.sans}`, color: color.text }}>
                       {experiment.run_id}
                     </span>
-                    <span style={{ font: `400 10px/1.3 ${font.mono}`, color: color.textFaint }}>
+                    <span style={{ font: `400 11px/1.3 ${font.mono}`, color: color.textFaint }}>
                       {startedAt(experiment.started_at ?? experiment.created_at)}
                     </span>
                     {/* 고르지 않아도 목록에서 바로 견줄 수 있도록 요약 한 줄을 둡니다. */}
                     <span
                       style={{
-                        font: `400 11px/1.4 ${font.mono}`,
+                        font: `400 12px/1.4 ${font.mono}`,
                         color: color.textStrong,
                         overflowWrap: 'anywhere',
                       }}
