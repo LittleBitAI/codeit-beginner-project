@@ -23,7 +23,7 @@ from ..masking import sanitize_line
 from ..paths import REPOSITORY_ROOT
 from ..progress import ProgressState, consume_line, snapshot, take_quiet_change
 from ..train_config import config_relative_path, read_runtime_config
-from .. import team_sync
+from .. import state_sync, team_sync
 from . import runner, store
 from .model import (
     ACTIVE_STATUSES,
@@ -74,6 +74,19 @@ def _lost_message(record: JobRecord) -> str:
     return "서버가 다시 시작되어 실행 상태를 잃었습니다."
 
 
+def _lost_runtime_message() -> str:
+    """이 기계가 아니라 사라진 런타임에서 돌던 학습에 붙이는 안내입니다.
+
+    같은 기계에서 서버만 죽은 경우와 달리, 여기서는 그 학습 process를 찾을 수
+    없습니다. 없는 process를 찾아보라고 안내하면 시간만 씁니다.
+    """
+
+    return (
+        "이 학습을 시작한 런타임이 사라졌습니다. 그 process는 남아 있지 않습니다."
+        " epoch마다 저장한 checkpoint가 S3에 있으므로 거기서 이어서 학습할 수 있습니다."
+    )
+
+
 class JobManager:
     """이 서버가 실행한 학습 job들의 유일한 소유자."""
 
@@ -108,6 +121,10 @@ class JobManager:
         with self._lock:
             if self._loaded:
                 return
+            # 런타임이 바뀌었으면 이 디스크에는 아무 기록도 없습니다. 자기 칸에 남은
+            # 사본을 먼저 되살려야 그 학습이 아래에서 interrupted가 되고, 화면에
+            # "이어서 학습"이 붙습니다.
+            elsewhere = state_sync.restore()
             for record in store.load_all_records():
                 if record.status in ACTIVE_STATUSES:
                     # 이 서버는 저 학습을 더 이상 관리할 수 없습니다. log pipe도 다시
@@ -115,7 +132,11 @@ class JobManager:
                     # 막습니다.
                     record.status = STATUS_INTERRUPTED
                     record.finished_at = record.finished_at or utc_now_text()
-                    record.message = _lost_message(record)
+                    record.message = (
+                        _lost_runtime_message()
+                        if record.job_id in elsewhere
+                        else _lost_message(record)
+                    )
                     try:
                         team_sync.get_team_sync().enqueue_update(record)
                         store.save_record(record)
