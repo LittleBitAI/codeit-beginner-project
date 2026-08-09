@@ -227,18 +227,29 @@ class JobManager:
     def resume_queue(self, *, access_token: str | None = None) -> JobRecord | None:
         """멈춰 있던 대기열을 다시 돌립니다.
 
-        서버가 다시 뜨면 memory에만 두던 login token이 사라집니다. 그래서 다시
-        돌리는 사람의 token을 아직 token이 없는 항목 **전체**에 붙입니다. 첫 항목에만
-        붙이면 그것이 끝난 뒤 다음 항목에서 또 멈추므로, 밤새 돌리라고 만든 목록을
-        사람이 하나씩 눌러 깨워야 합니다. 다시 돌리기를 누른 사람이 곧 그 학습들을
-        시작한 사람이므로 팀 기록에도 그 사람으로 남는 것이 맞습니다.
+        받은 token을 기다리는 항목 **전체에 덮어씁니다.** 두 가지를 한꺼번에 처리해야
+        하기 때문입니다.
+
+        하나는 서버 재시작입니다. memory에만 두던 token이 사라지므로 항목에 token이
+        아예 없습니다. 첫 항목에만 붙이면 그것이 끝난 뒤 다음 항목에서 또 멈춰, 밤새
+        돌리라고 만든 목록을 사람이 하나씩 눌러 깨워야 합니다.
+
+        다른 하나는 **만료**입니다. Cognito access token의 수명은 기본 한 시간이라
+        앞 학습이 그보다 길면 다음 항목이 쥔 token은 이미 죽어 있습니다. AppSync가
+        401로 거절하면 대기열은 멈추면서 그 만료된 token을 도로 항목에 붙여 둡니다.
+        여기서 비어 있을 때만 채우면 죽은 token이 살아남아, 사람이 새로 로그인해
+        다시 돌리기를 눌러도 같은 401이 반복됩니다. 서버를 다시 띄우기 전에는
+        복구할 방법이 없어집니다.
+
+        덮어써도 되는 이유는 다시 돌리기를 누른 사람이 곧 그 학습들을 시작한
+        사람이기 때문입니다. 팀 기록에도 그 사람으로 남는 것이 맞습니다.
         """
 
         self.load()
         with self._lock:
             if access_token:
                 for item in self._queue:
-                    self._queue_access_tokens.setdefault(item["entry_id"], access_token)
+                    self._queue_access_tokens[item["entry_id"]] = access_token
             self._queue_paused = False
         return self._start_next()
 

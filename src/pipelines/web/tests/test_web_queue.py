@@ -151,6 +151,60 @@ def test_a_start_failure_pauses_and_keeps_the_entry_and_login_token(
     assert manager.queue_entries() == []
 
 
+def test_resuming_replaces_a_token_that_was_already_refused(
+    manager, config_ids, monkeypatch, fake_process_factory
+):
+    """다시 돌릴 때는 **받은 token으로 덮어씁니다.** 남겨 두면 영원히 못 고칩니다.
+
+    Cognito access token의 기본 수명은 한 시간입니다(실제 user pool client에
+    ``AccessTokenValidity``가 없어 기본값이 적용됩니다). 그래서 앞 학습이 한 시간을
+    넘기면, 대기열이 다음 항목을 꺼낼 때 그 항목이 쥔 token은 이미 만료돼 있습니다.
+    AppSync는 401로 거절하고 대기열은 그 자리에서 멈추면서 만료된 token을 도로
+    항목에 붙여 둡니다.
+
+    이때 사람이 새 token으로 다시 돌리기를 눌렀는데 비어 있을 때만 채우면, 항목에는
+    이미 만료된 token이 있으므로 새 token이 무시되고 같은 401이 반복됩니다. 서버를
+    다시 띄우기 전에는 밤새 걸어 둔 목록을 하나도 살릴 수 없습니다.
+    """
+
+    from src.pipelines.web import team_sync
+
+    class ExpiringSync:
+        """만료된 token만 거절합니다. 실제 AppSync의 401을 대신합니다."""
+
+        def create_run(self, *, access_token, **_kwargs):
+            if access_token != "fresh-token":
+                raise TeamSyncAuthError("로그인이 만료됐습니다.")
+            received_tokens.append(access_token)
+            return None
+
+        def enqueue_update(self, _record):
+            return None
+
+        def enqueue_log(self, _record, _entry):
+            return None
+
+    received_tokens: list[str] = []
+    monkeypatch.setattr(team_sync, "get_team_sync", lambda: ExpiringSync())
+
+    # 한 시간 전에 받은 token으로 걸어 둡니다. 꺼내는 순간 이미 만료됐습니다.
+    with pytest.raises(TeamSyncAuthError):
+        manager.enqueue(config_ids[0], access_token="expired-token")
+
+    assert manager.queue_paused() is True
+    assert [item["run_id"] for item in manager.queue_entries()] == ["first"]
+
+    monkeypatch.setattr(
+        runner, "spawn", lambda *a, **k: fake_process_factory(stdout=TRAIN_STDOUT)
+    )
+
+    started = manager.resume_queue(access_token="fresh-token")
+
+    assert started is not None
+    assert received_tokens == ["fresh-token"]
+    assert manager.queue_entries() == []
+
+
 # --- 중지 ------------------------------------------------------------------
 
 

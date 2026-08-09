@@ -318,3 +318,74 @@ def test_cloud_record_failure_prevents_local_process_start(
 
     assert response.status_code == 503
     assert "원격 시작 기록 실패" in response.json()["message"]
+
+
+# --- 만료된 login token ------------------------------------------------------
+
+
+class _Response:
+    """``httpx.post``가 돌려줄 최소한의 응답. 실제 AppSync 응답을 그대로 흉내 냅니다."""
+
+    def __init__(self, status_code: int, payload: dict[str, Any]) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            import httpx
+
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code}", request=None, response=None  # type: ignore[arg-type]
+            )
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+def _transport() -> team_sync.GraphQLTransport:
+    return team_sync.GraphQLTransport(
+        TeamSyncConfig(
+            enabled=True,
+            team_id="pill-team",
+            endpoint="https://example.appsync-api.ap-northeast-2.amazonaws.com/graphql",
+            user_pool_id="ap-northeast-2_test",
+            user_pool_client_id="client",
+            cognito_domain="example.auth.ap-northeast-2.amazoncognito.com",
+        )
+    )
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_a_refused_login_token_is_reported_as_an_auth_failure(monkeypatch, status_code):
+    """만료된 token을 network 오류로 보고하면 사람이 엉뚱한 곳을 고칩니다.
+
+    실제 AppSync는 만료된 Cognito access token에 ``401 UnauthorizedException``을
+    돌려줍니다. 그것을 "연결하지 못했습니다"로 옮기면, 다시 로그인하면 되는 상황에서
+    network와 서버를 뒤지게 됩니다. 대기열은 이 오류를 만난 자리에서 멈추므로,
+    무엇을 눌러야 풀리는지가 메시지에 그대로 담겨야 합니다.
+    """
+
+    monkeypatch.setattr(
+        team_sync.httpx,
+        "post",
+        lambda *a, **k: _Response(
+            status_code,
+            {"errors": [{"errorType": "UnauthorizedException"}]},
+        ),
+    )
+
+    with pytest.raises(TeamSyncAuthError, match="로그인"):
+        _transport().execute("query { __typename }", {}, access_token="expired-token")
+
+
+def test_other_http_failures_are_still_connection_errors(monkeypatch):
+    """503처럼 인증과 무관한 실패까지 로그인 문제로 부르면 안 됩니다."""
+
+    monkeypatch.setattr(
+        team_sync.httpx, "post", lambda *a, **k: _Response(503, {"errors": []})
+    )
+
+    with pytest.raises(TeamSyncError) as error:
+        _transport().execute("query { __typename }", {}, access_token="good-token")
+
+    assert not isinstance(error.value, TeamSyncAuthError)
