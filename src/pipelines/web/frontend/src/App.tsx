@@ -9,6 +9,7 @@ import { usePolling } from './hooks/usePolling';
 import { sourceKeyOf } from './lib/dataSource';
 import { ConfigReview } from './screens/ConfigReview';
 import { ExperimentComparison } from './screens/ExperimentComparison';
+import { ExperimentDetail } from './screens/ExperimentDetail';
 import { ExperimentHistory } from './screens/ExperimentHistory';
 import { LiveMonitor } from './screens/LiveMonitor';
 import { NewExperiment } from './screens/NewExperiment';
@@ -100,6 +101,7 @@ function Shell() {
         <Route path="/monitor/:jobId" element={<LiveMonitor listing={listing.data} />} />
         <Route path="/compare" element={<ExperimentComparison />} />
         <Route path="/history" element={<ExperimentHistory />} />
+        <Route path="/history/:runId" element={<ExperimentDetail />} />
         <Route path="/team" element={<TeamActivity defaults={defaults.data} />} />
       </Routes>
     </AppShell>

@@ -14,8 +14,8 @@ import { completionOf } from '../lib/completion';
 import { loss, startedAt } from '../lib/format';
 import { EmptyState } from './primitives';
 
-const COLUMNS = '34px 1.7fr 122px .8fr .8fr .9fr';
-const HEADINGS = ['', '실행 이름', '단계', 'mAP', 'VAL LOSS', '등록'];
+const HEADINGS = ['실행 이름', '단계', 'mAP', 'VAL LOSS', '등록'];
+const BODY_COLUMNS = '1.7fr 122px .8fr .8fr .9fr';
 
 /** 표를 세울 기준. 값이 없는 실험은 어느 기준에서도 뒤로 보냅니다. */
 export type SortKey = 'map' | 'best_validation_loss' | 'created_at';
@@ -96,16 +96,27 @@ function StagePips({ experiment }: { experiment: ExperimentSummary }) {
   );
 }
 
+/**
+ * 두 가지로 씁니다.
+ *
+ * - **고르기**(`onToggle`): 실험 비교가 견줄 실험을 체크합니다.
+ * - **열기**(`onOpen`): 실험 내역이 행을 눌러 상세로 갑니다.
+ *
+ * 두 화면의 목적이 다르므로 한쪽에만 체크박스가 있습니다. 목록에 체크박스가
+ * 있는데 눌러도 아무 일이 없거나, 반대로 열리기만 하고 고를 수 없으면 헷갈립니다.
+ */
 export function ExperimentTable({
   experiments,
-  selectedIds,
+  selectedIds = [],
   onToggle,
+  onOpen,
   emptyMessage,
   selectLabel = '선택',
 }: {
   experiments: ExperimentSummary[];
-  selectedIds: string[];
-  onToggle: (experimentId: string) => void;
+  selectedIds?: string[];
+  onToggle?: (experimentId: string) => void;
+  onOpen?: (experiment: ExperimentSummary) => void;
   emptyMessage: string;
   /** 화면마다 고르는 뜻이 달라서 checkbox 이름을 부르는 쪽이 정합니다. */
   selectLabel?: string;
@@ -113,6 +124,8 @@ export function ExperimentTable({
   const [sortKey, setSortKey] = useState<SortKey>('map');
   const rows = useMemo(() => sorted(experiments, sortKey), [experiments, sortKey]);
   const top = useMemo(() => bestMap(experiments), [experiments]);
+  const selectable = onToggle !== undefined;
+  const columns = selectable ? `34px ${BODY_COLUMNS}` : BODY_COLUMNS;
 
   if (experiments.length === 0) return <EmptyState message={emptyMessage} />;
 
@@ -152,12 +165,12 @@ export function ExperimentTable({
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: COLUMNS,
+          gridTemplateColumns: columns,
           background: color.surfaceTableHead,
           borderBottom: `1px solid ${color.border}`,
         }}
       >
-        {HEADINGS.map((heading, index) => (
+        {(selectable ? ['', ...HEADINGS] : HEADINGS).map((heading, index) => (
           <span
             key={heading || `spacer-${index}`}
             style={{ font: `600 11.5px/1.3 ${font.sans}`, color: '#66707E', padding: '9px 12px' }}
@@ -170,12 +183,23 @@ export function ExperimentTable({
       {rows.map((experiment) => {
         const checked = selectedIds.includes(experiment.experiment_id);
         const isBest = top !== null && experiment.metrics.map === top;
+        const Row = selectable ? 'label' : 'div';
+        const openProps = selectable
+          ? {}
+          : {
+              role: 'button',
+              tabIndex: 0,
+              onClick: () => onOpen?.(experiment),
+              onKeyDown: (event: React.KeyboardEvent) => {
+                if (event.key === 'Enter' || event.key === ' ') onOpen?.(experiment);
+              },
+            };
         return (
-          <label
+          <Row
             key={experiment.experiment_id}
             style={{
               display: 'grid',
-              gridTemplateColumns: COLUMNS,
+              gridTemplateColumns: columns,
               alignItems: 'center',
               borderBottom: `1px solid ${color.borderInner}`,
               cursor: 'pointer',
@@ -183,15 +207,18 @@ export function ExperimentTable({
             }}
             // 선택된 행은 자기 배경을 쓰고, 나머지만 global.css의 hover가 칠합니다.
             {...(checked ? {} : { 'data-row-hover': '' })}
+            {...openProps}
           >
-            <span style={{ padding: '9px 12px' }}>
-              <input
-                type="checkbox"
-                checked={checked}
-                onChange={() => onToggle(experiment.experiment_id)}
-                aria-label={`${experiment.run_id} ${selectLabel}`}
-              />
-            </span>
+            {selectable && (
+              <span style={{ padding: '9px 12px' }}>
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => onToggle?.(experiment.experiment_id)}
+                  aria-label={`${experiment.run_id} ${selectLabel}`}
+                />
+              </span>
+            )}
             <span style={{ padding: '9px 12px', display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
               <span
                 style={{
@@ -260,7 +287,7 @@ export function ExperimentTable({
             <span style={{ padding: '9px 12px', font: `400 12px/1.3 ${font.mono}`, color: color.textStrong }}>
               {startedAt(experiment.created_at)}
             </span>
-          </label>
+          </Row>
         );
       })}
     </div>

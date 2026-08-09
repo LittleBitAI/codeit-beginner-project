@@ -15,9 +15,9 @@ from src.common import (
     read_experiment_record,
 )
 
-from . import train_capabilities
+from . import experiment_detail, train_capabilities
 from .datasets import storage_environment
-from .errors import FieldError, WebError, WebValidationError
+from .errors import FieldError, JobNotFoundError, WebError, WebValidationError
 from .masking import redact
 from .paths import repository_root
 from .train_config import DATA_ARTIFACT_KEYS, OPTIMIZER_PROFILES
@@ -26,6 +26,7 @@ from .train_config import DATA_ARTIFACT_KEYS, OPTIMIZER_PROFILES
 __all__ = [
     "compare_registry_experiments",
     "list_registry_experiments",
+    "read_registry_experiment",
     "registry_config",
     "registry_scope",
 ]
@@ -386,6 +387,69 @@ def _read_records(
             for run_id, uri in targets
         ]
         return [(targets[index][0], future.result()) for index, future in enumerate(futures)]
+
+
+def _artifact_uri(record: Mapping[str, Any], pipeline: str, key: str) -> str | None:
+    """record의 `pipelines.<pipeline>.<key>.uri`를 방어적으로 꺼냅니다."""
+
+    pipelines = record.get("pipelines")
+    if not isinstance(pipelines, Mapping):
+        return None
+    stage = pipelines.get(pipeline)
+    if not isinstance(stage, Mapping):
+        return None
+    entry = stage.get(key)
+    if isinstance(entry, Mapping):
+        return _text(entry.get("uri"))
+    return _text(entry)
+
+
+def read_registry_experiment(run_id: str) -> dict[str, Any]:
+    """실험 하나의 설정과 평가 결과를 상세 화면이 쓸 모양으로 모읍니다.
+
+    목록에 있는 값만으로는 "이 실험이 얼마나 잘 나왔나"를 판단할 수 없습니다.
+    지표 9개 중 5개만 index에 있고 loss 곡선은 아예 없어서, record가 가리키는
+    artifact를 직접 읽습니다. 평가나 학습 기록을 못 읽어도 설정은 보여 줍니다.
+    """
+
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise WebValidationError([FieldError("run_id", "실험 이름이 필요합니다.")])
+
+    wanted = run_id.strip()
+    config = registry_config()
+    try:
+        summary = next(
+            (
+                item
+                for item in list_experiment_summaries(config)
+                if item.get("run_id") == wanted
+            ),
+            None,
+        )
+        if summary is None:
+            raise JobNotFoundError(f"'{wanted}' 실험을 registry에서 찾을 수 없습니다.")
+
+        uri = _text(summary.get("experiment_record_uri"))
+        if uri is None:
+            raise JobNotFoundError(f"'{wanted}' 실험 기록의 위치가 index에 없습니다.")
+        record = read_experiment_record(uri, config, expected_run_id=wanted)
+    except ExperimentRegistryError as error:
+        raise WebError(f"실험 기록을 읽지 못했습니다({type(error).__name__}).") from error
+
+    storage_config = config["storage"]
+    return {
+        "experiment": _enrich_summary(summary, record),
+        "evaluation": _sanitized(
+            experiment_detail.evaluation_block(
+                _artifact_uri(record, "evaluate", "metrics_uri"), storage_config
+            )
+        ),
+        "history": _sanitized(
+            experiment_detail.history_block(
+                _artifact_uri(record, "train", "training_history_uri"), storage_config
+            )
+        ),
+    }
 
 
 def compare_registry_experiments(run_ids: list[str]) -> dict[str, Any]:

@@ -27,6 +27,8 @@ const PAGE_TITLES: Record<string, string> = {
 
 function pageTitle(pathname: string): string {
   if (pathname.startsWith('/monitor')) return '라이브 모니터';
+  // /history/<run_id> 같은 하위 화면도 자기 묶음 이름을 답니다.
+  if (pathname.startsWith('/history')) return '실험 내역';
   return PAGE_TITLES[pathname] ?? '학습';
 }
 

@@ -139,6 +139,18 @@ def list_experiments() -> dict[str, Any]:
     }
 
 
+@router.get("/experiments/{run_id}")
+def get_experiment(run_id: str) -> dict[str, Any]:
+    """실험 하나의 설정과 평가 결과 전체입니다.
+
+    목록에는 지표 9개 중 5개만 있고 loss 곡선은 아예 없습니다. 여기서는 record가
+    가리키는 `metrics.json`과 `training_history.json`을 직접 읽어 화면이 쓸 만큼만
+    골라 돌려줍니다. 650KB짜리 파일을 그대로 흘려보내지 않습니다.
+    """
+
+    return experiments.read_registry_experiment(run_id)
+
+
 class CompareExperimentsRequest(BaseModel):
     run_ids: list[str]
 
