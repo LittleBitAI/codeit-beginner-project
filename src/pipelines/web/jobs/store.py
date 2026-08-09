@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
+from .. import state_sync
 from ..errors import JobNotFoundError
 from ..masking import redact, sanitize_line
 from ..paths import JOBS_DIRNAME, jobs_dir, repository_root, web_state_dir
@@ -65,14 +66,32 @@ def _write_atomic(destination: Path, payload: str) -> None:
         raise
 
 
+def _stored_status(destination: Path) -> str | None:
+    """디스크에 이미 적혀 있는 상태입니다. 없거나 깨졌으면 ``None``입니다."""
+
+    try:
+        payload = json.loads(destination.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload.get("status") if isinstance(payload, dict) else None
+
+
 def save_record(record: JobRecord) -> None:
     """기록을 저장합니다. 저장 전에 마스킹해 비밀이 디스크에도 닿지 않게 합니다."""
 
     payload = redact(record.to_dict())
+    destination = job_directory(record.job_id) / _RECORD_NAME
+    previous = _stored_status(destination)
     _write_atomic(
-        job_directory(record.job_id) / _RECORD_NAME,
+        destination,
         json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
     )
+    # 상태가 바뀔 때만 사본을 남깁니다. 30초마다 도는 heartbeat까지 올리면 그 network
+    # 호출이 manager lock을 쥔 채로 일어나 화면 전체가 그만큼 멈춥니다. 런타임이
+    # 죽었을 때 필요한 것은 어떤 설정으로 무엇이 돌고 있었는가이고, 그건 상태가
+    # 바뀌는 순간에 이미 정해져 있습니다.
+    if previous != record.status:
+        state_sync.mirror_job_record(record.job_id, payload)
 
 
 def load_record(job_id: str) -> JobRecord:

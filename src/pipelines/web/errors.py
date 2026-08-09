@@ -14,6 +14,7 @@ __all__ = [
     "TeamSyncError",
     "WebError",
     "WebPathError",
+    "WebStateError",
     "WebValidationError",
 ]
 
@@ -24,6 +25,10 @@ class WebError(RuntimeError):
 
 class WebPathError(WebError):
     """저장소를 벗어나거나 허용되지 않는 경로가 들어왔을 때 발생합니다."""
+
+
+class WebStateError(WebError):
+    """런타임 사이에 상태를 옮기는 설정이 잘못됐을 때 발생합니다."""
 
 
 class FieldError:

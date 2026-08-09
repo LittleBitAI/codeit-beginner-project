@@ -30,6 +30,7 @@ from .errors import (
     collect,
     raise_if_any,
 )
+from . import state_sync
 from .gpu import cuda_is_available, native_bf16_supported
 from .masking import redact
 from .paths import (
@@ -1210,6 +1211,9 @@ def write_runtime_config(config: dict[str, Any]) -> str:
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+    # 이어서 학습은 job 기록만으로는 못 합니다. 그 기록이 가리키는 이 설정까지
+    # 있어야 같은 dataset과 같은 값으로 다시 시작할 수 있습니다.
+    state_sync.mirror_runtime_config(config_id, config)
     return config_id
 
 
