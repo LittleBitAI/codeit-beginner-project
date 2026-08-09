@@ -20,10 +20,12 @@ from src.pipelines.web import train_config
 from src.pipelines.web.api.routes_train import ARCHITECTURE
 from src.pipelines.web.train_capabilities import (
     DEFAULT_AUGMENTATION,
+    DEFAULT_LR_SCHEDULER,
     DEFAULT_PRECISION,
     LEGACY_OPTIMIZER,
     SUPPORTED_ARCHITECTURES,
     SUPPORTED_AUGMENTATIONS,
+    SUPPORTED_LR_SCHEDULERS,
     SUPPORTED_OPTIMIZERS,
     SUPPORTED_PRECISIONS,
 )
@@ -31,6 +33,8 @@ from src.pipelines.web.train_config import (
     DATA_ARTIFACT_KEYS,
     DEFAULT_OUTPUT_DIR,
     DEFAULT_OUTPUT_PREFIX,
+    LR_SCHEDULER_DEFAULTS,
+    LR_WARMUP_DEFAULTS,
     OPTIMIZER_PROFILES,
     RUN_ID_PATTERN,
     normalize_train_settings,
@@ -225,6 +229,34 @@ def test_bf16_is_left_to_train_when_this_computer_cannot_tell(monkeypatch):
     settings = normalize_train_settings({"precision": "bf16", "device": "cuda"})
 
     assert settings["precision"] == "bf16"
+
+
+def test_lr_scheduler_choices_and_defaults_match_train_source():
+    """화면이 보여 주는 schedule 이름과 기본값이 train이 실제로 받는 것과 같아야 합니다."""
+
+    source = read_source("pipeline.py")
+    schedules = module_constant(source, "LR_SCHEDULER_DEFAULTS")
+
+    assert SUPPORTED_LR_SCHEDULERS == tuple(schedules)
+    # train은 값이 없으면 상수 learning rate입니다. 화면 기본값도 같아야 합니다.
+    assert DEFAULT_LR_SCHEDULER in schedules
+    assert LR_SCHEDULER_DEFAULTS == schedules
+    assert LR_WARMUP_DEFAULTS == module_constant(source, "LR_WARMUP_DEFAULTS")
+
+
+@pytest.mark.parametrize("name", SUPPORTED_LR_SCHEDULERS)
+def test_lr_scheduler_reaches_train_with_exactly_the_keys_it_uses(name):
+    """train은 고른 schedule이 쓰지 않는 key가 하나만 있어도 object를 통째로 거부합니다."""
+
+    schedules = module_constant(read_source("pipeline.py"), "LR_SCHEDULER_DEFAULTS")
+    mirrored = normalize_train_settings({"lr_scheduler": name, "lr_warmup_steps": 1})
+
+    assert set(mirrored["lr_scheduler"]) == {
+        "name",
+        "warmup_steps",
+        "warmup_start_factor",
+        *schedules[name],
+    }
 
 
 def test_optimizer_profiles_match_train_source():

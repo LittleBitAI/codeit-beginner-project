@@ -9,6 +9,37 @@ const NUMBER_PATTERN = /^-?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$/;
 export const EARLY_STOPPING_FIELDS = ['early_stopping_patience', 'early_stopping_min_delta'];
 
 /**
+ * schedule마다 실제로 쓰는 칸입니다. 고르지 않은 schedule의 칸은 화면에서 감추고
+ * payload에서도 뺍니다. 서버가 "그 schedule에서 쓰지 않는 값"이라며 거부하기 때문입니다.
+ *
+ * warmup 두 칸은 어느 schedule에서나 쓰므로 여기에 없습니다.
+ */
+const LR_SCHEDULER_FIELDS: Record<string, string[]> = {
+  none: [],
+  cosine: ['lr_min_factor'],
+  step: ['lr_step_size', 'lr_gamma'],
+  linear: ['lr_min_factor'],
+};
+
+/** 어떤 schedule에서든 쓰이는 칸의 전체 목록입니다. */
+export const LR_FIELDS = Object.values(LR_SCHEDULER_FIELDS).flat();
+
+/** 지금 고른 schedule에서 보여 줄 칸입니다. 모르는 이름이면 아무것도 보여 주지 않습니다. */
+export function lrFieldsFor(name: string): string[] {
+  return LR_SCHEDULER_FIELDS[name] ?? [];
+}
+
+/** schedule 선택의 현재 값입니다. 손대지 않았으면 서버가 알려 준 기본값입니다. */
+export function selectedSchedule(
+  train: Record<string, string>,
+  fields: FieldSpec[],
+): string {
+  const spec = fields.find((item) => item.name === 'lr_scheduler');
+  const fallback = typeof spec?.default === 'string' ? spec.default : 'none';
+  return train.lr_scheduler?.trim() || fallback;
+}
+
+/**
  * 조기 종료 스위치의 현재 값입니다. 손대지 않았으면 서버가 알려 준 기본값입니다.
  *
  * 화면의 숨김 규칙과 payload의 제외 규칙이 항상 같아야 해서 한 곳에 둡니다.
@@ -42,6 +73,10 @@ export function toPayload(draft: Draft, fields: FieldSpec[]): ConfigDraftPayload
       : new Set(['momentum']);
   if (!isEarlyStoppingOn(draft.train, fields)) {
     for (const name of EARLY_STOPPING_FIELDS) irrelevant.add(name);
+  }
+  const shown = new Set(lrFieldsFor(selectedSchedule(draft.train, fields)));
+  for (const name of LR_FIELDS) {
+    if (!shown.has(name)) irrelevant.add(name);
   }
 
   for (const spec of fields) {

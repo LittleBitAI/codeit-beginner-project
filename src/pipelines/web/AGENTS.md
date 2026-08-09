@@ -23,7 +23,7 @@ Because you cannot import train, `train_config.py` keeps a copy of train's defau
 
 ## Outputs
 
-All mutable state lives under `artifacts/web/`, which is gitignored. Never write outside the repository, and never send an absolute path to the browser — `masking.py` also strips home directories so the operating-system username cannot leak into a response.
+All mutable state lives under `artifacts/web/`, which is gitignored. Never write outside the repository, and never send an absolute path to the browser — `masking.py` strips home directories so the OS username cannot leak into a response.
 
 ## Run and Test
 
@@ -38,14 +38,14 @@ The server binds to localhost on purpose. Exposing it to other hosts is a delibe
 ## Local Rules
 
 - `artifacts/web/` and port 8000 are shared runtime state. Two people running the server from one clone will collide, so only one at a time. Tests avoid this by pointing the repository root at a temporary directory.
-- This pipeline picks its storage backend and whether to record to the team from `PILL_` environment variables, so tests must not inherit them. An autouse fixture strips every `PILL_` name; a test that needs one sets it with `monkeypatch.setenv`. Without that, `PILL_STORAGE_S3_BUCKET` makes the experiment list read the team's real registry and `PILL_TEAM_SYNC_ENABLED` makes starting a job demand a token — green on CI, red only on a developer machine.
+- This pipeline picks its storage backend and team recording from `PILL_` environment variables, so tests must not inherit them. An autouse fixture strips every `PILL_` name; a test that needs one sets it with `monkeypatch.setenv`. Without that, `PILL_STORAGE_S3_BUCKET` makes the experiment list read the team's real registry and `PILL_TEAM_SYNC_ENABLED` makes starting a job demand a token — green on CI, red only on a developer machine.
 - Subprocess output must be drained continuously, or a large log deadlocks the reader thread. A test guards this.
 - Cancelling a job must report cancelled, not failed.
-- The training queue exists to be left running overnight, so two rules follow from that. A **failed** run still advances to the next entry — one out-of-memory setting must not waste the night. A **cancelled** run, and a server restart, leave the queue paused instead, because a person who pressed stop did not ask for the next training to start. Tests guard both.
+- The training queue exists to be left running overnight, so two rules follow. A **failed** run still advances to the next entry — one out-of-memory setting must not waste the night. A **cancelled** run, and a server restart, leave the queue paused instead, because a person who pressed stop did not ask for the next training to start. Tests guard both.
 - A request must never resolve to a path outside the repository; traversal attempts return 404.
 - Probing for a GPU must not initialise a CUDA context.
-- Evaluation runs on the GPU when one is present. `evaluate` itself defaults to `cpu`, which inferred a 2,942-image run in about 55 minutes and hit `EVALUATE_TIMEOUT_SECONDS`; the same run takes about 2 minutes on a GPU. `resolve_device` picks the device and rejects `cuda` on a machine without one, so the failure arrives before the inference instead of after it.
+- Evaluation runs on the GPU when one is present. `evaluate` itself defaults to `cpu`, which inferred a 2,942-image run in about 55 minutes and hit `EVALUATE_TIMEOUT_SECONDS`; on a GPU it takes about 2 minutes. `resolve_device` picks the device and rejects `cuda` on a machine without one, so the failure arrives before the inference.
 - The frontend is the least-tested part of the repository. New screens need tests; do not assume the Python tests cover them.
-- A run left unnamed is named from its settings: `retina-basic-e15-b4-lr6e3-s42-a7f3`. Identical settings and seed produce an identical name, which is how a duplicate experiment announces itself. Resume keeps the timestamp name instead, because a deterministic one would equal the interrupted run's and train would refuse to start.
+- A run left unnamed is named from its settings: `retina-basic-e15-b4-lr6e3-s42-a7f3`. Identical settings and seed produce an identical name, which is how a duplicate experiment announces itself. Resume keeps the timestamp name instead, because a deterministic one would equal the interrupted run's and train would refuse to start. No schedule and no warmup sends no `lr_scheduler` key at all, so those configs and names stay as before.
 - Resuming an interrupted run always takes a **new** `run_id`. Reusing the old one makes train refuse to start, because that run's working directory is still on disk, and it would mix two runs into one name. `epochs` is the whole plan rather than what is left, so leaving it empty carries the original target over.
 - Nobody deletes an interrupted run's `.<run_id>.partial` directory, this screen included. It holds the only copy of that training, so removing it is a person's decision.

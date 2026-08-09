@@ -11,6 +11,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 import type { ExperimentDetail as Detail, ExperimentSummary, SweepPoint } from '../api/types';
 import { LossChart, ChartLegend } from '../components/LossChart';
+import { LrChart } from '../components/LrChart';
 import { AlertRow, Button, KpiCard, Panel, StatusBadge } from '../components/primitives';
 import { color, font, radius, type } from '../design/tokens';
 import { usePolling } from '../hooks/usePolling';
@@ -272,6 +273,13 @@ function EvaluationTab({ detail }: { detail: Detail }) {
             <span>best val {loss(experiment.metrics.best_validation_loss)}</span>
             <span>epoch {epochs.length}회</span>
           </div>
+        </Panel>
+      )}
+
+      {/* schedule을 쓴 학습만 값이 있습니다. 없으면 그렇다고 말하고 곡선을 그리지 않습니다. */}
+      {epochs.some((item) => typeof item.learning_rate === 'number') && (
+        <Panel title="epoch별 learning rate" bodyStyle={{ padding: '12px 16px 0' }}>
+          <LrChart epochs={epochs} totalEpochs={epochs.length} />
         </Panel>
       )}
 

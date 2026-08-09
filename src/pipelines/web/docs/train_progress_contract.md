@@ -25,10 +25,12 @@ web은 학습을 공개 CLI(`python -m src.main_pipeline --only train`)로만 �
 | `run_started` | `architecture`, `device`, `epochs`, `train_images`, `validation_images`, `class_count` |
 | `epoch_started` | `epoch`, `epochs` |
 | `step_progress` | `epoch`, `epochs`, `phase`, `step`, `total_steps` |
-| `epoch_completed` | `epoch`, `epochs`, `train_loss`, `validation_loss`, `train_loss_components`, `validation_loss_components`, `best_validation_loss`, `best_epoch`, `is_best`, `epoch_seconds` |
+| `epoch_completed` | `epoch`, `epochs`, `train_loss`, `validation_loss`, `train_loss_components`, `validation_loss_components`, `best_validation_loss`, `best_epoch`, `is_best`, `epoch_seconds`, `learning_rate` |
 | `training_completed` | `planned_epochs`, `completed_epochs`, `stopped_early`, `best_epoch`, `best_validation_loss` |
 
 **새로 만든 어휘가 없습니다.** `epoch`·`train_loss`·`validation_loss`는 `trainer.py`의 `epoch_record` 키 그대로이고, 나머지는 train이 이미 반환하는 `summary`·`artifacts` 키 그대로입니다.
+
+`learning_rate`는 `contracts/proposals/009-train-resume.md` 뒤에 더한 값으로, 그 epoch의 **마지막 batch가 실제로 쓴** learning rate입니다. `train.lr_scheduler`를 쓰지 않는 실행은 설정한 값이 그대로 나오고, 이 필드가 생기기 전의 옛 실행에는 아예 없어 `None`이 됩니다. **web은 없는 값을 0으로 채우지 않습니다.** 채우면 화면이 learning rate가 0까지 떨어진 것처럼 그립니다.
 
 두 `*_components`는 `문자열 -> 유한한 수` mapping입니다. 이름은 모델이 돌려준 것을 그대로 쓰므로(Faster R-CNN과 RetinaNet이 다릅니다) **web은 이름을 열거하지 않고 받은 것을 그립니다.**
 

@@ -88,6 +88,46 @@ describe('NewExperiment · Train capability 호환', () => {
     expect(field).toHaveValue('amp');
   });
 
+  it('고른 schedule이 쓰지 않는 칸은 감춘다', () => {
+    // 보이면 그 값이 학습에 쓰이는 것처럼 읽히고, 서버도 쓰지 않는 값이라며
+    // 저장을 막습니다. warmup 칸은 어느 schedule에서나 씁니다.
+    const defaults: Defaults = {
+      ...LEGACY_DEFAULTS,
+      fields: [
+        {
+          name: 'lr_scheduler',
+          type: 'enum',
+          default: 'none',
+          choices: ['none', 'cosine', 'step'],
+          label: 'Learning rate schedule',
+          hint: '',
+        },
+        { name: 'lr_warmup_steps', type: 'integer', default: 0, label: 'Warmup steps', hint: '' },
+        { name: 'lr_min_factor', type: 'number', default: 0.01, label: '최저 배율', hint: '' },
+        { name: 'lr_step_size', type: 'integer', default: 3, label: '줄이는 간격', hint: '' },
+      ],
+    };
+    render(
+      <MemoryRouter>
+        <DraftProvider>
+          <NewExperiment defaults={defaults} source={null} />
+        </DraftProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText('하이퍼파라미터'));
+
+    expect(screen.getByLabelText('Warmup steps')).toBeInTheDocument();
+    expect(screen.queryByLabelText('최저 배율')).toBeNull();
+    expect(screen.queryByLabelText('줄이는 간격')).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('Learning rate schedule'), {
+      target: { value: 'cosine' },
+    });
+
+    expect(screen.getByLabelText('최저 배율')).toBeInTheDocument();
+    expect(screen.queryByLabelText('줄이는 간격')).toBeNull();
+  });
+
   it('Device 칸은 서버가 알려 준 기본값으로 시작한다', () => {
     // GPU가 달린 컴퓨터에서는 서버가 cuda를 기본값으로 내려줍니다. 화면이 그것을
     // 무시하고 늘 cpu로 시작하면, 바꾸는 것을 잊은 사람의 학습이 몇 분에서 몇

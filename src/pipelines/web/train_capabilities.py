@@ -20,11 +20,13 @@ __all__ = [
     "CAPABILITY_SCHEMA_VERSION",
     "CUDA_ONLY_PRECISIONS",
     "DEFAULT_AUGMENTATION",
+    "DEFAULT_LR_SCHEDULER",
     "DEFAULT_PRECISION",
     "LEGACY_ARCHITECTURE",
     "LEGACY_OPTIMIZER",
     "SUPPORTED_ARCHITECTURES",
     "SUPPORTED_AUGMENTATIONS",
+    "SUPPORTED_LR_SCHEDULERS",
     "SUPPORTED_OPTIMIZERS",
     "SUPPORTED_PRECISIONS",
     "current_train_capability",
@@ -57,6 +59,10 @@ SUPPORTED_PRECISIONS = ("fp32", "amp", "fp16", "bf16")
 # 절반 정밀도는 CUDA에서만 됩니다. train이 같은 조건을 거부합니다.
 CUDA_ONLY_PRECISIONS = ("amp", "fp16", "bf16")
 DEFAULT_PRECISION = "fp32"
+# train의 LR_SCHEDULER_DEFAULTS key와 같은 순서로 둡니다. 값 자체는 train이 갖고
+# 있으므로 여기서는 고를 수 있는 이름만 복제합니다. `none`은 상수 learning rate입니다.
+SUPPORTED_LR_SCHEDULERS = ("none", "cosine", "step", "linear")
+DEFAULT_LR_SCHEDULER = "none"
 
 _CHOICE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+\-]{0,127}$")
 

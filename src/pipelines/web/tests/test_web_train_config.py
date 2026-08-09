@@ -228,6 +228,86 @@ def test_rejects_a_non_boolean_early_stopping_switch():
     assert "train.early_stopping" in fields_of(error.value)
 
 
+# --- learning rate schedule --------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ({}, {"lr_scheduler": "none"}))
+def test_no_schedule_leaves_the_config_untouched(raw):
+    """고르지 않으면 key 자체가 없어야 train이 예전과 똑같은 상수 learning rate로 돕니다.
+
+    화면은 고르지 않아도 enum 기본값 ``none``을 실어 보냅니다. 그래도 config가 예전과
+    한 글자도 달라지지 않아야 자동으로 짓는 실행 이름까지 그대로입니다.
+    """
+
+    assert "lr_scheduler" not in normalize_train_settings(raw)
+
+
+def test_schedule_reaches_train_as_the_object_it_expects():
+    settings = normalize_train_settings(
+        {
+            "lr_scheduler": "cosine",
+            "lr_warmup_steps": 500,
+            "lr_warmup_start_factor": 0.01,
+            "lr_min_factor": 0.05,
+        }
+    )
+
+    assert settings["lr_scheduler"] == {
+        "name": "cosine",
+        "warmup_steps": 500,
+        "warmup_start_factor": 0.01,
+        "min_lr_factor": 0.05,
+    }
+
+
+def test_warmup_alone_is_a_real_choice():
+    """decay 없이 warmup만 쓰는 것은 정상 조합입니다. 그때도 설정이 train까지 가야 합니다."""
+
+    settings = normalize_train_settings({"lr_scheduler": "none", "lr_warmup_steps": 300})
+
+    assert settings["lr_scheduler"] == {
+        "name": "none",
+        "warmup_steps": 300,
+        "warmup_start_factor": 0.001,
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "field"),
+    [("cosine", "lr_step_size"), ("step", "lr_min_factor")],
+)
+def test_rejects_settings_the_chosen_schedule_does_not_use(name, field):
+    """train이 같은 조건을 거부합니다. 여기서 막지 않으면 subprocess가 뜬 뒤에야 압니다."""
+
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings({"lr_scheduler": name, field: 2})
+
+    assert f"train.{field}" in fields_of(error.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("lr_warmup_steps", -1),
+        ("lr_warmup_start_factor", 0.0),
+        ("lr_warmup_start_factor", 1.5),
+        ("lr_min_factor", 1.5),
+    ],
+)
+def test_rejects_values_outside_what_train_accepts(field, value):
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings({"lr_scheduler": "cosine", field: value})
+
+    assert f"train.{field}" in fields_of(error.value)
+
+
+def test_rejects_an_unknown_schedule():
+    with pytest.raises(WebValidationError) as error:
+        normalize_train_settings({"lr_scheduler": "sqrt"})
+
+    assert "train.lr_scheduler" in fields_of(error.value)
+
+
 # --- 잘못된 값 --------------------------------------------------------------
 
 
