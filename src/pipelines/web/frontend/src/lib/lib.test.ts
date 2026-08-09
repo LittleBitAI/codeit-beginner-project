@@ -113,6 +113,22 @@ describe('toPayload', () => {
     expect(on.train.early_stopping_patience).toBe(5);
   });
 
+  it('손대지 않은 device도 화면에 보이는 기본값 그대로 실어 보낸다', () => {
+    // GPU가 있는 PC에서 서버는 device 기본값을 cuda로, precision을 amp로 내려 줍니다.
+    // 둘은 짝이라 device만 빼고 보내면 서버 fallback인 cpu가 이깁니다. 그러면 화면에는
+    // cuda가 보이는데 "amp 정밀도는 device가 cuda일 때만" 오류가 폼을 열자마자 떴습니다.
+    const fields: FieldSpec[] = [
+      ...FIELDS,
+      { name: 'device', type: 'enum', default: 'cuda', choices: ['cpu', 'cuda'], label: 'Device', hint: '' },
+      { name: 'precision', type: 'enum', default: 'amp', choices: ['fp32', 'amp'], label: '연산 정밀도', hint: '' },
+    ];
+
+    const payload = toPayload({ train: {}, data: {} }, fields);
+
+    expect(payload.train.device).toBe('cuda');
+    expect(payload.train.precision).toBe('amp');
+  });
+
   it('data 입력의 공백을 정리하고 빈 값은 뺀다', () => {
     const payload = toPayload(
       { train: {}, data: { class_map_uri: '  artifacts/a.json ', dataset_summary_uri: '' } },
