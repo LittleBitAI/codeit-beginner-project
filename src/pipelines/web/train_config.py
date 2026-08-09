@@ -9,11 +9,13 @@ train이 거부하는 값을 여기서 통과시키지 않습니다.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import os
 import re
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -185,12 +187,100 @@ def _utc_now() -> datetime:
 
 
 def generate_run_id() -> str:
-    """GUI가 만든 실행임을 알 수 있는 run_id를 만듭니다.
+    """시각으로만 만드는 run_id입니다. 설정을 모를 때 쓰는 마지막 수단입니다.
 
     train의 기본값은 ``train-`` 접두사를 쓰므로, CLI로 돌린 실행과 구분됩니다.
+    이어서 학습도 이 이름을 씁니다(아래 ``build_resume_config`` 설명 참고).
     """
 
     return _utc_now().strftime("web-%Y%m%dT%H%M%S%fZ")
+
+
+# 표에서 한눈에 읽히도록 줄인 이름입니다. train에 모델이 늘면 아래 fallback이 받습니다.
+_ARCHITECTURE_SHORT_NAMES = {
+    "fasterrcnn_mobilenet_v3_large_320_fpn": "mobile",
+    "fasterrcnn_resnet50_fpn_v2": "frcnn",
+    "retinanet_resnet50_fpn_v2": "retina",
+}
+
+# 이름은 설정을 읽으라고 있는 것이라, 경로와 이름 자체는 꼬리표 계산에서 뺍니다.
+_FINGERPRINT_IGNORED = frozenset({"run_id", "output_dir", "output_prefix"})
+
+
+def _short_architecture(name: Any) -> str:
+    known = _ARCHITECTURE_SHORT_NAMES.get(name) if isinstance(name, str) else None
+    if known is not None:
+        return known
+    # 모르는 이름은 첫 토큰만 씁니다. 이름을 못 만들어 저장이 막히면 안 됩니다.
+    token = re.split(r"[^A-Za-z0-9]", str(name or ""))[0]
+    return (token or "model").lower()[:8]
+
+
+def _short_augmentation(name: Any) -> str:
+    text = str(name or "none")
+    # `pill_basic`은 이 프로젝트 전용 preset이라 앞머리가 모든 이름에서 같습니다.
+    return text.split("_")[-1] if "_" in text else text
+
+
+def _short_learning_rate(value: Any) -> str:
+    """팀이 이미 쓰던 표기입니다: 0.006 -> 6e3, 0.0002 -> 2e4."""
+
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        return "na"
+    mantissa, exponent = f"{float(value):.6e}".split("e")
+    mantissa = mantissa.rstrip("0").rstrip(".")
+    power = int(exponent)
+    if power < 0:
+        return f"{mantissa}e{-power}"
+    # 1 이상인 learning rate는 사실상 없지만 이름은 언제나 만들어져야 합니다.
+    return f"{float(value):g}".replace(".", "p")
+
+
+def _settings_fingerprint(
+    settings: Mapping[str, Any], data_inputs: Mapping[str, str] | None
+) -> str:
+    """설정과 데이터셋을 함께 요약한 4자입니다.
+
+    같은 설정이면 언제나 같은 값이라 중복 실험을 이름만 보고 알아챌 수 있습니다.
+    이름에 데이터셋이 들어가지 않으므로, **데이터셋 차이는 이 값이 맡습니다.**
+    """
+
+    material: dict[str, Any] = {
+        key: value for key, value in settings.items() if key not in _FINGERPRINT_IGNORED
+    }
+    material["__data"] = dict(sorted((data_inputs or {}).items()))
+    canonical = json.dumps(
+        material, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:4]
+
+
+def generate_settings_run_id(
+    settings: Mapping[str, Any], data_inputs: Mapping[str, str] | None
+) -> str:
+    """설정을 그대로 읽을 수 있는 실행 이름을 만듭니다.
+
+    ``retina-basic-e15-b4-lr6e3-s42-a7f3`` 처럼 모델·증강·epochs·batch·learning
+    rate·seed와 꼬리표 4자로 이루어집니다. 이름이 사람마다 달라 목록에서 아무것도
+    읽을 수 없던 것을 고치려는 것이라, 값이 바뀌면 이름도 함께 바뀝니다.
+
+    seed를 넣는 것은 같은 설정을 다시 돌릴 때 이름이 겹쳐 train이 시작을 거부하는
+    일을 피하려는 것입니다. 설정도 seed도 완전히 같으면 이름도 같은데, 그때는
+    실제로 같은 실험이므로 겹쳤다고 알려 주는 편이 맞습니다.
+    """
+
+    parts = [
+        _short_architecture(settings.get("architecture")),
+        _short_augmentation(settings.get("augmentation")),
+        f"e{settings.get('epochs')}",
+        f"b{settings.get('batch_size')}",
+        f"lr{_short_learning_rate(settings.get('learning_rate'))}",
+        f"s{settings.get('seed')}",
+        _settings_fingerprint(settings, data_inputs),
+    ]
+    candidate = "-".join(str(part) for part in parts)
+    # 어떤 이유로든 규칙을 못 지키면 시각 이름으로 물러섭니다. 저장이 막히면 안 됩니다.
+    return candidate if RUN_ID_PATTERN.fullmatch(candidate) else generate_run_id()
 
 
 def field_specs() -> list[dict[str, Any]]:
@@ -418,11 +508,17 @@ def _normalize_early_stopping(
     return {"patience": patience, "min_delta": min_delta}
 
 
-def normalize_train_settings(raw: Any) -> dict[str, Any]:
+def normalize_train_settings(
+    raw: Any, data_inputs: Mapping[str, str] | None = None
+) -> dict[str, Any]:
     """``config["train"]`` 후보를 train과 같은 규칙으로 정규화합니다.
 
     문제를 하나 발견하면 멈추지 않고 모두 모아서 한 번에 보고합니다. 화면에서 여러
     칸의 오류를 동시에 보여줘야 하기 때문입니다.
+
+    ``run_id``를 비우면 정규화가 끝난 설정으로 이름을 지어 줍니다. ``data_inputs``는
+    그 이름의 꼬리표에만 쓰입니다. 데이터셋이 이름에 들어가지 않으므로, 주지 않으면
+    데이터셋만 다른 두 실행이 같은 이름을 받습니다.
     """
 
     errors: list[FieldError] = []
@@ -507,8 +603,9 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
 
     resume_from = _normalize_resume_from(raw, errors)
 
-    run_id = raw.get("run_id") or generate_run_id()
-    if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
+    # 비워 두면 정규화가 끝난 뒤 설정을 읽어 이름을 짓습니다. 여기서는 빈 채로 둡니다.
+    run_id = raw.get("run_id") or ""
+    if run_id and (not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id)):
         collect(
             errors,
             "train.run_id",
@@ -566,6 +663,10 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
         )
 
     raise_if_any(errors)
+    # 이름을 안 준 실행은 여기서 짓습니다. 값이 모두 정규화된 뒤라야 같은 설정이
+    # 언제나 같은 이름을 받습니다.
+    if not settings["run_id"]:
+        settings["run_id"] = generate_settings_run_id(settings, data_inputs)
     # train이 읽는 순서와 같게 정렬해 config를 읽기 쉽게 만듭니다.
     return {
         "run_id": settings["run_id"],
@@ -845,7 +946,9 @@ def check_run_id_collision(settings: dict[str, Any], data_inputs: dict[str, str]
             [
                 FieldError(
                     "train.run_id",
-                    f"'{settings['run_id']}' 결과가 이미 있습니다. 다른 이름을 쓰세요.",
+                    f"'{settings['run_id']}' 결과가 이미 있습니다. 이름을 비워 두면 설정에서 "
+                    "자동으로 짓는데, 설정과 seed가 똑같으면 이름도 같습니다. 같은 실험을 "
+                    "다시 돌리려면 seed를 바꾸거나 이름을 직접 쓰세요.",
                 )
             ]
         )
@@ -879,17 +982,23 @@ def validate_request(payload: Any) -> dict[str, Any]:
     settings: dict[str, Any] | None = None
     data_inputs: dict[str, str] | None = None
 
-    try:
-        settings = normalize_train_settings(payload.get("train"))
-    except WebValidationError as error:
-        errors.extend(error.as_list())
-
+    # data 입력을 먼저 정규화합니다. 이름을 안 준 실행의 자동 이름이 데이터셋까지
+    # 요약하기 때문입니다. 보고 순서는 지금까지처럼 train 오류가 앞입니다.
     inputs = payload.get("inputs")
     data_section = inputs.get("data") if isinstance(inputs, dict) else payload.get("data")
+    data_error: WebValidationError | None = None
     try:
         data_inputs = normalize_data_inputs(data_section)
     except WebValidationError as error:
+        data_error = error
+
+    try:
+        settings = normalize_train_settings(payload.get("train"), data_inputs)
+    except WebValidationError as error:
         errors.extend(error.as_list())
+
+    if data_error is not None:
+        errors.extend(data_error.as_list())
 
     warnings: list[dict[str, str]] = []
     if settings is not None and data_inputs is not None and not errors:

@@ -98,6 +98,11 @@ export function NewExperiment({
 
   const errors = result?.errors ?? [];
   const warnings = result?.warnings ?? [];
+  // 서버가 지어 준 이름입니다. 규칙은 backend 한 곳에만 있습니다.
+  const autoRunId =
+    typeof result?.normalized?.train?.run_id === 'string'
+      ? result.normalized.train.run_id
+      : null;
   const dataFilled = (defaults?.data_fields ?? []).every(
     (spec) => (draft.data[spec.name] ?? '').trim() !== '',
   );
@@ -223,6 +228,25 @@ export function NewExperiment({
                 if (!earlyStoppingOn && EARLY_STOPPING_FIELDS.includes(name)) return null;
                 const spec = fields.find((item) => item.name === name);
                 if (!spec) return null;
+                // 이름을 비워 두면 서버가 설정을 읽어 지어 줍니다. 규칙을 여기에
+                // 옮겨 적지 않고, 매 입력마다 받는 검증 결과의 이름을 그대로 보여 줍니다.
+                if (name === 'run_id') {
+                  return (
+                    <TrainField
+                      key={name}
+                      spec={spec}
+                      value={draft.train.run_id ?? ''}
+                      error={messageFor(errors, 'train.run_id')}
+                      devices={defaults.devices}
+                      onChange={(value) => setTrainField('run_id', value)}
+                      note={
+                        (draft.train.run_id ?? '').trim() === '' && autoRunId
+                          ? `자동 이름: ${autoRunId}`
+                          : undefined
+                      }
+                    />
+                  );
+                }
                 const optimizerDefault = spec.defaults_by_optimizer?.[selectedOptimizer];
                 const shownSpec =
                   optimizerDefault === undefined
@@ -418,12 +442,15 @@ function TrainField({
   error,
   devices,
   onChange,
+  note,
 }: {
   spec: FieldSpec;
   value: string;
   error?: string;
   devices: Defaults['devices'];
   onChange: (value: string) => void;
+  /** 힌트 대신 보여 줄 한 줄. 지금은 자동으로 지어진 실행 이름에만 씁니다. */
+  note?: string;
 }) {
   const style = error ? invalidControlStyle : controlStyle;
   const placeholder =
@@ -476,7 +503,7 @@ function TrainField({
   }
 
   return (
-    <Field label={spec.label} hint={spec.hint} error={error}>
+    <Field label={spec.label} hint={note ?? spec.hint} error={error}>
       <input
         value={value}
         placeholder={placeholder}
