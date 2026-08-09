@@ -253,9 +253,16 @@ class JobManager:
                     self._save_queue()
                 return None
             except Exception:
-                # 설정을 읽지 못하는 등으로 시작하지 못한 항목은 건너뜁니다. 하나가
-                # 막혀 뒤의 학습이 통째로 밀리면 밤을 버립니다.
-                continue
+                # 팀 기록 인증이나 일시적인 network 오류도 여기로 옵니다. 항목과 login
+                # token을 지운 채 성공처럼 돌아가면 사용자는 재개 요청을 되살릴 수 없으므로
+                # 원래 자리에 복원하고 명시적으로 멈춘 뒤 API가 실제 오류를 응답하게 합니다.
+                with self._lock:
+                    self._queue.insert(0, entry)
+                    if access_token:
+                        self._queue_access_tokens[entry["entry_id"]] = access_token
+                    self._queue_paused = True
+                    self._save_queue()
+                raise
 
     # ------------------------------------------------------------------ 실행
 
@@ -465,7 +472,12 @@ class JobManager:
             # 실패해도 다음으로 넘어갑니다. 자는 동안 하나가 OOM으로 죽었다고
             # 나머지가 안 돌면 밤을 통째로 버립니다.
             if not cancelled:
-                self._start_next()
+                try:
+                    self._start_next()
+                except Exception:
+                    # background thread에는 오류를 응답할 caller가 없습니다. _start_next가
+                    # 항목을 복원하고 queue를 멈췄으므로 사람이 상태를 보고 재개할 수 있습니다.
+                    pass
 
     # ------------------------------------------------------------------ 종료
 

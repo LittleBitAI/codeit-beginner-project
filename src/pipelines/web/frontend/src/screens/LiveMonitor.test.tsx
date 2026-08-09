@@ -292,7 +292,14 @@ describe('LiveMonitor · 중단된 학습', () => {
       resumed_from_job_id: 'a'.repeat(32),
       resume_from: 'artifacts/experiments/completed/.exp-1.partial/last_checkpoint.pt',
       started: null,
-      entries: [],
+      entries: [
+        {
+          entry_id: 'queue-1',
+          config_id: 'c'.repeat(32),
+          run_id: 'web-resumed',
+          queued_at: '2026-08-09T00:00:00Z',
+        },
+      ],
       paused: false,
     });
 

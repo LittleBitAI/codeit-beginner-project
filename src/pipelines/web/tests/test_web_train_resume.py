@@ -7,9 +7,11 @@ import할 수 없으므로 검증 규칙은 여기에 복제하고, 이어서 �
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
-from src.pipelines.web.errors import WebValidationError
+from src.pipelines.web.errors import TeamSyncAuthError, WebValidationError
 from src.pipelines.web.train_config import (
     build_resume_config,
     field_specs,
@@ -219,6 +221,10 @@ def _interrupted_job(client, manager, monkeypatch, fake_process_factory, data_in
     process = fake_process_factory()
     monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
     started = manager.start(config_id)
+    deadline = time.monotonic() + 10
+    while manager._active_job_id is not None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert manager._active_job_id is None, "test 학습이 종료되지 않았습니다."
     record = manager.get(started.job_id)
     record.status = "interrupted"
     return record
@@ -270,6 +276,34 @@ def test_resume_route_passes_the_login_token_to_the_started_run(
 
     assert response.status_code == 201, response.text
     assert received_tokens == ["user-token"]
+
+
+def test_resume_route_reports_team_sync_auth_failure_and_keeps_the_request(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    from src.pipelines.web import team_sync
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+
+    class RejectingSync:
+        def create_run(self, **_kwargs):
+            raise TeamSyncAuthError("로그인 token이 거절됐습니다.")
+
+    monkeypatch.setattr(team_sync, "get_team_sync", lambda: RejectingSync())
+
+    response = client.post(
+        f"/api/train/jobs/{record.job_id}/resume",
+        json={},
+        headers={"Authorization": "Bearer rejected-token"},
+    )
+
+    assert response.status_code == 401, response.text
+    assert "거절" in response.text
+    assert manager.queue_paused() is True
+    assert len(manager.queue_entries()) == 1
+    assert manager.queue_entries()[0]["run_id"] != record.run_id
 
 
 def test_resume_route_refuses_a_job_that_is_not_interrupted(

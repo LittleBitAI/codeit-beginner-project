@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from src.pipelines.web.errors import JobNotFoundError
+from src.pipelines.web.errors import JobNotFoundError, TeamSyncAuthError
 from src.pipelines.web.jobs import runner
 from src.pipelines.web.jobs.manager import JobManager
 from src.pipelines.web.train_config import (
@@ -105,6 +105,50 @@ def test_a_failed_training_does_not_strand_the_rest(
     assert statuses["first"] == "failed"
     assert statuses["second"] == "succeeded"
     assert statuses["third"] == "succeeded"
+
+
+def test_a_start_failure_pauses_and_keeps_the_entry_and_login_token(
+    manager, config_ids, monkeypatch, fake_process_factory
+):
+    """팀 기록 시작이 실패해도 성공 응답 뒤에서 학습 요청을 버리면 안 됩니다."""
+
+    from src.pipelines.web import team_sync
+
+    class RejectingSync:
+        def create_run(self, **_kwargs):
+            raise TeamSyncAuthError("로그인 token이 거절됐습니다.")
+
+    monkeypatch.setattr(team_sync, "get_team_sync", lambda: RejectingSync())
+
+    with pytest.raises(TeamSyncAuthError, match="거절"):
+        manager.enqueue(config_ids[0], access_token="browser-token")
+
+    assert manager.queue_paused() is True
+    assert [item["run_id"] for item in manager.queue_entries()] == ["first"]
+
+    received_tokens = []
+
+    class AcceptingSync:
+        def create_run(self, *, access_token, **_kwargs):
+            received_tokens.append(access_token)
+            return None
+
+        def enqueue_update(self, _record):
+            return None
+
+        def enqueue_log(self, _record, _entry):
+            return None
+
+    monkeypatch.setattr(team_sync, "get_team_sync", lambda: AcceptingSync())
+    monkeypatch.setattr(
+        runner, "spawn", lambda *a, **k: fake_process_factory(stdout=TRAIN_STDOUT)
+    )
+
+    started = manager.resume_queue()
+
+    assert started is not None
+    assert received_tokens == ["browser-token"]
+    assert manager.queue_entries() == []
 
 
 # --- 중지 ------------------------------------------------------------------
