@@ -52,6 +52,7 @@ def test_defaults_expose_every_train_field(client):
         "precision",
         "seed",
         "epochs",
+        "checkpoint_every",
         "batch_size",
         "num_workers",
         "learning_rate",
