@@ -7,34 +7,26 @@ import type {
   GpuStatus,
   JobListing,
   JobRecord,
-  JobStatus,
   QueueState,
 } from '../api/types';
 import { DataSourcePanel } from '../components/DataSourcePanel';
 import {
   AlertRow,
   Button,
-  Chip,
   EmptyState,
   KpiCard,
   Panel,
   ScreenIntro,
   StatusBadge,
 } from '../components/primitives';
-import { color, font } from '../design/tokens';
+import { color, font, radius, type } from '../design/tokens';
 import { usePolling } from '../hooks/usePolling';
 import { duration, loss, megabytes, percent, startedAt } from '../lib/format';
+import { countLabel, hasResult, specLine, stagesOf } from '../lib/runSpec';
 import { useTeam } from '../team/TeamContext';
 
-const FILTERS: { key: string; label: string; match: (status: JobStatus) => boolean }[] = [
-  { key: 'all', label: '전체', match: () => true },
-  { key: 'running', label: '실행 중', match: (status) => status === 'running' || status === 'queued' },
-  { key: 'succeeded', label: '성공', match: (status) => status === 'succeeded' },
-  { key: 'failed', label: '실패', match: (status) => status === 'failed' },
-  { key: 'cancelled', label: '취소·중단', match: (status) => status === 'cancelled' || status === 'interrupted' },
-];
-
-const COLUMNS = '1.5fr .7fr .6fr .9fr .95fr .7fr .9fr';
+const COLUMNS = '1.6fr 132px .72fr .8fr .7fr .9fr 40px';
+const HEADINGS = ['실행 이름', '단계', 'mAP', 'VAL LOSS', '경과', '시작', ''];
 
 export function TrainingOverview({
   listing,
@@ -48,15 +40,13 @@ export function TrainingOverview({
   onPrepared: () => void;
 }) {
   const navigate = useNavigate();
-  const [filter, setFilter] = useState('all');
   const gpu = usePolling<GpuStatus>(() => api.gpu(), 5000);
 
   const jobs = listing?.jobs ?? [];
   const active = jobs.find((job) => job.job_id === listing?.active_job_id) ?? null;
-  const visible = useMemo(() => {
-    const rule = FILTERS.find((item) => item.key === filter) ?? FILTERS[0]!;
-    return jobs.filter((job) => rule.match(job.status));
-  }, [jobs, filter]);
+  // 결과가 남은 학습과 결과 없이 끝난 기록을 나눕니다. 판단 기준은 lib/runSpec에 있습니다.
+  const kept = useMemo(() => jobs.filter(hasResult), [jobs]);
+  const discarded = useMemo(() => jobs.filter((job) => !hasResult(job)), [jobs]);
 
   const latestBest = useMemo(() => {
     const scored = jobs
@@ -132,61 +122,37 @@ export function TrainingOverview({
       <Panel
         title="학습 실행"
         right={
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-            {FILTERS.map((item) => (
-              <Chip key={item.key} active={filter === item.key} onClick={() => setFilter(item.key)}>
-                {item.label}
-              </Chip>
-            ))}
-            <span style={{ font: `400 12px/1 ${font.mono}`, color: color.textMuted, marginLeft: 4 }}>
-              {visible.length}건
-            </span>
-          </div>
+          <span style={{ font: `400 12px/1 ${font.mono}`, color: color.textMuted }}>
+            {jobs.length}건
+          </span>
         }
         bodyStyle={{ padding: 0 }}
       >
-        {visible.length === 0 ? (
+        {jobs.length === 0 ? (
           <EmptyState
-            message="이 조건에 맞는 학습이 0건입니다."
+            message="아직 이 GUI로 시작한 학습이 없습니다."
             action={
-              filter === 'all' ? (
-                <Button kind="primary" onClick={() => navigate('/new')}>
-                  새 실험 만들기
-                </Button>
-              ) : (
-                <Button onClick={() => setFilter('all')}>필터 초기화</Button>
-              )
+              <Button kind="primary" onClick={() => navigate('/new')}>
+                새 실험 만들기
+              </Button>
             }
           />
         ) : (
           <>
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: COLUMNS,
-                background: color.surfaceTableHead,
-                borderBottom: `1px solid ${color.border}`,
-              }}
-            >
-              {['실행 이름', 'DEVICE', 'EPOCHS', '상태', 'BEST VAL LOSS', '경과', '시작'].map(
-                (heading) => (
-                  <span
-                    key={heading}
-                    style={{
-                      font: `600 11px/1.3 ${font.mono}`,
-                      letterSpacing: '.04em',
-                      color: '#66707E',
-                      padding: '9px 12px',
-                    }}
-                  >
-                    {heading}
-                  </span>
-                ),
-              )}
-            </div>
-            {visible.map((job) => (
-              <JobRow key={job.job_id} job={job} onOpen={() => navigate(`/monitor/${job.job_id}`)} />
-            ))}
+            <RunGroup
+              title="결과가 있는 학습"
+              detail={`${kept.length}건`}
+              jobs={kept}
+              open
+              onOpen={(job) => navigate(`/monitor/${job.job_id}`)}
+            />
+            <RunGroup
+              title="결과 없이 끝난 기록"
+              detail={countLabel(discarded)}
+              jobs={discarded}
+              open={false}
+              onOpen={(job) => navigate(`/monitor/${job.job_id}`)}
+            />
           </>
         )}
       </Panel>
@@ -206,13 +172,200 @@ export function TrainingOverview({
   );
 }
 
+/**
+ * 한 구역과 그 안의 표입니다. 비어 있으면 머리글도 만들지 않습니다.
+ *
+ * 열 머리글을 구역 안에 두는 것은, 접힌 구역을 폈을 때 그 표가 무슨 열인지 바로
+ * 위에 있어야 하기 때문입니다.
+ */
+function RunGroup({
+  title,
+  detail,
+  jobs,
+  open,
+  onOpen,
+}: {
+  title: string;
+  detail: string;
+  jobs: JobRecord[];
+  open: boolean;
+  onOpen: (job: JobRecord) => void;
+}) {
+  if (jobs.length === 0) return null;
+
+  return (
+    <details open={open}>
+      <summary
+        style={{
+          padding: '9px 14px',
+          font: `600 12px/1.4 ${font.sans}`,
+          color: color.textStrong,
+          background: color.surfaceAlt,
+          borderBottom: `1px solid ${color.borderInner}`,
+          cursor: 'pointer',
+          display: 'flex',
+          gap: 8,
+          alignItems: 'baseline',
+        }}
+      >
+        {title}
+        <span style={{ ...type.plainNote, color: color.textMuted }}>{detail}</span>
+      </summary>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: COLUMNS,
+          background: color.surfaceTableHead,
+          borderBottom: `1px solid ${color.border}`,
+        }}
+      >
+        {HEADINGS.map((heading, index) => (
+          <span
+            key={heading || `spacer-${index}`}
+            // 한글 머리글에는 mono와 자간을 쓰지 않습니다. "실 행  이 름"처럼 벌어져
+            // 두 단어로 읽힙니다. 값은 그대로 mono라 소수점은 계속 맞습니다.
+            style={{ font: `600 11.5px/1.3 ${font.sans}`, color: '#66707E', padding: '9px 12px' }}
+          >
+            {heading}
+          </span>
+        ))}
+      </div>
+      {jobs.map((job) => (
+        <JobRow key={job.job_id} job={job} onOpen={() => onOpen(job)} />
+      ))}
+    </details>
+  );
+}
+
+/** 한 단계가 끝났는지. 색만으로 뜻을 전하지 않도록 점과 글자를 함께 둡니다. */
+function StagePips({ job }: { job: JobRecord }) {
+  return (
+    <span style={{ display: 'flex', gap: 7, padding: '8px 12px', alignItems: 'center' }}>
+      {stagesOf(job).map((stage) => (
+        <span
+          key={stage.key}
+          title={stage.done ? `${stage.label} 끝남` : `${stage.label} 아직`}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 3,
+            font: `${stage.done ? 600 : 400} 11px/1 ${font.sans}`,
+            color: stage.done ? color.tealDark : color.textFaint,
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: '50%',
+              background: stage.done ? color.teal : 'transparent',
+              border: `1px solid ${stage.done ? color.teal : color.borderControl}`,
+            }}
+          />
+          {stage.label}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/**
+ * 행마다 열리는 작은 메뉴입니다.
+ *
+ * 행 전체가 눌리는 버튼이라 메뉴 버튼은 그 클릭을 막아야 합니다. Escape와 초점이
+ * 밖으로 나가면 닫히므로 마우스 없이도 빠져나올 수 있습니다.
+ */
+function RowMenu({
+  label,
+  items,
+}: {
+  label: string;
+  items: { label: string; onSelect: () => void; danger?: boolean }[];
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <span
+      style={{ position: 'relative', display: 'flex', justifyContent: 'center' }}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') setOpen(false);
+      }}
+    >
+      <button
+        type="button"
+        aria-label={label}
+        aria-expanded={open}
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen((value) => !value);
+        }}
+        style={{
+          border: 0,
+          background: 'transparent',
+          color: color.textMuted,
+          font: `600 13px/1 ${font.sans}`,
+          padding: '6px 8px',
+          borderRadius: radius.control,
+        }}
+      >
+        ⋯
+      </button>
+      {open && (
+        <span
+          role="menu"
+          style={{
+            position: 'absolute',
+            top: '100%',
+            right: 0,
+            zIndex: 10,
+            minWidth: 148,
+            background: color.surface,
+            border: `1px solid ${color.borderControl}`,
+            borderRadius: radius.control,
+            boxShadow: '0 4px 14px rgba(17,28,46,.12)',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }}
+        >
+          {items.map((item) => (
+            <button
+              key={item.label}
+              type="button"
+              role="menuitem"
+              onClick={(event) => {
+                event.stopPropagation();
+                setOpen(false);
+                item.onSelect();
+              }}
+              style={{
+                border: 0,
+                background: color.surface,
+                textAlign: 'left',
+                padding: '8px 11px',
+                font: `500 12px/1.4 ${font.sans}`,
+                color: item.danger ? color.red : color.textStrong,
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function JobRow({ job, onOpen }: { job: JobRecord; onOpen: () => void }) {
   const best = job.summary?.best_validation_loss;
-  const cells: (string | number)[] = [
-    '',
-    String(job.settings?.device ?? '-'),
-    String(job.settings?.epochs ?? '-'),
-    '',
+  const map = job.evaluation?.summary?.metrics?.mAP;
+  const spec = specLine(job);
+  const cells = [
+    typeof map === 'number' ? map.toFixed(4) : '-',
     typeof best === 'number' ? loss(best) : '-',
     duration(job.elapsed_seconds),
     startedAt(job.started_at ?? job.created_at),
@@ -236,13 +389,39 @@ function JobRow({ job, onOpen }: { job: JobRecord; onOpen: () => void }) {
         cursor: 'pointer',
       }}
     >
-      <span style={{ padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 1 }}>
-        <span style={{ font: `600 12.5px/1.3 ${font.sans}`, color: color.text }}>{job.run_id}</span>
-        <span style={{ font: `400 11px/1.35 ${font.mono}`, color: color.textFaint }}>
-          {job.job_id.slice(0, 8)}
+      <span style={{ padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+          <span
+            style={{
+              font: `600 12.5px/1.3 ${font.sans}`,
+              color: color.text,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+            title={job.run_id}
+          >
+            {job.run_id}
+          </span>
+          <StatusBadge status={job.status} label={job.status_label} />
         </span>
+        {/* 예전에는 이 자리에 job_id 앞 8자가 있었습니다. 무엇으로 돌린 학습인지를 둡니다. */}
+        {spec !== '' && (
+          <span
+            style={{
+              font: `400 11px/1.35 ${font.mono}`,
+              color: color.textFaint,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {spec}
+          </span>
+        )}
       </span>
-      {cells.slice(1, 3).map((value, index) => (
+      <StagePips job={job} />
+      {cells.map((value, index) => (
         <span
           key={index}
           style={{ padding: '8px 12px', font: `400 12px/1.3 ${font.mono}`, color: color.textStrong }}
@@ -250,17 +429,10 @@ function JobRow({ job, onOpen }: { job: JobRecord; onOpen: () => void }) {
           {value}
         </span>
       ))}
-      <span style={{ padding: '8px 12px' }}>
-        <StatusBadge status={job.status} label={job.status_label} />
-      </span>
-      {cells.slice(4).map((value, index) => (
-        <span
-          key={index}
-          style={{ padding: '8px 12px', font: `400 12px/1.3 ${font.mono}`, color: color.textStrong }}
-        >
-          {value}
-        </span>
-      ))}
+      <RowMenu
+        label={`${job.run_id} 학습 메뉴`}
+        items={[{ label: '자세히 보기', onSelect: onOpen }]}
+      />
     </div>
   );
 }
