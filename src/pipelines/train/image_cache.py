@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import tarfile
 import tempfile
 import time
 from collections.abc import Callable, Mapping
@@ -18,7 +19,7 @@ from uuid import uuid4
 
 from PIL import Image
 
-from src.common import S3Storage, Storage
+from src.common import S3Storage, Storage, StorageError
 
 from .errors import TrainError
 
@@ -28,6 +29,10 @@ CACHE_ROOT = REPOSITORY_ROOT / "artifacts" / "train-image-cache" / "v1"
 TEMPORARY_ROOT = REPOSITORY_ROOT / "artifacts"
 CACHE_TTL_SECONDS = 14 * 24 * 60 * 60
 MAX_CACHE_BYTES = 50 * 1024**3
+# 다 채운 cache를 묶어 두는 자리입니다. 이름이 fingerprint라 dataset이 바뀌면 다른
+# 묶음이 되고, 옛 묶음을 실수로 쓰는 일이 없습니다.
+ARCHIVE_PREFIX = "datasets/pill_detection/image-cache"
+ARCHIVE_NAME = "image-cache.tar"
 _VERSION_SEGMENT = re.compile(r"v[0-9]+")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _MANIFEST_FILES = ("train_manifest.json", "validation_manifest.json")
@@ -127,6 +132,38 @@ def _process_lock(path: Path) -> Iterator[None]:
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
+def _safe_member_name(name: str) -> str:
+    """묶음 안의 이름이 cache directory 밖을 가리키지 않는지 확인합니다.
+
+    묶음은 bucket에서 옵니다. 이름 하나가 ``../``이면 푸는 쪽 파일이 조용히
+    덮어써지므로, 하나라도 이상하면 전부 거부하고 평소대로 이미지를 받습니다.
+    """
+
+    if not name or name.startswith(("/", "\\")) or ":" in name:
+        raise TrainError(f"image cache archive member escapes the cache: {name}")
+    parts = name.replace("\\", "/").split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise TrainError(f"image cache archive member escapes the cache: {name}")
+    return name
+
+
+def _extract_archive(archive: Path, destination: Path) -> None:
+    """cache 묶음을 풉니다. 파일과 directory 말고는 하나도 받지 않습니다."""
+
+    destination.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(archive, "r") as bundle:
+        members = bundle.getmembers()
+        for member in members:
+            # symlink는 자기 밖을 가리킬 수 있고, 그 뒤에 풀리는 파일이 그 링크를
+            # 통해 cache 밖에 써집니다. 이름 검사만으로는 막지 못합니다.
+            if not (member.isfile() or member.isdir()):
+                raise TrainError(
+                    f"image cache archive member escapes the cache: {member.name}"
+                )
+            _safe_member_name(member.name)
+        bundle.extractall(destination, members=members)
+
+
 def _directory_size(path: Path) -> int:
     total = 0
     for candidate in path.rglob("*"):
@@ -205,6 +242,101 @@ class ImageCacheSession:
             return
         for path in trash:
             shutil.rmtree(path, ignore_errors=True)
+
+    @property
+    def archive_uri(self) -> str | None:
+        """다 채운 cache가 통째로 올라가는 자리입니다.
+
+        실행마다 새로 만드는 임시 cache는 다음 실행이 쓸 수 없으므로 ``None``입니다.
+        """
+
+        if not self._persistent or self._fingerprint is None:
+            return None
+        return f"{ARCHIVE_PREFIX}/{self._fingerprint}.tar"
+
+    def _entry_names(self) -> list[str]:
+        """이미 받아 둔 image entry 이름입니다. 받는 중인 임시 폴더는 뺍니다."""
+
+        objects = self.namespace / "objects"
+        if not objects.is_dir():
+            return []
+        return sorted(
+            path.name
+            for path in objects.iterdir()
+            if path.is_dir() and not path.name.startswith(".")
+        )
+
+    def seed_from_archive(self, storage: Storage) -> bool:
+        """묶음 하나를 받아 cache를 채웁니다.
+
+        런타임이 바뀌면 디스크가 비어 있어 이미지를 한 장씩 다시 받게 됩니다. 같은
+        1.9 GB라도 객체 하나로 받는 편이 훨씬 빠릅니다.
+
+        여기서 실패해도 학습은 그대로 진행됩니다. 이건 빠른 길일 뿐이고, 없으면
+        평소처럼 이미지를 한 장씩 받습니다.
+        """
+
+        location = self.archive_uri
+        if location is None or not isinstance(storage, S3Storage):
+            return False
+        if self._entry_names():
+            return False  # 이미 받아 둔 것이 있으면 건드리지 않습니다.
+        staging = self.namespace / f".seed-{uuid4().hex}"
+        try:
+            if not storage.exists(location):
+                return False
+            self._temporary_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                prefix="train-cache-archive-", dir=self._temporary_root
+            ) as scratch:
+                archive = Path(scratch) / ARCHIVE_NAME
+                storage.download_file(location, archive)
+                _extract_archive(archive, staging)
+            objects = self.namespace / "objects"
+            objects.mkdir(parents=True, exist_ok=True)
+            for entry in staging.iterdir():
+                try:
+                    entry.rename(objects / entry.name)
+                except OSError:
+                    # 같은 cache를 쓰는 다른 실행이 먼저 놓았습니다. 내용은 같습니다.
+                    continue
+            return True
+        except (TrainError, StorageError, OSError, tarfile.TarError):
+            return False
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def publish_archive(self, storage: Storage, *, expected_entries: int) -> bool:
+        """다 채운 cache를 묶어 한 번만 올립니다.
+
+        ``expected_entries``는 이 dataset의 이미지 수입니다. 그만큼 받기 전에 올리면
+        다음 실행이 나머지가 영영 없는 묶음을 믿게 되므로, 다 찼을 때만 올립니다.
+        """
+
+        location = self.archive_uri
+        if location is None or not isinstance(storage, S3Storage):
+            return False
+        names = self._entry_names()
+        if not names or len(names) != expected_entries:
+            return False
+        objects = self.namespace / "objects"
+        try:
+            if storage.exists(location):
+                return False  # 이미 다른 실행이 올렸습니다.
+            self._temporary_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                prefix="train-cache-archive-", dir=self._temporary_root
+            ) as scratch:
+                archive = Path(scratch) / ARCHIVE_NAME
+                with tarfile.open(archive, "w") as bundle:
+                    for name in names:
+                        bundle.add(objects / name, arcname=name)
+                # 먼저 올린 실행의 묶음을 덮어쓰면, 그것을 받고 있던 쪽이 반쪽짜리를
+                # 보게 됩니다. 진 쪽은 그냥 올리지 않습니다.
+                storage.upload_file(archive, location, overwrite=False)
+            return True
+        except (StorageError, OSError, tarfile.TarError):
+            return False
 
     def _start_temporary(self) -> None:
         self._persistent = False

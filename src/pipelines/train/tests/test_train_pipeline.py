@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import io
 import json
 import os
@@ -19,6 +20,7 @@ from torchvision.models.detection import FasterRCNN, RetinaNet
 
 from src.common import LocalStorage, S3Storage, StorageError
 from src.pipelines import train
+from src.pipelines.train import image_cache as image_cache_module
 from src.pipelines.train import pipeline, trainer as trainer_module
 from src.pipelines.train.dataset import DetectionAugmentation, REPOSITORY_ROOT, load_class_map
 from src.pipelines.train.model import SUPPORTED_ARCHITECTURES, build_model
@@ -2441,3 +2443,151 @@ def test_s3_publisher_can_retry_same_run_id_after_intermediate_failure(monkeypat
     }
     with pytest.raises(FileExistsError, match="already exists"):
         pipeline._publish_s3(storage, checkpoint, checkpoint, history, settings)
+
+
+def _bucket_storage(objects: dict[str, bytes]) -> S3Storage:
+    """dict 하나를 bucket처럼 쓰는 S3Storage입니다."""
+
+    client = Mock()
+
+    def missing(operation: str) -> ClientError:
+        return ClientError({"Error": {"Code": "404", "Message": "missing"}}, operation)
+
+    def head_object(*, Bucket, Key, **_):
+        if Key not in objects:
+            raise missing("HeadObject")
+        return {"ETag": f'"{hashlib.md5(objects[Key]).hexdigest()}"'}
+
+    def get_object(*, Bucket, Key, **_):
+        if Key not in objects:
+            raise missing("GetObject")
+        return {"Body": io.BytesIO(objects[Key])}
+
+    def put_object(*, Bucket, Key, Body=b"", **request):
+        if request.get("IfNoneMatch") == "*" and Key in objects:
+            raise ClientError(
+                {"Error": {"Code": "PreconditionFailed", "Message": "exists"}},
+                "PutObject",
+            )
+        objects[Key] = Body.read() if hasattr(Body, "read") else Body
+
+    def download_file(bucket, key, destination):
+        if key not in objects:
+            raise missing("GetObject")
+        Path(destination).write_bytes(objects[key])
+
+    client.head_object.side_effect = head_object
+    client.get_object.side_effect = get_object
+    client.put_object.side_effect = put_object
+    client.download_file.side_effect = download_file
+    return S3Storage("bucket", client=client)
+
+
+DATASET_PREFIX = "datasets/pill_detection/processed/v1-seed42-8020"
+
+
+def _s3_dataset_objects() -> dict[str, bytes]:
+    """bucket에 올라가 있는 dataset artifact와 이미지입니다."""
+
+    def image(color: str) -> bytes:
+        buffer = io.BytesIO()
+        Image.new("RGB", (16, 12), color=color).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def document(value) -> bytes:
+        return json.dumps(value, ensure_ascii=False).encode("utf-8")
+
+    train_manifest = document(_manifest("train.png"))
+    validation_manifest = document(_manifest("validation.png"))
+    return {
+        f"{DATASET_PREFIX}/train.png": image("red"),
+        f"{DATASET_PREFIX}/validation.png": image("blue"),
+        f"{DATASET_PREFIX}/train_manifest.json": train_manifest,
+        f"{DATASET_PREFIX}/validation_manifest.json": validation_manifest,
+        f"{DATASET_PREFIX}/class_map.json": document({"pill": 1}),
+        # image cache가 영구 cache를 쓰려면 version 조각과 두 manifest checksum이
+        # 모두 있어야 합니다. 실제 data pipeline이 쓰는 형식 그대로입니다.
+        f"{DATASET_PREFIX}/dataset_summary.json": document(
+            {
+                "train_images": 1,
+                "validation_images": 1,
+                "source_prefix": "datasets/pill_detection/raw/v1/original/",
+                "split": {
+                    "checksums": {
+                        "algorithm": "sha256",
+                        "train_manifest.json": {
+                            "sha256": hashlib.sha256(train_manifest).hexdigest(),
+                            "bytes": len(train_manifest),
+                        },
+                        "validation_manifest.json": {
+                            "sha256": hashlib.sha256(validation_manifest).hexdigest(),
+                            "bytes": len(validation_manifest),
+                        },
+                    }
+                },
+            }
+        ),
+    }
+
+
+def _s3_train_config(tmp_path: Path, run_id: str) -> dict:
+    return {
+        "storage": {"backend": "s3", "s3": {"prefix": ""}},
+        "inputs": {
+            "data": {
+                name: f"s3://bucket/{DATASET_PREFIX}/{name.removesuffix('_uri')}.json"
+                for name in (
+                    "train_manifest_uri",
+                    "validation_manifest_uri",
+                    "class_map_uri",
+                    "dataset_summary_uri",
+                )
+            }
+        },
+        "train": {
+            "run_id": run_id,
+            "seed": 17,
+            "epochs": 1,
+            "batch_size": 1,
+            "device": "cpu",
+            "output_dir": _relative(tmp_path / "outputs"),
+            "output_prefix": "experiments/completed",
+        },
+    }
+
+
+def test_a_new_runtime_fills_its_image_cache_from_one_archive(tmp_path, monkeypatch):
+    """Colab은 runtime이 바뀌면 빈 디스크로 시작합니다.
+
+    그때 이미지를 한 장씩 다시 받으면 1만 건을 다시 받게 됩니다. 앞선 실행이 남긴
+    묶음 하나로 채워야 이어서 학습하는 값이 있습니다.
+    """
+
+    monkeypatch.setattr(pipeline, "build_model", lambda *args, **kwargs: TinyDetector())
+    objects = _s3_dataset_objects()
+    storage = _bucket_storage(objects)
+    monkeypatch.setattr(pipeline, "create_storage", lambda config: storage)
+
+    def cache_at(directory: str):
+        # 실제 cache 위치는 저장소 안이라 test가 쓰면 안 됩니다.
+        return lambda summary: image_cache_module.ImageCacheSession(
+            summary,
+            cache_root=tmp_path / directory,
+            temporary_root=tmp_path / "cache-temporary",
+        )
+
+    monkeypatch.setattr(pipeline, "ImageCacheSession", cache_at("first-runtime"))
+    first = train.run(_s3_train_config(tmp_path, "colab-first"))
+
+    assert first["status"] == "ok", first["message"]
+    archives = [key for key in objects if key.endswith(".tar")]
+    assert len(archives) == 1
+
+    monkeypatch.setattr(pipeline, "ImageCacheSession", cache_at("second-runtime"))
+    storage.client.download_file.reset_mock()
+    second = train.run(_s3_train_config(tmp_path, "colab-second"))
+
+    assert second["status"] == "ok", second["message"]
+    downloaded = [call.args[1] for call in storage.client.download_file.call_args_list]
+    assert archives[0] in downloaded
+    assert not [key for key in downloaded if key.endswith(".png")]
