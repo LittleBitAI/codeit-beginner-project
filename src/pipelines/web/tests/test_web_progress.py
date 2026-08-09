@@ -77,6 +77,22 @@ def test_parses_epoch_completed():
     assert result["percent"] == 10.0
 
 
+def test_learning_rate_is_kept_when_train_reports_it_and_stays_none_when_it_does_not():
+    """schedule을 쓰지 않는 실행과 이 계약 이전의 옛 실행은 값이 없습니다.
+
+    없는 것을 0으로 채우면 화면이 learning rate가 0까지 떨어진 것처럼 그립니다.
+    """
+
+    state = feed(
+        line("epoch_completed", epoch=1, epochs=2, learning_rate=0.0005),
+        line("epoch_completed", epoch=2, epochs=2),
+    )
+
+    result = snapshot(state)
+
+    assert [item["learning_rate"] for item in result["epochs"]] == [0.0005, None]
+
+
 def test_epoch_completed_produces_readable_log_line():
     state = ProgressState()
 

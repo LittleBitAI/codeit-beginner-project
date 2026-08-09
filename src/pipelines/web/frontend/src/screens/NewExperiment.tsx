@@ -17,8 +17,11 @@ import { color, font, radius } from '../design/tokens';
 import { dataMatchesSource } from '../lib/dataSource';
 import {
   EARLY_STOPPING_FIELDS,
+  LR_FIELDS,
   isEarlyStoppingOn,
+  lrFieldsFor,
   messageFor,
+  selectedSchedule,
   toPayload,
 } from '../lib/draftPayload';
 import { resolveTrainCapability } from '../lib/trainCapabilities';
@@ -54,6 +57,12 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
       'beta2',
       'epsilon',
       'num_workers',
+      'lr_scheduler',
+      'lr_warmup_steps',
+      'lr_warmup_start_factor',
+      'lr_min_factor',
+      'lr_step_size',
+      'lr_gamma',
       'early_stopping',
       'early_stopping_patience',
       'early_stopping_min_delta',
@@ -129,6 +138,10 @@ export function NewExperiment({
   const capability = resolveTrainCapability(defaults);
   const selectedOptimizer = draft.train.optimizer || capability.optimizer.default;
   const earlyStoppingOn = isEarlyStoppingOn(draft.train, fields);
+  // 고른 schedule이 쓰지 않는 칸은 감춥니다. 보이면 그 값이 학습에 쓰이는 것처럼
+  // 읽히고, 서버도 쓰지 않는 값이라며 거부합니다. payload의 제외 규칙과 같은 함수를
+  // 씁니다 — 둘이 어긋나면 화면에 없는 값 때문에 저장이 막힙니다.
+  const shownLrFields = new Set(lrFieldsFor(selectedSchedule(draft.train, fields)));
   const activeTab = TABS.find((item) => item.key === tab) ?? TABS[0]!;
   const tabHasError = (item: (typeof TABS)[number]) =>
     item.fields.some((name) => messageFor(errors, `train.${name}`) !== undefined);
@@ -226,6 +239,7 @@ export function NewExperiment({
                 // 조기 종료를 끄면 관련 숫자 칸도 감춥니다. 보이면 그 값이 학습에
                 // 쓰이는 것처럼 읽히고, 서버도 쓰지 않는 값이라며 거부합니다.
                 if (!earlyStoppingOn && EARLY_STOPPING_FIELDS.includes(name)) return null;
+                if (LR_FIELDS.includes(name) && !shownLrFields.has(name)) return null;
                 const spec = fields.find((item) => item.name === name);
                 if (!spec) return null;
                 // 이름을 비워 두면 서버가 설정을 읽어 지어 줍니다. 규칙을 여기에

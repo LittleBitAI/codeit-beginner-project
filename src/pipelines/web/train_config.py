@@ -41,12 +41,14 @@ from .paths import (
 from .train_capabilities import (
     CUDA_ONLY_PRECISIONS,
     DEFAULT_AUGMENTATION,
+    DEFAULT_LR_SCHEDULER,
     DEFAULT_PRECISION,
     LEGACY_ARCHITECTURE,
     LEGACY_OPTIMIZER,
     NEW_EXPERIMENT_OPTIMIZER,
     SUPPORTED_ARCHITECTURES,
     SUPPORTED_AUGMENTATIONS,
+    SUPPORTED_LR_SCHEDULERS,
     SUPPORTED_OPTIMIZERS,
     SUPPORTED_PRECISIONS,
 )
@@ -54,6 +56,8 @@ from .train_capabilities import (
 
 __all__ = [
     "DATA_ARTIFACT_KEYS",
+    "LR_SCHEDULER_DEFAULTS",
+    "LR_WARMUP_DEFAULTS",
     "OPTIONAL_DATA_ARTIFACT_KEYS",
     "OPTIMIZER_PROFILES",
     "build_runtime_config",
@@ -103,6 +107,23 @@ _INTEGER_FIELDS = (
 RESUME_CHECKPOINT_NAME = "last_checkpoint.pt"
 WORKING_DIRECTORY_SUFFIX = ".partial"
 RUNNING_PREFIX = "running"
+# train의 LR_SCHEDULER_DEFAULTS·LR_WARMUP_DEFAULTS와 같아야 합니다.
+# test_web_train_contract.py가 train source를 읽어 대조합니다.
+LR_WARMUP_DEFAULTS = {"warmup_steps": 0, "warmup_start_factor": 0.001}
+LR_SCHEDULER_DEFAULTS = {
+    "none": {},
+    "cosine": {"min_lr_factor": 0.01},
+    "step": {"step_size": 3, "gamma": 0.1},
+    "linear": {"min_lr_factor": 0.01},
+}
+# 화면의 평평한 칸 이름 -> train이 받는 nested object의 key.
+_LR_FIELDS = {
+    "lr_warmup_steps": "warmup_steps",
+    "lr_warmup_start_factor": "warmup_start_factor",
+    "lr_min_factor": "min_lr_factor",
+    "lr_step_size": "step_size",
+    "lr_gamma": "gamma",
+}
 OPTIMIZER_PROFILES = {
     "AdamW": {
         "learning_rate": 0.0001,
@@ -148,6 +169,29 @@ _FIELD_LABELS = {
     "batch_size": ("Batch size", "한 번에 처리할 이미지 수. GPU 메모리에 가장 큰 영향을 줍니다."),
     "num_workers": ("DataLoader workers", "이미지를 읽어 오는 보조 process 수. 0이면 주 process가 직접 읽습니다."),
     "learning_rate": ("Learning rate", "한 번에 얼마나 크게 배울지 정합니다. 너무 크면 발산합니다."),
+    "lr_scheduler": (
+        "Learning rate schedule",
+        "학습이 진행되면서 learning rate를 줄이는 방법입니다. none은 처음부터 끝까지 같은"
+        " 값이고, cosine은 부드럽게, linear는 곧게, step은 정해진 epoch마다 계단처럼"
+        " 줄입니다.",
+    ),
+    "lr_warmup_steps": (
+        "Warmup steps",
+        "처음 몇 batch 동안 learning rate를 조금씩 올릴지 정합니다. 0이면 쓰지 않습니다."
+        " 사전학습 가중치로 시작할 때 초반에 손실이 튀는 것을 막아 줍니다.",
+    ),
+    "lr_warmup_start_factor": (
+        "Warmup 시작 배율",
+        "warmup을 시작할 때의 learning rate 배율입니다. 0.001이면 위에 적은 값의"
+        " 1/1000에서 출발해 warmup이 끝날 때 그 값에 닿습니다.",
+    ),
+    "lr_min_factor": (
+        "최저 learning rate 배율",
+        "학습이 끝날 때의 learning rate 배율입니다. 0.01이면 위에 적은 값의 1/100까지"
+        " 내려갑니다. 0이면 마지막에 0이 됩니다.",
+    ),
+    "lr_step_size": ("줄이는 간격", "step schedule이 몇 epoch마다 learning rate를 줄일지 정합니다."),
+    "lr_gamma": ("줄이는 배율", "step schedule이 한 번에 곱하는 값입니다. 0.1이면 10분의 1이 됩니다."),
     "momentum": ("Momentum", "SGD가 이전 방향을 얼마나 유지할지 정합니다."),
     "weight_decay": ("Weight decay", "과적합을 억제하는 정규화 강도입니다."),
     "beta1": ("Beta 1", "Adam 계열의 1차 모멘트 감쇠율입니다."),
@@ -304,6 +348,7 @@ def field_specs() -> list[dict[str, Any]]:
         ("optimizer", NEW_EXPERIMENT_OPTIMIZER, SUPPORTED_OPTIMIZERS),
         ("augmentation", DEFAULT_AUGMENTATION, SUPPORTED_AUGMENTATIONS),
         ("precision", form_precision, SUPPORTED_PRECISIONS),
+        ("lr_scheduler", DEFAULT_LR_SCHEDULER, SUPPORTED_LR_SCHEDULERS),
     ):
         label, hint = _FIELD_LABELS[name]
         specs.append(
@@ -405,6 +450,24 @@ def field_specs() -> list[dict[str, Any]]:
             "hint": hint,
         }
     )
+    for name, default, minimum, kind in (
+        ("lr_warmup_steps", LR_WARMUP_DEFAULTS["warmup_steps"], 0, "integer"),
+        ("lr_warmup_start_factor", LR_WARMUP_DEFAULTS["warmup_start_factor"], 0.0, "number"),
+        ("lr_min_factor", LR_SCHEDULER_DEFAULTS["cosine"]["min_lr_factor"], 0.0, "number"),
+        ("lr_step_size", LR_SCHEDULER_DEFAULTS["step"]["step_size"], 1, "integer"),
+        ("lr_gamma", LR_SCHEDULER_DEFAULTS["step"]["gamma"], 0.0, "number"),
+    ):
+        label, hint = _FIELD_LABELS[name]
+        specs.append(
+            {
+                "name": name,
+                "type": kind,
+                "default": default,
+                "minimum": minimum,
+                "label": label,
+                "hint": hint,
+            }
+        )
     label, hint = _FIELD_LABELS["pretrained"]
     # 화면에서 시작하는 학습은 사전학습 가중치를 기본으로 씁니다. 아래
     # normalize_train_settings의 fallback은 train 기본값(False) 그대로 두어야 합니다.
@@ -473,6 +536,75 @@ def _normalize_probability(
         collect(errors, f"train.{name}", "0 이상 1 미만의 유한한 숫자여야 합니다.")
         return default
     return value
+
+
+def _normalize_ratio(
+    raw: Any, name: str, default: float, errors: list[FieldError], *, above_zero: bool
+) -> float:
+    """0과 1 사이의 배율입니다. learning rate를 키우는 값은 schedule이 아닙니다."""
+
+    value = _normalize_float(raw, name, default, 0.0, errors)
+    if value > 1.0 or (above_zero and value <= 0.0):
+        bound = "0 초과" if above_zero else "0 이상"
+        collect(errors, f"train.{name}", f"{bound} 1 이하의 유한한 숫자여야 합니다.")
+        return default
+    return value
+
+
+def _normalize_lr_scheduler(raw: Any, errors: list[FieldError]) -> dict[str, Any] | None:
+    """화면의 평평한 칸을 train이 받는 object 하나로 접습니다.
+
+    검증 규칙은 train의 ``_lr_scheduler``(pipeline.py)를 그대로 옮긴 것입니다.
+    ``none``을 고르고 warmup도 쓰지 않으면 key 자체를 만들지 않아, schedule을 쓰지 않는
+    사람의 config는 이 기능이 생기기 전과 한 글자도 달라지지 않습니다. 자동으로 짓는
+    실행 이름이 설정에서 나오므로 그 이름까지 그대로입니다.
+    """
+
+    name = raw.get("lr_scheduler", DEFAULT_LR_SCHEDULER)
+    if not isinstance(name, str) or name not in SUPPORTED_LR_SCHEDULERS:
+        collect(
+            errors,
+            "train.lr_scheduler",
+            f"{', '.join(SUPPORTED_LR_SCHEDULERS)} 중 하나여야 합니다.",
+        )
+        name = DEFAULT_LR_SCHEDULER
+
+    used = {**LR_WARMUP_DEFAULTS, **LR_SCHEDULER_DEFAULTS[name]}
+    # 고른 schedule이 쓰지 않는 값은 train이 거부합니다. optimizer의 momentum·beta를
+    # 막는 것과 같은 이유입니다.
+    for field, key in _LR_FIELDS.items():
+        if key not in used and field in raw:
+            collect(errors, f"train.{field}", f"{name} schedule에서 사용하지 않는 값입니다.")
+
+    warmup_steps = _normalize_integer(
+        raw, "lr_warmup_steps", used["warmup_steps"], 0, errors
+    )
+    settings: dict[str, Any] = {
+        "name": name,
+        "warmup_steps": warmup_steps,
+        "warmup_start_factor": _normalize_ratio(
+            raw,
+            "lr_warmup_start_factor",
+            used["warmup_start_factor"],
+            errors,
+            above_zero=True,
+        ),
+    }
+    if "min_lr_factor" in used:
+        settings["min_lr_factor"] = _normalize_ratio(
+            raw, "lr_min_factor", used["min_lr_factor"], errors, above_zero=False
+        )
+    if "step_size" in used:
+        settings["step_size"] = _normalize_integer(
+            raw, "lr_step_size", used["step_size"], 1, errors
+        )
+        settings["gamma"] = _normalize_ratio(
+            raw, "lr_gamma", used["gamma"], errors, above_zero=True
+        )
+    # warmup만 쓰는 것도 정상 조합입니다. 둘 다 안 쓸 때만 없던 일이 됩니다.
+    if name == DEFAULT_LR_SCHEDULER and warmup_steps == 0:
+        return None
+    return settings
 
 
 def _normalize_early_stopping(
@@ -638,6 +770,7 @@ def normalize_train_settings(
         "precision": precision,
         "device": device,
         "pretrained": pretrained,
+        "lr_scheduler": _normalize_lr_scheduler(raw, errors),
         "early_stopping": _normalize_early_stopping(raw, errors),
         "output_dir": output_dir,
         "output_prefix": output_prefix.strip("/"),
@@ -686,6 +819,13 @@ def normalize_train_settings(
         **({"resume_from": resume_from} if resume_from is not None else {}),
         "learning_rate": settings["learning_rate"],
         "weight_decay": settings["weight_decay"],
+        # 상수 learning rate로 돌리는 실행은 key 자체를 넣지 않습니다. train은 없으면
+        # 지금과 완전히 같게 동작합니다.
+        **(
+            {"lr_scheduler": settings["lr_scheduler"]}
+            if settings["lr_scheduler"] is not None
+            else {}
+        ),
         "device": settings["device"],
         "pretrained": settings["pretrained"],
         # 끄면 key 자체를 넣지 않습니다. train은 없으면 전체 epoch를 그대로 돕니다.

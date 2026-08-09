@@ -113,6 +113,35 @@ describe('toPayload', () => {
     expect(on.train.early_stopping_patience).toBe(5);
   });
 
+  it('고른 schedule이 쓰지 않는 칸은 보내지 않는다', () => {
+    // 화면에서 감춘 값을 payload에 남기면 서버가 "그 schedule에서 쓰지 않는 값"이라며
+    // 저장을 막습니다. 숨김 규칙과 제외 규칙은 같은 함수에서 나와야 합니다.
+    const fields: FieldSpec[] = [
+      ...FIELDS,
+      {
+        name: 'lr_scheduler',
+        type: 'enum',
+        default: 'none',
+        choices: ['none', 'cosine', 'step', 'linear'],
+        label: 'Schedule',
+        hint: '',
+      },
+      { name: 'lr_min_factor', type: 'number', default: 0.01, label: '최저 배율', hint: '' },
+      { name: 'lr_step_size', type: 'integer', default: 3, label: '간격', hint: '' },
+      { name: 'lr_gamma', type: 'number', default: 0.1, label: '배율', hint: '' },
+    ];
+    const draft = {
+      train: { lr_scheduler: 'cosine', lr_min_factor: '0.05', lr_step_size: '3', lr_gamma: '0.1' },
+      data: {},
+    };
+
+    const payload = toPayload(draft, fields);
+
+    expect(payload.train.lr_min_factor).toBe(0.05);
+    expect(payload.train.lr_step_size).toBeUndefined();
+    expect(payload.train.lr_gamma).toBeUndefined();
+  });
+
   it('손대지 않은 device도 화면에 보이는 기본값 그대로 실어 보낸다', () => {
     // GPU가 있는 PC에서 서버는 device 기본값을 cuda로, precision을 amp로 내려 줍니다.
     // 둘은 짝이라 device만 빼고 보내면 서버 fallback인 cpu가 이깁니다. 그러면 화면에는
@@ -222,6 +251,23 @@ describe('describeRun', () => {
 
   it('조기 종료를 쓰지 않으면 그 말을 꺼내지 않는다', () => {
     expect(describeRun(config)).not.toContain('조기 종료');
+  });
+
+  it('learning rate schedule을 쓰면 어떻게 변하는지 말한다', () => {
+    const text = describeRun({
+      ...config,
+      train: {
+        ...config.train,
+        lr_scheduler: { name: 'cosine', warmup_steps: 500, warmup_start_factor: 0.001 },
+      },
+    });
+
+    expect(text).toContain('곡선');
+    expect(text).toContain('500 batch');
+  });
+
+  it('schedule을 쓰지 않으면 learning rate 이야기를 꺼내지 않는다', () => {
+    expect(describeRun(config)).not.toContain('batch 동안');
   });
 });
 

@@ -78,6 +78,8 @@ export interface EpochRecord {
   validation_loss_components?: Record<string, number> | null;
   epoch_seconds: number | null;
   is_best: boolean | null;
+  /** 그 epoch의 마지막 batch가 쓴 값. schedule 이전의 옛 실행에는 없습니다. */
+  learning_rate?: number | null;
 }
 
 /** 지금 지나고 있는 epoch 안의 batch 위치입니다. */

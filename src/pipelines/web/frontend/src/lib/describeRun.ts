@@ -1,5 +1,13 @@
 import type { RuntimeConfig } from '../api/types';
 
+/** schedule 이름을 딥러닝을 모르는 사람이 읽을 수 있는 말로 바꿉니다. */
+const SCHEDULE_WORDS: Record<string, string> = {
+  none: '학습하는 동안 그대로입니다',
+  cosine: '학습이 진행될수록 부드러운 곡선을 그리며 줄어듭니다',
+  linear: '학습이 진행될수록 일정한 기울기로 줄어듭니다',
+  step: '정해진 epoch마다 계단처럼 줄어듭니다',
+};
+
 /**
  * 설정을 한국어 문장으로 풀어 씁니다.
  *
@@ -15,6 +23,17 @@ export function describeRun(config: RuntimeConfig | null): string {
   const start = train.pretrained === true ? 'COCO 사전학습 가중치' : '무작위 초기 가중치';
   const backend = (config.storage as { backend?: string }).backend === 's3' ? 'S3' : '로컬 디스크';
   const sources = Object.keys(data).length;
+  const schedule = train.lr_scheduler as
+    | { name?: unknown; warmup_steps?: unknown }
+    | null
+    | undefined;
+  // 쓸 때만 말합니다. 설정하지 않으면 learning rate가 처음부터 끝까지 그대로입니다.
+  const scheduleSentence = schedule
+    ? `learning rate는 ${SCHEDULE_WORDS[String(schedule.name)] ?? String(schedule.name)}` +
+      (Number(schedule.warmup_steps) > 0
+        ? `, 처음 ${String(schedule.warmup_steps)} batch 동안은 작은 값에서 올라갑니다. `
+        : '. ')
+    : '';
   const earlyStopping = train.early_stopping as { patience?: unknown; min_delta?: unknown } | null;
   // 켰을 때만 말합니다. 쓰지 않는 설명을 붙이면 안 쓰는 기능을 쓰는 줄 압니다.
   const stopSentence = earlyStopping
@@ -29,6 +48,7 @@ export function describeRun(config: RuntimeConfig | null): string {
     `momentum ${String(train.momentum)}, weight decay ${String(train.weight_decay)})를 쓰고, ` +
     `random seed는 ${String(train.seed)}이라 같은 데이터면 같은 결과가 나옵니다. ` +
     `DataLoader worker는 ${String(train.num_workers)}개이며 실행 대상은 ${device}입니다. ` +
+    scheduleSentence +
     stopSentence +
     `결과 checkpoint와 학습 이력은 ${backend}의 '${String(train.output_dir)}/${String(train.run_id)}'에 저장됩니다.`
   );

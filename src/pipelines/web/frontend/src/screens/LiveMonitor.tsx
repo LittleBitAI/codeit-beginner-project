@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 import type { GpuStatus, JobListing } from '../api/types';
 import { ChartLegend, LossChart } from '../components/LossChart';
+import { LrChart } from '../components/LrChart';
 import { LossBreakdown } from '../components/LossBreakdown';
 import { EvaluatePanel } from '../components/EvaluatePanel';
 import { LogStream } from '../components/LogStream';
@@ -246,6 +247,15 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
           value={String(progress.best?.epoch ?? job.summary?.best_epoch ?? '-')}
           compact
         />
+        <KpiCard
+          label="LEARNING RATE"
+          value={
+            typeof last?.learning_rate === 'number'
+              ? last.learning_rate.toExponential(2)
+              : '-'
+          }
+          compact
+        />
         <KpiCard label="EPOCH TIME" value={duration(last?.epoch_seconds)} compact />
         <KpiCard label="경과" value={duration(job.elapsed_seconds)} compact />
       </div>
@@ -263,6 +273,10 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
               currentEpoch={progress.current_epoch}
             />
             <ChartLegend />
+          </Panel>
+          {/* schedule을 쓴 학습에서만 의미가 있습니다. 값이 없으면 그렇다고 말합니다. */}
+          <Panel title="Learning rate" bodyStyle={{ padding: '12px 16px 0' }}>
+            <LrChart epochs={epochs} totalEpochs={progress.total_epochs} />
           </Panel>
           <LossBreakdown epochs={epochs} />
 

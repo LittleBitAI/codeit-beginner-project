@@ -5,6 +5,7 @@ import { AlertRow, EstimatedValue, KpiCard, ProgressBar, StatusBadge } from './p
 import { LogStream } from './LogStream';
 import { LossBreakdown } from './LossBreakdown';
 import { LossChart } from './LossChart';
+import { LrChart } from './LrChart';
 import type { EpochRecord, LogLine } from '../api/types';
 
 describe('AlertRow', () => {
@@ -115,6 +116,31 @@ describe('LossChart', () => {
     const { container } = render(<LossChart epochs={epochs} totalEpochs={4} currentEpoch={2} />);
 
     expect(container.querySelectorAll('polyline').length).toBe(2);
+  });
+});
+
+describe('LrChart', () => {
+  it('learning rate를 기록하지 않은 학습에는 곡선을 그리지 않고 이유를 말한다', () => {
+    // 없는 값을 0으로 채우면 learning rate가 0까지 떨어진 것처럼 보입니다.
+    const epochs: EpochRecord[] = [
+      { epoch: 1, train_loss: 1.2, validation_loss: 1.1, epoch_seconds: 2, is_best: true },
+    ];
+    const { container } = render(<LrChart epochs={epochs} totalEpochs={4} />);
+
+    expect(screen.getByText(/learning rate를 기록하지 않았습니다/)).toBeInTheDocument();
+    expect(container.querySelector('polyline')).toBeNull();
+  });
+
+  it('기록이 있는 epoch만 이어 그린다', () => {
+    const epochs: EpochRecord[] = [
+      { epoch: 1, train_loss: 1.2, validation_loss: 1.1, epoch_seconds: 2, is_best: true, learning_rate: 0.001 },
+      { epoch: 2, train_loss: 0.9, validation_loss: 1.0, epoch_seconds: 2, is_best: true, learning_rate: null },
+      { epoch: 3, train_loss: 0.8, validation_loss: 0.9, epoch_seconds: 2, is_best: true, learning_rate: 0.0005 },
+    ];
+    const { container } = render(<LrChart epochs={epochs} totalEpochs={3} />);
+
+    const polyline = container.querySelector('polyline');
+    expect(polyline?.getAttribute('points')?.split(' ').length).toBe(2);
   });
 });
 

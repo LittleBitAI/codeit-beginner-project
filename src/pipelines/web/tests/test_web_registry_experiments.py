@@ -453,8 +453,15 @@ def metrics_document() -> dict:
 def training_history() -> list[dict]:
     return [
         {"epoch": 2, "train_loss": 0.3, "validation_loss": 0.35, "is_best": False},
+        # 이 기능 이전에 학습한 실행에는 learning_rate가 없습니다.
         {"epoch": 1, "train_loss": 0.9, "validation_loss": 0.8, "is_best": False},
-        {"epoch": 3, "train_loss": 0.1, "validation_loss": 0.0575, "is_best": True},
+        {
+            "epoch": 3,
+            "train_loss": 0.1,
+            "validation_loss": 0.0575,
+            "is_best": True,
+            "learning_rate": 0.00025,
+        },
     ]
 
 
@@ -510,6 +517,12 @@ def test_detail_carries_all_nine_metrics_and_the_loss_curve(client, monkeypatch)
     # 곡선을 그리려면 순서가 있어야 합니다. 파일 순서를 믿지 않습니다.
     assert [item["epoch"] for item in payload["history"]["epochs"]] == [1, 2, 3]
     assert payload["history"]["epochs"][2]["validation_loss"] == 0.0575
+    # 옛 실행에는 learning_rate가 없습니다. 없는 값을 지어내지 않습니다.
+    assert [item["learning_rate"] for item in payload["history"]["epochs"]] == [
+        None,
+        None,
+        0.00025,
+    ]
 
 
 def test_detail_never_sends_the_huge_blocks(client, monkeypatch):

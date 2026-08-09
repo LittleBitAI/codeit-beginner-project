@@ -231,6 +231,8 @@ def history_block(
                 "validation_loss": _number(entry.get("validation_loss")),
                 "epoch_seconds": _number(entry.get("epoch_seconds")),
                 "is_best": entry.get("is_best") if isinstance(entry.get("is_best"), bool) else None,
+                # schedule이 생기기 전에 학습한 실행에는 이 값이 없습니다.
+                "learning_rate": _number(entry.get("learning_rate")),
             }
         )
     if not epochs:

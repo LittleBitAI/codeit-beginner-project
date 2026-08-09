@@ -234,6 +234,8 @@ def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[
         "validation_loss_components": _loss_components(event.get("validation_loss_components")),
         "epoch_seconds": _finite_number(event.get("epoch_seconds")),
         "is_best": bool(event.get("is_best")) if isinstance(event.get("is_best"), bool) else None,
+        # schedule을 쓰지 않는 실행과 이 계약 이전의 옛 실행은 None입니다.
+        "learning_rate": _finite_number(event.get("learning_rate")),
     }
     # 같은 epoch이 다시 오면 나중 값으로 덮어씁니다.
     state.epochs_by_number[epoch] = record
