@@ -120,6 +120,12 @@ class TeamSyncConfig:
     # 화면을 띄울 수 없는 곳을 위한 값이고, 이 이름은 Cognito가 확인해 주지
     # 않습니다. 그래서 선택 값으로 두고, 켠 사람만 그 경로를 씁니다.
     actor_name: str | None = None
+    # 로그인은 되지만 **밤새 무인으로** 대기열을 돌리는 컴퓨터를 위한 이름입니다.
+    # `actor_name`과 일부러 나눠 두었습니다. `actor_name`은 화면에 "여기는 로그인할
+    # 수 없는 환경"이라고 알려 로그인 관문을 걷어 내는데, 로그인이 되는 PC에서 그것을
+    # 켜면 사람이 로그인을 잊은 채로 쓰다가 남의 이름으로 기록하게 됩니다. 이 값은
+    # 화면에 그런 신호를 보내지 않고, 만료된 token을 IAM으로 대신할 때만 쓰입니다.
+    unattended_actor_name: str | None = None
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> "TeamSyncConfig":
@@ -141,6 +147,9 @@ class TeamSyncConfig:
             user_pool_client_id=_required(source, "PILL_TEAM_COGNITO_CLIENT_ID"),
             cognito_domain=_required(source, "PILL_TEAM_COGNITO_DOMAIN"),
             actor_name=(source.get("PILL_TEAM_ACTOR", "").strip() or None),
+            unattended_actor_name=(
+                source.get("PILL_TEAM_UNATTENDED_ACTOR", "").strip() or None
+            ),
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -155,6 +164,10 @@ class TeamSyncConfig:
             # 화면이 로그인 관문을 열지 말지 정할 때 씁니다. 비밀이 아니고 팀
             # 목록에도 그대로 보이는 이름입니다.
             "actor": self.actor_name,
+            # 무인 대기열용 이름은 **여기 따로** 실어 보냅니다. `actor`에 합치면
+            # 로그인이 되는 PC에서도 관문이 사라집니다. 화면은 이 값을 보고 관문을
+            # 여닫지 않으며, 설정이 켜져 있는지 확인하는 용도로만 씁니다.
+            "unattended_actor": self.unattended_actor_name,
         }
 
 
@@ -292,9 +305,15 @@ class TeamSync:
             # credential은 만료가 없습니다. 시작 기록만 브라우저 token을 고집할 이유가
             # 없으므로 SigV4로 한 번 더 시도합니다. 다만 누구의 학습인지 지어내지 않도록,
             # 이름을 미리 지정해 둔 경우에만 그렇게 합니다.
-            if not access_token or not actor_name:
+            #
+            # 여기서 쓰는 이름은 `PILL_TEAM_ACTOR`가 아니라 `PILL_TEAM_UNATTENDED_ACTOR`
+            # 입니다. 앞의 것은 화면의 로그인 관문까지 걷어 내는 Colab용이라, 로그인이
+            # 되는 PC에서 이 기능을 켜자고 그것을 쓰면 로그인을 잊은 채로 남의 이름으로
+            # 기록하게 됩니다. 두 상황은 필요한 것이 다르므로 값도 나눠 둡니다.
+            unattended_name = self.config.unattended_actor_name
+            if not access_token or not unattended_name:
                 raise
-            payload["actorName"] = actor_name
+            payload["actorName"] = unattended_name
             data = self._create_run_once(payload, access_token=None)
         created = data.get("createRun")
         if not isinstance(created, dict) or created.get("cloudRunId") != cloud_run_id:

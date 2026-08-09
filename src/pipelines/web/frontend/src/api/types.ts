@@ -149,6 +149,12 @@ export interface TeamConfig {
   cognito_domain: string | null;
   /** 설정되어 있으면 로그인 없이 이 이름으로 팀에 기록하는 환경입니다. */
   actor: string | null;
+  /**
+   * 밤새 무인으로 대기열을 돌릴 때, 만료된 login token을 대신해 쓰는 이름입니다.
+   * `actor`와 달리 **로그인 관문을 열지 않습니다.** 화면은 설정 여부를 확인하는
+   * 용도로만 읽고, 이 값으로 로그인을 건너뛰면 안 됩니다.
+   */
+  unattended_actor: string | null;
 }
 
 export interface TeamRun {

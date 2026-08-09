@@ -43,6 +43,26 @@ AWS_PROFILE=<팀 SSO profile>
 AWS 인증이나 network가 끊기면 `artifacts/web/team-sync/outbox.jsonl`에 쌓고 재연결 뒤
 순서대로 전송한다.
 
+## 이름을 지정하는 두 값은 서로 다르다
+
+둘 다 선택 값이고 `createRun`을 IAM으로 보낼 때 쓰는 이름이지만, **켜지는 상황과 화면에
+미치는 영향이 다르므로 섞어 쓰면 안 된다.**
+
+| | `PILL_TEAM_ACTOR` | `PILL_TEAM_UNATTENDED_ACTOR` |
+|---|---|---|
+| 대상 | 로그인이 **불가능한** 곳 (Colab) | 로그인이 되는 PC의 밤샘 대기열 |
+| 언제 쓰이나 | login token이 **아예 없을 때** | token이 있었는데 **만료돼 거절될 때** |
+| 로그인 관문 | **걷어 낸다** | 건드리지 않는다 |
+| 팀 활동 읽기 | 안 됨(조회는 Cognito 전용) | 로그인해 두면 됨 |
+
+Cognito access token의 수명은 기본 한 시간인데 대기열은 앞 학습이 끝난 뒤에야 다음 항목을
+시작한다. 그래서 학습이 한 시간을 넘기면 넣어 둘 때 받아 둔 token은 반드시 죽어 있다.
+`PILL_TEAM_UNATTENDED_ACTOR`가 있으면 그 자리에서 SigV4로 한 번 더 보내 대기열을 이어
+돌리고, 없으면 멈춰 서서 다시 로그인하라고 답한다.
+
+로그인이 되는 PC에서 `PILL_TEAM_ACTOR`를 대신 쓰면 안 된다. 화면이 로그인 관문을 없애기
+때문에 사람이 로그인을 잊은 채로 쓰다가 학습이 본인 이름 대신 그 이름으로 기록된다.
+
 ## Field을 더할 때 (중요)
 
 AppSync subscription은 기록을 다시 읽지 않는다. **그 subscription을 깨운 mutation의
