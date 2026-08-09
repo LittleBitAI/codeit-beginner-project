@@ -76,6 +76,22 @@ def wait_for_finish(manager: JobManager, job_id: str, timeout: float = 15.0):
     raise AssertionError(f"job이 {timeout}초 안에 끝나지 않았습니다: {manager.get(job_id).status}")
 
 
+def wait_for_process(manager: JobManager, timeout: float = 15.0):
+    """``_process``가 붙을 때까지 기다립니다.
+
+    ``start()``는 thread를 띄우고 곧바로 돌아옵니다. spawn이 끝난 것과 그 결과가
+    ``_process``에 담긴 것은 다른 순간이라, 기다리지 않고 만지면 ``None``을 봅니다.
+    """
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        process = manager._process
+        if process is not None:
+            return process
+        time.sleep(0.02)
+    raise AssertionError(f"process가 {timeout}초 안에 뜨지 않았습니다.")
+
+
 def wait_for_spawn(manager: JobManager, timeout: float = 5.0) -> None:
     """process가 실제로 떠서 ``_process``가 채워질 때까지 기다립니다."""
 
@@ -284,7 +300,7 @@ def test_duplicate_start_is_rejected(manager, config_id, monkeypatch, fake_proce
     assert "한 번에 하나만 실행할 수 있습니다" in str(error.value)
     assert len(calls) == 1  # 두 번째는 process를 띄우지도 않습니다
 
-    manager._process.release()
+    wait_for_process(manager).release()
     wait_for_finish(manager, first.job_id)
 
 

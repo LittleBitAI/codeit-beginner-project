@@ -24,6 +24,7 @@ import {
 import { color, font } from '../design/tokens';
 import { usePolling } from '../hooks/usePolling';
 import { duration, loss, megabytes, percent, startedAt } from '../lib/format';
+import { useTeam } from '../team/TeamContext';
 
 const FILTERS: { key: string; label: string; match: (status: JobStatus) => boolean }[] = [
   { key: 'all', label: '전체', match: () => true },
@@ -271,6 +272,7 @@ function JobRow({ job, onOpen }: { job: JobRecord; onOpen: () => void }) {
  */
 function TrainingQueue() {
   const queue = usePolling<QueueState>(() => api.readQueue(), 3000);
+  const team = useTeam();
   const [busy, setBusy] = useState(false);
   const entries = queue.data?.entries ?? [];
   const paused = Boolean(queue.data?.paused);
@@ -295,7 +297,9 @@ function TrainingQueue() {
           <Button
             kind="primary"
             disabled={busy}
-            onClick={() => void act(() => api.resumeQueue())}
+            // 서버가 다시 뜨면 저장해 둔 login token이 사라집니다. 다시 돌리는 사람의
+            // token을 함께 보내지 않으면 남은 항목을 하나도 시작하지 못합니다.
+            onClick={() => void act(async () => api.resumeQueue(await team.getAccessToken()))}
           >
             대기열 다시 돌리기
           </Button>

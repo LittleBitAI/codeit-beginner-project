@@ -25,6 +25,10 @@ from src.pipelines.web.train_config import DATA_ARTIFACT_KEYS
 # 이 prefix로 시작하는 값은 모두 이 project가 동작을 고르려고 두는 knob입니다.
 PROJECT_ENVIRONMENT_PREFIX = "PILL_"
 
+# ``JobManager._run``이 thread에 붙이는 이름표입니다. 그 thread가 살아 있는 동안에는
+# 저장소 root를 되돌리면 안 됩니다.
+JOB_THREAD_NAME_PREFIX = "train-job-"
+
 
 @pytest.fixture(autouse=True)
 def neutral_environment(monkeypatch):
@@ -60,11 +64,32 @@ def isolated_repo(tmp_path, monkeypatch):
 
 @pytest.fixture
 def manager(isolated_repo, monkeypatch):
-    """Test마다 완전히 새 JobManager를 씁니다."""
+    """Test마다 완전히 새 JobManager를 쓰고, 남은 job thread를 여기서 거둡니다.
+
+    학습은 background thread에서 끝납니다. 그 thread는 마지막에 ``_start_next()``를
+    부르고, 그것이 다시 ``save_queue()``를 부릅니다. ``save_queue()``는 저장소 root를
+    **부르는 시점에** 읽으므로, test가 이미 끝났다면 그 값은 다음 test의 임시
+    directory입니다. 그러면 다음 test는 비어 있어야 할 대기열에 앞 test가 남긴 항목을
+    물려받고, 그 항목의 설정 파일은 없으므로 대기열 요청이 404로 답합니다. 실제로
+    ``test_queue_entry_can_be_taken_out_again``이 세 번에 한 번꼴로 그렇게 깨졌습니다.
+
+    준비·평가 runner와 같은 방식으로, 이름표를 단 job thread가 사라질 때까지
+    기다린 뒤 저장소 root를 되돌립니다.
+    """
 
     fresh = manager_module.JobManager()
     monkeypatch.setattr(manager_module, "_MANAGER", fresh)
-    return fresh
+    yield fresh
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if not [
+            thread
+            for thread in threading.enumerate()
+            if thread.name.startswith(JOB_THREAD_NAME_PREFIX)
+        ]:
+            break
+        time.sleep(0.02)
 
 
 @pytest.fixture

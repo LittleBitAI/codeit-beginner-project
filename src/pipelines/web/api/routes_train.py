@@ -170,11 +170,18 @@ def read_queue() -> dict[str, Any]:
 
 
 @router.post("/queue", status_code=201)
-def add_to_queue(payload: StartJobRequest = Body(...)) -> dict[str, Any]:
-    """설정 하나를 대기열에 넣습니다. 비어 있으면 곧바로 시작합니다."""
+def add_to_queue(
+    payload: StartJobRequest = Body(...), authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
+    """설정 하나를 대기열에 넣습니다. 비어 있으면 곧바로 시작합니다.
+
+    ``/jobs``와 같은 login token을 받습니다. 대기열이 항목을 꺼내 실제로 시작할 때
+    팀 기록을 만들어야 하는데, token이 없으면 이미 로그인한 사람에게도 "먼저
+    로그인해야 합니다"라고 답하며 멈춰 섭니다.
+    """
 
     manager = get_manager()
-    started = manager.enqueue(payload.config_id)
+    started = manager.enqueue(payload.config_id, access_token=_bearer_token(authorization))
     return {
         "started": public_record(started) if started is not None else None,
         "entries": manager.queue_entries(),
@@ -190,11 +197,15 @@ def remove_queue_entry(entry_id: str) -> dict[str, Any]:
 
 
 @router.post("/queue/resume", status_code=202)
-def resume_queue() -> dict[str, Any]:
-    """중지나 서버 재시작으로 멈춘 대기열을 다시 돌립니다."""
+def resume_queue(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    """중지나 서버 재시작으로 멈춘 대기열을 다시 돌립니다.
+
+    Login token을 함께 받습니다. 서버가 다시 뜨면 memory에만 두던 token이 사라지므로,
+    브라우저가 지금 보내 주지 않으면 남아 있는 목록을 하나도 시작하지 못합니다.
+    """
 
     manager = get_manager()
-    started = manager.resume_queue()
+    started = manager.resume_queue(access_token=_bearer_token(authorization))
     return {
         "started": public_record(started) if started is not None else None,
         "entries": manager.queue_entries(),

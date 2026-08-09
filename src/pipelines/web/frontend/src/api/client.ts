@@ -110,16 +110,24 @@ export const api = {
 
   readQueue: () => request<QueueState>('/api/train/queue'),
 
-  addToQueue: (configId: string) =>
+  // 대기열도 `/jobs`와 같은 login token을 보냅니다. 항목을 꺼내 실제로 시작할 때
+  // 팀 기록을 만들어야 하는데, token이 없으면 이미 로그인한 사람도 거절당합니다.
+  addToQueue: (configId: string, accessToken?: string | null) =>
     request<QueueState>('/api/train/queue', {
       method: 'POST',
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
       body: JSON.stringify({ config_id: configId }),
     }),
 
   removeFromQueue: (entryId: string) =>
     request<QueueState>(`/api/train/queue/${entryId}`, { method: 'DELETE' }),
 
-  resumeQueue: () => request<QueueState>('/api/train/queue/resume', { method: 'POST' }),
+  // 서버가 다시 뜨면 저장해 둔 token이 사라지므로 다시 돌릴 때 새로 보내 줍니다.
+  resumeQueue: (accessToken?: string | null) =>
+    request<QueueState>('/api/train/queue/resume', {
+      method: 'POST',
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+    }),
 
   teamConfig: () => request<TeamConfig>('/api/team/config'),
 

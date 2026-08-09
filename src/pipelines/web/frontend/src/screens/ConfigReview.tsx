@@ -64,7 +64,7 @@ export function ConfigReview({
     setQueueing(true);
     setError(null);
     try {
-      const queue = await api.addToQueue(saved!.config_id);
+      const queue = await api.addToQueue(saved!.config_id, await team.getAccessToken());
       onStarted();
       // 비어 있었으면 곧바로 시작되므로 그 학습 화면으로, 줄을 섰으면 개요로 갑니다.
       navigate(queue.started ? `/monitor/${queue.started.job_id}` : '/');
@@ -93,7 +93,7 @@ export function ConfigReview({
     <div style={{ maxWidth: 1300, display: 'flex', flexDirection: 'column', gap: 14 }}>
       <ScreenIntro title="GPU 시간을 쓰기 전 마지막 확인입니다">
         아래 문장은 저장된 설정을 그대로 풀어 쓴 것입니다. 시작하면 이 설정으로 학습 process가 실행되고,
-        끝날 때까지 다른 학습을 시작할 수 없습니다.
+        끝날 때까지 다른 학습은 바로 시작되지 않습니다. 지금 도는 학습이 있으면 대기열에 넣어 두세요.
       </ScreenIntro>
 
       <Panel>
@@ -274,7 +274,8 @@ export function ConfigReview({
 
           {busy && (
             <AlertRow level="warning" title="다른 학습이 실행 중입니다">
-              한 번에 하나만 실행할 수 있어 지금은 시작할 수 없습니다.
+              한 번에 하나만 실행할 수 있어 지금 바로 시작하지는 못합니다. 대기열에 넣으면 앞
+              학습이 끝나는 대로 이 설정이 이어서 시작됩니다.
             </AlertRow>
           )}
 
@@ -293,9 +294,11 @@ export function ConfigReview({
             >
               {starting ? '시작하는 중…' : '학습 시작'}
             </Button>
-            {/* 여러 설정을 줄 세워 두고 자러 갈 때 씁니다. 비어 있으면 곧바로 시작합니다. */}
+            {/* 여러 설정을 줄 세워 두고 자러 갈 때 씁니다. 비어 있으면 곧바로 시작합니다.
+                다른 학습이 도는 중에도 눌러야 합니다. 줄을 세우는 기능을 정작 줄 세울
+                상황에서 막으면 남는 쓸모가 없습니다. */}
             <Button
-              disabled={busy || starting || queueing}
+              disabled={starting || queueing}
               onClick={() => void addToQueue()}
               style={{ padding: '9px 0' }}
             >

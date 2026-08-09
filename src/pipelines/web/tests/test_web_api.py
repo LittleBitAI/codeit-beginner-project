@@ -260,6 +260,98 @@ def test_queue_entry_can_be_taken_out_again(
     process.release()
 
 
+def test_queue_route_passes_the_login_token_to_the_started_run(
+    client, valid_payload, monkeypatch, fake_process_factory
+):
+    """대기열도 ``/jobs``와 같은 login token으로 팀 기록을 만들어야 합니다.
+
+    token을 넘기지 않으면 팀 동기화를 켠 컴퓨터에서 첫 항목부터 "먼저 로그인해야
+    합니다"로 거절당합니다. 브라우저는 이미 로그인한 상태인데도 그렇습니다.
+    """
+
+    from src.pipelines.web import team_sync
+
+    received_tokens: list[str | None] = []
+
+    class TokenCheckingSync:
+        def create_run(self, *, access_token, **_kwargs):
+            received_tokens.append(access_token)
+            return None
+
+        def enqueue_update(self, _record):
+            return None
+
+        def enqueue_log(self, _record, _entry):
+            return None
+
+    monkeypatch.setattr(team_sync, "get_team_sync", lambda: TokenCheckingSync())
+    process = fake_process_factory(block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    config_id = create_config(client, valid_payload)
+
+    response = client.post(
+        "/api/train/queue",
+        json={"config_id": config_id},
+        headers={"Authorization": "Bearer user-token"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert received_tokens == ["user-token"]
+    process.release()
+
+
+def test_resuming_the_queue_supplies_the_login_token_a_restart_lost(
+    client, manager, valid_payload, monkeypatch, fake_process_factory
+):
+    """서버가 다시 뜨면 memory에 있던 login token은 사라집니다.
+
+    목록은 디스크에 남기지만 token은 일부러 남기지 않습니다. 그래서 다시 돌릴 때
+    브라우저가 token을 함께 보내 주지 않으면, 밤새 돌리려던 대기열이 아침까지
+    401로 멈춰 있습니다.
+    """
+
+    from src.pipelines.web import team_sync
+
+    config_id = create_config(client, valid_payload)
+    # token 없이 줄만 서 있는 상태를 만듭니다. 서버가 다시 뜬 직후와 같습니다.
+    manager._queue = [
+        {
+            "entry_id": "e0",
+            "config_id": config_id,
+            "run_id": "test-run",
+            "queued_at": "2026-08-09T00:00:00Z",
+        }
+    ]
+    manager._queue_paused = True
+    manager._loaded = True
+
+    received_tokens: list[str | None] = []
+
+    class TokenCheckingSync:
+        def create_run(self, *, access_token, **_kwargs):
+            received_tokens.append(access_token)
+            return None
+
+        def enqueue_update(self, _record):
+            return None
+
+        def enqueue_log(self, _record, _entry):
+            return None
+
+    monkeypatch.setattr(team_sync, "get_team_sync", lambda: TokenCheckingSync())
+    process = fake_process_factory(block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+
+    response = client.post(
+        "/api/train/queue/resume", headers={"Authorization": "Bearer user-token"}
+    )
+
+    assert response.status_code == 202, response.text
+    assert response.json()["started"] is not None
+    assert received_tokens == ["user-token"]
+    process.release()
+
+
 def test_queue_with_unknown_config_returns_404(client):
     response = client.post("/api/train/queue", json={"config_id": "0" * 32})
 
