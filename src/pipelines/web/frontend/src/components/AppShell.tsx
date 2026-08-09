@@ -43,7 +43,7 @@ function Badge({
   return (
     <span
       style={{
-        font: `500 10.5px/1 ${font.mono}`,
+        font: `500 11.5px/1 ${font.mono}`,
         color: palette.color,
         background: palette.background,
         border: `1px solid ${palette.border}`,
@@ -96,14 +96,14 @@ export function AppShell({
         }}
       >
         <div style={{ padding: '0 15px 12px' }}>
-          <div style={{ font: `650 13px/1.3 ${font.sans}`, color: '#fff' }}>알약 객체 탐지</div>
-          <div style={{ font: `400 10px/1.4 ${font.mono}`, color: color.railLabel }}>
+          <div style={{ font: `650 13.5px/1.3 ${font.sans}`, color: '#fff' }}>알약 객체 탐지</div>
+          <div style={{ font: `400 11px/1.4 ${font.mono}`, color: color.railLabel }}>
             Training GUI
           </div>
         </div>
         <div
           style={{
-            font: `600 10px/1.3 ${font.mono}`,
+            font: `600 11px/1.3 ${font.mono}`,
             letterSpacing: '.09em',
             color: color.railLabel,
             padding: '11px 15px 4px',
@@ -121,7 +121,9 @@ export function AppShell({
               padding: '6px 15px 6px 17px',
               font: `${isActive ? 600 : 500} 12.5px/1.5 ${font.sans}`,
               color: isActive ? '#fff' : color.railIdle,
-              background: isActive ? 'rgba(255,255,255,.09)' : 'transparent',
+              // 활성이 아닐 때 background를 아예 쓰지 않습니다. inline style로
+              // 'transparent'를 박아 두면 global.css의 :hover가 이기지 못합니다.
+              ...(isActive ? { background: 'rgba(255,255,255,.09)' } : {}),
               display: 'flex',
               alignItems: 'center',
               gap: 7,
@@ -154,7 +156,7 @@ export function AppShell({
             flexWrap: 'wrap',
           }}
         >
-          <span style={{ font: `650 14.5px/1.3 ${font.sans}`, color: color.text }}>
+          <span style={{ font: `650 15px/1.3 ${font.sans}`, color: color.text }}>
             {pageTitle(location.pathname)}
           </span>
           <span style={{ width: 1, height: 15, background: '#DFE3E8' }} />
@@ -186,7 +188,7 @@ export function AppShell({
             borderRadius: 6,
             background: color.surface,
             color: color.text,
-            font: `500 12px/1.5 ${font.sans}`,
+            font: `500 12.5px/1.5 ${font.sans}`,
           }}
         >
           {toast.actorName}님의 {toast.runId} 학습이 {toast.status === 'running' ? '시작됐습니다.' : `${toast.status} 상태가 됐습니다.`}
@@ -198,7 +200,7 @@ export function AppShell({
 
 function ButtonLike({ children, onClick }: { children: ReactNode; onClick: () => void }) {
   return (
-    <button type="button" onClick={onClick} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: color.textBody, font: `500 11px/1 ${font.sans}`, cursor: 'pointer' }}>
+    <button type="button" onClick={onClick} style={{ marginLeft: 'auto', border: 0, background: 'transparent', color: color.textBody, font: `500 12px/1 ${font.sans}`, cursor: 'pointer' }}>
       {children}
     </button>
   );

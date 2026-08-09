@@ -145,8 +145,8 @@ function ValueGrid({ rows }: { rows: [string, string][] }) {
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
       {rows.map(([label, value]) => (
         <div key={label}>
-          <div style={{ font: `600 10px/1.4 ${font.sans}`, color: color.textMuted }}>{label}</div>
-          <div style={{ font: `400 11px/1.5 ${font.mono}`, overflowWrap: 'anywhere' }}>{value}</div>
+          <div style={{ font: `600 11px/1.4 ${font.sans}`, color: color.textMuted }}>{label}</div>
+          <div style={{ font: `400 12px/1.5 ${font.mono}`, overflowWrap: 'anywhere' }}>{value}</div>
         </div>
       ))}
     </div>
@@ -180,10 +180,10 @@ function RunRow({
       }}
     >
       <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-        <strong style={{ font: `600 12px/1.3 ${font.mono}`, color: color.text }}>{run.runId}</strong>
+        <strong style={{ font: `600 12.5px/1.3 ${font.mono}`, color: color.text }}>{run.runId}</strong>
         <StatusBadge status={run.status} />
       </span>
-      <span style={{ font: `400 11px/1.4 ${font.sans}`, color: color.textBody }}>
+      <span style={{ font: `400 12px/1.4 ${font.sans}`, color: color.textBody }}>
         {run.actorName} · {new Date(run.createdAt).toLocaleString('ko-KR')}
         {/* Cognito가 확인해 준 이름이 아니면 그렇다고 말해 줍니다. */}
         {run.actorSource === 'iam' && (
@@ -193,7 +193,7 @@ function RunRow({
       {/* 클릭하지 않아도 팀원끼리 비교되도록 맨 아래에 요약 한 줄을 둡니다. */}
       <span
         style={{
-          font: `400 11px/1.4 ${font.mono}`,
+          font: `400 12px/1.4 ${font.mono}`,
           color: color.textStrong,
           overflowWrap: 'anywhere',
         }}
@@ -201,7 +201,7 @@ function RunRow({
         {summaryLine(run)}
       </span>
       {isStale(run) && (
-        <span style={{ color: color.amber, fontSize: 11 }}>연결 끊김 의심 · 마지막 heartbeat 2분 초과</span>
+        <span style={{ color: color.amber, fontSize: 12 }}>연결 끊김 의심 · 마지막 heartbeat 2분 초과</span>
       )}
     </button>
   );
@@ -334,7 +334,7 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
                 <summary
                   style={{
                     padding: '9px 14px',
-                    font: `600 11px/1.4 ${font.sans}`,
+                    font: `600 12px/1.4 ${font.sans}`,
                     color: color.textMuted,
                     background: color.surfaceAlt,
                     borderBottom: `1px solid ${color.borderInner}`,
@@ -368,7 +368,7 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
                   <KpiCard compact label={MAP_LABEL} value={metric(metricsOf(selected).mAP)} />
                 </div>
                 <details style={{ marginTop: 12 }}>
-                  <summary style={{ font: `600 11px/1.5 ${font.sans}`, color: color.textBody, cursor: 'pointer' }}>
+                  <summary style={{ font: `600 12px/1.5 ${font.sans}`, color: color.textBody, cursor: 'pointer' }}>
                     하이퍼파라미터 자세히 ({settingRows.length}개)
                   </summary>
                   <div style={{ marginTop: 10 }}>
@@ -395,7 +395,7 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
                         ])}
                       />
                     ) : (
-                      <div style={{ font: `400 11px/1.5 ${font.sans}`, color: color.textMuted }}>
+                      <div style={{ font: `400 12px/1.5 ${font.sans}`, color: color.textMuted }}>
                         평가를 아직 돌리지 않아 {MAP_LABEL} 값이 없습니다.
                       </div>
                     )}
@@ -405,7 +405,7 @@ export function TeamActivity({ defaults }: { defaults: Defaults | null }) {
                     .map(([key, value]) => {
                       const location = show(value);
                       return (
-                        <div key={key} style={{ marginTop: 8, font: `400 11px/1.5 ${font.mono}` }}>
+                        <div key={key} style={{ marginTop: 8, font: `400 12px/1.5 ${font.mono}` }}>
                           {key}: {location}{' '}
                           <strong style={{ color: location.startsWith('s3://') ? color.green : color.amber }}>
                             {location.startsWith('s3://') ? '· 팀 공유 가능' : '· 작성자 PC 전용'}

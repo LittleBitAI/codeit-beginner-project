@@ -125,9 +125,9 @@ export function AlertRow({
         <Component color={fg} />
       </span>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0, flex: 1 }}>
-        <span style={{ font: `600 12.5px/1.4 ${font.sans}`, color: fg }}>{title}</span>
+        <span style={{ font: `600 13px/1.4 ${font.sans}`, color: fg }}>{title}</span>
         {children && (
-          <span style={{ font: `400 11.5px/1.55 ${font.sans}`, color: color.textBody }}>
+          <span style={{ font: `400 12.5px/1.55 ${font.sans}`, color: color.textBody }}>
             {children}
           </span>
         )}
@@ -177,7 +177,7 @@ export function Button({
       title={title}
       style={{
         ...BUTTON_STYLE[kind],
-        font: `600 11.5px/1 ${font.sans}`,
+        font: `600 12.5px/1 ${font.sans}`,
         borderRadius: radius.control,
         padding: '8px 12px',
         opacity: disabled ? 0.5 : 1,
@@ -335,7 +335,7 @@ export function ScreenIntro({
         borderRadius: radius.panel,
         marginBottom: 12,
         overflow: 'hidden',
-        maxWidth: 1720,
+        maxWidth: 1320,
       }}
     >
       <div style={{ display: 'flex', gap: 10, padding: '13px 16px', alignItems: 'flex-start' }}>
@@ -360,7 +360,7 @@ export function ScreenIntro({
         >
           {terms.map((item) => (
             <span key={item.term} style={{ flex: '1 1 300px', ...type.plainNote, color: color.textBody }}>
-              <b style={{ font: `600 11px/1.5 ${font.mono}`, color: color.textStrong }}>
+              <b style={{ font: `600 12px/1.5 ${font.mono}`, color: color.textStrong }}>
                 {item.term}
               </b>{' '}
               {item.meaning}
@@ -400,8 +400,9 @@ export const controlStyle: CSSProperties = {
   padding: '8px 10px',
   border: `1px solid ${color.borderControl}`,
   borderRadius: radius.control,
-  font: `500 12px/1.3 ${font.mono}`,
-  outline: 'none',
+  font: `500 12.5px/1.3 ${font.mono}`,
+  // outline은 비우고 global.css의 :focus-visible에 맡깁니다. 여기서 none으로
+  // 막으면 키보드로 칸을 옮길 때 어디에 있는지 보이지 않습니다.
   background: color.surface,
   color: color.text,
   width: '100%',

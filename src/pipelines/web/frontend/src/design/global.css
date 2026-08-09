@@ -31,6 +31,35 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* 누를 수 있는 것인지는 마우스를 올렸을 때 드러나야 합니다.
+   화면 코드가 배경색을 inline style로 직접 쓰기 때문에 배경을 덮어쓰는 대신
+   밝기를 낮춥니다. inline style은 stylesheet를 이기지만 filter는 건드리지 않습니다. */
+button:not(:disabled):hover,
+a:hover {
+  filter: brightness(0.96);
+}
+
+button:not(:disabled):active {
+  filter: brightness(0.9);
+}
+
+/* 키보드로만 쓰는 사람에게 지금 어디에 있는지 보여 줍니다. 마우스 클릭에는 뜨지 않습니다. */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+
+/* 눌러서 여는 표 행. 배경을 비워 둔 행에만 얹히므로 선택된 행의 색은 그대로 남습니다. */
+[data-row]:hover {
+  background: var(--color-surface-hover);
+}
+
+/* 왼쪽 메뉴는 어두운 바탕이라 밝기를 낮추면 오히려 안 보입니다. 흰색을 얹습니다. */
+nav a:hover {
+  background: rgba(255, 255, 255, 0.07);
+  filter: none;
+}
+
 input,
 select,
 textarea {

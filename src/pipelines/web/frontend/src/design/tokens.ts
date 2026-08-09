@@ -43,6 +43,8 @@ export const color = {
   surfaceAlt: '#FAFBFC',
   surfaceSunken: '#F6F7F9',
   surfaceTableHead: '#F7F9FC',
+  /** 마우스를 올린 표 행. 선택 표시(primaryTint)보다 옅어야 둘이 구분됩니다. */
+  surfaceHover: '#F2F5FA',
 
   railLabel: '#5C7290',
   railIdle: '#9AA2AD',
@@ -77,21 +79,21 @@ export const radius = {
 export const space = (steps: number): number => steps * 4;
 
 export const type = {
-  pageTitle: { font: `650 14.5px/1.3 ${font.sans}` },
-  panelHeader: { font: `600 13px/1 ${font.sans}` },
-  introTitle: { font: `600 13px/1.4 ${font.sans}` },
-  body: { font: `400 12.5px/1.7 ${font.sans}` },
-  plainNote: { font: `400 11px/1.5 ${font.sans}` },
-  fieldLabel: { font: `600 11.5px/1 ${font.sans}` },
-  fieldHint: { font: `400 10.5px/1.45 ${font.sans}` },
-  tableCell: { font: `400 11px/1.3 ${font.mono}` },
-  tableHead: { font: `600 10px/1.3 ${font.mono}`, letterSpacing: '.04em' },
-  microLabel: { font: `500 10px/1.3 ${font.mono}`, letterSpacing: '.05em' },
+  pageTitle: { font: `650 15px/1.3 ${font.sans}` },
+  panelHeader: { font: `600 13.5px/1 ${font.sans}` },
+  introTitle: { font: `600 13.5px/1.4 ${font.sans}` },
+  body: { font: `400 13px/1.7 ${font.sans}` },
+  plainNote: { font: `400 12px/1.5 ${font.sans}` },
+  fieldLabel: { font: `600 12.5px/1 ${font.sans}` },
+  fieldHint: { font: `400 11.5px/1.45 ${font.sans}` },
+  tableCell: { font: `400 12px/1.3 ${font.mono}` },
+  tableHead: { font: `600 11px/1.3 ${font.mono}`, letterSpacing: '.04em' },
+  microLabel: { font: `500 11px/1.3 ${font.mono}`, letterSpacing: '.05em' },
   kpiLarge: { font: `600 22px/1 ${font.mono}` },
   kpiCompact: { font: `600 15px/1 ${font.mono}` },
-  badge: { font: `600 10px/1.3 ${font.mono}` },
-  logLine: { font: `400 10.5px/1.6 ${font.mono}` },
-  code: { font: `400 10.5px/1.65 ${font.mono}` },
+  badge: { font: `600 11px/1.3 ${font.mono}` },
+  logLine: { font: `400 11.5px/1.6 ${font.mono}` },
+  code: { font: `400 11.5px/1.65 ${font.mono}` },
 } as const;
 
 /** global.css가 쓰는 CSS 변수. 단일 출처를 지키려고 여기서 주입합니다. */
@@ -102,6 +104,7 @@ export const cssVariables: Record<string, string> = {
   '--color-text': color.text,
   '--color-border-control': color.borderControl,
   '--color-surface-page': color.surfacePage,
+  '--color-surface-hover': color.surfaceHover,
   '--color-scrollbar': '#C9D3E0',
   '--font-sans': font.sans,
   '--font-mono': font.mono,
