@@ -276,6 +276,67 @@ export interface ExperimentComparisonResult {
   missing: string[];
 }
 
+/** score threshold를 옮겨 가며 잰 precision·recall·F1 한 점입니다. */
+export interface SweepPoint {
+  threshold: number;
+  precision: number | null;
+  recall: number | null;
+  f1: number | null;
+}
+
+/** 표본은 충분한데 점수가 낮은 class 한 줄. evaluate가 골라 둔 것을 그대로 씁니다. */
+export interface WeakClassRow {
+  category_id: number;
+  name: string;
+  ap: number | null;
+  truth_count?: number;
+  prediction_count?: number;
+}
+
+/**
+ * `metrics.json`에서 화면이 쓸 것만 골라 온 결과입니다.
+ *
+ * confusion matrix와 per_image는 담기지 않습니다. 그 둘까지 넣으면 650KB입니다.
+ */
+export interface ExperimentEvaluation {
+  available: boolean;
+  reason: string | null;
+  /**
+   * 아래 블록은 모두 선택입니다.
+   *
+   * 평가를 못 읽은 응답에는 이 key들이 통째로 없을 수 있어서, 화면이 available을
+   * 확인하기 전에 파고들면 죽습니다. 실제로 상세 화면이 흰 채로 멈췄습니다.
+   * 선택으로 두어 타입 검사가 방어를 강제하게 합니다.
+   */
+  metrics?: Record<string, number | null>;
+  counts?: Record<string, number | null>;
+  score_threshold?: number | null;
+  max_detections_per_image?: number | null;
+  /** IoU label("0.50"/"0.75")별로 나뉩니다. */
+  score_sweep?: Record<string, SweepPoint[]>;
+  best_f1?: Record<string, SweepPoint | null>;
+  per_class_summary?: {
+    min_truth_count: number;
+    top_n: number;
+    counts: { weak: number; sparse: number; unmeasured: number };
+    weak: WeakClassRow[];
+    sparse: WeakClassRow[];
+    unmeasured: WeakClassRow[];
+  } | null;
+}
+
+export interface ExperimentHistoryCurve {
+  available: boolean;
+  reason: string | null;
+  epochs?: EpochRecord[];
+}
+
+export interface ExperimentDetail {
+  experiment: ExperimentSummary;
+  evaluation: ExperimentEvaluation;
+  history: ExperimentHistoryCurve;
+}
+
 export interface LogLine {
   seq: number;
   stream: 'stdout' | 'stderr' | 'system';

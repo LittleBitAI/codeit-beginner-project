@@ -81,6 +81,8 @@ async function renderComparison(experiments: ExperimentSummary[]) {
   for (const experiment of experiments) {
     fireEvent.click(await screen.findByLabelText(`${experiment.run_id} 비교 선택`));
   }
+  // 고르기와 비교표는 한 화면에 함께 있지 않습니다. 눌러야 비교표로 넘어갑니다.
+  fireEvent.click(screen.getByRole('button', { name: '선택 완료 →' }));
   await screen.findByRole('button', { name: '결과값' });
   return view;
 }
@@ -126,6 +128,7 @@ describe('ExperimentComparison', () => {
 
     fireEvent.click(await screen.findByLabelText('run-a 비교 선택'));
     fireEvent.click(screen.getByLabelText('run-b 비교 선택'));
+    fireEvent.click(screen.getByRole('button', { name: '선택 완료 →' }));
 
     expect(await screen.findByText('같은 dataset 입력으로 기록된 실험입니다')).toBeInTheDocument();
     expect(screen.getByText('BEST VAL LOSS')).toBeInTheDocument();
@@ -194,6 +197,7 @@ describe('ExperimentComparison', () => {
     );
 
     fireEvent.click(await screen.findByLabelText('run-a 비교 선택'));
+    fireEvent.click(screen.getByRole('button', { name: '선택 완료 →' }));
     fireEvent.click(await screen.findByRole('button', { name: '학습 세팅' }));
 
     // 목록 응답은 registry index만 읽어 모델과 optimizer가 null입니다. record를
@@ -303,6 +307,7 @@ describe('ExperimentComparison', () => {
 
     fireEvent.click(await screen.findByLabelText('run-a 비교 선택'));
     fireEvent.click(screen.getByLabelText('run-b 비교 선택'));
+    fireEvent.click(screen.getByRole('button', { name: '선택 완료 →' }));
 
     expect(await screen.findByText('dataset 동일 여부를 판정할 수 없습니다')).toBeInTheDocument();
   });

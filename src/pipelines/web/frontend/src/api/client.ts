@@ -4,6 +4,7 @@ import type {
   DataVerification,
   Defaults,
   EvaluationState,
+  ExperimentDetail,
   PerClassSummary,
   QueueState,
   ResumeResult,
@@ -89,6 +90,11 @@ export const api = {
   listJobs: () => request<JobListing>('/api/train/jobs'),
 
   listExperiments: () => request<ExperimentListing>('/api/train/experiments'),
+
+  // 목록에는 지표 9개 중 5개만 있고 loss 곡선은 없습니다. 상세는 record가 가리키는
+  // artifact를 서버가 직접 읽어 화면이 쓸 만큼만 골라 돌려줍니다.
+  experimentDetail: (runId: string) =>
+    request<ExperimentDetail>(`/api/train/experiments/${encodeURIComponent(runId)}`),
 
   compareExperiments: (runIds: string[]) =>
     request<ExperimentComparisonResult>('/api/train/experiments/compare', {

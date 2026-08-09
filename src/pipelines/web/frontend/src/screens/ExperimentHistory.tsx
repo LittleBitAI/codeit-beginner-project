@@ -11,7 +11,7 @@ import { useNavigate } from 'react-router-dom';
 
 import { api } from '../api/client';
 import { ExperimentTable } from '../components/ExperimentTable';
-import { AlertRow, Button, Panel, ScreenIntro } from '../components/primitives';
+import { AlertRow, Panel, ScreenIntro } from '../components/primitives';
 import { color, font } from '../design/tokens';
 import { usePolling } from '../hooks/usePolling';
 import { isComplete } from '../lib/completion';
@@ -20,7 +20,6 @@ export function ExperimentHistory() {
   const navigate = useNavigate();
   const listing = usePolling(() => api.listExperiments(), 5000);
   const [onlyComplete, setOnlyComplete] = useState(true);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const experiments = useMemo(() => listing.data?.experiments ?? [], [listing.data]);
   const complete = useMemo(() => experiments.filter(isComplete), [experiments]);
@@ -28,25 +27,18 @@ export function ExperimentHistory() {
   const hidden = experiments.length - complete.length;
   const scope = listing.data?.scope;
 
-  const toggle = (experimentId: string) =>
-    setSelectedIds((current) =>
-      current.includes(experimentId)
-        ? current.filter((value) => value !== experimentId)
-        : [...current, experimentId],
-    );
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1320 }}>
       <ScreenIntro
-        title="끝까지 마친 실험을 한 목록에서 봅니다"
+        title="팀원 것까지, 끝까지 마친 실험의 결과를 봅니다"
         terms={[
           { term: '평가', meaning: 'checkpoint로 mAP 같은 지표를 낸 단계입니다' },
           { term: '제출', meaning: '대회에 낼 submission.csv를 만들고 등록까지 마친 단계입니다' },
         ]}
       >
-        학습을 마치고 평가와 제출까지 끝낸 실험만 기본으로 보여 줍니다. 학습 개요와 달리 이
+        <b>행을 누르면 그 실험의 세팅과 평가 결과 전체가 열립니다.</b> 학습 개요와 달리 이
         목록은 registry에서 읽으므로, 팀이 같은 S3 저장소를 쓰면 팀원이 등록한 실험도 함께
-        나옵니다.
+        나옵니다. 여러 실험을 견주려면 실험 비교 화면을 쓰세요.
       </ScreenIntro>
 
       {listing.error && (
@@ -69,18 +61,9 @@ export function ExperimentHistory() {
       <Panel
         title="실험 내역"
         right={
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span style={{ font: `400 12px/1 ${font.mono}`, color: color.textMuted }}>
-              {shown.length}건
-            </span>
-            <Button
-              onClick={() => navigate('/compare')}
-              disabled={selectedIds.length === 0}
-              title={selectedIds.length === 0 ? '먼저 실험을 고르세요' : undefined}
-            >
-              비교 화면으로
-            </Button>
-          </div>
+          <span style={{ font: `400 12px/1 ${font.mono}`, color: color.textMuted }}>
+            {shown.length}건
+          </span>
         }
         bodyStyle={{ padding: 0 }}
       >
@@ -117,8 +100,7 @@ export function ExperimentHistory() {
         ) : (
           <ExperimentTable
             experiments={shown}
-            selectedIds={selectedIds}
-            onToggle={toggle}
+            onOpen={(experiment) => navigate(`/history/${encodeURIComponent(experiment.run_id)}`)}
             emptyMessage={
               onlyComplete && experiments.length > 0
                 ? '평가와 제출까지 끝난 실험이 아직 없습니다. 위 체크를 풀면 나머지가 보입니다.'

@@ -260,8 +260,12 @@ function ComparisonTable({ experiments }: { experiments: ExperimentSummary[] }) 
                 <span style={{ font: `600 12.5px/1.35 ${font.sans}`, color: color.text }}>
                   {experiment.run_id}
                 </span>
+                {/* 예전에는 experiment_id 앞 8자였는데, registry 실험은 그것이 run_id와
+                    같아서 위 이름을 잘라 놓은 것에 지나지 않았습니다. */}
                 <span style={{ font: `400 11px/1.3 ${font.mono}`, color: color.textFaint }}>
-                  {experiment.experiment_id.slice(0, 8)}
+                  {[experiment.dataset.label, experiment.training.seed === null ? null : `seed ${experiment.training.seed}`]
+                    .filter((part): part is string => Boolean(part))
+                    .join(' · ')}
                 </span>
               </span>
             ))}
@@ -365,6 +369,9 @@ function TabButton({
 export function ExperimentComparison() {
   const listing = usePolling(() => api.listExperiments(), 3000);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  // 고르기와 비교표를 한 화면에 함께 두지 않습니다. 22개 목록 밑에 비교표를 놓으면
+  // 고른 뒤 매번 스크롤을 한참 내려야 결과가 보입니다.
+  const [step, setStep] = useState<'pick' | 'compare'>('pick');
   const [compared, setCompared] = useState<ExperimentSummary[]>([]);
   const [compareError, setCompareError] = useState<string | null>(null);
   const experiments = useMemo(() => listing.data?.experiments ?? [], [listing.data]);
@@ -420,71 +427,105 @@ export function ExperimentComparison() {
     );
   };
 
+  // 고른 것이 하나도 남지 않으면 비교표에 보여 줄 것이 없으므로 고르기로 되돌립니다.
+  if (step === 'compare' && selectedIds.length === 0 && experiments.length > 0) {
+    setStep('pick');
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1320 }}>
-      <ScreenIntro
-        title="실험 설정과 결과를 같은 기준으로 나란히 봅니다"
-        terms={[
-          { term: '같은 dataset', meaning: '기록된 data artifact URI 4개가 모두 같은 경우입니다' },
-          { term: '판정 불가', meaning: '이전 기록에 dataset 정보가 일부 빠진 경우입니다' },
-        ]}
-      >
-        하나만 골라도 그 실험의 설정과 결과가 열리고, 2개 이상이면 나란히 비교합니다. 기록에
-        없는 값은 추정하지 않고 - 로 표시합니다.
-      </ScreenIntro>
+      {/* 고르기와 비교표를 세로로 쌓으면 고른 뒤 한참 스크롤해야 결과가 보입니다.
+          한 화면에 하나씩만 두고 갈아 끼웁니다. */}
+      {step === 'pick' ? (
+        <>
+          <ScreenIntro
+            title="견줄 실험을 고릅니다"
+            terms={[
+              { term: '같은 dataset', meaning: '기록된 data artifact URI 4개가 모두 같은 경우입니다' },
+              { term: '판정 불가', meaning: '이전 기록에 dataset 정보가 일부 빠진 경우입니다' },
+            ]}
+          >
+            2개 이상 고르면 나란히 견줍니다. 하나만 골라도 그 실험의 설정과 결과가 열립니다.
+            다 고른 뒤 <b>선택 완료</b>를 누르면 비교표로 넘어갑니다.
+          </ScreenIntro>
 
-      {listing.error && (
-        <AlertRow level="error" title="실험 목록을 불러오지 못했습니다">
-          {listing.error}
-        </AlertRow>
-      )}
+          {listing.error && (
+            <AlertRow level="error" title="실험 목록을 불러오지 못했습니다">
+              {listing.error}
+            </AlertRow>
+          )}
 
-      <Panel
-        title="비교할 실험"
-        right={
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span style={{ font: `400 12px/1 ${font.mono}`, color: color.textMuted }}>
-              {selectedIds.length}개 선택
+          <Panel
+            title="비교할 실험"
+            right={
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span style={{ font: `400 12px/1 ${font.mono}`, color: color.textMuted }}>
+                  {selectedIds.length}개 선택
+                </span>
+                <Button
+                  onClick={() =>
+                    setSelectedIds(experiments.slice(0, 2).map((item) => item.experiment_id))
+                  }
+                  disabled={experiments.length < 2}
+                >
+                  최근 2개 선택
+                </Button>
+                <Button onClick={() => setSelectedIds([])} disabled={selectedIds.length === 0}>
+                  선택 해제
+                </Button>
+                <Button
+                  kind="primary"
+                  onClick={() => setStep('compare')}
+                  disabled={selectedIds.length === 0}
+                  title={selectedIds.length === 0 ? '먼저 실험을 고르세요' : undefined}
+                >
+                  선택 완료 →
+                </Button>
+              </div>
+            }
+            bodyStyle={{ padding: 0 }}
+          >
+            {listing.loading && experiments.length === 0 ? (
+              <EmptyState message="실험 기록을 불러오고 있습니다." />
+            ) : (
+              <ExperimentTable
+                experiments={experiments}
+                selectedIds={selectedIds}
+                onToggle={toggle}
+                emptyMessage="비교할 학습 기록이 아직 없습니다."
+                selectLabel="비교 선택"
+              />
+            )}
+          </Panel>
+        </>
+      ) : (
+        <>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Button onClick={() => setStep('pick')}>← 다시 고르기</Button>
+            <span style={{ font: `650 15px/1.3 ${font.sans}`, color: color.text }}>
+              실험 {selectedRunIds.length}개 비교
             </span>
-            <Button
-              onClick={() => setSelectedIds(experiments.slice(0, 2).map((item) => item.experiment_id))}
-              disabled={experiments.length < 2}
-            >
-              최근 2개 선택
-            </Button>
-            <Button onClick={() => setSelectedIds([])} disabled={selectedIds.length === 0}>
-              선택 해제
-            </Button>
+            <span style={{ font: `400 12px/1.4 ${font.mono}`, color: color.textMuted, overflowWrap: 'anywhere' }}>
+              {selectedRunIds.join(' · ')}
+            </span>
           </div>
-        }
-        bodyStyle={{ padding: 0 }}
-      >
-        {listing.loading && experiments.length === 0 ? (
-          <EmptyState message="실험 기록을 불러오고 있습니다." />
-        ) : (
-          /* 실험 내역 화면과 같은 표입니다. 같은 목록이 두 모양으로 보이면 안 됩니다. */
-          <ExperimentTable
-            experiments={experiments}
-            selectedIds={selectedIds}
-            onToggle={toggle}
-            emptyMessage="비교할 학습 기록이 아직 없습니다."
-            selectLabel="비교 선택"
-          />
-        )}
-      </Panel>
 
-      {compareError && <AlertRow level="error" title="비교 정보를 불러오지 못했습니다">{compareError}</AlertRow>}
-      <DatasetNotice experiments={compared} />
+          {compareError && (
+            <AlertRow level="error" title="비교 정보를 불러오지 못했습니다">
+              {compareError}
+            </AlertRow>
+          )}
+          <DatasetNotice experiments={compared} />
 
-      <Panel title="비교표" bodyStyle={{ padding: 0 }}>
-        {selectedIds.length === 0 ? (
-          <EmptyState message="위에서 실험을 선택하면 설정과 결과가 열립니다. 2개 이상이면 나란히 비교합니다." />
-        ) : compared.length === 0 ? (
-          <EmptyState message="선택한 실험의 상세 기록을 불러오고 있습니다." />
-        ) : (
-          <ComparisonTable experiments={compared} />
-        )}
-      </Panel>
+          <Panel title="비교표" bodyStyle={{ padding: 0 }}>
+            {compared.length === 0 ? (
+              <EmptyState message="선택한 실험의 상세 기록을 불러오고 있습니다." />
+            ) : (
+              <ComparisonTable experiments={compared} />
+            )}
+          </Panel>
+        </>
+      )}
     </div>
   );
 }

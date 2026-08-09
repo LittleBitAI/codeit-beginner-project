@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.pipelines.web import experiments
+from src.pipelines.web import experiment_detail, experiments
 
 
 def registry_summary(run_id: str) -> dict:
@@ -396,3 +396,187 @@ def test_experiment_list_names_the_dataset_folder(client, monkeypatch):
     dataset = client.get("/api/train/experiments").json()["experiments"][0]["dataset"]
 
     assert dataset["label"] == "v3-seed42-8020-group"
+
+
+# --- 실험 하나 상세 -------------------------------------------------------------
+
+
+def metrics_document() -> dict:
+    """evaluate가 쓰는 metrics.json에서 상세 화면이 읽는 부분만 담았습니다."""
+
+    return {
+        "image_count": 500,
+        "annotation_count": 1200,
+        "prediction_count": 1500,
+        "evaluated_class_count": 57,
+        "max_detections_per_image": 100,
+        "metrics": {
+            "mAP": 0.9664,
+            "mAP50_95": 0.81,
+            "mAP75_95": 0.9664,
+            "mAP50": 0.9891,
+            "mAP75": 0.982,
+            "precision50": 0.95,
+            "recall50": 0.93,
+            "precision75": 0.91,
+            "recall75": 0.89,
+        },
+        "analysis": {
+            "score_threshold": 0.5,
+            "by_iou": {"0.50": {"tp": 1, "fp": 2, "fn": 3}},
+            # 화면에 보내면 안 되는 큰 블록들입니다.
+            "confusion_matrix": {"0.50": [[0] * 58 for _ in range(58)]},
+            "per_image": {"0.50": [{"image_id": index} for index in range(2100)]},
+            "score_sweep": {
+                "0.50": {
+                    "0.10": {"precision": 0.8, "recall": 0.99, "f1": 0.88},
+                    "0.05": {"precision": 0.7, "recall": 1.0, "f1": 0.82},
+                    "0.50": {"precision": 0.95, "recall": 0.93, "f1": 0.94},
+                }
+            },
+            "best_f1": {
+                "0.50": {"threshold": 0.5, "precision": 0.95, "recall": 0.93, "f1": 0.94}
+            },
+            "per_class_summary": {
+                "min_truth_count": 10,
+                "top_n": 5,
+                "counts": {"weak": 3, "sparse": 2, "unmeasured": 0},
+                "weak": [{"category_id": 1, "name": "약1", "ap": 0.2}],
+                "sparse": [],
+                "unmeasured": [],
+            },
+        },
+        "per_class": [{"category_id": index} for index in range(57)],
+    }
+
+
+def training_history() -> list[dict]:
+    return [
+        {"epoch": 2, "train_loss": 0.3, "validation_loss": 0.35, "is_best": False},
+        {"epoch": 1, "train_loss": 0.9, "validation_loss": 0.8, "is_best": False},
+        {"epoch": 3, "train_loss": 0.1, "validation_loss": 0.0575, "is_best": True},
+    ]
+
+
+def record_with_artifacts(run_id: str) -> dict:
+    record = experiment_record(run_id)
+    record["pipelines"] = {
+        "evaluate": {"metrics_uri": {"uri": f"artifacts/evaluate/{run_id}/metrics.json"}},
+        "train": {
+            "training_history_uri": {
+                "uri": f"artifacts/experiments/{run_id}/training_history.json"
+            }
+        },
+    }
+    return record
+
+
+def stub_detail_sources(monkeypatch, run_id: str, documents: dict) -> None:
+    monkeypatch.setattr(
+        experiments,
+        "list_experiment_summaries",
+        lambda config: [submitted_summary(run_id)],
+    )
+    monkeypatch.setattr(
+        experiments,
+        "read_experiment_record",
+        lambda uri, config, *, expected_run_id=None: record_with_artifacts(run_id),
+    )
+    monkeypatch.setattr(
+        experiment_detail,
+        "_read_document",
+        lambda uri, storage_config: documents.get(uri),
+    )
+
+
+def test_detail_carries_all_nine_metrics_and_the_loss_curve(client, monkeypatch):
+    stub_detail_sources(
+        monkeypatch,
+        "done",
+        {
+            "artifacts/evaluate/done/metrics.json": metrics_document(),
+            "artifacts/experiments/done/training_history.json": training_history(),
+        },
+    )
+
+    payload = client.get("/api/train/experiments/done").json()
+
+    assert payload["experiment"]["run_id"] == "done"
+    assert payload["evaluation"]["metrics"]["precision75"] == 0.91
+    assert len(payload["evaluation"]["metrics"]) == 9
+    assert payload["evaluation"]["counts"]["image_count"] == 500
+    assert payload["evaluation"]["best_f1"]["0.50"]["f1"] == 0.94
+    assert payload["evaluation"]["per_class_summary"]["counts"]["weak"] == 3
+    # 곡선을 그리려면 순서가 있어야 합니다. 파일 순서를 믿지 않습니다.
+    assert [item["epoch"] for item in payload["history"]["epochs"]] == [1, 2, 3]
+    assert payload["history"]["epochs"][2]["validation_loss"] == 0.0575
+
+
+def test_detail_never_sends_the_huge_blocks(client, monkeypatch):
+    """metrics.json은 confusion matrix와 per_image까지 들어 650KB가 넘습니다."""
+
+    stub_detail_sources(
+        monkeypatch,
+        "done",
+        {"artifacts/evaluate/done/metrics.json": metrics_document()},
+    )
+
+    body = client.get("/api/train/experiments/done").text
+
+    # key 이름으로 봅니다. `max_detections_per_image`가 부분 문자열로 걸립니다.
+    assert '"confusion_matrix"' not in body
+    assert '"per_image"' not in body
+    assert '"per_class"' not in body
+    assert len(body) < 20_000
+
+
+def test_detail_sorts_the_score_sweep_by_threshold(client, monkeypatch):
+    stub_detail_sources(
+        monkeypatch,
+        "done",
+        {"artifacts/evaluate/done/metrics.json": metrics_document()},
+    )
+
+    sweep = client.get("/api/train/experiments/done").json()["evaluation"]["score_sweep"]
+
+    assert [row["threshold"] for row in sweep["0.50"]] == [0.05, 0.1, 0.5]
+
+
+def test_detail_shows_settings_even_when_the_result_files_are_gone(client, monkeypatch):
+    """평가 파일을 못 읽는다고 설정까지 안 보이면 화면이 쓸모없어집니다."""
+
+    stub_detail_sources(monkeypatch, "done", {})
+
+    payload = client.get("/api/train/experiments/done").json()
+
+    assert payload["experiment"]["training"]["epochs"] == 4
+    assert payload["evaluation"]["available"] is False
+    assert payload["evaluation"]["reason"]
+    assert payload["history"]["available"] is False
+
+
+def test_detail_reports_404_for_an_unregistered_run(client, monkeypatch):
+    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [])
+
+    assert client.get("/api/train/experiments/nope").status_code == 404
+
+
+def test_detail_keeps_the_same_keys_when_the_files_cannot_be_read(client, monkeypatch):
+    """못 읽었을 때도 성공했을 때와 같은 key를 채워 보냅니다.
+
+    key를 통째로 빼면 화면이 available을 확인하기 전에 값을 만지는 순간 죽습니다.
+    실제로 학습만 하고 평가를 돌리지 않은 기록에서 상세 화면이 흰 채로 멈췄습니다.
+    """
+
+    stub_detail_sources(monkeypatch, "done", {})
+    payload = client.get("/api/train/experiments/done").json()
+
+    good = experiment_detail.evaluation_block(
+        "artifacts/evaluate/done/metrics.json", {"backend": "local"}
+    )
+    assert payload["evaluation"]["available"] is False
+    assert set(payload["evaluation"]) == set(good)
+    assert payload["evaluation"]["score_sweep"] == {}
+    assert payload["evaluation"]["best_f1"] == {}
+    assert payload["evaluation"]["per_class_summary"] is None
+    assert payload["history"]["epochs"] == []

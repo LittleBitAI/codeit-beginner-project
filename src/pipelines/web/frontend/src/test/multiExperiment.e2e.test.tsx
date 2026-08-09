@@ -123,6 +123,8 @@ describe('Web multi-experiment E2E', () => {
     const selectRecent = await screen.findByRole('button', { name: '최근 2개 선택' });
     await waitFor(() => expect(selectRecent).toBeEnabled());
     fireEvent.click(selectRecent);
+    // 고르기와 비교표는 한 화면에 함께 있지 않습니다. 눌러야 비교표로 넘어갑니다.
+    fireEvent.click(screen.getByRole('button', { name: '선택 완료 →' }));
 
     expect(
       await screen.findByText('같은 dataset 입력으로 기록된 실험입니다'),
