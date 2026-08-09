@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import shutil
+import stat
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,11 +20,24 @@ import torch
 
 from src.common import S3Storage, Storage, StorageError, create_storage
 
-from .dataset import CocoDetectionDataset, REPOSITORY_ROOT, load_class_map, read_json_artifact
+from .dataset import (
+    CocoDetectionDataset,
+    REPOSITORY_ROOT,
+    _is_s3,
+    _local_artifact_path,
+    _s3_relative,
+    load_class_map,
+    read_json_artifact,
+)
 from .image_cache import ImageCacheSession
 from .model import ARCHITECTURE, SUPPORTED_ARCHITECTURES, build_model
 from .progress import ProgressEmitter
-from .trainer import SUPPORTED_OPTIMIZERS, set_seed, train_model
+from .trainer import (
+    RESUME_STATE_VERSION,
+    SUPPORTED_OPTIMIZERS,
+    set_seed,
+    train_model,
+)
 
 
 RETURN_KEYS = {"status", "artifacts", "summary", "message"}
@@ -78,6 +94,8 @@ AUGMENTATION_PRESETS = {
     },
 }
 PRECISION_MODES = ("fp32", "amp")
+# 학습 중 작업 폴더에 두는 파일입니다. 마지막 것이 이어서 학습할 대상입니다.
+WORKING_CHECKPOINT_NAMES = ("best_checkpoint.pt", "last_checkpoint.pt")
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -207,6 +225,18 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
     pretrained = raw.get("pretrained", False)
     if not isinstance(pretrained, bool):
         raise ValueError("train.pretrained must be a boolean")
+    resume_from = raw.get("resume_from")
+    if resume_from is not None and (
+        not isinstance(resume_from, str) or not resume_from.strip()
+    ):
+        raise ValueError("train.resume_from must be a non-empty checkpoint path")
+    resume_path = Path(resume_from) if isinstance(resume_from, str) else None
+    if isinstance(resume_from, str) and not _is_s3(resume_from) and (
+        resume_path.is_absolute() or bool(resume_path.drive) or "\\" in resume_from
+    ):
+        raise ValueError(
+            "train.resume_from must be a repository-relative POSIX path or an S3 URI"
+        )
     run_id = raw.get("run_id") or datetime.now(timezone.utc).strftime("train-%Y%m%dT%H%M%S%fZ")
     if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
         raise ValueError("train.run_id contains unsupported characters")
@@ -222,6 +252,7 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "optimizer": optimizer,
         "seed": _integer(raw, "seed", 42, minimum=0),
         "epochs": _integer(raw, "epochs", 1, minimum=1),
+        "checkpoint_every": _integer(raw, "checkpoint_every", 1, minimum=1),
         "batch_size": _integer(raw, "batch_size", 1, minimum=1),
         "num_workers": _integer(raw, "num_workers", 0, minimum=0),
         "learning_rate": _float(
@@ -237,6 +268,9 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "early_stopping": _early_stopping(raw),
         "output_dir": output_dir,
         "output_prefix": output_prefix.strip("/"),
+        "resume_from": resume_from,
+        # 이어서 학습한 출처는 checkpoint를 읽어 봐야 알 수 있으므로 _execute가 채웁니다.
+        "resume": None,
     }
     if optimizer == "SGD":
         normalized["momentum"] = _float(
@@ -316,7 +350,8 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
         optimizer_settings["epsilon"] = settings.get("epsilon", profile["epsilon"])
     augmentation = settings.get("augmentation", AUGMENTATION_PRESETS["none"])
     return {
-        "schema_version": 1,
+        # 2: resume block이 생겼습니다. 처음부터 학습한 실행은 그 값이 None입니다.
+        "schema_version": 2,
         "run_id": settings.get("run_id"),
         "architecture": settings.get("architecture", ARCHITECTURE),
         "optimizer": optimizer_settings,
@@ -338,6 +373,10 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
             if settings.get("early_stopping") is not None
             else None
         ),
+        # 처음부터 학습한 실행은 항상 None입니다. key 자체는 늘 있어야 읽는 쪽이 편합니다.
+        "resume": (
+            dict(settings["resume"]) if settings.get("resume") is not None else None
+        ),
     }
 
 
@@ -346,30 +385,350 @@ def _write_checkpoint(path: Path, value: Mapping[str, Any]) -> None:
         torch.save(dict(value), output)
 
 
-def _publish_local(
+def _replace_checkpoint(path: Path, value: Mapping[str, Any]) -> None:
+    """학습 중 checkpoint를 갱신합니다.
+
+    쓰다가 죽어도 직전 checkpoint가 남도록 임시 파일에 먼저 쓰고 옮깁니다. 공개
+    artifact는 여전히 ``_write_checkpoint``가 덮어쓰기 없이 씁니다.
+    """
+
+    temporary = path.with_name(f".{path.name}.writing")
+    with temporary.open("wb") as output:
+        torch.save(dict(value), output)
+    os.replace(temporary, path)
+
+
+def _final_directory(settings: Mapping[str, Any]) -> Path:
+    return _repo_output(settings["output_dir"]) / settings["run_id"]
+
+
+def _working_directory(settings: Mapping[str, Any]) -> Path:
+    """학습 중인 checkpoint가 머무는 폴더입니다.
+
+    점으로 시작하므로 완료된 실행과 섞이지 않고, 이름이 정해져 있어 나중에 사람이
+    이어서 할 파일을 찾을 수 있습니다.
+    """
+
+    return _repo_output(settings["output_dir"]) / f".{settings['run_id']}.partial"
+
+
+def _validate_working_directory(path: Path) -> None:
+    """작업 폴더가 link를 거쳐 저장소 밖으로 나가지 않는지 확인합니다."""
+
+    if os.path.lexists(path):
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+        reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if path.is_symlink() or attributes & reparse_point:
+            raise ValueError(
+                "training working directory must not be a symbolic link or reparse point"
+            )
+    try:
+        path.resolve(strict=False).relative_to(REPOSITORY_ROOT)
+    except ValueError as error:
+        raise ValueError("training working directory leaves the repository") from error
+
+
+@contextmanager
+def _temporary_checkpoint_directory(prefix: str) -> Iterator[Path]:
+    """S3 checkpoint 임시 파일을 저장소 안의 일반 폴더에만 둡니다."""
+
+    scratch_root = REPOSITORY_ROOT / "artifacts"
+    if os.path.lexists(scratch_root):
+        attributes = getattr(scratch_root.lstat(), "st_file_attributes", 0)
+        reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if scratch_root.is_symlink() or attributes & reparse_point:
+            raise ValueError(
+                "training checkpoint scratch directory must not be a symbolic link "
+                "or reparse point"
+            )
+        if not scratch_root.is_dir():
+            raise ValueError("training checkpoint scratch directory must be a directory")
+    else:
+        scratch_root.mkdir()
+    try:
+        scratch_root.resolve(strict=True).relative_to(REPOSITORY_ROOT.resolve(strict=True))
+    except ValueError as error:
+        raise ValueError(
+            "training checkpoint scratch directory leaves the repository"
+        ) from error
+
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=scratch_root) as directory:
+        temporary = Path(directory)
+        try:
+            temporary.resolve(strict=True).relative_to(
+                REPOSITORY_ROOT.resolve(strict=True)
+            )
+        except ValueError as error:
+            raise ValueError(
+                "training checkpoint scratch directory leaves the repository"
+            ) from error
+        yield temporary
+
+
+@contextmanager
+def _claim_run(settings: Mapping[str, Any]) -> Iterator[None]:
+    """같은 이름의 local 학습 하나만 입력을 읽도록 원자적으로 표시합니다."""
+
+    parent = _repo_output(settings["output_dir"])
+    parent.mkdir(parents=True, exist_ok=True)
+    claim = parent / f".{settings['run_id']}.claim"
+    try:
+        with claim.open("xb"):
+            pass
+    except FileExistsError as error:
+        raise FileExistsError(
+            f"training run is already active: {settings['run_id']}"
+        ) from error
+    try:
+        yield
+    finally:
+        claim.unlink(missing_ok=True)
+
+
+@contextmanager
+def _own_working_directory(settings: Mapping[str, Any]) -> Iterator[Path]:
+    """검사한 local 작업 폴더를 원자적으로 만들고 빈 폴더만 정리합니다."""
+
+    working = _working_directory(settings)
+    _validate_working_directory(working)
+    try:
+        working.mkdir()
+    except FileExistsError as error:
+        _validate_working_directory(working)
+        raise FileExistsError(
+            "an interrupted run with the same run_id is still on disk; resume from "
+            f"it or remove it: {working.relative_to(REPOSITORY_ROOT).as_posix()}"
+        ) from error
+    try:
+        yield working
+    finally:
+        try:
+            working.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # checkpoint가 하나라도 생긴 중단 실행은 이어서 할 수 있도록 남깁니다.
+            pass
+
+
+def _s3_run_prefix(settings: Mapping[str, Any]) -> str:
+    return f"{settings['output_prefix']}/{settings['run_id']}"
+
+
+def _reject_existing_run(settings: Mapping[str, Any], storage: Storage) -> None:
+    """이름 충돌을 몇 시간 학습한 뒤가 아니라 시작 전에 알려 줍니다."""
+
+    if isinstance(storage, S3Storage):
+        prefix = _s3_run_prefix(settings)
+        if storage.exists(f"{prefix}/completed.json"):
+            raise FileExistsError(
+                f"training run artifact already exists: {settings['run_id']}"
+            )
+        running = f"{prefix}/running/{WORKING_CHECKPOINT_NAMES[-1]}"
+        if storage.exists(running):
+            # 이 key를 덮어쓰면 중단된 학습의 유일한 사본이 사라집니다. Colab은
+            # runtime이 바뀌면 로컬 작업 폴더가 없으므로 S3를 직접 봐야 압니다.
+            raise FileExistsError(
+                "an interrupted run with the same run_id is still on S3; resume from "
+                f"it or remove it: {running}"
+            )
+    elif _final_directory(settings).exists():
+        raise FileExistsError(
+            f"training run artifact already exists: {settings['run_id']}"
+        )
+    working = _working_directory(settings)
+    _validate_working_directory(working)
+    if os.path.lexists(working):
+        # 여기를 덮어쓰면 이 기능이 지키려던 바로 그 파일이 사라집니다.
+        location = working.relative_to(REPOSITORY_ROOT).as_posix()
+        raise FileExistsError(
+            "an interrupted run with the same run_id is still on disk; resume from it "
+            f"or remove it: {location}"
+        )
+
+
+def _read_checkpoint(location: str, storage: Storage, *, label: str) -> dict[str, Any]:
+    """이어서 학습할 checkpoint를 읽습니다.
+
+    사람이 config에 적어 준 경로이므로 ``weights_only=True``로만 읽습니다.
+    """
+
+    if _is_s3(location):
+        with _temporary_checkpoint_directory("train-resume-") as temporary:
+            path = temporary / "checkpoint.pt"
+            storage.download_file(location, path)
+            return _load_checkpoint(path, location, label=label)
+    return _load_checkpoint(_local_artifact_path(location, storage), location, label=label)
+
+
+def _load_checkpoint(path: Path, location: str, *, label: str) -> dict[str, Any]:
+    if not path.is_file():
+        raise ValueError(f"{label} does not exist: {location}")
+    document = torch.load(path, map_location="cpu", weights_only=True)
+    if not isinstance(document, Mapping):
+        raise ValueError(f"{label} must be an object: {location}")
+    return dict(document)
+
+
+def _sibling_best_uri(location: str) -> str:
+    """이어서 학습할 checkpoint 옆의 best_checkpoint.pt를 가리킵니다."""
+
+    if _is_s3(location):
+        return _s3_relative(location, "best_checkpoint.pt")
+    return (Path(location).parent / "best_checkpoint.pt").as_posix()
+
+
+def _load_resume(
+    settings: dict[str, Any], storage: Storage, class_map: Mapping[str, int]
+) -> dict[str, Any] | None:
+    """이어서 학습할 상태를 읽고, 이어붙일 수 있는지 학습 전에 전부 확인합니다."""
+
+    location = settings["resume_from"]
+    if location is None:
+        return None
+    checkpoint = _read_checkpoint(location, storage, label="train.resume_from")
+    state = checkpoint.get("resume_state")
+    if not isinstance(state, Mapping):
+        raise ValueError(
+            f"checkpoint predates resume support and cannot be resumed: {location}"
+        )
+    if state.get("version") != RESUME_STATE_VERSION:
+        raise ValueError(
+            f"unsupported resume_state version: {state.get('version')}"
+        )
+    completed_epoch = state.get("completed_epoch")
+    if not isinstance(completed_epoch, int) or isinstance(completed_epoch, bool):
+        raise ValueError("resume_state.completed_epoch must be an integer")
+    history = state.get("history")
+    if not isinstance(history, list) or [
+        entry.get("epoch") for entry in history
+    ] != list(range(1, completed_epoch + 1)):
+        # 구멍 난 history는 손실 곡선과 best_epoch을 조용히 틀리게 만듭니다.
+        raise ValueError(
+            "resume_state.history must cover epoch 1 to the resumed epoch without gaps"
+        )
+    if settings["epochs"] <= completed_epoch:
+        raise ValueError(
+            f"train.epochs must be greater than the resumed epoch {completed_epoch}"
+        )
+    if checkpoint.get("architecture") != settings["architecture"]:
+        raise ValueError(
+            "resume checkpoint was trained with a different train.architecture"
+        )
+    training_config = checkpoint.get("training_config")
+    recorded_optimizer = (
+        training_config.get("optimizer")
+        if isinstance(training_config, Mapping)
+        else None
+    )
+    expected_optimizer = _training_config(settings)["optimizer"]
+    if not isinstance(recorded_optimizer, Mapping) or dict(
+        recorded_optimizer
+    ) != expected_optimizer:
+        raise ValueError(
+            "resume checkpoint optimizer settings do not match current train optimizer settings"
+        )
+    if checkpoint.get("num_classes") != len(class_map) + 1 or dict(
+        checkpoint.get("class_map") or {}
+    ) != dict(class_map):
+        raise ValueError("resume checkpoint was trained with a different class map")
+    early_stopping = settings.get("early_stopping")
+    if "grad_scaler_state_dict" not in state:
+        raise ValueError("resume_state is missing grad_scaler_state_dict")
+    if (
+        early_stopping is not None
+        and state["early_stopping"]["epochs_without_improvement"]
+        >= early_stopping["patience"]
+    ):
+        # 그대로 되돌리면 한 epoch만 돌고 다시 멈춥니다. 성공한 것처럼 보여서 더 나쁩니다.
+        raise ValueError(
+            "resume checkpoint already used up train.early_stopping.patience; "
+            "raise patience or drop early_stopping"
+        )
+    recorded_best = state["best"]
+    if "model_state_dict" in recorded_best:
+        # S3에서 받은 사본은 한 파일 안에 best 가중치까지 들고 있습니다.
+        best = dict(recorded_best)
+    else:
+        best = _read_checkpoint(
+            _sibling_best_uri(location),
+            storage,
+            label="best_checkpoint.pt next to train.resume_from",
+        )
+        if best.get("epoch") != recorded_best["epoch"]:
+            raise ValueError(
+                "best_checkpoint.pt next to train.resume_from does not match "
+                "resume_state.best"
+            )
+    settings["resume"] = {
+        "resumed_from": location,
+        "resumed_at_epoch": completed_epoch,
+    }
+    return {"checkpoint": checkpoint, "best": best}
+
+
+def _with_embedded_best(
+    last_payload: Mapping[str, Any], best: Mapping[str, Any]
+) -> dict[str, Any]:
+    """옆 best 파일이 없어도 이어서 할 수 있는 last checkpoint를 만듭니다."""
+
+    return {
+        **last_payload,
+        "resume_state": {
+            **last_payload["resume_state"],
+            "best": {
+                **last_payload["resume_state"]["best"],
+                "model_state_dict": best["model_state_dict"],
+                "optimizer_state_dict": best["optimizer_state_dict"],
+            },
+        },
+    }
+
+
+def _mirror_to_s3(
+    storage: S3Storage,
+    last_payload: Mapping[str, Any],
     best: Mapping[str, Any],
-    last: Mapping[str, Any],
+    settings: Mapping[str, Any],
+    *,
+    overwrite: bool = False,
+) -> None:
+    """이어서 할 상태를 S3에 **한 object로** 올립니다.
+
+    S3는 여러 object를 한 번에 바꿀 수 없습니다. best와 last를 따로 올리면 하나만
+    성공했을 때 두 파일의 epoch이 어긋나고, bucket에 남은 유일한 사본을 이어서 쓸 수
+    없게 됩니다. 그래서 이 사본에는 best 가중치까지 담습니다. 로컬 작업 폴더는 두
+    파일을 나란히 두지만 last도 같은 이유로 self-contained 상태를 유지합니다.
+    """
+
+    payload = _with_embedded_best(last_payload, best)
+    destination = f"{_s3_run_prefix(settings)}/running/{WORKING_CHECKPOINT_NAMES[-1]}"
+    with _temporary_checkpoint_directory("train-mirror-") as temporary:
+        path = temporary / WORKING_CHECKPOINT_NAMES[-1]
+        _write_checkpoint(path, payload)
+        # 첫 checkpoint는 If-None-Match로 run_id 소유권까지 얻습니다. 같은 이름의 두
+        # 작업이 사전 exists 검사를 동시에 통과해도 하나만 이 object를 만들 수 있습니다.
+        storage.upload_file(path, destination, overwrite=overwrite)
+
+
+def _publish_local(
+    working_directory: Path,
     history: list[dict[str, Any]],
     settings: Mapping[str, Any],
 ) -> dict[str, str]:
-    output_parent = _repo_output(settings["output_dir"])
-    final_directory = output_parent / settings["run_id"]
+    """작업 폴더에 이미 있는 checkpoint에 history를 더해 폴더째 옮깁니다."""
+
+    _validate_working_directory(working_directory)
+    final_directory = _final_directory(settings)
+    # 학습이 몇 시간 걸리는 동안 같은 이름이 생겼을 수 있어 옮기기 직전에 다시 봅니다.
     if final_directory.exists():
         raise FileExistsError(f"training run artifact already exists: {settings['run_id']}")
-    output_parent.mkdir(parents=True, exist_ok=True)
-    stage_directory = Path(tempfile.mkdtemp(prefix=f".{settings['run_id']}-", dir=output_parent))
-    try:
-        _write_checkpoint(stage_directory / "best_checkpoint.pt", best)
-        _write_checkpoint(stage_directory / "last_checkpoint.pt", last)
-        (stage_directory / "training_history.json").write_text(
-            json.dumps(history, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-            newline="\n",
-        )
-        stage_directory.rename(final_directory)
-    except Exception:
-        shutil.rmtree(stage_directory, ignore_errors=True)
-        raise
+    (working_directory / "training_history.json").write_text(
+        json.dumps(history, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    working_directory.rename(final_directory)
 
     def relative(name: str) -> str:
         return (final_directory / name).relative_to(REPOSITORY_ROOT).as_posix()
@@ -388,7 +747,7 @@ def _publish_s3(
     history: list[dict[str, Any]],
     settings: Mapping[str, Any],
 ) -> dict[str, str]:
-    prefix = f"{settings['output_prefix']}/{settings['run_id']}"
+    prefix = _s3_run_prefix(settings)
     completion_destination = f"{prefix}/completed.json"
     if storage.exists(completion_destination):
         raise FileExistsError(f"training run artifact already exists: {settings['run_id']}")
@@ -399,10 +758,7 @@ def _publish_s3(
         "training_history_uri": f"{attempt_prefix}/training_history.json",
     }
 
-    scratch_root = REPOSITORY_ROOT / "artifacts"
-    scratch_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="train-upload-", dir=scratch_root) as directory:
-        temporary = Path(directory)
+    with _temporary_checkpoint_directory("train-upload-") as temporary:
         best_path = temporary / "best_checkpoint.pt"
         last_path = temporary / "last_checkpoint.pt"
         _write_checkpoint(best_path, best)
@@ -426,10 +782,23 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
     settings = _settings(config)
     data = _data_inputs(config)
     storage = create_storage(config)
+    with _claim_run(settings):
+        _reject_existing_run(settings, storage)
+        with _own_working_directory(settings) as working_directory:
+            return _execute_claimed(settings, data, storage, working_directory)
+
+
+def _execute_claimed(
+    settings: dict[str, Any],
+    data: dict[str, str],
+    storage: Storage,
+    working_directory: Path,
+) -> dict[str, Any]:
     class_map = load_class_map(data["class_map_uri"], storage)
     dataset_summary = read_json_artifact(data["dataset_summary_uri"], storage)
     if not isinstance(dataset_summary, Mapping):
         raise ValueError("dataset summary must be a JSON object")
+    resume = _load_resume(settings, storage, class_map)
 
     with ImageCacheSession(dataset_summary) as image_cache:
         train_dataset = CocoDetectionDataset(
@@ -447,6 +816,54 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("train and validation manifests contain overlapping images")
         if train_dataset.category_ids != validation_dataset.category_ids:
             raise ValueError("train and validation COCO category ids must match")
+        category_ids = train_dataset.category_ids
+        written_best: dict[str, int] = {}
+        # 마지막으로 남긴 resume_state입니다. S3 게시가 이것을 그대로 써야 backend에
+        # 따라 최종 last checkpoint의 내용이 달라지지 않습니다.
+        latest: dict[str, Any] = {}
+        s3_mirror_owned = False
+
+        def write_checkpoints(
+            last: dict[str, Any],
+            best: dict[str, Any],
+            resume_state: dict[str, Any],
+        ) -> None:
+            """Epoch이 끝날 때마다 이어서 할 수 있는 checkpoint를 남깁니다."""
+
+            nonlocal s3_mirror_owned
+
+            _validate_working_directory(working_directory)
+            payload = _checkpoint_payload(last, settings, class_map, category_ids)
+            payload["resume_state"] = {
+                **resume_state,
+                "source": {
+                    "run_id": settings["run_id"],
+                    "resume_from": settings["resume_from"],
+                },
+            }
+            resumable_payload = _with_embedded_best(payload, best)
+            # last를 먼저 바꿉니다. 이후 best 저장에서 중단돼도 last 안의 best 가중치로
+            # 이어서 할 수 있고, last 자체를 쓰다 중단되면 os.replace 전 사본이 남습니다.
+            _replace_checkpoint(
+                working_directory / "last_checkpoint.pt", resumable_payload
+            )
+            if written_best.get("epoch") != best["epoch"]:
+                _replace_checkpoint(
+                    working_directory / "best_checkpoint.pt",
+                    _checkpoint_payload(best, settings, class_map, category_ids),
+                )
+                written_best["epoch"] = best["epoch"]
+            latest["resume_state"] = resumable_payload["resume_state"]
+            if isinstance(storage, S3Storage):
+                _mirror_to_s3(
+                    storage,
+                    resumable_payload,
+                    best,
+                    settings,
+                    overwrite=s3_mirror_owned,
+                )
+                s3_mirror_owned = True
+
         progress = ProgressEmitter(settings["run_id"])
         progress.emit(
             "run_started",
@@ -464,19 +881,29 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
             pretrained=settings["pretrained"],
         )
         best, last, history = train_model(
-            model, train_dataset, validation_dataset, settings, progress
+            model,
+            train_dataset,
+            validation_dataset,
+            settings,
+            progress,
+            resume=resume,
+            on_checkpoint=write_checkpoints,
         )
 
-    category_ids = train_dataset.category_ids
-    best_payload = _checkpoint_payload(best, settings, class_map, category_ids)
-    last_payload = _checkpoint_payload(last, settings, class_map, category_ids)
     if isinstance(storage, S3Storage):
+        best_payload = _checkpoint_payload(best, settings, class_map, category_ids)
+        last_payload = _checkpoint_payload(last, settings, class_map, category_ids)
+        # 로컬은 작업 파일을 그대로 옮기므로 이미 들어 있습니다. S3도 같아야 합니다.
+        last_payload["resume_state"] = latest["resume_state"]
         artifact_uris = _publish_s3(storage, best_payload, last_payload, history, settings)
+        # 업로드가 끝났으므로 이 실행의 작업 폴더는 더 이상 이어서 할 대상이 아닙니다.
+        shutil.rmtree(_working_directory(settings), ignore_errors=True)
     else:
-        artifact_uris = _publish_local(best_payload, last_payload, history, settings)
+        artifact_uris = _publish_local(_working_directory(settings), history, settings)
     artifacts = {"run_id": settings["run_id"], **artifact_uris}
     best_epoch = min(history, key=lambda entry: entry["validation_loss"])
-    completed_epochs = len(history)
+    # 이어서 한 실행의 history는 1부터 이어지므로 마지막 epoch 번호가 곧 진행한 양입니다.
+    completed_epochs = history[-1]["epoch"]
     stopped_early = completed_epochs < settings["epochs"]
     progress.emit(
         "training_completed",
@@ -504,6 +931,12 @@ def _execute(config: Mapping[str, Any]) -> dict[str, Any]:
             "class_count": len(class_map),
             "best_epoch": best_epoch["epoch"],
             "best_validation_loss": best_epoch["validation_loss"],
+            "resumed_from": (
+                settings["resume"]["resumed_from"] if settings["resume"] else None
+            ),
+            "resumed_at_epoch": (
+                settings["resume"]["resumed_at_epoch"] if settings["resume"] else None
+            ),
         },
         "message": (
             f"object detection training stopped early after {completed_epochs} of "

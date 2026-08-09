@@ -1,6 +1,10 @@
 import copy
 import io
 import json
+import os
+import subprocess
+import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -263,8 +267,10 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
             "precision",
             "pretrained",
             "early_stopping",
+            "resume",
         }
-        assert recorded["schema_version"] == 1
+        assert recorded["schema_version"] == 2
+        assert recorded["resume"] is None
         assert recorded["run_id"] == "cpu-smoke"
         assert recorded["architecture"] == checkpoint["architecture"]
         assert recorded["optimizer"] == {
@@ -917,6 +923,468 @@ def test_seed_reproduces_training_history(local_config):
     assert first_history == second_history
 
 
+class RandomWalkDetector(nn.Module):
+    """전역 RNG를 실제로 씁니다.
+
+    ``TinyDetector``는 난수를 쓰지 않아서 난수 상태를 하나도 되돌리지 않아도 이어서 한
+    결과가 똑같이 나옵니다. 그러면 이어서 학습 test가 아무것도 지키지 못합니다.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.rand(()))
+
+    def forward(self, images, targets):
+        image_term = sum(image.mean() * 0 for image in images)
+        return {"loss_classifier": (self.weight - torch.rand(())).square() + image_term}
+
+
+class ExplodingDetector(nn.Module):
+    """정해진 호출에서 터집니다. 세션이 끊긴 학습을 흉내 냅니다."""
+
+    def __init__(self, fail_on_call: int) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.rand(()))
+        self.fail_on_call = fail_on_call
+        self.calls = 0
+
+    def forward(self, images, targets):
+        self.calls += 1
+        if self.calls >= self.fail_on_call:
+            raise RuntimeError("simulated session loss")
+        image_term = sum(image.mean() * 0 for image in images)
+        return {"loss_classifier": (self.weight - 0.25).square() + image_term}
+
+
+def _working_directory(local_config) -> Path:
+    train_settings = local_config["train"]
+    return (
+        REPOSITORY_ROOT
+        / train_settings["output_dir"]
+        / f".{train_settings['run_id']}.partial"
+    )
+
+
+def _load(path: Path) -> dict:
+    return torch.load(path, map_location="cpu", weights_only=True)
+
+
+def test_interrupted_training_leaves_a_resumable_working_checkpoint(
+    local_config, monkeypatch
+):
+    """이 하나가 나머지를 가능하게 합니다. 이어서 할 대상이 남아야 합니다."""
+
+    # epoch마다 train 1번 + validation 1번이므로 5번째 호출은 epoch 3입니다.
+    monkeypatch.setattr(
+        pipeline, "build_model", lambda *args, **kwargs: ExplodingDetector(5)
+    )
+    local_config["train"]["epochs"] = 5
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    working = _working_directory(local_config)
+    last = _load(working / "last_checkpoint.pt")
+    assert last["resume_state"]["completed_epoch"] == 2
+    assert [entry["epoch"] for entry in last["resume_state"]["history"]] == [1, 2]
+    # 끊긴 checkpoint도 evaluate가 읽을 수 있어야 합니다.
+    assert last["architecture"] == "fasterrcnn_mobilenet_v3_large_320_fpn"
+    assert last["num_classes"] == 2
+    assert (working / "best_checkpoint.pt").is_file()
+
+
+def test_local_last_stays_resumable_if_publishing_the_best_checkpoint_is_interrupted(
+    local_config, monkeypatch
+):
+    """두 파일 사이에서 중단돼도 이미 쓴 last 하나만으로 이어갈 수 있어야 합니다."""
+
+    replace_checkpoint = pipeline._replace_checkpoint
+
+    def interrupt_best(path, value):
+        if path.name == "best_checkpoint.pt":
+            raise OSError("simulated interruption while publishing best")
+        replace_checkpoint(path, value)
+
+    monkeypatch.setattr(pipeline, "_replace_checkpoint", interrupt_best)
+    local_config["train"]["epochs"] = 2
+
+    interrupted = train.run(local_config)
+
+    assert interrupted["status"] == "error"
+    last_path = _working_directory(local_config) / "last_checkpoint.pt"
+    last = _load(last_path)
+    assert "model_state_dict" in last["resume_state"]["best"]
+    assert not (_working_directory(local_config) / "best_checkpoint.pt").exists()
+
+    monkeypatch.setattr(pipeline, "_replace_checkpoint", replace_checkpoint)
+    resumed = _resume_config(local_config, last_path)
+    resumed["train"]["epochs"] = 3
+
+    result = train.run(resumed)
+
+    assert result["status"] == "ok", result["message"]
+
+
+def test_a_successful_run_leaves_no_working_directory_behind(local_config):
+    result = train.run(local_config)
+
+    assert result["status"] == "ok"
+    assert not _working_directory(local_config).exists()
+
+
+def test_no_working_directory_when_the_run_fails_before_the_first_epoch(local_config):
+    local_config["inputs"]["data"]["train_manifest_uri"] = "artifacts/missing.json"
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert not _working_directory(local_config).exists()
+
+
+def test_same_local_run_id_is_claimed_before_reading_inputs(
+    local_config, monkeypatch
+):
+    """동시에 시작한 두 학습이 같은 partial checkpoint를 공유하면 안 됩니다."""
+
+    original = pipeline.load_class_map
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def blocking_load_class_map(*args, **kwargs):
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+            this_call = calls
+        if this_call == 1:
+            first_entered.set()
+            if not release_first.wait(10):
+                raise RuntimeError("동시 실행 test가 첫 실행을 놓아주지 않았습니다.")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "load_class_map", blocking_load_class_map)
+    first_result = {}
+    first_thread = threading.Thread(
+        target=lambda: first_result.update(train.run(copy.deepcopy(local_config))),
+        daemon=True,
+    )
+    first_thread.start()
+    try:
+        assert first_entered.wait(10), "첫 실행이 입력을 읽기 시작하지 않았습니다."
+        second_result = train.run(copy.deepcopy(local_config))
+    finally:
+        release_first.set()
+        first_thread.join(timeout=10)
+
+    assert not first_thread.is_alive()
+    assert second_result["status"] == "error"
+    assert "already active" in second_result["message"]
+    assert calls == 1
+    assert first_result["status"] == "ok", first_result["message"]
+
+
+def test_run_rejects_a_working_directory_link_before_reading_inputs(
+    local_config, monkeypatch
+):
+    """외부를 가리키는 작업 폴더로 checkpoint가 저장소 밖에 쓰이면 안 됩니다."""
+
+    working = _working_directory(local_config)
+    working.parent.mkdir(parents=True, exist_ok=True)
+    inputs_read = False
+
+    def record_input_read(*args, **kwargs):
+        nonlocal inputs_read
+        inputs_read = True
+        raise RuntimeError("작업 폴더 검사 전에 입력을 읽었습니다.")
+
+    monkeypatch.setattr(pipeline, "load_class_map", record_input_read)
+    with tempfile.TemporaryDirectory(prefix="train-working-link-") as directory:
+        target = Path(directory)
+        if os.name == "nt":
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(working), str(target)],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+        else:
+            working.symlink_to(target, target_is_directory=True)
+        try:
+            result = train.run(local_config)
+
+            assert result["status"] == "error"
+            assert "working directory" in result["message"]
+            assert not inputs_read
+            assert not any(target.iterdir())
+        finally:
+            if working.exists():
+                if os.name == "nt":
+                    os.rmdir(working)
+                else:
+                    working.unlink()
+
+
+def test_run_refuses_to_start_when_an_interrupted_run_is_still_on_disk(local_config):
+    working = _working_directory(local_config)
+    working.mkdir(parents=True)
+    (working / "last_checkpoint.pt").write_bytes(b"leftover")
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert "interrupted run" in result["message"]
+
+
+def _resume_config(local_config, source: Path) -> dict:
+    resumed = copy.deepcopy(local_config)
+    resumed["train"]["run_id"] = "cpu-resumed"
+    resumed["train"]["resume_from"] = _relative(source)
+    return resumed
+
+
+def test_resumed_training_matches_an_uninterrupted_run(
+    local_config, tmp_path, monkeypatch
+):
+    """이어서 한 학습이 끊기지 않은 학습과 같아야 합니다.
+
+    난수 상태·조기 종료 상태·history를 하나라도 빠뜨리면 여기서 갈라집니다.
+    """
+
+    monkeypatch.setattr(
+        pipeline, "build_model", lambda *args, **kwargs: RandomWalkDetector()
+    )
+    local_config["train"]["augmentation"] = {"preset": "pill_basic"}
+
+    straight = copy.deepcopy(local_config)
+    straight["train"]["run_id"] = "cpu-straight"
+    straight["train"]["epochs"] = 4
+    straight_result = train.run(straight)
+
+    interrupted = copy.deepcopy(local_config)
+    interrupted["train"]["epochs"] = 2
+    train.run(interrupted)
+    source = REPOSITORY_ROOT / interrupted["train"]["output_dir"] / "cpu-smoke"
+
+    resumed = _resume_config(local_config, source / "last_checkpoint.pt")
+    resumed["train"]["epochs"] = 4
+    resumed_result = train.run(resumed)
+
+    assert resumed_result["status"] == "ok", resumed_result["message"]
+    straight_history = json.loads(
+        (REPOSITORY_ROOT / straight_result["artifacts"]["training_history_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    resumed_history = json.loads(
+        (REPOSITORY_ROOT / resumed_result["artifacts"]["training_history_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert resumed_history == straight_history
+
+    straight_weights = _load(
+        REPOSITORY_ROOT / straight_result["artifacts"]["last_checkpoint_uri"]
+    )["model_state_dict"]
+    resumed_weights = _load(
+        REPOSITORY_ROOT / resumed_result["artifacts"]["last_checkpoint_uri"]
+    )["model_state_dict"]
+    assert set(straight_weights) == set(resumed_weights)
+    for name, value in straight_weights.items():
+        assert torch.equal(value, resumed_weights[name]), name
+
+
+def test_resume_without_restoring_the_random_state_diverges(
+    local_config, tmp_path, monkeypatch
+):
+    """앞 test가 정말 무언가를 지키는지 확인하는 대조군입니다.
+
+    난수 복원을 꺼 두면 결과가 갈라져야 합니다. 갈라지지 않으면 앞 test는 난수 복원을
+    하나도 검사하지 못하고 있다는 뜻입니다.
+    """
+
+    monkeypatch.setattr(
+        pipeline, "build_model", lambda *args, **kwargs: RandomWalkDetector()
+    )
+    local_config["train"]["augmentation"] = {"preset": "pill_basic"}
+
+    straight = copy.deepcopy(local_config)
+    straight["train"]["run_id"] = "control-straight"
+    straight["train"]["epochs"] = 4
+    straight_result = train.run(straight)
+
+    interrupted = copy.deepcopy(local_config)
+    interrupted["train"]["run_id"] = "control-interrupted"
+    interrupted["train"]["epochs"] = 2
+    train.run(interrupted)
+    source = (
+        REPOSITORY_ROOT
+        / interrupted["train"]["output_dir"]
+        / "control-interrupted"
+        / "last_checkpoint.pt"
+    )
+
+    monkeypatch.setattr(trainer_module, "restore_rng", lambda *args, **kwargs: None)
+    resumed = _resume_config(local_config, source)
+    resumed["train"]["run_id"] = "control-resumed"
+    resumed["train"]["epochs"] = 4
+    resumed_result = train.run(resumed)
+
+    straight_history = json.loads(
+        (REPOSITORY_ROOT / straight_result["artifacts"]["training_history_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    resumed_history = json.loads(
+        (REPOSITORY_ROOT / resumed_result["artifacts"]["training_history_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert resumed_history != straight_history
+
+
+def test_resume_keeps_a_best_epoch_from_before_the_interruption(
+    local_config, tmp_path, monkeypatch
+):
+    """이어붙이기 이전이 더 좋았다면 그 epoch이 그대로 best로 공개되어야 합니다."""
+
+    # 첫 실행은 epoch 1이 가장 좋고, 이어서 한 실행은 그보다 나빠집니다.
+    detectors = iter([SequencedDetector([0.1, 0.2]), SequencedDetector([0.9, 0.9])])
+    monkeypatch.setattr(
+        pipeline, "build_model", lambda *args, **kwargs: next(detectors)
+    )
+    local_config["train"]["epochs"] = 2
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"]["epochs"] = 4
+    result = train.run(resumed)
+
+    assert result["status"] == "ok", result["message"]
+    assert result["summary"]["best_epoch"] == 1
+    best = _load(REPOSITORY_ROOT / result["artifacts"]["best_checkpoint_uri"])
+    assert best["epoch"] == result["summary"]["best_epoch"]
+
+
+def test_resumed_run_records_where_it_came_from(local_config, tmp_path):
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"]["epochs"] = 4
+    result = train.run(resumed)
+
+    assert result["status"] == "ok", result["message"]
+    assert result["summary"]["resumed_from"] == _relative(source)
+    assert result["summary"]["resumed_at_epoch"] == 2
+    last = _load(REPOSITORY_ROOT / result["artifacts"]["last_checkpoint_uri"])
+    assert last["training_config"]["resume"] == {
+        "resumed_from": _relative(source),
+        "resumed_at_epoch": 2,
+    }
+
+
+def test_run_records_no_resume_block_when_it_starts_from_scratch(local_config):
+    result = train.run(local_config)
+
+    assert result["summary"]["resumed_from"] is None
+    last = _load(REPOSITORY_ROOT / result["artifacts"]["last_checkpoint_uri"])
+    assert last["training_config"]["resume"] is None
+
+
+@pytest.mark.parametrize(
+    ("resume_from", "message"),
+    [
+        (17, "train.resume_from must be a non-empty checkpoint path"),
+        ("", "train.resume_from must be a non-empty checkpoint path"),
+        ("../outside.pt", "leaves the repository"),
+        ("artifacts/missing-checkpoint.pt", "does not exist"),
+    ],
+)
+def test_run_rejects_unusable_resume_paths(local_config, resume_from, message):
+    local_config["train"]["resume_from"] = resume_from
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert message in result["message"]
+    assert not _working_directory(local_config).exists()
+
+
+def test_run_rejects_a_checkpoint_that_predates_resume_support(local_config, tmp_path):
+    legacy = tmp_path / "legacy_checkpoint.pt"
+    torch.save({"epoch": 1, "model_state_dict": {}}, legacy)
+    local_config["train"]["resume_from"] = _relative(legacy)
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert "cannot be resumed" in result["message"]
+
+
+def test_run_rejects_resuming_past_the_planned_epochs(local_config, tmp_path):
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"]["epochs"] = 2
+
+    result = train.run(resumed)
+
+    assert result["status"] == "error"
+    assert "train.epochs" in result["message"]
+
+
+def test_run_rejects_changed_optimizer_settings_before_building_the_model(
+    local_config, monkeypatch
+):
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+    resumed = _resume_config(local_config, source)
+    resumed["train"].update({"epochs": 4, "learning_rate": 0.123})
+    build_model_spy = Mock()
+    monkeypatch.setattr(pipeline, "build_model", build_model_spy)
+
+    result = train.run(resumed)
+
+    assert result["status"] == "error"
+    assert "optimizer settings" in result["message"]
+    build_model_spy.assert_not_called()
+
+
+def test_run_rejects_absolute_resume_path_before_recording_it(local_config):
+    local_config["train"]["resume_from"] = str(
+        (REPOSITORY_ROOT / "artifacts" / "private-checkpoint.pt").resolve()
+    )
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert "repository-relative POSIX" in result["message"]
+
+
 def test_run_reports_missing_input_artifacts_without_partial_success():
     result = train.run({"inputs": {"data": {}}, "train": {}})
 
@@ -1115,6 +1583,67 @@ def test_validation_does_not_update_batch_norm_running_statistics():
     assert torch.allclose(model.batch_norm.running_mean, torch.full((3,), 0.1))
 
 
+def _trainer_settings(**overrides) -> dict:
+    settings = {
+        "seed": 17,
+        "device": "cpu",
+        "batch_size": 1,
+        "num_workers": 0,
+        "learning_rate": 0.01,
+        "momentum": 0.0,
+        "weight_decay": 0.0,
+        "epochs": 2,
+    }
+    settings.update(overrides)
+    return settings
+
+
+def _collect_checkpoints(**overrides) -> list[tuple[dict, dict, dict]]:
+    """학습 도중 trainer가 넘겨 준 (last, best, resume_state)를 모읍니다."""
+
+    seen: list[tuple[dict, dict, dict]] = []
+    train_model(
+        TinyDetector(),
+        InMemoryDetectionDataset(1.0),
+        InMemoryDetectionDataset(0.0),
+        _trainer_settings(**overrides),
+        on_checkpoint=lambda last, best, resume_state: seen.append(
+            (last, best, resume_state)
+        ),
+    )
+    return seen
+
+
+def test_trainer_hands_back_resumable_state_after_every_epoch():
+    seen = _collect_checkpoints(epochs=2)
+
+    assert [state["completed_epoch"] for _, _, state in seen] == [1, 2]
+    assert [last["epoch"] for last, _, _ in seen] == [1, 2]
+    # history는 지금까지의 전체입니다. 이어서 시작해도 손실 곡선이 끊기지 않아야 합니다.
+    assert [entry["epoch"] for entry in seen[-1][2]["history"]] == [1, 2]
+
+
+def test_checkpoint_every_thins_out_the_resumable_state():
+    seen = _collect_checkpoints(epochs=4, checkpoint_every=2)
+
+    assert [state["completed_epoch"] for _, _, state in seen] == [2, 4]
+
+
+def test_resumable_state_carries_what_the_next_run_cannot_recompute():
+    _, best, state = _collect_checkpoints(epochs=1)[-1]
+
+    assert state["version"] == trainer_module.RESUME_STATE_VERSION
+    assert set(state["rng"]) == {"python", "numpy", "torch", "cuda", "dataloader"}
+    assert state["grad_scaler_state_dict"] is None
+    assert set(state["early_stopping"]) == {
+        "reference_loss",
+        "epochs_without_improvement",
+    }
+    # best는 숫자만 담습니다. 가중치는 옆에 저장되는 best_checkpoint.pt가 들고 있습니다.
+    assert state["best"] == {"epoch": 1, "validation_loss": best["validation_loss"]}
+    assert isinstance(best["model_state_dict"], dict)
+
+
 def test_fp16_runtime_uses_autocast_and_grad_scaler(monkeypatch):
     calls: list[tuple[str, object]] = []
 
@@ -1164,6 +1693,33 @@ def test_fp16_runtime_uses_autocast_and_grad_scaler(monkeypatch):
     ]
 
 
+def test_fp16_runtime_saves_and_restores_grad_scaler_state(monkeypatch):
+    loaded: list[dict] = []
+
+    class FakeScaler:
+        def state_dict(self):
+            return {"scale": 128.0, "growth_tracker": 7}
+
+        def load_state_dict(self, state):
+            loaded.append(dict(state))
+
+    monkeypatch.setattr(
+        trainer_module.torch.amp,
+        "GradScaler",
+        Mock(return_value=FakeScaler()),
+    )
+    runtime = trainer_module._PrecisionRuntime(
+        {"mode": "amp", "dtype": "fp16", "grad_scaler": True},
+        torch.device("cuda"),
+    )
+
+    saved = runtime.state_dict()
+    runtime.load_state_dict({"scale": 32.0, "growth_tracker": 11})
+
+    assert saved == {"scale": 128.0, "growth_tracker": 7}
+    assert loaded == [{"scale": 32.0, "growth_tracker": 11}]
+
+
 def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
     calls = {"autocast": 0, "backward_and_step": 0}
 
@@ -1182,6 +1738,12 @@ def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
             calls["backward_and_step"] += 1
             loss.backward()
             optimizer.step()
+
+        def state_dict(self):
+            return None
+
+        def load_state_dict(self, state):
+            assert state is None
 
     monkeypatch.setattr(
         trainer_module,
@@ -1208,6 +1770,239 @@ def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
     )
 
     assert calls == {"autocast": 2, "backward_and_step": 1}
+
+
+def _s3_storage_with(existing: set[str]) -> S3Storage:
+    """주어진 key만 있는 것처럼 구는 S3Storage를 만듭니다."""
+
+    client = Mock()
+
+    def head_object(**request):
+        if request["Key"] in existing:
+            return {}
+        raise ClientError(
+            {"Error": {"Code": "404", "Message": "missing"}}, "HeadObject"
+        )
+
+    client.head_object.side_effect = head_object
+    return S3Storage("bucket", client=client)
+
+
+def _s3_settings(tmp_path) -> dict:
+    return {
+        "run_id": "colab-run",
+        "output_prefix": "experiments/completed",
+        "output_dir": _relative(tmp_path / "outputs"),
+    }
+
+
+def test_s3_run_refuses_to_overwrite_an_interrupted_run_of_the_same_name(tmp_path):
+    """Colab은 runtime이 바뀌면 로컬 작업 폴더가 없습니다.
+
+    그때 같은 run_id로 다시 돌리면 S3의 running checkpoint를 덮어쓰게 되는데, 그게
+    중단된 학습의 유일한 사본입니다. 로컬을 볼 수 없으니 S3를 직접 봐야 합니다.
+    """
+
+    storage = _s3_storage_with(
+        {"experiments/completed/colab-run/running/last_checkpoint.pt"}
+    )
+
+    with pytest.raises(FileExistsError, match="still on S3"):
+        pipeline._reject_existing_run(_s3_settings(tmp_path), storage)
+
+
+def test_s3_run_reports_a_finished_run_of_the_same_name_before_training(tmp_path):
+    """몇 시간 학습한 뒤가 아니라 시작하기 전에 알려 줘야 합니다."""
+
+    storage = _s3_storage_with({"experiments/completed/colab-run/completed.json"})
+
+    with pytest.raises(FileExistsError, match="already exists: colab-run"):
+        pipeline._reject_existing_run(_s3_settings(tmp_path), storage)
+
+
+def test_s3_run_starts_when_the_run_id_is_free(tmp_path):
+    pipeline._reject_existing_run(_s3_settings(tmp_path), _s3_storage_with(set()))
+
+
+def _recording_s3_storage() -> tuple[S3Storage, dict]:
+    """올라간 object를 그대로 모아 두는 S3Storage를 만듭니다."""
+
+    uploaded: dict[str, bytes] = {}
+    client = Mock()
+    client.head_object.side_effect = ClientError(
+        {"Error": {"Code": "404", "Message": "missing"}}, "HeadObject"
+    )
+
+    def put_object(**request):
+        body = request["Body"]
+        uploaded[request["Key"]] = body.read() if hasattr(body, "read") else body
+
+    client.put_object.side_effect = put_object
+    client.upload_file.side_effect = lambda source, bucket, key, **_: uploaded.update(
+        {key: Path(source).read_bytes()}
+    )
+    return S3Storage("bucket", client=client), uploaded
+
+
+def test_s3_mirror_writes_one_self_contained_object(tmp_path):
+    """S3는 여러 object를 한 번에 바꿀 수 없습니다.
+
+    best와 last를 따로 올리면 하나만 성공했을 때 짝이 어긋나고, bucket에 남은 유일한
+    사본을 이어서 쓸 수 없게 됩니다. 그래서 한 파일에 best 가중치까지 담습니다.
+    """
+
+    storage, uploaded = _recording_s3_storage()
+    best = {
+        "epoch": 2,
+        "validation_loss": 0.5,
+        "model_state_dict": {"weight": torch.tensor(2.0)},
+        "optimizer_state_dict": {"param_groups": []},
+    }
+    last_payload = {
+        "epoch": 3,
+        "model_state_dict": {"weight": torch.tensor(3.0)},
+        "resume_state": {
+            "completed_epoch": 3,
+            "best": {"epoch": 2, "validation_loss": 0.5},
+        },
+    }
+
+    pipeline._mirror_to_s3(storage, last_payload, best, _s3_settings(tmp_path))
+
+    assert list(uploaded) == [
+        "experiments/completed/colab-run/running/last_checkpoint.pt"
+    ]
+    mirrored = torch.load(
+        io.BytesIO(next(iter(uploaded.values()))), map_location="cpu", weights_only=True
+    )
+    mirrored_best = mirrored["resume_state"]["best"]
+    assert mirrored_best["epoch"] == 2
+    assert torch.equal(mirrored_best["model_state_dict"]["weight"], torch.tensor(2.0))
+    # 원래 payload를 건드리면 로컬 작업 파일까지 두 배가 됩니다.
+    assert "model_state_dict" not in last_payload["resume_state"]["best"]
+
+
+def test_s3_checkpoint_scratch_rejects_an_artifacts_directory_link(
+    tmp_path, monkeypatch
+):
+    """S3 checkpoint를 받거나 쓸 때 저장소 밖 junction을 따라가면 안 됩니다."""
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    artifacts = repository / "artifacts"
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(artifacts), str(outside)],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    else:
+        artifacts.symlink_to(outside, target_is_directory=True)
+
+    storage, _ = _recording_s3_storage()
+    storage.download_file = Mock()
+    best = {
+        "epoch": 1,
+        "model_state_dict": {},
+        "optimizer_state_dict": {},
+    }
+    last = {
+        "epoch": 1,
+        "resume_state": {"best": {"epoch": 1}},
+    }
+    monkeypatch.setattr(pipeline, "REPOSITORY_ROOT", repository)
+    try:
+        with pytest.raises(ValueError, match="scratch directory"):
+            pipeline._read_checkpoint(
+                "s3://bucket/checkpoint.pt", storage, label="train.resume_from"
+            )
+        with pytest.raises(ValueError, match="scratch directory"):
+            pipeline._mirror_to_s3(
+                storage,
+                last,
+                best,
+                {"run_id": "linked", "output_prefix": "experiments"},
+            )
+
+        storage.download_file.assert_not_called()
+        storage.client.upload_file.assert_not_called()
+        assert not any(outside.iterdir())
+    finally:
+        if os.path.lexists(artifacts):
+            if os.name == "nt":
+                os.rmdir(artifacts)
+            else:
+                artifacts.unlink()
+
+
+def test_resume_reads_best_weights_embedded_in_a_single_checkpoint(
+    local_config, tmp_path
+):
+    """S3에서 받은 한 파일짜리 checkpoint는 옆 파일 없이도 이어서 할 수 있어야 합니다."""
+
+    train.run(local_config)
+    finished = REPOSITORY_ROOT / local_config["train"]["output_dir"] / "cpu-smoke"
+    last = _load(finished / "last_checkpoint.pt")
+    best = _load(finished / "best_checkpoint.pt")
+    last["resume_state"]["best"] = {
+        **last["resume_state"]["best"],
+        "model_state_dict": best["model_state_dict"],
+        "optimizer_state_dict": best["optimizer_state_dict"],
+    }
+    alone = tmp_path / "downloaded" / "last_checkpoint.pt"
+    alone.parent.mkdir(parents=True)
+    torch.save(last, alone)
+
+    resumed = _resume_config(local_config, alone)
+    resumed["train"]["epochs"] = 4
+    result = train.run(resumed)
+
+    assert result["status"] == "ok", result["message"]
+    assert result["summary"]["resumed_at_epoch"] == 2
+
+
+def test_s3_run_publishes_a_last_checkpoint_that_can_be_resumed(
+    local_config, monkeypatch
+):
+    """backend에 따라 최종 artifact의 내용이 달라지면 안 됩니다."""
+
+    storage, uploaded = _recording_s3_storage()
+    monkeypatch.setattr(pipeline, "create_storage", lambda config: storage)
+
+    result = train.run(local_config)
+
+    assert result["status"] == "ok", result["message"]
+    # 학습 중 올린 running/ 사본이 아니라 공개된 artifact를 봐야 합니다.
+    published = next(
+        value
+        for key, value in uploaded.items()
+        if "/attempts/" in key and key.endswith("last_checkpoint.pt")
+    )
+    document = torch.load(io.BytesIO(published), map_location="cpu", weights_only=True)
+    assert document["resume_state"]["completed_epoch"] == 2
+
+
+def test_s3_run_claims_the_running_checkpoint_before_overwriting_it(
+    local_config, monkeypatch
+):
+    storage, _ = _recording_s3_storage()
+    monkeypatch.setattr(pipeline, "create_storage", lambda config: storage)
+
+    result = train.run(local_config)
+
+    assert result["status"] == "ok", result["message"]
+    running_writes = [
+        call.kwargs
+        for call in storage.client.put_object.call_args_list
+        if call.kwargs["Key"].endswith("/running/last_checkpoint.pt")
+    ]
+    assert len(running_writes) == 2
+    assert running_writes[0]["IfNoneMatch"] == "*"
+    assert "IfNoneMatch" not in running_writes[1]
 
 
 def test_s3_publisher_returns_attempt_uris_and_writes_completion_marker(
