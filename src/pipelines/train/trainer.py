@@ -104,6 +104,54 @@ def build_optimizer(
     raise ValueError(f"unsupported train optimizer: {name}")
 
 
+def build_lr_scheduler(
+    optimizer: torch.optim.Optimizer,
+    settings: Mapping[str, Any],
+    steps_per_epoch: int,
+) -> torch.optim.lr_scheduler.LambdaLR | None:
+    """정규화된 설정으로 learning rate schedule을 만듭니다.
+
+    설정이 없으면 ``None``을 돌려주고 학습은 지금까지처럼 상수 learning rate로 돕니다.
+    이것이 schedule을 몰랐던 옛 checkpoint를 그대로 이어서 학습할 수 있게 하는 조건이기도
+    합니다.
+
+    배율은 epoch이 아니라 **batch마다** 계산합니다. warmup을 epoch 단위로만 셀 수 있으면
+    가장 짧은 warmup이 1 epoch인데, 이미지가 만 장이 넘는 지금은 그것도 수천 batch입니다.
+    """
+
+    schedule = settings.get("lr_scheduler")
+    if schedule is None:
+        return None
+    name = schedule["name"]
+    warmup_steps = schedule["warmup_steps"]
+    start_factor = schedule["warmup_start_factor"]
+    # 전체 길이는 ``epochs``에서 옵니다. 이어서 학습하며 epochs를 늘리면 남은 곡선도
+    # 그만큼 늘어납니다. epochs를 "남은 수가 아니라 전체 목표"로 읽는 규칙 그대로입니다.
+    total_steps = max(1, settings["epochs"] * steps_per_epoch)
+
+    def factor(step: int) -> float:
+        if step < warmup_steps:
+            return start_factor + (1.0 - start_factor) * (step / warmup_steps)
+        if name == "step":
+            # 이것만 epoch 단위입니다. "몇 epoch마다 줄인다"가 곧 설정이기 때문입니다.
+            return schedule["gamma"] ** (
+                (step // steps_per_epoch) // schedule["step_size"]
+            )
+        if name == "none":
+            return 1.0
+        minimum = schedule["min_lr_factor"]
+        # 남은 step에서 1을 빼야 **마지막 batch가** min_lr_factor를 실제로 씁니다.
+        # 빼지 않으면 설정한 최저 learning rate는 한 번도 쓰이지 않고 끝납니다.
+        progress = min(
+            1.0, (step - warmup_steps) / max(1, total_steps - warmup_steps - 1)
+        )
+        if name == "linear":
+            return 1.0 + (minimum - 1.0) * progress
+        return minimum + (1.0 - minimum) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -164,6 +212,29 @@ def restore_rng(state: Mapping[str, Any], generator: torch.Generator) -> None:
     ):
         torch.cuda.set_rng_state_all(cuda_states)
     generator.set_state(state["dataloader"].cpu())
+
+
+def _load_schedule_state(
+    schedule: torch.optim.lr_scheduler.LambdaLR | None,
+    state: Mapping[str, Any] | None,
+) -> None:
+    """이어서 학습할 때 schedule이 어디까지 왔는지 되돌립니다.
+
+    한쪽만 있는 상태로는 이어서 할 수 없습니다. 되돌리지 않고 시작하면 warmup을 처음부터
+    다시 하면서, 이어붙인 실행이 끊기지 않은 실행과 조용히 달라집니다.
+    """
+
+    if schedule is None:
+        if state is not None:
+            raise ValueError(
+                "resume checkpoint has learning rate schedule state but this run has no schedule"
+            )
+        return
+    if not isinstance(state, Mapping):
+        raise ValueError(
+            "resume checkpoint is missing the learning rate schedule state this run needs"
+        )
+    schedule.load_state_dict(dict(state))
 
 
 def _collate(batch: list[Any]) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
@@ -289,6 +360,7 @@ def _train_model(
     if not parameters:
         raise RuntimeError("model has no trainable parameters")
     optimizer = build_optimizer(parameters, settings)
+    schedule = build_lr_scheduler(optimizer, settings, len(train_loader))
     precision = _PrecisionRuntime(
         settings.get(
             "precision",
@@ -334,6 +406,7 @@ def _train_model(
         )
         epochs_without_improvement = int(stopping["epochs_without_improvement"])
         precision.load_state_dict(state["grad_scaler_state_dict"])
+        _load_schedule_state(schedule, state.get("scheduler_state_dict"))
         restore_rng(state["rng"], generator)
         start_epoch = int(state["completed_epoch"]) + 1
     for epoch in range(start_epoch, settings["epochs"] + 1):
@@ -343,11 +416,17 @@ def _train_model(
         model.train()
         train_total = 0.0
         train_component_totals: dict[str, float] = {}
+        # epoch이 끝난 뒤 남길 값입니다. 아래에서 batch마다 갱신합니다.
+        learning_rate = optimizer.param_groups[0]["lr"]
         for step, (images, targets) in enumerate(train_loader, start=1):
             optimizer.zero_grad(set_to_none=True)
             with precision.autocast():
                 loss, components = _loss(model, images, targets, device)
+            # 이 batch가 실제로 쓴 값이므로 schedule을 넘기기 전에 읽습니다.
+            learning_rate = optimizer.param_groups[0]["lr"]
             precision.backward_and_step(loss, optimizer)
+            if schedule is not None:
+                schedule.step()
             train_total += float(loss.detach().cpu())
             _add_components(train_component_totals, components, phase="train")
             if progress is not None:
@@ -396,6 +475,8 @@ def _train_model(
             "validation_loss": validation_loss,
             "train_loss_components": train_loss_components,
             "validation_loss_components": validation_loss_components,
+            # 이 epoch의 마지막 batch가 쓴 learning rate입니다.
+            "learning_rate": learning_rate,
         }
         history.append(epoch_record)
         is_best = validation_loss < best_loss
@@ -427,6 +508,7 @@ def _train_model(
                 best_epoch=best_epoch,
                 is_best=is_best,
                 epoch_seconds=round(time.perf_counter() - epoch_started_at, 3),
+                learning_rate=learning_rate,
             )
         # 마지막 epoch은 주기와 상관없이 남깁니다. 그래야 작업 폴더의 checkpoint가
         # 학습이 끝난 실제 상태와 같아지고, 그대로 공개할 수 있습니다.
@@ -456,6 +538,13 @@ def _train_model(
                         "epochs_without_improvement": epochs_without_improvement,
                     },
                     "grad_scaler_state_dict": precision.state_dict(),
+                    # schedule을 쓰지 않는 실행은 None입니다. key 자체는 늘 있어야
+                    # 읽는 쪽이 "없는 것"과 "못 읽은 것"을 구별할 수 있습니다.
+                    "scheduler_state_dict": (
+                        copy.deepcopy(schedule.state_dict())
+                        if schedule is not None
+                        else None
+                    ),
                     "rng": capture_rng(generator),
                 },
             )

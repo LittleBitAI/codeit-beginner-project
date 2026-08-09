@@ -259,6 +259,7 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
             "architecture",
             "optimizer",
             "augmentation",
+            "lr_scheduler",
             "seed",
             "epochs",
             "batch_size",
@@ -269,7 +270,7 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
             "early_stopping",
             "resume",
         }
-        assert recorded["schema_version"] == 2
+        assert recorded["schema_version"] == 3
         assert recorded["resume"] is None
         assert recorded["run_id"] == "cpu-smoke"
         assert recorded["architecture"] == checkpoint["architecture"]
@@ -428,6 +429,57 @@ def test_invalid_early_stopping_fails_before_writing_artifacts(
     local_config, early_stopping, message
 ):
     local_config["train"]["early_stopping"] = early_stopping
+
+    result = train.run(local_config)
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert message in result["message"]
+    output = REPOSITORY_ROOT / local_config["train"]["output_dir"] / "cpu-smoke"
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("lr_scheduler", "message"),
+    [
+        ("cosine", "train.lr_scheduler must be an object"),
+        ({"name": "sqrt"}, "train.lr_scheduler.name must be one of: none, cosine, step, linear"),
+        (
+            {"name": "cosine", "warmup_steps": -1},
+            "train.lr_scheduler.warmup_steps must be an integer >= 0",
+        ),
+        (
+            {"name": "cosine", "warmup_start_factor": 0.0},
+            "train.lr_scheduler.warmup_start_factor must be a number > 0.0 and <= 1.0",
+        ),
+        (
+            {"name": "cosine", "min_lr_factor": 1.5},
+            "train.lr_scheduler.min_lr_factor must be a number >= 0.0 and <= 1.0",
+        ),
+        (
+            {"name": "step", "step_size": 0},
+            "train.lr_scheduler.step_size must be an integer >= 1",
+        ),
+        (
+            {"name": "step", "gamma": 0.0},
+            "train.lr_scheduler.gamma must be a number > 0.0 and <= 1.0",
+        ),
+        (
+            {"name": "cosine", "step_size": 2},
+            "train.lr_scheduler.step_size is not used by train.lr_scheduler.name=cosine",
+        ),
+        (
+            {"name": "cosine", "unexpected": 3},
+            "train.lr_scheduler contains unsupported settings: unexpected",
+        ),
+    ],
+)
+def test_invalid_lr_scheduler_fails_before_writing_artifacts(
+    local_config, lr_scheduler, message
+):
+    """고른 schedule이 쓰지 않는 값은 조용히 무시하지 않고 학습 전에 거부합니다."""
+
+    local_config["train"]["lr_scheduler"] = lr_scheduler
 
     result = train.run(local_config)
 
@@ -683,6 +735,7 @@ def test_run_emits_progress_events_on_stderr_and_leaves_stdout_empty(
         "best_epoch",
         "is_best",
         "epoch_seconds",
+        "learning_rate",
         "ts",
     }
     assert (first["epoch"], last["epoch"]) == (1, 2)
@@ -745,6 +798,71 @@ def test_history_and_progress_preserve_model_loss_names(local_config, monkeypatc
     assert completed_epoch["validation_loss_components"] == record[
         "validation_loss_components"
     ]
+
+
+def test_history_and_progress_record_the_learning_rate_actually_used(
+    local_config, capsys
+):
+    """warmup과 decay가 실제로 걸렸는지 사람이 눈으로 확인할 수 있어야 합니다."""
+
+    local_config["train"].update(
+        {
+            "epochs": 3,
+            "learning_rate": 0.01,
+            "lr_scheduler": {"name": "linear", "min_lr_factor": 0.0},
+        }
+    )
+
+    result = train.run(local_config)
+    events = _progress_events(capsys.readouterr().err)
+
+    assert result["status"] == "ok", result["message"]
+    assert result["summary"]["lr_scheduler"] == "linear"
+    history = json.loads(
+        (REPOSITORY_ROOT / result["artifacts"]["training_history_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    # 이미지가 한 장이라 epoch당 batch도 하나입니다. 곧 epoch마다 한 번씩 내려갑니다.
+    assert [entry["learning_rate"] for entry in history] == pytest.approx(
+        [0.01, 0.005, 0.0]
+    )
+    assert [
+        event["learning_rate"] for event in events if event["event"] == "epoch_completed"
+    ] == pytest.approx([0.01, 0.005, 0.0])
+
+
+def test_run_without_a_schedule_keeps_the_learning_rate_constant(local_config):
+    """설정하지 않은 실행은 이 기능이 생기기 전과 완전히 같아야 합니다."""
+
+    local_config["train"]["learning_rate"] = 0.01
+
+    result = train.run(local_config)
+
+    assert result["summary"]["lr_scheduler"] == "none"
+    history = json.loads(
+        (REPOSITORY_ROOT / result["artifacts"]["training_history_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [entry["learning_rate"] for entry in history] == [0.01, 0.01]
+    last = _load(REPOSITORY_ROOT / result["artifacts"]["last_checkpoint_uri"])
+    assert last["training_config"]["lr_scheduler"] is None
+    assert last["resume_state"]["scheduler_state_dict"] is None
+
+
+def test_checkpoint_records_the_schedule_it_was_trained_with(local_config):
+    local_config["train"]["lr_scheduler"] = {"name": "cosine", "warmup_steps": 2}
+
+    result = train.run(local_config)
+
+    last = _load(REPOSITORY_ROOT / result["artifacts"]["last_checkpoint_uri"])
+    assert last["training_config"]["lr_scheduler"] == {
+        "name": "cosine",
+        "warmup_steps": 2,
+        "warmup_start_factor": 0.001,
+        "min_lr_factor": 0.01,
+    }
 
 
 def test_early_stopping_keeps_best_and_actual_last_checkpoint_separate(
@@ -1452,6 +1570,90 @@ def test_run_rejects_changed_optimizer_settings_before_building_the_model(
     build_model_spy.assert_not_called()
 
 
+def test_resumed_training_continues_the_learning_rate_schedule(
+    local_config, monkeypatch
+):
+    """이어서 한 실행이 warmup을 처음부터 다시 하면 안 됩니다.
+
+    schedule 위치를 되돌리지 않으면 learning rate가 갈라지고, 그 뒤 가중치도 갈라집니다.
+    """
+
+    monkeypatch.setattr(
+        pipeline, "build_model", lambda *args, **kwargs: RandomWalkDetector()
+    )
+    local_config["train"]["lr_scheduler"] = {
+        "name": "cosine",
+        "warmup_steps": 3,
+        "warmup_start_factor": 0.1,
+    }
+
+    straight = copy.deepcopy(local_config)
+    straight["train"]["run_id"] = "schedule-straight"
+    straight["train"]["epochs"] = 4
+    straight_result = train.run(straight)
+
+    interrupted = copy.deepcopy(local_config)
+    interrupted["train"]["epochs"] = 2
+    train.run(interrupted)
+    source = REPOSITORY_ROOT / interrupted["train"]["output_dir"] / "cpu-smoke"
+
+    resumed = _resume_config(local_config, source / "last_checkpoint.pt")
+    resumed["train"]["epochs"] = 4
+    resumed_result = train.run(resumed)
+
+    assert resumed_result["status"] == "ok", resumed_result["message"]
+    straight_history = json.loads(
+        (REPOSITORY_ROOT / straight_result["artifacts"]["training_history_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    resumed_history = json.loads(
+        (REPOSITORY_ROOT / resumed_result["artifacts"]["training_history_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    # warmup 3 step이 2 epoch째까지 이어지므로, 되돌리지 않으면 여기가 갈라집니다.
+    assert [entry["learning_rate"] for entry in resumed_history] == [
+        entry["learning_rate"] for entry in straight_history
+    ]
+    assert resumed_history == straight_history
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (None, {"name": "cosine"}),
+        ({"name": "cosine"}, {"name": "linear"}),
+        ({"name": "cosine"}, {"name": "cosine", "warmup_steps": 5}),
+    ],
+)
+def test_run_rejects_resuming_into_a_different_schedule(
+    local_config, monkeypatch, first, second
+):
+    """schedule이 바뀌면 learning rate 궤적이 조용히 달라집니다. optimizer와 같은 이유입니다."""
+
+    if first is not None:
+        local_config["train"]["lr_scheduler"] = first
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"].update({"epochs": 4, "lr_scheduler": second})
+    build_model_spy = Mock()
+    monkeypatch.setattr(pipeline, "build_model", build_model_spy)
+
+    result = train.run(resumed)
+
+    assert result["status"] == "error"
+    assert "learning rate schedule" in result["message"]
+    build_model_spy.assert_not_called()
+
+
 def test_run_rejects_absolute_resume_path_before_recording_it(local_config):
     local_config["train"]["resume_from"] = str(
         (REPOSITORY_ROOT / "artifacts" / "private-checkpoint.pt").resolve()
@@ -1720,6 +1922,71 @@ def test_resumable_state_carries_what_the_next_run_cannot_recompute():
     # best는 숫자만 담습니다. 가중치는 옆에 저장되는 best_checkpoint.pt가 들고 있습니다.
     assert state["best"] == {"epoch": 1, "validation_loss": best["validation_loss"]}
     assert isinstance(best["model_state_dict"], dict)
+
+
+def _lr_curve(*, epochs: int, steps_per_epoch: int = 1, **scheduler) -> list[float]:
+    """설정한 schedule이 step마다 실제로 쓰는 learning rate를 모읍니다.
+
+    base learning rate를 1.0으로 두었으므로 값이 곧 배율입니다.
+    """
+
+    parameter = nn.Parameter(torch.tensor(1.0))
+    optimizer = torch.optim.SGD([parameter], lr=1.0)
+    settings = _trainer_settings(
+        epochs=epochs,
+        # trainer는 언제나 정규화가 끝난 설정만 받습니다. 기본값도 같이 확인됩니다.
+        lr_scheduler=pipeline._lr_scheduler({"lr_scheduler": dict(scheduler)}),
+    )
+    schedule = trainer_module.build_lr_scheduler(optimizer, settings, steps_per_epoch)
+    seen = []
+    for _ in range(epochs * steps_per_epoch):
+        seen.append(optimizer.param_groups[0]["lr"])
+        # 학습 loop와 같은 순서(optimizer 먼저, schedule 나중)로 돌립니다.
+        parameter.grad = torch.zeros(())
+        optimizer.step()
+        schedule.step()
+    return seen
+
+
+def test_warmup_raises_the_learning_rate_linearly_and_then_stops():
+    curve = _lr_curve(epochs=8, name="none", warmup_steps=4, warmup_start_factor=0.25)
+
+    assert curve[:5] == pytest.approx([0.25, 0.4375, 0.625, 0.8125, 1.0])
+    # warmup이 끝난 뒤 name="none"은 base learning rate를 그대로 유지합니다.
+    assert curve[4:] == pytest.approx([1.0] * 4)
+
+
+def test_cosine_falls_from_the_base_learning_rate_to_the_minimum_factor():
+    curve = _lr_curve(epochs=5, name="cosine", min_lr_factor=0.1)
+
+    # 마지막 batch가 실제로 min_lr_factor를 쓰는 것이 중요합니다. 마지막 step에서도
+    # 아직 내려가는 중이면 설정한 최저 learning rate는 한 번도 쓰이지 않습니다.
+    assert curve[0] == pytest.approx(1.0)
+    assert curve[-1] == pytest.approx(0.1)
+    assert curve == sorted(curve, reverse=True)
+
+
+def test_linear_falls_straight_from_the_base_learning_rate_to_the_minimum_factor():
+    curve = _lr_curve(epochs=5, name="linear", min_lr_factor=0.2)
+
+    assert curve == pytest.approx([1.0, 0.8, 0.6, 0.4, 0.2])
+
+
+def test_step_schedule_drops_once_every_step_size_epochs():
+    curve = _lr_curve(epochs=4, steps_per_epoch=2, name="step", step_size=2, gamma=0.1)
+
+    assert curve == pytest.approx([1.0, 1.0, 1.0, 1.0, 0.1, 0.1, 0.1, 0.1])
+
+
+def test_warmup_runs_before_the_decay_and_the_decay_still_reaches_its_minimum():
+    """warmup과 decay는 한 schedule입니다. 둘을 같이 켜도 끝은 min_lr_factor입니다."""
+
+    curve = _lr_curve(
+        epochs=6, name="linear", warmup_steps=2, warmup_start_factor=0.5, min_lr_factor=0.0
+    )
+
+    assert curve[:3] == pytest.approx([0.5, 0.75, 1.0])
+    assert curve[-1] == pytest.approx(0.0)
 
 
 def test_fp16_runtime_uses_autocast_and_grad_scaler(monkeypatch):

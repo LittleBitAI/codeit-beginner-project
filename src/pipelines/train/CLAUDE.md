@@ -4,13 +4,13 @@ Read the repository root `CLAUDE.md` first. This file adds only what is specific
 
 ## Scope
 
-Trains a config-selected torchvision detector and writes checkpoints plus a training history. The CPU-friendly MobileNetV3 320 FPN Faster R-CNN remains the legacy architecture when the setting is absent. It does not prepare data, compute metrics, or register experiments.
+Trains a config-selected torchvision detector and writes checkpoints plus a training history. The CPU-friendly MobileNetV3 320 FPN Faster R-CNN is the legacy default. It does not prepare data, compute metrics, or register experiments.
 
 ## Boundaries
 
 You own `src/pipelines/train/`. Do not edit another pipeline and never import one; `src/common` is the only shared code available to you. `config["inputs"]` is read-only.
 
-Web cannot import you, so `src/pipelines/web/train_config.py` keeps its own copy of your defaults and validation rules, and `src/pipelines/web/tests/test_web_train_contract.py` reads your source with `ast` and fails when the copies drift. **If you change a default, the architecture name, or the run-id rule and that test fails, the alarm is working.** Tell the web owner; do not edit their file.
+Web cannot import you, so `src/pipelines/web/train_config.py` keeps its own copy of your defaults and validation rules, and `src/pipelines/web/tests/test_web_train_contract.py` reads your source with `ast` and fails when the copies drift. **If you change a default or a rule and that test fails, the alarm is working.** Tell the web owner; do not edit their file.
 
 ## Interface
 
@@ -20,9 +20,9 @@ It requires the four data artifacts in `config["inputs"]["data"]`.
 
 ## Outputs
 
-Checkpoints and history go to the configured repository-relative output directory, or to the configured S3 prefix.
+Checkpoints and history go to the configured repository-relative output directory or S3 prefix.
 
-During training, `.<run_id>.partial` sits beside the final output. Every `checkpoint_every` epochs, each file is replaced from a temporary file. Last is self-contained and replaced before best, so a failed best replacement remains resumable. Local renames the directory into place. S3 also keeps it locally until upload succeeds, so `output_dir` needs disk.
+During training, `.<run_id>.partial` sits beside the final output. Every `checkpoint_every` epochs, each file is replaced from a temporary file. Last is self-contained and replaced before best, so a failed best replacement remains resumable. Local renames the directory into place; S3 keeps it locally until upload succeeds, so `output_dir` needs disk.
 
 The S3 mirror `<prefix>/<run_id>/running/last_checkpoint.pt` is **one** self-contained object. Its first conditional write claims the `run_id`; only the winner overwrites it. This avoids a half-updated pair. Both backends publish the same self-contained last artifact.
 
@@ -30,14 +30,15 @@ Published files are never overwritten, and a run stops before its first batch wh
 
 ## Configurable Training
 
-- Supported architectures are declared in `model.py`; never accept arbitrary import or builder names.
-- Supported optimizers are AdamW, SGD, and Adam. A missing optimizer means legacy SGD, while new callers should explicitly send AdamW.
-- Reject optimizer-specific settings that the selected optimizer does not use; never ignore them silently.
+- Supported architectures are declared in `model.py`; never accept arbitrary builder names.
+- Supported optimizers are AdamW, SGD, and Adam. A missing optimizer means legacy SGD; new callers should send AdamW.
+- Reject optimizer- or schedule-specific settings the selection does not use; never ignore them silently.
 - Augmentation defaults to `none`. `pill_basic` applies only to the train split and must update bounding boxes with geometric transforms.
 - `precision` is `fp32`, `amp`, `fp16`, or `bf16`; all but `fp32` need CUDA. `amp` takes native bf16 else fp16 plus a scaler, and `bf16` is refused rather than emulated.
-- Checkpoints record the normalized model, optimizer, augmentation, and seed settings under `training_config`. Keep that metadata JSON-safe and free of storage credentials.
+- `lr_scheduler` is absent by default: the constant learning rate of before. Its factor is recomputed every batch, so warmup counts batches; only `step` decays per epoch.
+- Checkpoints record the normalized model, optimizer, augmentation, schedule, and seed settings under `training_config`. Keep that metadata JSON-safe and free of storage credentials.
 - `resume_from` continues an interrupted run from its self-contained `last_checkpoint.pt`, including the best epoch from before interruption. `epochs` counts the whole run, not the part that remains.
-- Every reason a resume cannot work is checked before the first batch: a missing `resume_state`, a history with gaps, different architecture, class map, or optimizer settings, missing AMP scaler state, `epochs` no larger than the resumed epoch, and patience already used up.
+- Every reason a resume cannot work is checked before the first batch: a missing `resume_state`, a history with gaps, a different architecture, class map, optimizer, or schedule, missing AMP scaler or schedule state, `epochs` no larger than the resumed epoch, and patience already used up.
 
 ## Run and Test
 
@@ -46,13 +47,13 @@ python -m src.main_pipeline --only train
 python -m pytest src/pipelines/train/tests -q
 ```
 
-Tests train a tiny model on CPU. They need no GPU and no AWS.
+Tests train a tiny model on CPU: no GPU, no AWS.
 
 ## Local Rules
 
 - **The checkpoint payload is a contract with evaluate.** It must stay loadable by `src/pipelines/evaluate/predictor.py`. Renaming or dropping a key there is a `contracts/proposals/` proposal.
-- `progress.py` emits `train.progress/1` JSON Lines on **stderr**. stdout belongs to the single JSON document `main_pipeline` prints — never write there. The emitter swallows every exception on purpose: progress output must never be able to fail a training run.
+- `progress.py` emits `train.progress/1` JSON Lines on **stderr**. stdout belongs to the single JSON document `main_pipeline` prints — never write there. The emitter swallows every exception on purpose: progress output must never fail a training run.
 - Validation must not update BatchNorm running statistics. A test guards this.
 - A seeded run must reproduce. If you introduce randomness, seed it.
-- **A resumed run must reproduce an uninterrupted one.** One test compares four epochs against two plus two; a second one breaks the random-state restore on purpose and requires the two to diverge, so the first test cannot pass by accident. The guarantee is CPU-only: deterministic algorithms run with `warn_only=True`, so CUDA kernels may still differ.
+- **A resumed run must reproduce an uninterrupted one.** Tests compare four epochs against two plus two, and a control breaks the random-state restore to prove the comparison is not passing by accident. The guarantee is CPU-only: deterministic algorithms run with `warn_only=True`, so CUDA kernels may still differ.
 - Nobody deletes an orphaned `.<run_id>.partial`. It holds the only copy of an interrupted run, so removing it is a person's decision.
