@@ -621,3 +621,81 @@ def test_logs_paginate_with_cursor(manager, config_id, monkeypatch, fake_process
     assert len(first["lines"]) == 10
     assert first["complete"] is False
     assert second["lines"][0]["seq"] == first["lines"][-1]["seq"] + 1
+
+
+# --- 기록 삭제 ---------------------------------------------------------------
+
+
+def test_delete_removes_only_this_gui_record(
+    manager, config_id, monkeypatch, fake_process_factory, isolated_repo
+):
+    """지우는 것은 ``artifacts/web/jobs/<job_id>/`` 하나뿐입니다.
+
+    checkpoint와 학습 결과 폴더는 train이 만든 산출물이라 이 화면이 지우지 않습니다.
+    설정 파일도 남깁니다. 대기열이나 이어서 학습이 아직 그것을 가리킬 수 있습니다.
+    """
+
+    monkeypatch.setattr(
+        runner, "spawn", lambda *a, **k: fake_process_factory(stdout=TRAIN_SUCCESS_STDOUT)
+    )
+    started = manager.start(config_id)
+    wait_for_finish(manager, started.job_id)
+
+    output = isolated_repo / "artifacts" / "experiments" / "completed" / "test-run"
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "best_checkpoint.pt").write_text("weights", encoding="utf-8")
+    config_path = isolated_repo / "artifacts" / "web" / "configs" / f"{config_id}.json"
+
+    manager.delete(started.job_id)
+
+    assert not store.job_directory(started.job_id).exists()
+    assert [record.job_id for record in manager.list_jobs()] == []
+    assert (output / "best_checkpoint.pt").read_text(encoding="utf-8") == "weights"
+    assert config_path.exists()
+
+
+def test_delete_refuses_while_the_job_is_running(
+    manager, config_id, monkeypatch, fake_process_factory
+):
+    """돌고 있는 학습의 기록을 지우면 그 학습을 관리할 방법이 사라집니다."""
+
+    process = fake_process_factory(block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    started = manager.start(config_id)
+    wait_for_spawn(manager)
+
+    with pytest.raises(JobConflictError):
+        manager.delete(started.job_id)
+
+    process.release()
+    wait_for_finish(manager, started.job_id)
+    assert store.job_directory(started.job_id).exists()
+
+
+def test_delete_rejects_ids_that_are_not_job_ids(manager):
+    """경로 조작은 디스크에 닿기 전에 막습니다."""
+
+    with pytest.raises(JobNotFoundError):
+        manager.delete("../../../etc/passwd")
+
+
+def test_delete_endpoint_reports_conflict_and_removes_from_listing(
+    client, valid_payload, monkeypatch, fake_process_factory
+):
+    created = client.post("/api/train/configs", json=valid_payload).json()
+    process = fake_process_factory(block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    started = client.post("/api/train/jobs", json={"config_id": created["config_id"]}).json()
+
+    assert client.delete(f"/api/train/jobs/{started['job_id']}").status_code == 409
+
+    process.release()
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if client.get(f"/api/train/jobs/{started['job_id']}").json()["status"] != "running":
+            break
+        time.sleep(0.02)
+
+    assert client.delete(f"/api/train/jobs/{started['job_id']}").status_code == 200
+    assert client.get("/api/train/jobs").json()["jobs"] == []
+    assert client.get(f"/api/train/jobs/{started['job_id']}").status_code == 404

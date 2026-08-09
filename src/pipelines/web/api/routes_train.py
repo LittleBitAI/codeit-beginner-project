@@ -238,6 +238,31 @@ def cancel_job(job_id: str) -> dict[str, Any]:
     return public_record(get_manager().cancel(job_id))
 
 
+@router.delete("/jobs/{job_id}")
+def delete_job(job_id: str) -> dict[str, Any]:
+    """이 GUI가 들고 있던 학습 기록 하나를 지웁니다.
+
+    **학습 산출물은 지우지 않습니다.** checkpoint와 학습 결과 폴더는 train이
+    만든 것이고, registry에 등록된 실험과 팀에 공유된 기록도 이 화면의 것이
+    아닙니다. 지우는 것은 ``artifacts/web/jobs/<job_id>/`` 하나뿐입니다.
+
+    평가가 도는 중이면 거절합니다. 그 runner가 끝나면서 같은 record를 다시
+    저장하기 때문에, 지워도 곧 되살아나 지운 것처럼 보이지 않습니다.
+    """
+
+    evaluating = get_evaluation_runner().status()
+    if evaluating.get("status") == "running" and evaluating.get("job_id") == job_id:
+        raise JobConflictError("평가가 도는 중인 학습의 기록은 지울 수 없습니다.")
+
+    manager = get_manager()
+    manager.delete(job_id)  # 없거나 실행 중이면 404 또는 409
+    active = manager.active_job()
+    return {
+        "jobs": [public_record(record) for record in manager.list_jobs()],
+        "active_job_id": active.job_id if active else None,
+    }
+
+
 def _event_stream(job_id: str) -> Iterator[str]:
     manager = get_manager()
     cursor = 0

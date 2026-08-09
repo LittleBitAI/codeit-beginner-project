@@ -75,6 +75,7 @@ function Shell() {
               source={source.data?.source ?? null}
               onSourceSelected={handleSourceSelected}
               onPrepared={handlePrepared}
+              onJobsChanged={listing.refresh}
             />
           }
         />

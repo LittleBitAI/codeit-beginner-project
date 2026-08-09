@@ -651,6 +651,29 @@ class JobManager:
             ).start()
         return record
 
+    def delete(self, job_id: str) -> None:
+        """이 GUI가 들고 있던 학습 기록 하나를 지웁니다.
+
+        **학습 산출물은 지우지 않습니다.** checkpoint, 학습 결과 폴더, registry에
+        등록된 실험, 팀에 공유된 기록은 모두 다른 곳이 만든 것이라 남습니다.
+        지우는 것은 ``artifacts/web/jobs/<job_id>/`` 하나뿐입니다.
+
+        아직 끝나지 않은 학습은 거절합니다. 기록을 없애면 그 process를 중지할
+        방법도, 끝났을 때 결과를 적을 곳도 사라지기 때문입니다.
+        """
+
+        self.load()
+        with self._lock:
+            record = self._records.get(job_id)
+            if record is None:
+                # 형식이 틀린 id는 여기서 걸리고, 맞더라도 없으면 store가 알려 줍니다.
+                store.delete_record(job_id)
+                return
+            if record.is_active() or job_id == self._active_job_id:
+                raise JobConflictError("실행 중이거나 대기 중인 학습의 기록은 지울 수 없습니다.")
+            store.delete_record(job_id)
+            self._records.pop(job_id, None)
+
     def _escalate(self, process: subprocess.Popen[str]) -> None:
         """정중한 종료가 통하지 않으면 강제로 끝냅니다."""
 
