@@ -179,6 +179,47 @@ describe('ExperimentDetail', () => {
     expect(screen.queryByText('Momentum')).not.toBeInTheDocument();
   });
 
+  it('평가를 못 읽었는데 loss 곡선은 있는 응답에도 죽지 않는다', async () => {
+    // backend가 평가를 못 읽으면 available과 reason만 돌려주던 때가 있었습니다.
+    // 그 응답에서 화면이 score_sweep을 먼저 파고들어 TypeError로 상세 화면 전체가
+    // 멈췄습니다. 학습만 하고 평가를 안 돌린 기록이 정확히 이 모양입니다.
+    experimentDetail.mockResolvedValue({
+      ...detail(),
+      evaluation: {
+        available: false,
+        reason: '이 실험에는 평가 결과 파일이 기록돼 있지 않습니다.',
+      } as Detail['evaluation'],
+    });
+    show();
+
+    // 평가는 없어도 loss 곡선과 학습이 남긴 값은 보여 줍니다.
+    expect(await screen.findByText('epoch별 loss')).toBeInTheDocument();
+    expect(screen.getByText('BEST VAL LOSS')).toBeInTheDocument();
+    expect(screen.queryByText('지표 전체')).not.toBeInTheDocument();
+  });
+
+  it('backend가 빈 블록까지 채워 보낸 응답도 그대로 그린다', async () => {
+    // 지금 backend는 못 읽었을 때도 성공했을 때와 같은 key를 채워 보냅니다.
+    experimentDetail.mockResolvedValue({
+      ...detail(),
+      evaluation: {
+        available: false,
+        reason: '평가 결과 파일을 읽지 못했습니다.',
+        metrics: {},
+        counts: {},
+        score_threshold: null,
+        max_detections_per_image: null,
+        score_sweep: {},
+        best_f1: {},
+        per_class_summary: null,
+      },
+    });
+    show();
+
+    expect(await screen.findByText('epoch별 loss')).toBeInTheDocument();
+    expect(screen.getByText('가장 낮은 CLASS')).toBeInTheDocument();
+  });
+
   it('평가 파일을 못 읽어도 세팅은 볼 수 있다', async () => {
     experimentDetail.mockResolvedValue(
       detail({

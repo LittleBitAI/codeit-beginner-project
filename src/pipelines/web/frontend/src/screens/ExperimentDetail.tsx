@@ -200,13 +200,17 @@ function SweepTable({ points }: { points: SweepPoint[] }) {
 function EvaluationTab({ detail }: { detail: Detail }) {
   const { evaluation, history, experiment } = detail;
   const epochs = history.epochs ?? [];
-  const weak = evaluation.per_class_summary;
+  const weak = evaluation.per_class_summary ?? null;
   // 점수가 가장 낮은 class. evaluate가 이미 AP 오름차순으로 정렬해 둡니다.
-  const lowest = weak?.weak[0] ?? null;
-  // IoU 0.5 기준을 먼저 보여 줍니다. 없으면 있는 것 중 첫 번째를 씁니다.
-  const sweepLabel =
-    '0.50' in evaluation.score_sweep ? '0.50' : Object.keys(evaluation.score_sweep)[0];
-  const best = sweepLabel ? evaluation.best_f1[sweepLabel] : null;
+  const lowest = weak?.weak?.[0] ?? null;
+  // 평가를 못 읽은 응답에는 이 blocks가 통째로 없을 수 있습니다. 값을 만지기 전에
+  // 빈 것으로 받아 둡니다. 예전에는 여기서 곧바로 파고들어 상세 화면이 흰 채로
+  // 멈췄습니다. IoU 0.5 기준을 먼저 보여 주고, 없으면 있는 것 중 첫 번째를 씁니다.
+  const sweeps = evaluation.score_sweep ?? {};
+  const bests = evaluation.best_f1 ?? {};
+  const sweepLabel = '0.50' in sweeps ? '0.50' : Object.keys(sweeps)[0];
+  const best = sweepLabel ? bests[sweepLabel] ?? null : null;
+  const metrics = evaluation.metrics ?? {};
 
   if (!evaluation.available && !history.available) {
     return (
@@ -222,11 +226,11 @@ function EvaluationTab({ detail }: { detail: Detail }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 10 }}>
         <KpiCard
           label={MAP_LABEL}
-          value={metric(evaluation.metrics.mAP ?? experiment.metrics.map)}
+          value={metric(metrics.mAP ?? experiment.metrics.map)}
           valueColor={color.tealDark}
           note="대회가 보는 값입니다. 높을수록 좋습니다."
         />
-        <KpiCard label="mAP@0.5" value={metric(evaluation.metrics.mAP50 ?? experiment.metrics.map50)} note="상자를 느슨하게 맞춰도 되는 기준입니다." />
+        <KpiCard label="mAP@0.5" value={metric(metrics.mAP50 ?? experiment.metrics.map50)} note="상자를 느슨하게 맞춰도 되는 기준입니다." />
         <KpiCard
           label="BEST VAL LOSS"
           value={loss(experiment.metrics.best_validation_loss)}
@@ -275,13 +279,13 @@ function EvaluationTab({ detail }: { detail: Detail }) {
         <>
           <Fold title="지표 전체" note="9개">
             <ValueTable
-              rows={METRIC_LABELS.map(([key, label]) => [label, metric(evaluation.metrics[key])])}
+              rows={METRIC_LABELS.map(([key, label]) => [label, metric(metrics[key])])}
             />
             <div style={{ marginTop: 12 }}>
               <ValueTable
                 rows={[
                   ...COUNT_LABELS.map(
-                    ([key, label]) => [label, count(evaluation.counts[key])] as [string, string],
+                    ([key, label]) => [label, count((evaluation.counts ?? {})[key])] as [string, string],
                   ),
                   ['분석 score 기준', shown(evaluation.score_threshold)],
                   ['이미지당 최대 예측', shown(evaluation.max_detections_per_image)],
@@ -290,7 +294,7 @@ function EvaluationTab({ detail }: { detail: Detail }) {
             </div>
           </Fold>
 
-          {sweepLabel && (evaluation.score_sweep[sweepLabel] ?? []).length > 0 && (
+          {sweepLabel && (sweeps[sweepLabel] ?? []).length > 0 && (
             <Fold
               title="점수 기준을 얼마로 둘까"
               note={
@@ -303,7 +307,7 @@ function EvaluationTab({ detail }: { detail: Detail }) {
                 예측을 몇 점부터 믿을지 정하는 값입니다. 낮추면 많이 잡아 recall이 오르고 precision이
                 떨어집니다. 제출 전에 F1이 가장 높은 지점을 쓰면 대개 무난합니다.
               </p>
-              <SweepTable points={evaluation.score_sweep[sweepLabel] ?? []} />
+              <SweepTable points={sweeps[sweepLabel] ?? []} />
             </Fold>
           )}
 

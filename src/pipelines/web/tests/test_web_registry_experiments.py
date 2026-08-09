@@ -559,3 +559,24 @@ def test_detail_reports_404_for_an_unregistered_run(client, monkeypatch):
     monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [])
 
     assert client.get("/api/train/experiments/nope").status_code == 404
+
+
+def test_detail_keeps_the_same_keys_when_the_files_cannot_be_read(client, monkeypatch):
+    """못 읽었을 때도 성공했을 때와 같은 key를 채워 보냅니다.
+
+    key를 통째로 빼면 화면이 available을 확인하기 전에 값을 만지는 순간 죽습니다.
+    실제로 학습만 하고 평가를 돌리지 않은 기록에서 상세 화면이 흰 채로 멈췄습니다.
+    """
+
+    stub_detail_sources(monkeypatch, "done", {})
+    payload = client.get("/api/train/experiments/done").json()
+
+    good = experiment_detail.evaluation_block(
+        "artifacts/evaluate/done/metrics.json", {"backend": "local"}
+    )
+    assert payload["evaluation"]["available"] is False
+    assert set(payload["evaluation"]) == set(good)
+    assert payload["evaluation"]["score_sweep"] == {}
+    assert payload["evaluation"]["best_f1"] == {}
+    assert payload["evaluation"]["per_class_summary"] is None
+    assert payload["history"]["epochs"] == []

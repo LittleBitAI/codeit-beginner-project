@@ -301,15 +301,21 @@ export interface WeakClassRow {
 export interface ExperimentEvaluation {
   available: boolean;
   reason: string | null;
-  /** evaluate가 쓰는 이름 그대로 9개입니다. */
-  metrics: Record<string, number | null>;
-  counts: Record<string, number | null>;
-  score_threshold: number | null;
-  max_detections_per_image: number | null;
+  /**
+   * 아래 블록은 모두 선택입니다.
+   *
+   * 평가를 못 읽은 응답에는 이 key들이 통째로 없을 수 있어서, 화면이 available을
+   * 확인하기 전에 파고들면 죽습니다. 실제로 상세 화면이 흰 채로 멈췄습니다.
+   * 선택으로 두어 타입 검사가 방어를 강제하게 합니다.
+   */
+  metrics?: Record<string, number | null>;
+  counts?: Record<string, number | null>;
+  score_threshold?: number | null;
+  max_detections_per_image?: number | null;
   /** IoU label("0.50"/"0.75")별로 나뉩니다. */
-  score_sweep: Record<string, SweepPoint[]>;
-  best_f1: Record<string, SweepPoint | null>;
-  per_class_summary: {
+  score_sweep?: Record<string, SweepPoint[]>;
+  best_f1?: Record<string, SweepPoint | null>;
+  per_class_summary?: {
     min_truth_count: number;
     top_n: number;
     counts: { weak: number; sparse: number; unmeasured: number };

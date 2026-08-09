@@ -77,8 +77,31 @@ def _read_document(uri: str, storage_config: Mapping[str, Any]) -> Any | None:
         return None
 
 
-def _unavailable(reason: str) -> dict[str, Any]:
-    return {"available": False, "reason": reason}
+def _unavailable_evaluation(reason: str) -> dict[str, Any]:
+    """못 읽었을 때도 성공했을 때와 **같은 key**를 채워 돌려줍니다.
+
+    key를 통째로 빼면 화면이 available을 확인하기 전에 값을 만지는 순간 죽습니다.
+    실제로 학습만 하고 평가를 돌리지 않은 기록에서 상세 화면이 흰 채로 멈췄습니다.
+    빈 값과 "없다"를 구분하는 것은 ``available``과 ``reason``의 몫입니다.
+    """
+
+    return {
+        "available": False,
+        "reason": reason,
+        "metrics": {key: None for key in METRIC_KEYS},
+        "counts": {key: None for key in COUNT_KEYS},
+        "score_threshold": None,
+        "max_detections_per_image": None,
+        "score_sweep": {},
+        "best_f1": {},
+        "per_class_summary": None,
+    }
+
+
+def _unavailable_history(reason: str) -> dict[str, Any]:
+    """loss 곡선도 같은 이유로 빈 목록까지 채워 돌려줍니다."""
+
+    return {"available": False, "reason": reason, "epochs": []}
 
 
 def _sweep_rows(sweep: Any) -> list[dict[str, Any]]:
@@ -140,11 +163,11 @@ def evaluation_block(
     """
 
     if not metrics_uri:
-        return _unavailable("이 실험에는 평가 결과 파일이 기록돼 있지 않습니다.")
+        return _unavailable_evaluation("이 실험에는 평가 결과 파일이 기록돼 있지 않습니다.")
 
     document = _read_document(metrics_uri, storage_config)
     if not isinstance(document, Mapping):
-        return _unavailable("평가 결과 파일을 읽지 못했습니다.")
+        return _unavailable_evaluation("평가 결과 파일을 읽지 못했습니다.")
 
     metrics = document.get("metrics")
     metric_values = metrics if isinstance(metrics, Mapping) else {}
@@ -188,11 +211,11 @@ def history_block(
     """
 
     if not history_uri:
-        return _unavailable("이 실험에는 학습 기록 파일이 없습니다.")
+        return _unavailable_history("이 실험에는 학습 기록 파일이 없습니다.")
 
     document = _read_document(history_uri, storage_config)
     if isinstance(document, (str, bytes)) or not isinstance(document, Sequence):
-        return _unavailable("학습 기록 파일을 읽지 못했습니다.")
+        return _unavailable_history("학습 기록 파일을 읽지 못했습니다.")
 
     epochs: list[dict[str, Any]] = []
     for entry in document:
@@ -211,6 +234,6 @@ def history_block(
             }
         )
     if not epochs:
-        return _unavailable("학습 기록에 epoch이 하나도 없습니다.")
+        return _unavailable_history("학습 기록에 epoch이 하나도 없습니다.")
     epochs.sort(key=lambda item: item["epoch"])
     return {"available": True, "reason": None, "epochs": epochs}
