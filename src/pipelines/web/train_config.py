@@ -28,7 +28,7 @@ from .errors import (
     collect,
     raise_if_any,
 )
-from .gpu import cuda_is_available
+from .gpu import cuda_is_available, native_bf16_supported
 from .masking import redact
 from .paths import (
     CONFIG_DIRNAME,
@@ -37,6 +37,7 @@ from .paths import (
     resolve_within_repo,
 )
 from .train_capabilities import (
+    CUDA_ONLY_PRECISIONS,
     DEFAULT_AUGMENTATION,
     DEFAULT_PRECISION,
     LEGACY_ARCHITECTURE,
@@ -132,7 +133,9 @@ _FIELD_LABELS = {
     ),
     "precision": (
         "연산 정밀도",
-        "amp는 GPU에서 절반 정밀도를 섞어 더 빠르고 메모리를 덜 씁니다. device가 cuda여야 합니다.",
+        "fp32 외에는 device가 cuda여야 합니다. amp는 GPU를 보고 bf16과 fp16 중 되는 쪽을"
+        " 골라 줍니다. fp16은 어느 GPU에서나 되고, bf16은 Ampere(RTX 30 시리즈, A100) 이상만"
+        " 됩니다. T4처럼 bf16이 없는 GPU라면 amp나 fp16을 쓰세요.",
     ),
     "seed": ("Random seed", "같은 seed와 같은 데이터면 같은 결과가 나옵니다."),
     "checkpoint_every": (
@@ -466,10 +469,23 @@ def normalize_train_settings(raw: Any) -> dict[str, Any]:
     elif device == "cuda" and not cuda_is_available():
         collect(errors, "train.device", "CUDA를 사용할 수 없는 환경입니다.")
 
-    if precision == "amp" and device != "cuda":
+    if precision in CUDA_ONLY_PRECISIONS and device != "cuda":
         # train이 같은 조건을 거부합니다. 여기서 잡지 않으면 subprocess가 뜬 뒤에야
         # 알게 되고, 화면에는 어느 칸이 잘못됐는지 남지 않습니다.
-        collect(errors, "train.precision", "amp는 device가 cuda일 때만 쓸 수 있습니다.")
+        collect(
+            errors,
+            "train.precision",
+            f"{precision} 정밀도는 device가 cuda일 때만 쓸 수 있습니다.",
+        )
+        precision = DEFAULT_PRECISION
+    elif precision == "bf16" and native_bf16_supported() is False:
+        # T4 같은 Turing GPU는 bf16을 emulation으로만 처리해 아주 느립니다. 확실히
+        # 안 되는 것을 아는 경우에만 막고, 알 수 없으면(None) train이 판단하게 둡니다.
+        collect(
+            errors,
+            "train.precision",
+            "이 컴퓨터의 GPU는 bf16을 지원하지 않습니다. fp16이나 amp를 쓰세요.",
+        )
         precision = DEFAULT_PRECISION
 
     pretrained = raw.get("pretrained", False)

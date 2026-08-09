@@ -93,7 +93,10 @@ AUGMENTATION_PRESETS = {
         "hue": 0.02,
     },
 }
-PRECISION_MODES = ("fp32", "amp")
+# ``amp``는 GPU를 보고 dtype을 대신 골라 주고, ``fp16``·``bf16``은 고른 그대로 씁니다.
+# 자동 선택만 있으면 어떤 GPU에서 무엇으로 돌지 미리 알 수 없고, 그 GPU에 맞는 쪽을
+# 사람이 고를 수도 없습니다.
+PRECISION_MODES = ("fp32", "amp", "fp16", "bf16")
 # 학습 중 작업 폴더에 두는 파일입니다. 마지막 것이 이어서 학습할 대상입니다.
 WORKING_CHECKPOINT_NAMES = ("best_checkpoint.pt", "last_checkpoint.pt")
 
@@ -173,6 +176,22 @@ def _early_stopping(raw: Mapping[str, Any]) -> dict[str, float | int] | None:
     return {"patience": patience, "min_delta": float(min_delta)}
 
 
+def _native_bf16_supported() -> bool:
+    """Emulation을 뺀, 하드웨어가 직접 처리하는 bf16 지원 여부입니다.
+
+    ``including_emulation``은 비교적 최근 torch에만 있는 인자입니다. 그 인자가 없는
+    torch의 ``is_bf16_supported()``는 emulation까지 지원으로 세어 T4(sm_75)에서도
+    True를 돌려줍니다. 그대로 믿으면 T4가 bf16 emulation으로 학습해 크게 느려집니다.
+    인자를 거부하면 compute capability로 직접 판단합니다. bf16을 하드웨어로 처리하는
+    것은 Ampere(8.0)부터입니다.
+    """
+
+    try:
+        return bool(torch.cuda.is_bf16_supported(including_emulation=False))
+    except TypeError:
+        return torch.cuda.get_device_capability()[0] >= 8
+
+
 def _precision(raw: Mapping[str, Any], device: str) -> dict[str, str | bool]:
     """요청한 정밀도를 실제 CUDA가 빠르게 지원하는 dtype으로 확정합니다."""
 
@@ -182,8 +201,22 @@ def _precision(raw: Mapping[str, Any], device: str) -> dict[str, str | bool]:
     if mode == "fp32":
         return {"mode": "fp32", "dtype": "fp32", "grad_scaler": False}
     if device != "cuda":
-        raise ValueError("train.precision='amp' requires train.device='cuda'")
-    native_bf16 = torch.cuda.is_bf16_supported(including_emulation=False)
+        raise ValueError(f"train.precision='{mode}' requires train.device='cuda'")
+    if mode == "fp16":
+        # fp16은 어느 CUDA GPU에서나 됩니다. 표현할 수 있는 수의 범위가 좁아 gradient가
+        # 0으로 내려앉으므로 GradScaler가 필요합니다. bf16 지원 여부는 물을 필요가 없습니다.
+        return {"mode": "fp16", "dtype": "fp16", "grad_scaler": True}
+    native_bf16 = _native_bf16_supported()
+    if mode == "bf16":
+        if not native_bf16:
+            # 조용히 fp16으로 바꾸지 않습니다. 고른 것과 다른 값으로 도는 학습은
+            # 결과를 비교할 수 없고, emulation으로 도는 bf16은 밤새 돌린 시간을
+            # 통째로 버리게 만듭니다.
+            raise ValueError(
+                "train.precision='bf16' requires a GPU with native bfloat16 support "
+                "(compute capability 8.0 or newer); use 'fp16' or 'amp' instead"
+            )
+        return {"mode": "bf16", "dtype": "bf16", "grad_scaler": False}
     return {
         "mode": "amp",
         "dtype": "bf16" if native_bf16 else "fp16",

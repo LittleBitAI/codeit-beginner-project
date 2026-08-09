@@ -167,22 +167,64 @@ def test_precision_choices_match_train_source():
 
 def test_unknown_precision_is_rejected_before_training_starts():
     with pytest.raises(Exception, match="precision"):
-        normalize_train_settings({"precision": "bf16"})
+        normalize_train_settings({"precision": "fp8"})
 
 
-def test_amp_on_cpu_is_rejected_because_train_requires_cuda():
-    """train은 amp에 device='cuda'를 요구합니다. subprocess까지 가서 실패할 이유가 없습니다."""
+@pytest.mark.parametrize("mode", ["amp", "fp16", "bf16"])
+def test_half_precision_on_cpu_is_rejected_because_train_requires_cuda(mode):
+    """train은 절반 정밀도에 device='cuda'를 요구합니다.
+
+    subprocess까지 가서 실패할 이유가 없습니다. 거기까지 가면 어느 칸이 잘못됐는지
+    화면에 남지 않습니다.
+    """
 
     with pytest.raises(Exception, match="precision"):
-        normalize_train_settings({"precision": "amp", "device": "cpu"})
+        normalize_train_settings({"precision": mode, "device": "cpu"})
 
 
-def test_amp_is_accepted_when_the_machine_has_cuda(monkeypatch):
+@pytest.mark.parametrize("mode", ["amp", "fp16"])
+def test_modes_that_run_on_any_cuda_gpu_are_accepted(monkeypatch, mode):
+    """amp와 fp16은 GPU 세대를 가리지 않습니다. T4에서도 그대로 됩니다."""
+
     monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
 
-    settings = normalize_train_settings({"precision": "amp", "device": "cuda"})
+    settings = normalize_train_settings({"precision": mode, "device": "cuda"})
 
-    assert settings["precision"] == "amp"
+    assert settings["precision"] == mode
+
+
+def test_bf16_is_refused_on_a_computer_whose_gpu_cannot_do_it(monkeypatch):
+    """T4에서 bf16을 고르면 저장하기 전에 막고 이유를 말해 줍니다."""
+
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
+    monkeypatch.setattr(train_config, "native_bf16_supported", lambda: False)
+
+    with pytest.raises(Exception, match="precision"):
+        normalize_train_settings({"precision": "bf16", "device": "cuda"})
+
+
+def test_bf16_is_accepted_on_a_computer_whose_gpu_can_do_it(monkeypatch):
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
+    monkeypatch.setattr(train_config, "native_bf16_supported", lambda: True)
+
+    settings = normalize_train_settings({"precision": "bf16", "device": "cuda"})
+
+    assert settings["precision"] == "bf16"
+
+
+def test_bf16_is_left_to_train_when_this_computer_cannot_tell(monkeypatch):
+    """확실하지 않으면 막지 않습니다.
+
+    nvidia-smi가 없다고 bf16을 거부하면, 실제로는 되는 GPU에서 설정 저장 자체를
+    못 합니다. 최종 판단은 GPU를 직접 보는 train이 합니다.
+    """
+
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
+    monkeypatch.setattr(train_config, "native_bf16_supported", lambda: None)
+
+    settings = normalize_train_settings({"precision": "bf16", "device": "cuda"})
+
+    assert settings["precision"] == "bf16"
 
 
 def test_optimizer_profiles_match_train_source():
