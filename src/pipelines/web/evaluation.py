@@ -424,18 +424,26 @@ class EvaluationRunner:
         return other
 
     @contextmanager
-    def hold_for_delete(self, job_id: str) -> Iterator[None]:
-        """이 학습의 기록을 지우는 동안 평가가 시작되지 못하게 붙잡습니다.
+    def locked(self) -> Iterator[None]:
+        """``start()``가 상태를 바꿀 때 쓰는 lock을 블록 내내 쥐고 있습니다.
 
-        확인과 삭제를 따로 하면 그 사이에 같은 학습의 평가가 시작될 수 있습니다.
-        그러면 삭제는 성공하지만, evaluator가 들고 있던 record를 끝나면서 다시
-        저장해 기록이 되살아납니다. log는 이미 지워진 뒤라 반쪽짜리만 남습니다.
+        평가 시작과 기록 삭제는 서로를 앞질러서는 안 됩니다. 평가 POST는 record를
+        읽고 config를 만드는 동안 lock을 쥐지 않는데, 그 사이에 DELETE가 idle 상태를
+        보고 기록을 지우면 뒤늦게 시작한 평가가 끝나면서 손에 든 stale record를 다시
+        저장해 빈 log와 함께 되살립니다. 두 route가 이 블록 안에서 **record를 읽는
+        것까지** 하면 둘 중 하나만 이깁니다.
 
-        ``start()``가 상태를 바꿀 때 쓰는 lock을 그대로 쥐고 있으므로, 이 블록이
-        끝날 때까지 평가는 시작되지 못합니다.
+        재진입 가능한 lock이라 이 블록 안에서 ``start()``를 불러도 막히지 않습니다.
         """
 
         with self._lock:
+            yield
+
+    @contextmanager
+    def hold_for_delete(self, job_id: str) -> Iterator[None]:
+        """이 학습의 기록을 지우는 동안 평가가 시작되지 못하게 붙잡습니다."""
+
+        with self.locked():
             if (
                 self._state.get("status") == STATUS_RUNNING
                 and self._state.get("job_id") == job_id

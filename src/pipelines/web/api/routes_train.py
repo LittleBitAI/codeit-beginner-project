@@ -320,12 +320,18 @@ def start_evaluation(job_id: str, payload: EvaluateRequest = Body(...)) -> dict[
 
     학습이 만드는 값은 loss뿐이라 mAP 같은 detection metric은 여기서 처음 나옵니다.
     이미지마다 추론을 돌리므로 시작만 시키고 상태는 따로 확인합니다.
+
+    **record를 읽는 것부터 시작까지를 삭제와 같은 잠금 안에서 합니다.** 밖에서 읽으면
+    그 사이에 DELETE가 기록을 지울 수 있고, 뒤늦게 시작한 평가가 끝나면서 손에 든
+    stale record를 다시 저장해 빈 log와 함께 되살립니다.
     """
 
-    record = get_manager().get(job_id)
-    if record.status != "succeeded":
-        raise JobConflictError("성공으로 끝난 학습만 평가할 수 있습니다.")
-    return {"evaluation": get_evaluation_runner().start(record, payload.model_dump())}
+    runner = get_evaluation_runner()
+    with runner.locked():
+        record = get_manager().get(job_id)  # 지워졌으면 여기서 404
+        if record.status != "succeeded":
+            raise JobConflictError("성공으로 끝난 학습만 평가할 수 있습니다.")
+        return {"evaluation": runner.start(record, payload.model_dump())}
 
 
 class ResumeRequest(BaseModel):

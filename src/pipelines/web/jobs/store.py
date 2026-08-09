@@ -16,7 +16,7 @@ from typing import Any, Iterable
 
 from ..errors import JobNotFoundError
 from ..masking import redact, sanitize_line
-from ..paths import jobs_dir, repository_root, web_state_dir
+from ..paths import JOBS_DIRNAME, jobs_dir, repository_root, web_state_dir
 from .model import JobRecord
 
 
@@ -118,21 +118,23 @@ def delete_record(job_id: str) -> None:
     대기열 항목이나 이어서 학습이 아직 그 config를 가리킬 수 있기 때문입니다.
 
     ``job_directory``가 형식을 먼저 확인하므로 이름으로는 빠져나갈 수 없습니다.
-    그것만으로는 부족합니다. ``artifacts/web/jobs`` 자체가 저장소 밖을 가리키는
+    그것만으로는 부족합니다. ``artifacts/web/jobs`` 자체가 다른 곳을 가리키는
     link면 그 아래 job directory는 진짜 directory라서 ``rmtree``가 아무 의심 없이
-    저장소 밖을 통째로 지웁니다(Windows junction은 권한 없이 만들 수 있습니다).
-    그래서 **link를 따라간 실제 위치**가 jobs 루트 바로 아래이면서 저장소 안인지
-    지우기 전에 확인합니다.
+    그쪽을 지웁니다(Windows junction은 권한 없이 만들 수 있습니다). 저장소 밖이면
+    남의 파일이고, ``artifacts/experiments/completed``처럼 저장소 안이어도 train이
+    만든 checkpoint입니다.
+
+    그래서 **link를 따라간 실제 위치가 글자 그대로의 자리와 같은지**만 봅니다.
+    jobs 루트를 함께 따라가서 비교하면(``jobs_dir().resolve()``) 그 link가 정확히
+    상쇄돼 검사가 통과합니다. 기대 위치는 link를 따라가지 않고 만듭니다.
     """
 
     directory = job_directory(job_id)
     if not directory.is_dir():
         raise JobNotFoundError("학습 기록을 찾을 수 없습니다.")
 
-    resolved = directory.resolve()
-    root = jobs_dir().resolve()
-    repository = repository_root().resolve()
-    if resolved.parent != root or not resolved.is_relative_to(repository):
+    expected = repository_root().resolve() / JOBS_DIRNAME / job_id
+    if directory.resolve() != expected:
         raise JobNotFoundError("학습 기록을 찾을 수 없습니다.")
 
     try:

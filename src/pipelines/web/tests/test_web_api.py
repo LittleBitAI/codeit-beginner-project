@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
+from contextlib import contextmanager
 
 from src.pipelines.web.api.app import ALLOWED_ORIGINS
 from src.pipelines.web.api.routes_train import ARCHITECTURE
@@ -724,6 +725,11 @@ def test_evaluate_route_forwards_an_attached_test_manifest(client, monkeypatch):
             return record
 
     class Evaluation:
+        # route가 record를 읽는 것부터 시작까지를 이 잠금 안에서 합니다.
+        @contextmanager
+        def locked(self):
+            yield
+
         def start(self, received_record, options):
             assert received_record is record
             captured.update(options)

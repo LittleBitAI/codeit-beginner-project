@@ -786,3 +786,58 @@ def test_delete_guard_refuses_while_that_job_is_being_evaluated(evaluation_runne
     # 다른 학습의 평가가 도는 것은 이 기록을 지우는 데 상관이 없습니다.
     with evaluation_runner.hold_for_delete("d" * 32):
         pass
+
+
+def test_delete_does_not_follow_a_link_to_another_components_output(manager, isolated_repo):
+    """jobs 루트가 저장소 **안**의 다른 곳을 가리켜도 거부합니다.
+
+    저장소 밖만 막으면 부족합니다. jobs 루트가 ``artifacts/experiments/completed``
+    같은 train 산출물을 가리키면, 그 아래 32자리 이름의 directory는 형식 검사도
+    통과하고 저장소 안이기도 해서 checkpoint가 통째로 지워집니다. 다른 component가
+    만든 산출물은 이 화면이 지우지 않습니다.
+    """
+
+    job_id = "e" * 32
+    train_output = isolated_repo / "artifacts" / "experiments" / "completed"
+    (train_output / job_id).mkdir(parents=True, exist_ok=True)
+    (train_output / job_id / "best_checkpoint.pt").write_text("가중치", encoding="utf-8")
+
+    web_state = isolated_repo / "artifacts" / "web"
+    web_state.mkdir(parents=True, exist_ok=True)
+    if not _link_directory(web_state / "jobs", train_output):
+        pytest.skip("이 환경에서는 directory 연결을 만들 수 없습니다.")
+
+    with pytest.raises(JobNotFoundError):
+        store.delete_record(job_id)
+
+    assert (train_output / job_id / "best_checkpoint.pt").exists()
+
+
+def test_evaluation_cannot_start_for_a_record_that_was_deleted(
+    client, valid_payload, monkeypatch, fake_process_factory
+):
+    """삭제가 먼저 끝났으면 평가는 시작하지 않습니다.
+
+    평가 POST가 record를 읽고 config를 만드는 동안 lock을 쥐지 않으면, 그 사이에
+    DELETE가 idle 상태를 보고 기록을 지웁니다. 뒤늦게 시작한 평가는 끝나면서 손에 든
+    stale record를 다시 저장해 빈 log와 함께 기록을 되살립니다. 그래서 record를 읽는
+    것부터 시작까지가 삭제와 같은 잠금 안에 있어야 합니다.
+    """
+
+    created = client.post("/api/train/configs", json=valid_payload).json()
+    monkeypatch.setattr(
+        runner, "spawn", lambda *a, **k: fake_process_factory(stdout=TRAIN_SUCCESS_STDOUT)
+    )
+    started = client.post("/api/train/jobs", json={"config_id": created["config_id"]}).json()
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if client.get(f"/api/train/jobs/{started['job_id']}").json()["status"] == "succeeded":
+            break
+        time.sleep(0.02)
+
+    assert client.delete(f"/api/train/jobs/{started['job_id']}").status_code == 200
+
+    assert client.post(f"/api/train/jobs/{started['job_id']}/evaluate", json={}).status_code == 404
+    # 되살아나지 않았는지 확인합니다.
+    assert client.get("/api/train/jobs").json()["jobs"] == []
