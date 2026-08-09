@@ -11,7 +11,9 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -699,3 +701,88 @@ def test_delete_endpoint_reports_conflict_and_removes_from_listing(
     assert client.delete(f"/api/train/jobs/{started['job_id']}").status_code == 200
     assert client.get("/api/train/jobs").json()["jobs"] == []
     assert client.get(f"/api/train/jobs/{started['job_id']}").status_code == 404
+
+
+def _link_directory(link: Path, target: Path) -> bool:
+    """``link``가 ``target``을 가리키는 directory 연결을 만듭니다. 못 만들면 False입니다.
+
+    Windows에서는 junction을 먼저 씁니다. ``shutil.rmtree``는 맨 위가 symlink면
+    거부하지만 junction은 따라 들어가 그 안을 지우기 때문에, 실제로 위험한 쪽이
+    junction입니다. symlink만으로 시험하면 고치기 전에도 test가 통과합니다.
+    """
+
+    if os.name == "nt":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+        )
+        if result.returncode == 0 and link.exists():
+            return True
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+def test_delete_does_not_follow_a_link_out_of_the_repository(manager, isolated_repo):
+    """jobs 루트가 저장소 밖을 가리키면 그 안을 지우지 않습니다.
+
+    이름은 32자리 16진수만 통과하므로 이름으로는 빠져나갈 수 없습니다. ``rmtree``도
+    맨 위가 link면 거부합니다. 그런데 ``artifacts/web/jobs`` **자체**가 link면 그
+    아래 job directory는 진짜 directory라서 아무것도 막지 못하고, 저장소 밖이
+    통째로 지워집니다. Windows에서 junction은 권한 없이도 만들 수 있어 실제로
+    일어날 수 있는 배치입니다.
+    """
+
+    outside = isolated_repo.parent / "outside-target"
+    job_id = "a" * 32
+    (outside / job_id).mkdir(parents=True, exist_ok=True)
+    (outside / job_id / "record.json").write_text("남의 기록", encoding="utf-8")
+
+    web_state = isolated_repo / "artifacts" / "web"
+    web_state.mkdir(parents=True, exist_ok=True)
+    if not _link_directory(web_state / "jobs", outside):
+        pytest.skip("이 환경에서는 directory 연결을 만들 수 없습니다.")
+
+    with pytest.raises(JobNotFoundError):
+        store.delete_record(job_id)
+
+    assert (outside / job_id / "record.json").exists()
+
+
+def test_delete_holds_the_evaluation_lock_so_a_start_cannot_slip_in(evaluation_runner):
+    """평가 확인과 삭제 사이에 평가가 시작되면 지운 기록이 되살아납니다.
+
+    evaluator는 끝나면서 자기가 들고 있던 record를 다시 저장합니다. 그때 log는 이미
+    지워졌으므로 성공 응답 뒤에 반쪽짜리 기록만 남습니다. 그래서 확인과 삭제가 같은
+    잠금 안에서 일어나야 합니다.
+    """
+
+    job_id = "b" * 32
+    acquired: list[bool] = []
+
+    with evaluation_runner.hold_for_delete(job_id):
+        # 같은 thread에서는 RLock이 다시 잡히므로 다른 thread에서 확인합니다.
+        def probe() -> None:
+            acquired.append(evaluation_runner._lock.acquire(blocking=False))
+            if acquired[-1]:
+                evaluation_runner._lock.release()
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join(5)
+
+    assert acquired == [False]
+
+
+def test_delete_guard_refuses_while_that_job_is_being_evaluated(evaluation_runner):
+    evaluation_runner._state = {"status": "running", "job_id": "c" * 32}
+
+    with pytest.raises(JobConflictError):
+        with evaluation_runner.hold_for_delete("c" * 32):
+            pass
+
+    # 다른 학습의 평가가 도는 것은 이 기록을 지우는 데 상관이 없습니다.
+    with evaluation_runner.hold_for_delete("d" * 32):
+        pass

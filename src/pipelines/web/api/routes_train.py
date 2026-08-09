@@ -247,15 +247,13 @@ def delete_job(job_id: str) -> dict[str, Any]:
     아닙니다. 지우는 것은 ``artifacts/web/jobs/<job_id>/`` 하나뿐입니다.
 
     평가가 도는 중이면 거절합니다. 그 runner가 끝나면서 같은 record를 다시
-    저장하기 때문에, 지워도 곧 되살아나 지운 것처럼 보이지 않습니다.
+    저장하기 때문에, 지워도 곧 되살아나 지운 것처럼 보이지 않습니다. 확인과 삭제를
+    같은 잠금 안에서 해야 그 사이에 평가가 시작되는 틈이 없습니다.
     """
 
-    evaluating = get_evaluation_runner().status()
-    if evaluating.get("status") == "running" and evaluating.get("job_id") == job_id:
-        raise JobConflictError("평가가 도는 중인 학습의 기록은 지울 수 없습니다.")
-
     manager = get_manager()
-    manager.delete(job_id)  # 없거나 실행 중이면 404 또는 409
+    with get_evaluation_runner().hold_for_delete(job_id):
+        manager.delete(job_id)  # 없거나 실행 중이면 404 또는 409
     active = manager.active_job()
     return {
         "jobs": [public_record(record) for record in manager.list_jobs()],

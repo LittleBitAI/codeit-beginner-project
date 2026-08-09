@@ -16,7 +16,7 @@ from typing import Any, Iterable
 
 from ..errors import JobNotFoundError
 from ..masking import redact, sanitize_line
-from ..paths import jobs_dir, web_state_dir
+from ..paths import jobs_dir, repository_root, web_state_dir
 from .model import JobRecord
 
 
@@ -117,12 +117,24 @@ def delete_record(job_id: str) -> None:
     기록과 팀에 공유된 기록도 이 화면의 것이 아닙니다. 설정 파일도 남깁니다.
     대기열 항목이나 이어서 학습이 아직 그 config를 가리킬 수 있기 때문입니다.
 
-    ``job_directory``가 형식을 먼저 확인하므로 경로 조작은 디스크에 닿지 않습니다.
+    ``job_directory``가 형식을 먼저 확인하므로 이름으로는 빠져나갈 수 없습니다.
+    그것만으로는 부족합니다. ``artifacts/web/jobs`` 자체가 저장소 밖을 가리키는
+    link면 그 아래 job directory는 진짜 directory라서 ``rmtree``가 아무 의심 없이
+    저장소 밖을 통째로 지웁니다(Windows junction은 권한 없이 만들 수 있습니다).
+    그래서 **link를 따라간 실제 위치**가 jobs 루트 바로 아래이면서 저장소 안인지
+    지우기 전에 확인합니다.
     """
 
     directory = job_directory(job_id)
     if not directory.is_dir():
         raise JobNotFoundError("학습 기록을 찾을 수 없습니다.")
+
+    resolved = directory.resolve()
+    root = jobs_dir().resolve()
+    repository = repository_root().resolve()
+    if resolved.parent != root or not resolved.is_relative_to(repository):
+        raise JobNotFoundError("학습 기록을 찾을 수 없습니다.")
+
     try:
         shutil.rmtree(directory)
     except OSError as error:
