@@ -68,7 +68,7 @@ Backend는 config 또는 환경 변수로 고르며 환경 변수가 우선합�
 | `PILL_STORAGE_S3_PREFIX` | 선택적 공통 S3 key prefix |
 | `AWS_PROFILE`, `AWS_REGION` | AWS profile과 region |
 
-AWS account, bucket, 권한은 저장소 밖에서 준비합니다. `aws sso login --profile <profile-name>`으로 임시 credential을 받은 뒤 실제 값을 shell 환경이나 commit하지 않는 `.env`에 넣습니다. S3 object는 `datasets/`, `experiments/{uploading,completed,failed}/`, `registry/`, `submissions/`, `final-models/` prefix를 씁니다.
+AWS account, bucket, 권한은 저장소 밖에서 준비합니다. `aws sso login --profile <profile-name>`으로 임시 credential을 받은 뒤 실제 값을 shell 환경이나 commit하지 않는 `.env`에 넣습니다. S3 object는 `datasets/`, `experiments/{uploading,completed,failed,web-state}/`, `registry/`, `submissions/`, `final-models/` prefix를 씁니다. `experiments/web-state/<이름>/`은 런타임이 사라져도 GUI가 그 학습을 이어서 할 수 있도록 job 기록과 설정을 두는 자리이고, `datasets/pill_detection/image-cache/`에는 실행 사이에 재사용하는 이미지 묶음이 있습니다.
 
 별도 승인을 받은 경우에만 연결을 확인하는 smoke test를 실행합니다. 작은 임시 object 하나를 올리고 내려받아 확인한 뒤 지웁니다.
 
