@@ -34,6 +34,13 @@ function makeExperiment(
       identity: datasetIdentity,
       identity_source: datasetIdentity ? 'artifact_set' : 'unknown',
       artifacts_complete: datasetIdentity !== null,
+      label: 'fixture-dataset',
+    },
+    completion: {
+      evaluated: true,
+      submitted: true,
+      submission_checked: true,
+      submission_rows: 100,
     },
     model: { architecture: 'fasterrcnn', pretrained: true, source: 'record' },
     optimizer: {
@@ -124,7 +131,9 @@ describe('ExperimentComparison', () => {
     expect(screen.getByText('BEST VAL LOSS')).toBeInTheDocument();
     // evaluate의 `mAP`는 mAP@[0.75:0.95]입니다. 그냥 mAP라고만 적으면 오해합니다.
     expect(screen.getByText('mAP@[0.75:0.95]')).toBeInTheDocument();
-    expect(screen.getAllByText('0.4000')).toHaveLength(2);
+    // 고르는 표에도 같은 값이 나오므로 비교표 칸(data-run이 붙은 곳)만 셉니다.
+    const compared = [...document.querySelectorAll('[data-run]')].map((cell) => cell.textContent);
+    expect(compared.filter((text) => text === '0.4000')).toHaveLength(2);
 
     fireEvent.click(screen.getByRole('button', { name: '학습 세팅' }));
 
@@ -206,9 +215,11 @@ describe('ExperimentComparison', () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText('fasterrcnn · mAP@[0.75:0.95] 0.3125')).toBeInTheDocument();
+    // mAP는 이제 요약 문장 끝이 아니라 자기 열에 있어 세로로 훑을 수 있습니다.
+    expect(await screen.findByText('0.3125')).toBeInTheDocument();
+    expect(screen.getByText(/fixture-dataset · fasterrcnn/)).toBeInTheDocument();
     // 기록에 없는 값은 추정하지 않고 - 로 둡니다.
-    expect(screen.getByText('- · mAP@[0.75:0.95] -')).toBeInTheDocument();
+    expect(screen.getAllByText('-').length).toBeGreaterThanOrEqual(1);
     expect(compareExperiments).not.toHaveBeenCalled();
   });
 

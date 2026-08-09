@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import { api } from '../api/client';
 import type { CapabilityValueSource, ExperimentSummary } from '../api/types';
+import { ExperimentTable } from '../components/ExperimentTable';
 import { AlertRow, Button, EmptyState, Panel, ScreenIntro, StatusBadge } from '../components/primitives';
 import { color, font, radius, type } from '../design/tokens';
 import { usePolling } from '../hooks/usePolling';
@@ -28,11 +29,6 @@ function metric(value: number | null): string {
 function capabilityValue(value: string | null, source: CapabilityValueSource): string {
   const text = shown(value);
   return source === 'legacy_fallback' && value !== null ? `${text} (호환 기본값)` : text;
-}
-
-/** TeamActivity의 summaryLine과 같은 형식입니다. 두 화면이 같아 보여야 합니다. */
-function summaryLine(experiment: ExperimentSummary): string {
-  return `${shown(experiment.model.architecture)} · ${MAP_LABEL} ${metric(experiment.metrics.map)}`;
 }
 
 function relationLabel(experiments: ExperimentSummary[]): string {
@@ -463,56 +459,17 @@ export function ExperimentComparison() {
         }
         bodyStyle={{ padding: 0 }}
       >
-        {listing.loading ? (
+        {listing.loading && experiments.length === 0 ? (
           <EmptyState message="실험 기록을 불러오고 있습니다." />
-        ) : experiments.length === 0 ? (
-          <EmptyState message="비교할 학습 기록이 아직 없습니다." />
         ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))' }}>
-            {experiments.map((experiment) => {
-              const checked = selectedIds.includes(experiment.experiment_id);
-              return (
-                <label
-                  key={experiment.experiment_id}
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 9,
-                    padding: '10px 13px',
-                    borderBottom: `1px solid ${color.borderInner}`,
-                    background: checked ? color.primaryTint : color.surface,
-                    cursor: 'pointer',
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggle(experiment.experiment_id)}
-                    aria-label={`${experiment.run_id} 비교 선택`}
-                  />
-                  <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-                    <span style={{ font: `600 12.5px/1.35 ${font.sans}`, color: color.text }}>
-                      {experiment.run_id}
-                    </span>
-                    <span style={{ font: `400 11px/1.3 ${font.mono}`, color: color.textFaint }}>
-                      {startedAt(experiment.started_at ?? experiment.created_at)}
-                    </span>
-                    {/* 고르지 않아도 목록에서 바로 견줄 수 있도록 요약 한 줄을 둡니다. */}
-                    <span
-                      style={{
-                        font: `400 12px/1.4 ${font.mono}`,
-                        color: color.textStrong,
-                        overflowWrap: 'anywhere',
-                      }}
-                    >
-                      {summaryLine(experiment)}
-                    </span>
-                  </span>
-                  <StatusBadge status={experiment.status} label={experiment.status_label} />
-                </label>
-              );
-            })}
-          </div>
+          /* 실험 내역 화면과 같은 표입니다. 같은 목록이 두 모양으로 보이면 안 됩니다. */
+          <ExperimentTable
+            experiments={experiments}
+            selectedIds={selectedIds}
+            onToggle={toggle}
+            emptyMessage="비교할 학습 기록이 아직 없습니다."
+            selectLabel="비교 선택"
+          />
         )}
       </Panel>
 

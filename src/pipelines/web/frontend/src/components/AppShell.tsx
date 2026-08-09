@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { to: '/review', label: '설정 검토', end: false },
   { to: '/monitor', label: '라이브 모니터', end: false },
   { to: '/compare', label: '실험 비교', end: false },
+  { to: '/history', label: '실험 내역', end: false },
   { to: '/team', label: '팀 활동', end: false },
 ];
 
@@ -20,6 +21,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/review': '설정 검토',
   '/monitor': '라이브 모니터',
   '/compare': '실험 비교',
+  '/history': '실험 내역',
   '/team': '팀 활동',
 };
 
