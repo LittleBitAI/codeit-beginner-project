@@ -93,6 +93,18 @@ AUGMENTATION_PRESETS = {
         "hue": 0.02,
     },
 }
+# Learning rate schedule마다 자기가 쓰는 값과 그 기본값입니다. 고를 수 있는 이름도 이
+# 목록이 정합니다. warmup은 아래 값으로 모든 schedule이 함께 씁니다.
+LR_WARMUP_DEFAULTS = {"warmup_steps": 0, "warmup_start_factor": 0.001}
+LR_SCHEDULER_DEFAULTS = {
+    "none": {},
+    "cosine": {"min_lr_factor": 0.01},
+    "step": {"step_size": 3, "gamma": 0.1},
+    "linear": {"min_lr_factor": 0.01},
+}
+_LR_SCHEDULER_KEYS = {
+    key for defaults in LR_SCHEDULER_DEFAULTS.values() for key in defaults
+}
 # ``amp``는 GPU를 보고 dtype을 대신 골라 주고, ``fp16``·``bf16``은 고른 그대로 씁니다.
 # 자동 선택만 있으면 어떤 GPU에서 무엇으로 돌지 미리 알 수 없고, 그 GPU에 맞는 쪽을
 # 사람이 고를 수도 없습니다.
@@ -174,6 +186,88 @@ def _early_stopping(raw: Mapping[str, Any]) -> dict[str, float | int] | None:
     ):
         raise ValueError("train.early_stopping.min_delta must be a number >= 0.0")
     return {"patience": patience, "min_delta": float(min_delta)}
+
+
+def _schedule_integer(
+    value: Mapping[str, Any], name: str, default: int, *, minimum: int
+) -> int:
+    number = value.get(name, default)
+    if not isinstance(number, int) or isinstance(number, bool) or number < minimum:
+        raise ValueError(f"train.lr_scheduler.{name} must be an integer >= {minimum}")
+    return number
+
+
+def _schedule_ratio(
+    value: Mapping[str, Any], name: str, default: float, *, above_zero: bool
+) -> float:
+    """0과 1 사이의 배율입니다. learning rate를 키우는 값은 schedule이 아닙니다."""
+
+    number = value.get(name, default)
+    lower_ok = (
+        isinstance(number, (int, float))
+        and not isinstance(number, bool)
+        and math.isfinite(float(number))
+        and (float(number) > 0.0 if above_zero else float(number) >= 0.0)
+    )
+    if not lower_ok or float(number) > 1.0:
+        bound = "> 0.0" if above_zero else ">= 0.0"
+        raise ValueError(
+            f"train.lr_scheduler.{name} must be a number {bound} and <= 1.0"
+        )
+    return float(number)
+
+
+def _lr_scheduler(raw: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Learning rate schedule 설정입니다.
+
+    key가 없으면 ``None``이고, 학습은 이 기능이 생기기 전과 똑같이 상수 learning rate로
+    돕니다. ``early_stopping``과 같은 규칙입니다.
+    """
+
+    value = raw.get("lr_scheduler")
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError("train.lr_scheduler must be an object")
+    name = value.get("name", "none")
+    if not isinstance(name, str) or name not in LR_SCHEDULER_DEFAULTS:
+        choices = ", ".join(LR_SCHEDULER_DEFAULTS)
+        raise ValueError(f"train.lr_scheduler.name must be one of: {choices}")
+
+    used = {**LR_WARMUP_DEFAULTS, **LR_SCHEDULER_DEFAULTS[name]}
+    unexpected = set(value) - {"name"} - set(used) - _LR_SCHEDULER_KEYS
+    if unexpected:
+        raise ValueError(
+            "train.lr_scheduler contains unsupported settings: "
+            + ", ".join(sorted(unexpected))
+        )
+    # 다른 schedule의 값입니다. 조용히 무시하면 화면에 적은 값과 실제 학습이 달라집니다.
+    irrelevant = sorted((_LR_SCHEDULER_KEYS - set(used)) & set(value))
+    if irrelevant:
+        fields = ", ".join(f"train.lr_scheduler.{key}" for key in irrelevant)
+        raise ValueError(f"{fields} is not used by train.lr_scheduler.name={name}")
+
+    settings: dict[str, Any] = {
+        "name": name,
+        "warmup_steps": _schedule_integer(
+            value, "warmup_steps", used["warmup_steps"], minimum=0
+        ),
+        "warmup_start_factor": _schedule_ratio(
+            value, "warmup_start_factor", used["warmup_start_factor"], above_zero=True
+        ),
+    }
+    if "min_lr_factor" in used:
+        settings["min_lr_factor"] = _schedule_ratio(
+            value, "min_lr_factor", used["min_lr_factor"], above_zero=False
+        )
+    if "step_size" in used:
+        settings["step_size"] = _schedule_integer(
+            value, "step_size", used["step_size"], minimum=1
+        )
+        settings["gamma"] = _schedule_ratio(
+            value, "gamma", used["gamma"], above_zero=True
+        )
+    return settings
 
 
 def _native_bf16_supported() -> bool:
@@ -295,6 +389,7 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
             raw, "weight_decay", profile["weight_decay"], minimum=0.0
         ),
         "augmentation": _augmentation(raw),
+        "lr_scheduler": _lr_scheduler(raw),
         "device": device,
         "precision": _precision(raw, device),
         "pretrained": pretrained,
@@ -382,13 +477,17 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
         ]
         optimizer_settings["epsilon"] = settings.get("epsilon", profile["epsilon"])
     augmentation = settings.get("augmentation", AUGMENTATION_PRESETS["none"])
+    lr_scheduler = settings.get("lr_scheduler")
     return {
         # 2: resume block이 생겼습니다. 처음부터 학습한 실행은 그 값이 None입니다.
-        "schema_version": 2,
+        # 3: lr_scheduler block이 생겼습니다. 상수 learning rate면 그 값이 None입니다.
+        "schema_version": 3,
         "run_id": settings.get("run_id"),
         "architecture": settings.get("architecture", ARCHITECTURE),
         "optimizer": optimizer_settings,
         "augmentation": dict(augmentation),
+        # 상수 learning rate로 돈 실행은 항상 None입니다. key 자체는 늘 있어야 합니다.
+        "lr_scheduler": dict(lr_scheduler) if lr_scheduler is not None else None,
         "seed": settings["seed"],
         "epochs": settings.get("epochs"),
         "batch_size": settings.get("batch_size"),
@@ -649,17 +748,29 @@ def _load_resume(
             "resume checkpoint was trained with a different train.architecture"
         )
     training_config = checkpoint.get("training_config")
-    recorded_optimizer = (
-        training_config.get("optimizer")
-        if isinstance(training_config, Mapping)
-        else None
-    )
-    expected_optimizer = _training_config(settings)["optimizer"]
+    if not isinstance(training_config, Mapping):
+        training_config = {}
+    expected = _training_config(settings)
+    recorded_optimizer = training_config.get("optimizer")
     if not isinstance(recorded_optimizer, Mapping) or dict(
         recorded_optimizer
-    ) != expected_optimizer:
+    ) != expected["optimizer"]:
         raise ValueError(
             "resume checkpoint optimizer settings do not match current train optimizer settings"
+        )
+    # optimizer와 같은 이유입니다. schedule이 다르면 learning rate 궤적이 조용히 달라져
+    # 이어붙인 실행을 앞선 epoch과 같은 실험으로 볼 수 없습니다. 이 key를 몰랐던 옛
+    # checkpoint는 값이 없으므로, schedule을 쓰지 않는 재개는 지금까지처럼 그대로 됩니다.
+    recorded_schedule = training_config.get("lr_scheduler")
+    if (
+        dict(recorded_schedule) if isinstance(recorded_schedule, Mapping) else None
+    ) != expected["lr_scheduler"]:
+        raise ValueError(
+            "resume checkpoint used a different learning rate schedule than this run"
+        )
+    if expected["lr_scheduler"] is not None and "scheduler_state_dict" not in state:
+        raise ValueError(
+            "resume_state is missing the learning rate schedule state this run needs"
         )
     if checkpoint.get("num_classes") != len(class_map) + 1 or dict(
         checkpoint.get("class_map") or {}
@@ -953,6 +1064,11 @@ def _execute_claimed(
             "architecture": settings["architecture"],
             "optimizer": settings["optimizer"],
             "augmentation": settings["augmentation"]["preset"],
+            "lr_scheduler": (
+                settings["lr_scheduler"]["name"]
+                if settings["lr_scheduler"] is not None
+                else "none"
+            ),
             "device": settings["device"],
             "precision": settings["precision"]["dtype"],
             "epochs": settings["epochs"],
