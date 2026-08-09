@@ -89,6 +89,39 @@ def test_device_form_default_falls_back_to_cpu_without_cuda(monkeypatch):
     assert _device_spec()["default"] == "cpu"
 
 
+def _precision_spec() -> dict:
+    return next(item for item in train_config.field_specs() if item["name"] == "precision")
+
+
+def test_precision_form_default_is_amp_when_this_computer_has_a_gpu(monkeypatch):
+    """GPU가 있으면 절반 정밀도로 시작합니다.
+
+    같은 GPU에서 더 빠르고 메모리를 덜 씁니다. Device 기본값과 짝을 이룹니다.
+    amp는 device가 cuda여야 하므로 둘이 따로 놀면 폼이 저장할 수 없는 조합으로
+    시작하게 됩니다.
+    """
+
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
+
+    assert _precision_spec()["default"] == "amp"
+
+
+def test_precision_form_default_falls_back_to_fp32_without_cuda(monkeypatch):
+    """CUDA가 없으면 amp는 저장 자체가 막힙니다. fp32로 시작해야 합니다."""
+
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: False)
+
+    assert _precision_spec()["default"] == "fp32"
+
+
+def test_train_precision_default_stays_fp32(monkeypatch):
+    """폼 기본값만 바꿉니다. 값을 주지 않았을 때의 fallback은 train과 같아야 합니다."""
+
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
+
+    assert normalize_train_settings({})["precision"] == "fp32"
+
+
 def test_train_device_default_stays_cpu(monkeypatch):
     """폼 기본값만 바꿉니다. train의 기본값은 건드리지 않습니다.
 

@@ -196,12 +196,24 @@ def generate_run_id() -> str:
 def field_specs() -> list[dict[str, Any]]:
     """새 실험 화면이 form을 그릴 때 쓰는 필드 정의입니다."""
 
+    # GPU가 있는 컴퓨터에 맞춰 폼을 채웁니다. device와 precision은 짝이라 함께 정합니다.
+    # amp는 device가 cuda일 때만 쓸 수 있으므로, 하나만 바꾸면 폼이 저장할 수 없는
+    # 조합으로 시작합니다. CUDA가 없으면 둘 다 기존 값으로 둡니다.
+    #
+    # 여기서 정하는 것은 **폼의 출발값뿐**입니다. 아래 normalize_train_settings가 값을
+    # 받지 못했을 때 쓰는 fallback은 train 기본값(cpu, fp32) 그대로 두어야 합니다.
+    # 그쪽은 다른 소유 영역이고 test_web_train_contract.py가 두 값을 대조합니다.
+    # 바로 아래 pretrained가 같은 구조입니다.
+    has_cuda = cuda_is_available()
+    form_device = "cuda" if has_cuda else "cpu"
+    form_precision = "amp" if has_cuda else DEFAULT_PRECISION
+
     specs: list[dict[str, Any]] = []
     for name, default, choices in (
         ("architecture", LEGACY_ARCHITECTURE, SUPPORTED_ARCHITECTURES),
         ("optimizer", NEW_EXPERIMENT_OPTIMIZER, SUPPORTED_OPTIMIZERS),
         ("augmentation", DEFAULT_AUGMENTATION, SUPPORTED_AUGMENTATIONS),
-        ("precision", DEFAULT_PRECISION, SUPPORTED_PRECISIONS),
+        ("precision", form_precision, SUPPORTED_PRECISIONS),
     ):
         label, hint = _FIELD_LABELS[name]
         specs.append(
@@ -267,19 +279,11 @@ def field_specs() -> list[dict[str, Any]]:
             }
         )
     label, hint = _FIELD_LABELS["device"]
-    # 이 화면은 GPU가 달린 컴퓨터에서 학습을 돌리려고 만든 것이라, GPU가 있으면
-    # 그것을 기본으로 채웁니다. 바꾸는 것을 잊으면 몇 분이면 끝날 학습이 몇 시간이
-    # 됩니다. 다만 CUDA가 없는 컴퓨터에서 cuda로 채우면 device 검증이 곧바로 거부해
-    # 저장조차 못 하므로, 그때는 cpu로 둡니다.
-    #
-    # pretrained와 같은 구조입니다. 아래 normalize_train_settings의 fallback은 train
-    # 기본값(cpu) 그대로 두어야 합니다. 그쪽은 다른 소유 영역이고
-    # test_web_train_contract.py가 두 값을 대조합니다.
     specs.append(
         {
             "name": "device",
             "type": "enum",
-            "default": "cuda" if cuda_is_available() else "cpu",
+            "default": form_device,
             "choices": ["cpu", "cuda"],
             "label": label,
             "hint": hint,
