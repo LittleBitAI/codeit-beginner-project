@@ -137,7 +137,9 @@ def test_train_device_default_stays_cpu(monkeypatch):
     assert normalize_train_settings({})["device"] == "cpu"
 
 
-def test_generated_run_id_matches_train_pattern(monkeypatch):
+def test_time_based_run_id_matches_train_pattern(monkeypatch):
+    """설정을 모를 때 쓰는 마지막 수단입니다. 이어서 학습이 이 이름을 씁니다."""
+
     from datetime import datetime, timezone
 
     monkeypatch.setattr(
@@ -145,10 +147,9 @@ def test_generated_run_id_matches_train_pattern(monkeypatch):
         "_utc_now",
         lambda: datetime(2026, 8, 5, 1, 2, 3, 456789, tzinfo=timezone.utc),
     )
-    settings = normalize_train_settings({})
 
-    assert settings["run_id"] == "web-20260805T010203456789Z"
-    assert train_config.RUN_ID_PATTERN.fullmatch(settings["run_id"])
+    assert train_config.generate_run_id() == "web-20260805T010203456789Z"
+    assert train_config.RUN_ID_PATTERN.fullmatch(train_config.generate_run_id())
 
 
 def test_output_prefix_slashes_are_stripped():
@@ -307,12 +308,12 @@ def test_rejects_run_id_with_unsupported_characters(value):
 
 
 @pytest.mark.parametrize("value", ("", None))
-def test_empty_run_id_is_generated_like_train(value):
+def test_empty_run_id_is_generated_from_the_settings(value):
     """train도 ``raw.get("run_id") or <생성>``이라 빈 값은 자동 생성입니다."""
 
-    settings = normalize_train_settings({"run_id": value})
+    settings = normalize_train_settings({"run_id": value, "epochs": 7, "batch_size": 2})
 
-    assert settings["run_id"].startswith("web-")
+    assert settings["run_id"].startswith("mobile-none-e7-b2-")
     assert train_config.RUN_ID_PATTERN.fullmatch(settings["run_id"])
 
 
@@ -545,3 +546,86 @@ def test_validate_request_rejects_non_object_body():
 
     assert result["valid"] is False
     assert result["normalized"] is None
+
+
+# --- 자동 실행 이름 ------------------------------------------------------------
+
+
+def data_uris(dataset: str = "v3-seed42-8020") -> dict[str, str]:
+    return {key: f"artifacts/data/{dataset}/{key}.json" for key in DATA_ARTIFACT_KEYS}
+
+
+def test_generated_run_id_reads_like_the_settings_it_came_from():
+    """이름만 보고 무엇으로 돌린 학습인지 알 수 있어야 합니다."""
+
+    settings = normalize_train_settings(
+        {
+            "architecture": "retinanet_resnet50_fpn_v2",
+            "augmentation": "pill_basic",
+            "optimizer": "AdamW",
+            "epochs": 15,
+            "batch_size": 4,
+            "learning_rate": 0.006,
+            "seed": 42,
+        },
+        data_uris(),
+    )
+
+    name = settings["run_id"]
+
+    assert name.startswith("retina-basic-e15-b4-lr6e3-s42-")
+    assert train_config.RUN_ID_PATTERN.fullmatch(name)
+
+
+def test_same_settings_give_the_same_name_and_other_datasets_do_not():
+    """같은 설정이면 같은 이름이라 중복 실험을 바로 알아챕니다.
+
+    이름에 데이터셋이 들어가지 않으므로, 데이터셋 차이는 꼬리표가 맡습니다.
+    """
+
+    raw = {"epochs": 15, "batch_size": 4, "seed": 42}
+    first = normalize_train_settings(dict(raw), data_uris())["run_id"]
+    again = normalize_train_settings(dict(raw), data_uris())["run_id"]
+    other_dataset = normalize_train_settings(dict(raw), data_uris("v4-9010"))["run_id"]
+    other_seed = normalize_train_settings({**raw, "seed": 7}, data_uris())["run_id"]
+
+    assert first == again
+    assert first != other_dataset
+    assert first != other_seed
+
+
+def test_written_run_id_always_wins():
+    settings = normalize_train_settings({"run_id": "my-own-name"}, data_uris())
+
+    assert settings["run_id"] == "my-own-name"
+
+
+def test_unknown_architecture_still_gets_a_name():
+    """train에 모델이 늘어도 이름을 못 만들어 저장이 막히면 안 됩니다."""
+
+    name = train_config.generate_settings_run_id(
+        {
+            "architecture": "some_new_detector_v9",
+            "augmentation": "none",
+            "epochs": 3,
+            "batch_size": 1,
+            "learning_rate": 0.001,
+            "seed": 1,
+        },
+        {},
+    )
+
+    assert name.startswith("some-none-e3-b1-lr1e3-s1-")
+    assert train_config.RUN_ID_PATTERN.fullmatch(name)
+
+
+def test_resume_does_not_reuse_the_deterministic_name():
+    """이어서 학습에 같은 이름을 주면 train이 시작을 거부합니다."""
+
+    settings = normalize_train_settings({"epochs": 15, "seed": 42}, data_uris())
+    config = build_runtime_config(settings, normalize_data_inputs(data_uris()))
+    config["train"]["resume_from"] = "artifacts/experiments/completed/x/last_checkpoint.pt"
+
+    resumed = train_config.build_resume_config(config)
+
+    assert resumed["train"]["run_id"] != config["train"]["run_id"]

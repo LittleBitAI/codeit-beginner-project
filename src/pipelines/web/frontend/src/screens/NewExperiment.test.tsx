@@ -240,3 +240,53 @@ describe('NewExperiment · Train capability 호환', () => {
     );
   });
 });
+
+describe('NewExperiment · 자동 실행 이름', () => {
+  const defaults: Defaults = {
+    ...LEGACY_DEFAULTS,
+    fields: [
+      { name: 'run_id', type: 'string', label: '실행 이름', hint: '결과 폴더 이름입니다.' },
+    ],
+  };
+
+  async function showWithGeneratedName(runId: string) {
+    const { api } = await import('../api/client');
+    vi.mocked(api.validate).mockResolvedValue({
+      valid: true,
+      errors: [],
+      warnings: [],
+      normalized: {
+        project: { name: 'pill' },
+        execution: { mode: 'real' },
+        storage: {},
+        train: { run_id: runId },
+        inputs: { data: {} },
+      },
+    });
+    render(
+      <MemoryRouter>
+        <DraftProvider>
+          <NewExperiment defaults={defaults} source={null} />
+        </DraftProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  it('이름을 비워 두면 서버가 지어 준 이름을 미리 보여 준다', async () => {
+    // 규칙은 backend 한 곳에만 있습니다. 화면은 검증 결과의 이름을 그대로 씁니다.
+    await showWithGeneratedName('retina-basic-e15-b4-lr6e3-s42-a7f3');
+
+    expect(
+      await screen.findByText('자동 이름: retina-basic-e15-b4-lr6e3-s42-a7f3'),
+    ).toBeInTheDocument();
+  });
+
+  it('이름을 직접 쓰면 자동 이름 안내를 감춘다', async () => {
+    await showWithGeneratedName('retina-basic-e15-b4-lr6e3-s42-a7f3');
+    // Field는 label 안에 힌트까지 넣으므로 접근 이름에 힌트가 딸려 옵니다.
+    fireEvent.change(await screen.findByLabelText(/실행 이름/), { target: { value: 'my-run' } });
+
+    expect(screen.queryByText(/자동 이름:/)).not.toBeInTheDocument();
+    expect(screen.getByText('결과 폴더 이름입니다.')).toBeInTheDocument();
+  });
+});
