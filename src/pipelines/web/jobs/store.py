@@ -9,13 +9,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
 from ..errors import JobNotFoundError
 from ..masking import redact, sanitize_line
-from ..paths import jobs_dir, web_state_dir
+from ..paths import JOBS_DIRNAME, jobs_dir, repository_root, web_state_dir
 from .model import JobRecord
 
 
@@ -23,6 +24,7 @@ __all__ = [
     "load_queue",
     "save_queue",
     "append_log",
+    "delete_record",
     "job_directory",
     "load_all_records",
     "load_record",
@@ -105,6 +107,40 @@ def load_all_records() -> list[JobRecord]:
             continue  # 손상된 기록 하나가 목록 전체를 막지 않게 합니다.
     records.sort(key=lambda record: record.created_at, reverse=True)
     return records
+
+
+def delete_record(job_id: str) -> None:
+    """이 GUI가 만든 job directory 하나만 지웁니다.
+
+    지우는 것은 ``artifacts/web/jobs/<job_id>/``의 ``record.json``과 ``log.jsonl``
+    뿐입니다. checkpoint와 학습 결과 폴더는 train이 만든 산출물이고, registry
+    기록과 팀에 공유된 기록도 이 화면의 것이 아닙니다. 설정 파일도 남깁니다.
+    대기열 항목이나 이어서 학습이 아직 그 config를 가리킬 수 있기 때문입니다.
+
+    ``job_directory``가 형식을 먼저 확인하므로 이름으로는 빠져나갈 수 없습니다.
+    그것만으로는 부족합니다. ``artifacts/web/jobs`` 자체가 다른 곳을 가리키는
+    link면 그 아래 job directory는 진짜 directory라서 ``rmtree``가 아무 의심 없이
+    그쪽을 지웁니다(Windows junction은 권한 없이 만들 수 있습니다). 저장소 밖이면
+    남의 파일이고, ``artifacts/experiments/completed``처럼 저장소 안이어도 train이
+    만든 checkpoint입니다.
+
+    그래서 **link를 따라간 실제 위치가 글자 그대로의 자리와 같은지**만 봅니다.
+    jobs 루트를 함께 따라가서 비교하면(``jobs_dir().resolve()``) 그 link가 정확히
+    상쇄돼 검사가 통과합니다. 기대 위치는 link를 따라가지 않고 만듭니다.
+    """
+
+    directory = job_directory(job_id)
+    if not directory.is_dir():
+        raise JobNotFoundError("학습 기록을 찾을 수 없습니다.")
+
+    expected = repository_root().resolve() / JOBS_DIRNAME / job_id
+    if directory.resolve() != expected:
+        raise JobNotFoundError("학습 기록을 찾을 수 없습니다.")
+
+    try:
+        shutil.rmtree(directory)
+    except OSError as error:
+        raise JobNotFoundError("학습 기록을 지우지 못했습니다.") from error
 
 
 def append_log(job_id: str, entries: Iterable[dict[str, Any]]) -> None:

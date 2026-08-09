@@ -11,7 +11,9 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -621,3 +623,221 @@ def test_logs_paginate_with_cursor(manager, config_id, monkeypatch, fake_process
     assert len(first["lines"]) == 10
     assert first["complete"] is False
     assert second["lines"][0]["seq"] == first["lines"][-1]["seq"] + 1
+
+
+# --- 기록 삭제 ---------------------------------------------------------------
+
+
+def test_delete_removes_only_this_gui_record(
+    manager, config_id, monkeypatch, fake_process_factory, isolated_repo
+):
+    """지우는 것은 ``artifacts/web/jobs/<job_id>/`` 하나뿐입니다.
+
+    checkpoint와 학습 결과 폴더는 train이 만든 산출물이라 이 화면이 지우지 않습니다.
+    설정 파일도 남깁니다. 대기열이나 이어서 학습이 아직 그것을 가리킬 수 있습니다.
+    """
+
+    monkeypatch.setattr(
+        runner, "spawn", lambda *a, **k: fake_process_factory(stdout=TRAIN_SUCCESS_STDOUT)
+    )
+    started = manager.start(config_id)
+    wait_for_finish(manager, started.job_id)
+
+    output = isolated_repo / "artifacts" / "experiments" / "completed" / "test-run"
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "best_checkpoint.pt").write_text("weights", encoding="utf-8")
+    config_path = isolated_repo / "artifacts" / "web" / "configs" / f"{config_id}.json"
+
+    manager.delete(started.job_id)
+
+    assert not store.job_directory(started.job_id).exists()
+    assert [record.job_id for record in manager.list_jobs()] == []
+    assert (output / "best_checkpoint.pt").read_text(encoding="utf-8") == "weights"
+    assert config_path.exists()
+
+
+def test_delete_refuses_while_the_job_is_running(
+    manager, config_id, monkeypatch, fake_process_factory
+):
+    """돌고 있는 학습의 기록을 지우면 그 학습을 관리할 방법이 사라집니다."""
+
+    process = fake_process_factory(block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    started = manager.start(config_id)
+    wait_for_spawn(manager)
+
+    with pytest.raises(JobConflictError):
+        manager.delete(started.job_id)
+
+    process.release()
+    wait_for_finish(manager, started.job_id)
+    assert store.job_directory(started.job_id).exists()
+
+
+def test_delete_rejects_ids_that_are_not_job_ids(manager):
+    """경로 조작은 디스크에 닿기 전에 막습니다."""
+
+    with pytest.raises(JobNotFoundError):
+        manager.delete("../../../etc/passwd")
+
+
+def test_delete_endpoint_reports_conflict_and_removes_from_listing(
+    client, valid_payload, monkeypatch, fake_process_factory
+):
+    created = client.post("/api/train/configs", json=valid_payload).json()
+    process = fake_process_factory(block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    started = client.post("/api/train/jobs", json={"config_id": created["config_id"]}).json()
+
+    assert client.delete(f"/api/train/jobs/{started['job_id']}").status_code == 409
+
+    process.release()
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if client.get(f"/api/train/jobs/{started['job_id']}").json()["status"] != "running":
+            break
+        time.sleep(0.02)
+
+    assert client.delete(f"/api/train/jobs/{started['job_id']}").status_code == 200
+    assert client.get("/api/train/jobs").json()["jobs"] == []
+    assert client.get(f"/api/train/jobs/{started['job_id']}").status_code == 404
+
+
+def _link_directory(link: Path, target: Path) -> bool:
+    """``link``가 ``target``을 가리키는 directory 연결을 만듭니다. 못 만들면 False입니다.
+
+    Windows에서는 junction을 먼저 씁니다. ``shutil.rmtree``는 맨 위가 symlink면
+    거부하지만 junction은 따라 들어가 그 안을 지우기 때문에, 실제로 위험한 쪽이
+    junction입니다. symlink만으로 시험하면 고치기 전에도 test가 통과합니다.
+    """
+
+    if os.name == "nt":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+        )
+        if result.returncode == 0 and link.exists():
+            return True
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+def test_delete_does_not_follow_a_link_out_of_the_repository(manager, isolated_repo):
+    """jobs 루트가 저장소 밖을 가리키면 그 안을 지우지 않습니다.
+
+    이름은 32자리 16진수만 통과하므로 이름으로는 빠져나갈 수 없습니다. ``rmtree``도
+    맨 위가 link면 거부합니다. 그런데 ``artifacts/web/jobs`` **자체**가 link면 그
+    아래 job directory는 진짜 directory라서 아무것도 막지 못하고, 저장소 밖이
+    통째로 지워집니다. Windows에서 junction은 권한 없이도 만들 수 있어 실제로
+    일어날 수 있는 배치입니다.
+    """
+
+    outside = isolated_repo.parent / "outside-target"
+    job_id = "a" * 32
+    (outside / job_id).mkdir(parents=True, exist_ok=True)
+    (outside / job_id / "record.json").write_text("남의 기록", encoding="utf-8")
+
+    web_state = isolated_repo / "artifacts" / "web"
+    web_state.mkdir(parents=True, exist_ok=True)
+    if not _link_directory(web_state / "jobs", outside):
+        pytest.skip("이 환경에서는 directory 연결을 만들 수 없습니다.")
+
+    with pytest.raises(JobNotFoundError):
+        store.delete_record(job_id)
+
+    assert (outside / job_id / "record.json").exists()
+
+
+def test_delete_holds_the_evaluation_lock_so_a_start_cannot_slip_in(evaluation_runner):
+    """평가 확인과 삭제 사이에 평가가 시작되면 지운 기록이 되살아납니다.
+
+    evaluator는 끝나면서 자기가 들고 있던 record를 다시 저장합니다. 그때 log는 이미
+    지워졌으므로 성공 응답 뒤에 반쪽짜리 기록만 남습니다. 그래서 확인과 삭제가 같은
+    잠금 안에서 일어나야 합니다.
+    """
+
+    job_id = "b" * 32
+    acquired: list[bool] = []
+
+    with evaluation_runner.hold_for_delete(job_id):
+        # 같은 thread에서는 RLock이 다시 잡히므로 다른 thread에서 확인합니다.
+        def probe() -> None:
+            acquired.append(evaluation_runner._lock.acquire(blocking=False))
+            if acquired[-1]:
+                evaluation_runner._lock.release()
+
+        thread = threading.Thread(target=probe)
+        thread.start()
+        thread.join(5)
+
+    assert acquired == [False]
+
+
+def test_delete_guard_refuses_while_that_job_is_being_evaluated(evaluation_runner):
+    evaluation_runner._state = {"status": "running", "job_id": "c" * 32}
+
+    with pytest.raises(JobConflictError):
+        with evaluation_runner.hold_for_delete("c" * 32):
+            pass
+
+    # 다른 학습의 평가가 도는 것은 이 기록을 지우는 데 상관이 없습니다.
+    with evaluation_runner.hold_for_delete("d" * 32):
+        pass
+
+
+def test_delete_does_not_follow_a_link_to_another_components_output(manager, isolated_repo):
+    """jobs 루트가 저장소 **안**의 다른 곳을 가리켜도 거부합니다.
+
+    저장소 밖만 막으면 부족합니다. jobs 루트가 ``artifacts/experiments/completed``
+    같은 train 산출물을 가리키면, 그 아래 32자리 이름의 directory는 형식 검사도
+    통과하고 저장소 안이기도 해서 checkpoint가 통째로 지워집니다. 다른 component가
+    만든 산출물은 이 화면이 지우지 않습니다.
+    """
+
+    job_id = "e" * 32
+    train_output = isolated_repo / "artifacts" / "experiments" / "completed"
+    (train_output / job_id).mkdir(parents=True, exist_ok=True)
+    (train_output / job_id / "best_checkpoint.pt").write_text("가중치", encoding="utf-8")
+
+    web_state = isolated_repo / "artifacts" / "web"
+    web_state.mkdir(parents=True, exist_ok=True)
+    if not _link_directory(web_state / "jobs", train_output):
+        pytest.skip("이 환경에서는 directory 연결을 만들 수 없습니다.")
+
+    with pytest.raises(JobNotFoundError):
+        store.delete_record(job_id)
+
+    assert (train_output / job_id / "best_checkpoint.pt").exists()
+
+
+def test_evaluation_cannot_start_for_a_record_that_was_deleted(
+    client, valid_payload, monkeypatch, fake_process_factory
+):
+    """삭제가 먼저 끝났으면 평가는 시작하지 않습니다.
+
+    평가 POST가 record를 읽고 config를 만드는 동안 lock을 쥐지 않으면, 그 사이에
+    DELETE가 idle 상태를 보고 기록을 지웁니다. 뒤늦게 시작한 평가는 끝나면서 손에 든
+    stale record를 다시 저장해 빈 log와 함께 기록을 되살립니다. 그래서 record를 읽는
+    것부터 시작까지가 삭제와 같은 잠금 안에 있어야 합니다.
+    """
+
+    created = client.post("/api/train/configs", json=valid_payload).json()
+    monkeypatch.setattr(
+        runner, "spawn", lambda *a, **k: fake_process_factory(stdout=TRAIN_SUCCESS_STDOUT)
+    )
+    started = client.post("/api/train/jobs", json={"config_id": created["config_id"]}).json()
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if client.get(f"/api/train/jobs/{started['job_id']}").json()["status"] == "succeeded":
+            break
+        time.sleep(0.02)
+
+    assert client.delete(f"/api/train/jobs/{started['job_id']}").status_code == 200
+
+    assert client.post(f"/api/train/jobs/{started['job_id']}/evaluate", json={}).status_code == 404
+    # 되살아나지 않았는지 확인합니다.
+    assert client.get("/api/train/jobs").json()["jobs"] == []

@@ -141,6 +141,11 @@ export const api = {
   cancelJob: (jobId: string) =>
     request<JobRecord>(`/api/train/jobs/${jobId}/cancel`, { method: 'POST' }),
 
+  // 이 GUI가 들고 있던 기록만 지웁니다. checkpoint와 학습 결과 폴더, registry에
+  // 등록된 실험, 팀에 공유된 기록은 그대로 남습니다.
+  deleteJob: (jobId: string) =>
+    request<JobListing>(`/api/train/jobs/${jobId}`, { method: 'DELETE' }),
+
   logs: (jobId: string, after: number, limit = 500) =>
     request<LogPage>(`/api/train/jobs/${jobId}/logs?after=${after}&limit=${limit}`),
 

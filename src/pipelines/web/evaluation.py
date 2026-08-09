@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -420,6 +422,34 @@ class EvaluationRunner:
             # 한 번에 하나만 돌 수 있으므로, 실제로 돌고 있을 때만 잠급니다.
             other["busy_with"] = state.get("job_id")
         return other
+
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        """``start()``가 상태를 바꿀 때 쓰는 lock을 블록 내내 쥐고 있습니다.
+
+        평가 시작과 기록 삭제는 서로를 앞질러서는 안 됩니다. 평가 POST는 record를
+        읽고 config를 만드는 동안 lock을 쥐지 않는데, 그 사이에 DELETE가 idle 상태를
+        보고 기록을 지우면 뒤늦게 시작한 평가가 끝나면서 손에 든 stale record를 다시
+        저장해 빈 log와 함께 되살립니다. 두 route가 이 블록 안에서 **record를 읽는
+        것까지** 하면 둘 중 하나만 이깁니다.
+
+        재진입 가능한 lock이라 이 블록 안에서 ``start()``를 불러도 막히지 않습니다.
+        """
+
+        with self._lock:
+            yield
+
+    @contextmanager
+    def hold_for_delete(self, job_id: str) -> Iterator[None]:
+        """이 학습의 기록을 지우는 동안 평가가 시작되지 못하게 붙잡습니다."""
+
+        with self.locked():
+            if (
+                self._state.get("status") == STATUS_RUNNING
+                and self._state.get("job_id") == job_id
+            ):
+                raise JobConflictError("평가가 도는 중인 학습의 기록은 지울 수 없습니다.")
+            yield
 
     def status_for(self, record: JobRecord) -> dict[str, Any]:
         """메모리에 없으면 JobRecord에 영속화된 마지막 평가 상태를 돌려줍니다."""

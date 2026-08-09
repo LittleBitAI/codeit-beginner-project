@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import type {
   DataSource,
   GpuStatus,
@@ -33,14 +33,18 @@ export function TrainingOverview({
   source,
   onSourceSelected,
   onPrepared,
+  onJobsChanged,
 }: {
   listing: JobListing | null;
   source: DataSource | null;
   onSourceSelected: (source: DataSource) => void;
   onPrepared: () => void;
+  onJobsChanged?: () => void;
 }) {
   const navigate = useNavigate();
   const gpu = usePolling<GpuStatus>(() => api.gpu(), 5000);
+  // 지우기 전에 무엇이 사라지고 무엇이 남는지 보여 줍니다.
+  const [pendingDelete, setPendingDelete] = useState<JobRecord | null>(null);
 
   const jobs = listing?.jobs ?? [];
   const active = jobs.find((job) => job.job_id === listing?.active_job_id) ?? null;
@@ -145,6 +149,7 @@ export function TrainingOverview({
               jobs={kept}
               open
               onOpen={(job) => navigate(`/monitor/${job.job_id}`)}
+              onDelete={setPendingDelete}
             />
             <RunGroup
               title="결과 없이 끝난 기록"
@@ -152,6 +157,7 @@ export function TrainingOverview({
               jobs={discarded}
               open={false}
               onOpen={(job) => navigate(`/monitor/${job.job_id}`)}
+              onDelete={setPendingDelete}
             />
           </>
         )}
@@ -168,6 +174,108 @@ export function TrainingOverview({
           {failed.message ?? '원인을 알 수 없습니다.'}
         </AlertRow>
       )}
+
+      {pendingDelete && (
+        <DeleteRecordDialog
+          job={pendingDelete}
+          onClose={() => setPendingDelete(null)}
+          onDeleted={() => {
+            setPendingDelete(null);
+            onJobsChanged?.();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * 기록을 지우기 전 확인입니다.
+ *
+ * 무엇이 사라지고 무엇이 남는지를 나란히 적습니다. "정말 지울까요?"만 묻는 창은
+ * 학습 결과까지 날아가는 줄 알게 만들거나, 반대로 날아가는 줄 모르고 누르게 합니다.
+ */
+function DeleteRecordDialog({
+  job,
+  onClose,
+  onDeleted,
+}: {
+  job: JobRecord;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function remove() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteJob(job.job_id);
+      onDeleted();
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : '기록을 지우지 못했습니다.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${job.run_id} 기록 삭제`}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') onClose();
+      }}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 60,
+        background: 'rgba(17,28,46,.34)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 20,
+      }}
+    >
+      <div
+        style={{
+          width: 'min(460px, 100%)',
+          background: color.surface,
+          border: `1px solid ${color.border}`,
+          borderRadius: radius.panel,
+          padding: '18px 20px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
+        }}
+      >
+        <span style={{ font: `600 13.5px/1.4 ${font.sans}`, color: color.text }}>
+          {job.run_id} 기록을 지울까요?
+        </span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+          <span style={{ ...type.body, color: color.textBody }}>
+            <b style={{ color: color.red }}>지웁니다</b> — 이 GUI가 들고 있는 실행 기록과 로그.
+          </span>
+          <span style={{ ...type.body, color: color.textBody }}>
+            <b style={{ color: color.greenDark }}>그대로 둡니다</b> — 학습 결과 폴더와 checkpoint,
+            registry에 등록된 실험, 팀에 공유된 기록, 이 학습이 쓴 설정 파일.
+          </span>
+          <span style={{ ...type.plainNote, color: color.textMuted }}>
+            되돌릴 수 없습니다. 목록에서만 사라지고 학습 자체는 남습니다.
+          </span>
+        </div>
+        {error && <AlertRow level="error" title="지우지 못했습니다">{error}</AlertRow>}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <Button onClick={onClose} disabled={busy}>
+            취소
+          </Button>
+          <Button kind="danger" onClick={() => void remove()} disabled={busy}>
+            {busy ? '지우는 중…' : '기록 지우기'}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -184,12 +292,14 @@ function RunGroup({
   jobs,
   open,
   onOpen,
+  onDelete,
 }: {
   title: string;
   detail: string;
   jobs: JobRecord[];
   open: boolean;
   onOpen: (job: JobRecord) => void;
+  onDelete: (job: JobRecord) => void;
 }) {
   if (jobs.length === 0) return null;
 
@@ -231,7 +341,12 @@ function RunGroup({
         ))}
       </div>
       {jobs.map((job) => (
-        <JobRow key={job.job_id} job={job} onOpen={() => onOpen(job)} />
+        <JobRow
+          key={job.job_id}
+          job={job}
+          onOpen={() => onOpen(job)}
+          onDelete={() => onDelete(job)}
+        />
       ))}
     </details>
   );
@@ -360,7 +475,15 @@ function RowMenu({
   );
 }
 
-function JobRow({ job, onOpen }: { job: JobRecord; onOpen: () => void }) {
+function JobRow({
+  job,
+  onOpen,
+  onDelete,
+}: {
+  job: JobRecord;
+  onOpen: () => void;
+  onDelete: () => void;
+}) {
   const best = job.summary?.best_validation_loss;
   const map = job.evaluation?.summary?.metrics?.mAP;
   const spec = specLine(job);
@@ -431,7 +554,13 @@ function JobRow({ job, onOpen }: { job: JobRecord; onOpen: () => void }) {
       ))}
       <RowMenu
         label={`${job.run_id} 학습 메뉴`}
-        items={[{ label: '자세히 보기', onSelect: onOpen }]}
+        items={[
+          { label: '자세히 보기', onSelect: onOpen },
+          // 실행 중인 학습은 backend도 거절하지만, 누를 수 없는 편이 낫습니다.
+          ...(job.status === 'running' || job.status === 'queued' || job.status === 'starting'
+            ? []
+            : [{ label: '기록 삭제', onSelect: onDelete, danger: true }]),
+        ]}
       />
     </div>
   );

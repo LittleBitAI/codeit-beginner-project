@@ -238,6 +238,29 @@ def cancel_job(job_id: str) -> dict[str, Any]:
     return public_record(get_manager().cancel(job_id))
 
 
+@router.delete("/jobs/{job_id}")
+def delete_job(job_id: str) -> dict[str, Any]:
+    """이 GUI가 들고 있던 학습 기록 하나를 지웁니다.
+
+    **학습 산출물은 지우지 않습니다.** checkpoint와 학습 결과 폴더는 train이
+    만든 것이고, registry에 등록된 실험과 팀에 공유된 기록도 이 화면의 것이
+    아닙니다. 지우는 것은 ``artifacts/web/jobs/<job_id>/`` 하나뿐입니다.
+
+    평가가 도는 중이면 거절합니다. 그 runner가 끝나면서 같은 record를 다시
+    저장하기 때문에, 지워도 곧 되살아나 지운 것처럼 보이지 않습니다. 확인과 삭제를
+    같은 잠금 안에서 해야 그 사이에 평가가 시작되는 틈이 없습니다.
+    """
+
+    manager = get_manager()
+    with get_evaluation_runner().hold_for_delete(job_id):
+        manager.delete(job_id)  # 없거나 실행 중이면 404 또는 409
+    active = manager.active_job()
+    return {
+        "jobs": [public_record(record) for record in manager.list_jobs()],
+        "active_job_id": active.job_id if active else None,
+    }
+
+
 def _event_stream(job_id: str) -> Iterator[str]:
     manager = get_manager()
     cursor = 0
@@ -297,12 +320,18 @@ def start_evaluation(job_id: str, payload: EvaluateRequest = Body(...)) -> dict[
 
     학습이 만드는 값은 loss뿐이라 mAP 같은 detection metric은 여기서 처음 나옵니다.
     이미지마다 추론을 돌리므로 시작만 시키고 상태는 따로 확인합니다.
+
+    **record를 읽는 것부터 시작까지를 삭제와 같은 잠금 안에서 합니다.** 밖에서 읽으면
+    그 사이에 DELETE가 기록을 지울 수 있고, 뒤늦게 시작한 평가가 끝나면서 손에 든
+    stale record를 다시 저장해 빈 log와 함께 되살립니다.
     """
 
-    record = get_manager().get(job_id)
-    if record.status != "succeeded":
-        raise JobConflictError("성공으로 끝난 학습만 평가할 수 있습니다.")
-    return {"evaluation": get_evaluation_runner().start(record, payload.model_dump())}
+    runner = get_evaluation_runner()
+    with runner.locked():
+        record = get_manager().get(job_id)  # 지워졌으면 여기서 404
+        if record.status != "succeeded":
+            raise JobConflictError("성공으로 끝난 학습만 평가할 수 있습니다.")
+        return {"evaluation": runner.start(record, payload.model_dump())}
 
 
 class ResumeRequest(BaseModel):
