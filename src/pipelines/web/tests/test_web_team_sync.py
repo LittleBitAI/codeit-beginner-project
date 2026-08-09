@@ -389,3 +389,87 @@ def test_other_http_failures_are_still_connection_errors(monkeypatch):
         _transport().execute("query { __typename }", {}, access_token="good-token")
 
     assert not isinstance(error.value, TeamSyncAuthError)
+
+
+# --- 밤새 도는 대기열: 만료된 token을 IAM으로 대신하기 ---------------------
+
+
+class RefusingThenAcceptingTransport(FakeTransport):
+    """Cognito token은 거절하고 IAM은 받아들이는 AppSync를 흉내 냅니다.
+
+    실제 AppSync가 만료된 access token에 401을 주고, 같은 mutation을 SigV4로 보내면
+    받아 주는 상황과 같습니다.
+    """
+
+    def execute(self, query, variables, *, access_token=None, iam=False):
+        if access_token:
+            raise TeamSyncAuthError("로그인이 만료됐습니다.")
+        return super().execute(query, variables, access_token=access_token, iam=iam)
+
+
+def _create_run(sync: TeamSync, token: str | None) -> str | None:
+    return sync.create_run(
+        access_token=token,
+        local_job_id="j" * 32,
+        run_id="overnight-2",
+        settings={"epochs": 1},
+        data_inputs={},
+    )
+
+
+def test_an_expired_queue_token_falls_back_to_iam_when_an_actor_is_named():
+    """밤새 도는 대기열이 한 시간 뒤 멈추지 않게 합니다.
+
+    Cognito access token은 기본 한 시간만 삽니다. 그런데 대기열은 앞 학습이 끝난
+    뒤에야 다음 항목을 시작하므로, 학습이 한 시간을 넘기면 저장해 둔 token은 반드시
+    죽어 있습니다. 그러면 사람이 아침에 버튼을 눌러 줄 때까지 아무것도 돌지 않습니다.
+
+    진행 상황과 로그는 이미 IAM으로 올라가고 있어 이 컴퓨터의 AWS credential은
+    항상 유효합니다. 시작 기록만 브라우저 token을 고집할 이유가 없으므로, 이름을
+    지정해 둔 경우에 한해 IAM으로 대신 기록합니다.
+    """
+
+    transport = RefusingThenAcceptingTransport()
+    config = TeamSyncConfig(**{**enabled_config().__dict__, "actor_name": "야간 대기열"})
+    sync = TeamSync(config, transport=transport)
+
+    cloud_run_id = _create_run(sync, "expired-token")
+
+    assert cloud_run_id is not None
+    assert len(transport.calls) == 1  # token 시도는 거절돼 기록되지 않았습니다
+    fallback = transport.calls[0]
+    assert fallback["iam"] is True
+    assert fallback["access_token"] is None
+    # 누가 돌렸는지는 남겨야 합니다. 이름 없이 남은 기록은 팀 화면에서 쓸모가 없습니다.
+    assert fallback["variables"]["input"]["actorName"] == "야간 대기열"
+
+
+def test_an_expired_token_still_fails_when_no_actor_is_named():
+    """이름을 지정하지 않았으면 조용히 다른 사람으로 기록하지 않습니다.
+
+    누구의 학습인지 지어내는 것보다 멈춰 서서 다시 로그인하라고 하는 편이 낫습니다.
+    """
+
+    transport = RefusingThenAcceptingTransport()
+    sync = TeamSync(enabled_config(), transport=transport)
+
+    with pytest.raises(TeamSyncAuthError):
+        _create_run(sync, "expired-token")
+
+    assert transport.calls == []
+
+
+def test_a_valid_token_never_reaches_the_iam_fallback():
+    """로그인이 살아 있으면 그 사람 이름으로 기록되어야 합니다."""
+
+    transport = FakeTransport()
+    config = TeamSyncConfig(**{**enabled_config().__dict__, "actor_name": "야간 대기열"})
+    sync = TeamSync(config, transport=transport)
+
+    assert _create_run(sync, "good-token") is not None
+
+    assert len(transport.calls) == 1
+    assert transport.calls[0]["access_token"] == "good-token"
+    assert transport.calls[0]["iam"] is False
+    # token이 있으면 claims가 이깁니다. 이름을 같이 보내면 안 됩니다.
+    assert "actorName" not in transport.calls[0]["variables"]["input"]

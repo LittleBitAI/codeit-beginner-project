@@ -280,16 +280,38 @@ class TeamSync:
         # 남의 이름으로 기록하는 길이 아예 생기지 않습니다.
         if not access_token:
             payload["actorName"] = actor_name
-        data = self.transport.execute(
-            CREATE_RUN,
-            {"teamId": self.config.team_id, "input": payload},
-            access_token=access_token,
-            iam=not access_token,
-        )
+        try:
+            data = self._create_run_once(payload, access_token=access_token)
+        except TeamSyncAuthError:
+            # Cognito access token은 기본 한 시간만 삽니다. 그런데 대기열은 앞 학습이
+            # 끝난 **뒤에야** 다음 항목을 시작하므로, 학습이 한 시간을 넘기면 넣어 둘 때
+            # 받아 둔 token은 반드시 죽어 있습니다. 여기서 그대로 포기하면 밤새 돌리려고
+            # 걸어 둔 목록이 첫 인계에서 멈추고, 아침에 사람이 눌러 줄 때까지 GPU가 놉니다.
+            #
+            # 진행 상황과 로그는 이미 IAM으로 올라가고 있어(``_publish``) 이 컴퓨터의 AWS
+            # credential은 만료가 없습니다. 시작 기록만 브라우저 token을 고집할 이유가
+            # 없으므로 SigV4로 한 번 더 시도합니다. 다만 누구의 학습인지 지어내지 않도록,
+            # 이름을 미리 지정해 둔 경우에만 그렇게 합니다.
+            if not access_token or not actor_name:
+                raise
+            payload["actorName"] = actor_name
+            data = self._create_run_once(payload, access_token=None)
         created = data.get("createRun")
         if not isinstance(created, dict) or created.get("cloudRunId") != cloud_run_id:
             raise TeamSyncError("AWS가 만든 학습 ID를 확인하지 못했습니다.")
         return cloud_run_id
+
+    def _create_run_once(
+        self, payload: dict[str, Any], *, access_token: str | None
+    ) -> dict[str, Any]:
+        """``createRun`` 한 번. token이 있으면 그것으로, 없으면 IAM으로 보냅니다."""
+
+        return self.transport.execute(
+            CREATE_RUN,
+            {"teamId": self.config.team_id, "input": dict(payload)},
+            access_token=access_token,
+            iam=not access_token,
+        )
 
     def enqueue_update(self, record: Any) -> None:
         if not self.enabled or not getattr(record, "cloud_run_id", None):
