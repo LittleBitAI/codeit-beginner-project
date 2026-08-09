@@ -209,6 +209,8 @@ export interface ExperimentSummary {
     identity: string | null;
     identity_source: 'dataset_id' | 'artifact_set' | 'unknown';
     artifacts_complete: boolean;
+    /** 학습 manifest가 든 폴더 이름. 표에 100자짜리 URI 대신 이것을 보여 줍니다. */
+    label: string | null;
   };
   model: {
     architecture: string | null;
@@ -244,10 +246,29 @@ export interface ExperimentSummary {
     precision50: number | null;
     recall50: number | null;
   };
+  /**
+   * 학습이 평가와 제출까지 갔는지. registry index에 있는 값으로만 판단합니다.
+   *
+   * 이 field가 생기기 전 backend가 아직 떠 있을 수 있어 선택입니다. 없다고 화면이
+   * 통째로 죽으면 안 되므로 `completionOf()`를 거쳐서 읽습니다.
+   */
+  completion?: {
+    evaluated: boolean;
+    submitted: boolean;
+    submission_checked: boolean;
+    submission_rows: number | null;
+  };
+}
+
+/** 이 목록에 팀원의 실험도 들어오는지. registry index가 S3에 있을 때만 공용입니다. */
+export interface RegistryScope {
+  backend: string;
+  shared: boolean;
 }
 
 export interface ExperimentListing {
   experiments: ExperimentSummary[];
+  scope?: RegistryScope;
 }
 
 export interface ExperimentComparisonResult {

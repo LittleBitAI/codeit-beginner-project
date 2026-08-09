@@ -20,6 +20,13 @@ function experimentListing(): ExperimentListing {
       identity: 'fixture-same-dataset',
       identity_source: 'artifact_set',
       artifacts_complete: true,
+      label: 'fixture-same-dataset',
+    },
+    completion: {
+      evaluated: true,
+      submitted: true,
+      submission_checked: true,
+      submission_rows: 100,
     },
     model: {
       architecture: experiment.summary.architecture,
@@ -123,8 +130,14 @@ describe('Web multi-experiment E2E', () => {
     expect(screen.getAllByText('e2e-baseline').length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText('e2e-tuned').length).toBeGreaterThanOrEqual(1);
     // 기본 탭인 결과값에는 loss가, 학습 세팅 탭에는 optimizer가 있습니다.
-    expect(screen.getByText('0.7200')).toBeInTheDocument();
-    expect(screen.getByText('0.4800')).toBeInTheDocument();
+    // 고르는 표에도 같은 값이 있으므로 비교표 칸(data-run이 붙은 곳)만 봅니다.
+    // 가장 좋은 칸에는 값 뒤에 "최고" 표식이 붙으므로 앞부분으로 확인합니다.
+    const hasValue = (runId: string, value: string) =>
+      [...document.querySelectorAll(`[data-run="${runId}"]`)].some((cell) =>
+        (cell.textContent ?? '').startsWith(value),
+      );
+    expect(hasValue('e2e-baseline', '0.7200')).toBe(true);
+    expect(hasValue('e2e-tuned', '0.4800')).toBe(true);
 
     fireEvent.click(screen.getByRole('button', { name: '학습 세팅' }));
 

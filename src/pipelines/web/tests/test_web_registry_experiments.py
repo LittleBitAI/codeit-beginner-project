@@ -325,3 +325,74 @@ def test_experiment_list_matches_compare_for_unavailable_training(client, monkey
     assert listed["optimizer"]["name"] == "SGD"
     for block in ("model", "optimizer", "training"):
         assert listed[block] == compared[block]
+
+
+# --- 완료 단계와 저장소 범위 ---------------------------------------------------
+
+
+def submitted_summary(run_id: str) -> dict:
+    """평가와 제출까지 끝난 실험 하나입니다."""
+
+    summary = registry_summary(run_id)
+    summary["artifacts"]["submission_uri"] = f"artifacts/evaluate/{run_id}/submission.csv"
+    summary["submission_check"] = {
+        "checked": True,
+        "row_count": 2942,
+        "image_count": 500,
+        "max_detections_per_image": 100,
+        "skipped_reason": None,
+    }
+    return summary
+
+
+def test_experiment_list_reports_how_far_each_run_got(client, monkeypatch):
+    """평가와 제출을 마쳤는지는 index summary에 이미 있는 값으로만 판단합니다."""
+
+    monkeypatch.setattr(
+        experiments,
+        "list_experiment_summaries",
+        lambda config: [submitted_summary("done"), registry_summary("trained-only")],
+    )
+
+    payload = client.get("/api/train/experiments").json()["experiments"]
+    by_run = {item["run_id"]: item["completion"] for item in payload}
+
+    assert by_run["done"] == {
+        "evaluated": True,
+        "submitted": True,
+        "submission_checked": True,
+        "submission_rows": 2942,
+    }
+    assert by_run["trained-only"]["submitted"] is False
+    assert by_run["trained-only"]["submission_rows"] is None
+
+
+def test_experiment_list_says_whether_the_registry_is_shared(client, monkeypatch):
+    """local backend면 이 PC 기록만 보입니다. 화면이 그렇게 말할 수 있어야 합니다."""
+
+    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [])
+
+    assert client.get("/api/train/experiments").json()["scope"] == {
+        "backend": "local",
+        "shared": False,
+    }
+
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "pill-team")
+    assert client.get("/api/train/experiments").json()["scope"] == {
+        "backend": "s3",
+        "shared": True,
+    }
+
+
+def test_experiment_list_names_the_dataset_folder(client, monkeypatch):
+    """표에는 100자짜리 URI 대신 팀이 실제로 부르는 폴더 이름을 둡니다."""
+
+    summary = registry_summary("run-1")
+    summary["artifacts"]["train_manifest_uri"] = (
+        "s3://bucket/datasets/pill_detection/processed/v3-seed42-8020-group/train_manifest.json"
+    )
+    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
+
+    dataset = client.get("/api/train/experiments").json()["experiments"][0]["dataset"]
+
+    assert dataset["label"] == "v3-seed42-8020-group"

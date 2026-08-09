@@ -499,7 +499,7 @@ function JobRow({
       role="button"
       tabIndex={0}
       // global.css가 이 표시를 보고 마우스를 올렸을 때 배경을 바꿉니다.
-      data-row=""
+      data-row-hover=""
       onClick={onOpen}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') onOpen();

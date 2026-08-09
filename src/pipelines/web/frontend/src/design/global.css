@@ -49,8 +49,9 @@ button:not(:disabled):active {
   outline-offset: 1px;
 }
 
-/* 눌러서 여는 표 행. 배경을 비워 둔 행에만 얹히므로 선택된 행의 색은 그대로 남습니다. */
-[data-row]:hover {
+/* 눌러서 여는 표 행. 배경을 비워 둔 행에만 얹히므로 선택된 행의 색은 그대로 남습니다.
+   이름이 data-row가 아닌 것은 비교표가 그 이름을 이미 다른 뜻으로 쓰고 있어서입니다. */
+[data-row-hover]:hover {
   background: var(--color-surface-hover);
 }
 

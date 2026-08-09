@@ -27,6 +27,7 @@ __all__ = [
     "compare_registry_experiments",
     "list_registry_experiments",
     "registry_config",
+    "registry_scope",
 ]
 
 
@@ -62,12 +63,35 @@ def _fingerprint(value: Mapping[str, str]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _dataset_folder(artifacts: Any) -> str | None:
+    """학습 manifest가 든 폴더 이름입니다. 표에 URI 대신 이것을 보여 줍니다.
+
+    ``s3://bucket/datasets/pill_detection/processed/v3-seed42-8020-group/train_manifest.json``
+    에서 ``v3-seed42-8020-group``을 얻습니다. 전체 URI는 100자가 넘어 표에 넣을 수
+    없고, 팀이 데이터셋을 구별할 때 실제로 부르는 이름이 이 폴더 이름입니다.
+    """
+
+    if not isinstance(artifacts, Mapping):
+        return None
+    uri = _text(artifacts.get("train_manifest_uri"))
+    if uri is None:
+        return None
+    parts = [part for part in uri.replace("\\", "/").split("/") if part]
+    if len(parts) < 2:
+        return None
+    folder = parts[-2]
+    # `s3://bucket/train_manifest.json`이면 앞이 scheme입니다. 그것은 이름이 아닙니다.
+    return None if folder.endswith(":") else folder
+
+
 def _dataset_from_artifacts(artifacts: Any) -> dict[str, Any]:
+    label = _dataset_folder(artifacts)
     if not isinstance(artifacts, Mapping):
         return {
             "identity": None,
             "identity_source": "unknown",
             "artifacts_complete": False,
+            "label": label,
         }
     selected: dict[str, str] = {}
     for key in DATA_ARTIFACT_KEYS:
@@ -77,12 +101,37 @@ def _dataset_from_artifacts(artifacts: Any) -> dict[str, Any]:
                 "identity": None,
                 "identity_source": "unknown",
                 "artifacts_complete": False,
+                "label": label,
             }
         selected[key] = value.replace("\\", "/")
     return {
         "identity": _fingerprint(selected),
         "identity_source": "artifact_set",
         "artifacts_complete": True,
+        "label": label,
+    }
+
+
+def _completion_block(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """학습이 평가와 제출까지 갔는지. index summary에 있는 값만 씁니다.
+
+    ``submitted``의 근거는 registry가 기록한 ``artifacts.submission_uri``입니다.
+    제출 파일을 실제로 만들었는지가 사람이 알고 싶은 것이고, 그 값은 원격이든
+    로컬이든 남습니다. ``submission_check``는 registry가 CSV 규격을 확인한 결과라
+    원격 artifact에서는 건너뛴 채로 남으므로, 없다고 제출이 아닌 것은 아닙니다.
+    """
+
+    metrics = summary.get("metrics")
+    metric_values = metrics if isinstance(metrics, Mapping) else {}
+    artifacts = summary.get("artifacts")
+    artifact_values = artifacts if isinstance(artifacts, Mapping) else {}
+    check = summary.get("submission_check")
+    check_values = check if isinstance(check, Mapping) else {}
+    return {
+        "evaluated": _number(metric_values.get("mAP")) is not None,
+        "submitted": _text(artifact_values.get("submission_uri")) is not None,
+        "submission_checked": check_values.get("checked") is True,
+        "submission_rows": _integer(check_values.get("row_count")),
     }
 
 
@@ -259,6 +308,7 @@ def _summary_base(summary: Mapping[str, Any]) -> dict[str, Any]:
         "optimizer": blocks["optimizer"],
         "training": blocks["training"],
         "metrics": _metrics_block(summary),
+        "completion": _completion_block(summary),
     }
 
 
@@ -287,6 +337,19 @@ def _sanitized(value: dict[str, Any]) -> dict[str, Any]:
 
     sanitized = redact(value)
     return sanitized if isinstance(sanitized, dict) else value
+
+
+def registry_scope() -> dict[str, Any]:
+    """이 목록에 팀원의 실험도 들어오는지 알려 줍니다.
+
+    Registry index는 storage backend를 그대로 따릅니다. S3 bucket이 설정돼 있으면
+    팀이 공유하는 index를 읽으므로 팀원의 실험이 함께 나오고, local이면 이
+    컴퓨터에서 등록한 것만 나옵니다. 화면이 "팀원 것까지 보인다"고 말하려면 그
+    구분을 알아야 하는데, 목록만 봐서는 구별할 방법이 없습니다.
+    """
+
+    backend = storage_environment()["default_backend"]
+    return {"backend": backend, "shared": backend == "s3"}
 
 
 def list_registry_experiments() -> list[dict[str, Any]]:

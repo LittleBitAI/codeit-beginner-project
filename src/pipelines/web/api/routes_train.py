@@ -127,9 +127,16 @@ def list_jobs(status: str | None = Query(default=None)) -> dict[str, Any]:
 
 @router.get("/experiments")
 def list_experiments() -> dict[str, Any]:
-    """Registry에 등록된 완료 실험을 최신순으로 돌려줍니다."""
+    """Registry에 등록된 완료 실험을 최신순으로 돌려줍니다.
 
-    return {"experiments": experiments.list_registry_experiments()}
+    ``scope``는 이 목록에 팀원의 실험도 들어오는지입니다. Registry index는 storage
+    backend를 따라가서, S3면 팀 공용이고 local이면 이 컴퓨터 것뿐입니다.
+    """
+
+    return {
+        "experiments": experiments.list_registry_experiments(),
+        "scope": experiments.registry_scope(),
+    }
 
 
 class CompareExperimentsRequest(BaseModel):
