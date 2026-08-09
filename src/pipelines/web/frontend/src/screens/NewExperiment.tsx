@@ -430,9 +430,13 @@ function TrainField({
     spec.placeholder ?? (spec.default !== undefined && spec.default !== null ? `기본값 ${String(spec.default)}` : '');
 
   if (spec.name === 'device') {
+    // 고를 수 있는 목록은 devices에서 오지만 **출발값은 spec.default**입니다. 여기에
+    // cpu를 박아 두면 GPU가 있는 컴퓨터에서 서버가 cuda를 내려줘도 화면이 늘 cpu로
+    // 시작하고, 바꾸는 것을 잊은 학습이 몇 분에서 몇 시간짜리가 됩니다.
+    const fallback = typeof spec.default === 'string' ? spec.default : 'cpu';
     return (
       <Field label={spec.label} hint={spec.hint} error={error}>
-        <select value={value || 'cpu'} onChange={(event) => onChange(event.target.value)} style={style}>
+        <select value={value || fallback} onChange={(event) => onChange(event.target.value)} style={style}>
           {devices.map((device) => (
             <option key={device.value} value={device.value} disabled={!device.available}>
               {device.value}

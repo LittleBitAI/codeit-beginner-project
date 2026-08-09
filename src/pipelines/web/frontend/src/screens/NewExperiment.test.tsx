@@ -88,6 +88,53 @@ describe('NewExperiment · Train capability 호환', () => {
     expect(field).toHaveValue('amp');
   });
 
+  it('Device 칸은 서버가 알려 준 기본값으로 시작한다', () => {
+    // GPU가 달린 컴퓨터에서는 서버가 cuda를 기본값으로 내려줍니다. 화면이 그것을
+    // 무시하고 늘 cpu로 시작하면, 바꾸는 것을 잊은 사람의 학습이 몇 분에서 몇
+    // 시간짜리가 됩니다.
+    const defaults: Defaults = {
+      ...LEGACY_DEFAULTS,
+      fields: [
+        { name: 'device', type: 'enum', default: 'cuda', choices: ['cpu', 'cuda'], label: 'Device', hint: '' },
+      ],
+      devices: [
+        { value: 'cpu', available: true, reason: null },
+        { value: 'cuda', available: true, reason: null },
+      ],
+    };
+    render(
+      <MemoryRouter>
+        <DraftProvider>
+          <NewExperiment defaults={defaults} source={null} />
+        </DraftProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByLabelText('Device')).toHaveValue('cuda');
+  });
+
+  it('CUDA가 없으면 Device 칸이 cpu로 시작한다', () => {
+    const defaults: Defaults = {
+      ...LEGACY_DEFAULTS,
+      fields: [
+        { name: 'device', type: 'enum', default: 'cpu', choices: ['cpu', 'cuda'], label: 'Device', hint: '' },
+      ],
+      devices: [
+        { value: 'cpu', available: true, reason: null },
+        { value: 'cuda', available: false, reason: '이 컴퓨터에서 CUDA를 사용할 수 없습니다.' },
+      ],
+    };
+    render(
+      <MemoryRouter>
+        <DraftProvider>
+          <NewExperiment defaults={defaults} source={null} />
+        </DraftProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByLabelText('Device')).toHaveValue('cpu');
+  });
+
   it('boolean 칸은 서버가 알려 준 기본값으로 시작한다', () => {
     // 예전에는 무조건 "사용하지 않음"으로 시작해, 서버가 기본값을 바꿔도 화면이
     // 따라가지 않았습니다.
