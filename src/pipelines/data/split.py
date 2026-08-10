@@ -37,7 +37,7 @@ from typing import Any
 from .errors import DatasetPreparationError
 
 
-__all__ = ["GroupRule", "SplitResult", "split_images"]
+__all__ = ["AngleRule", "GroupRule", "SplitResult", "hold_out_angle", "split_images"]
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,33 @@ class GroupRule:
         if self.delimiter not in stem or not prefix:
             return f"file:{path.as_posix()}"
         return f"group:{prefix}"
+
+
+@dataclass(frozen=True)
+class AngleRule:
+    """file 이름에서 촬영 각도를 뽑는 규칙입니다.
+
+    원본 이름은 `<조합 코드>_<촬영 조건들>` 형태이고 각도는 **끝에서 세 번째**
+    토큰입니다. 예를 들어 `K-000250-000573_0_2_0_2_70_000_200`의 각도는 `70`입니다.
+    조합 코드 뒤의 토큰 수는 원본 판마다 다르지만 뒤쪽 세 개는 같으므로, 앞에서
+    세지 않고 뒤에서 셉니다.
+
+    규칙에 맞지 않는 이름은 각도를 `None`으로 둡니다. 모르는 것을 validation에
+    넣으면 그 각도가 학습에도 있었는지 말할 수 없게 되므로, 부르는 쪽이 train에
+    둡니다.
+    """
+
+    delimiter: str
+    #: 뒤에서부터 센 위치입니다. 1이 마지막 토큰입니다.
+    position_from_end: int
+
+    def key(self, file_name: str) -> str | None:
+        path = PurePosixPath(str(file_name).replace("\\", "/"))
+        parts = path.stem.split(self.delimiter)
+        if len(parts) < self.position_from_end + 1:
+            return None
+        value = parts[-self.position_from_end]
+        return value or None
 
 
 @dataclass(frozen=True)
@@ -391,4 +418,113 @@ def split_images(
         group_count=len(group_names),
         train_group_count=len(train_groups),
         validation_group_count=len(validation),
+    )
+
+
+def hold_out_angle(
+    split_result: SplitResult,
+    images: Sequence[Mapping[str, Any]],
+    annotations: Sequence[Mapping[str, Any]],
+    *,
+    group_rule: GroupRule,
+    angle_rule: AngleRule,
+    validation_angle: str,
+) -> tuple[SplitResult, int]:
+    """이미 나뉜 그룹 분할에서 촬영 각도 하나를 validation 전용으로 떼어냅니다.
+
+    validation은 그 각도만 남기고, train은 그 각도를 **전부** 버립니다. 그래야
+    validation이 "학습에서 못 본 시점"을 재게 됩니다. 한 장이라도 train에 남으면
+    그 시점을 이미 배운 model을 재는 것이라 그룹 분할과 다를 바가 없습니다.
+
+    그 대가로 이미지를 잃습니다. train 그룹의 그 각도와 validation 그룹의 나머지
+    각도가 모두 버려집니다. 버린 수를 함께 돌려주어 부르는 쪽이 기록하게 합니다.
+
+    각도를 알 수 없는 이름은 train에 남깁니다. 모르는 것을 validation에 넣으면 그
+    각도가 학습에도 있었는지 말할 수 없게 됩니다.
+    """
+
+    angle_by_image: dict[int, str | None] = {}
+    group_by_image: dict[int, str] = {}
+    for image in images:
+        file_name = str(image["file_name"])
+        angle_by_image[image["id"]] = angle_rule.key(file_name)
+        group_by_image[image["id"]] = group_rule.key(file_name)
+
+    train_image_ids = {
+        image_id
+        for image_id in split_result.train_image_ids
+        if angle_by_image.get(image_id) != validation_angle
+    }
+    validation_image_ids = {
+        image_id
+        for image_id in split_result.validation_image_ids
+        if angle_by_image.get(image_id) == validation_angle
+    }
+    dropped = (
+        len(split_result.train_image_ids)
+        + len(split_result.validation_image_ids)
+        - len(train_image_ids)
+        - len(validation_image_ids)
+    )
+    if not train_image_ids or not validation_image_ids:
+        raise DatasetPreparationError(
+            f"각도 '{validation_angle}'을 빼면 한쪽 split이 비어 있게 됩니다. "
+            "다른 각도를 고르거나 그룹 분할을 쓰세요."
+        )
+
+    categories_by_image: defaultdict[Any, set[int]] = defaultdict(set)
+    for annotation in annotations:
+        categories_by_image[annotation["image_id"]].add(annotation["category_id"])
+
+    train_counts = Counter(
+        category_id
+        for image_id in train_image_ids
+        for category_id in categories_by_image[image_id]
+    )
+    validation_counts = Counter(
+        category_id
+        for image_id in validation_image_ids
+        for category_id in categories_by_image[image_id]
+    )
+    # 각도를 빼면서 train에서 사라진 category는 model이 배울 수 없습니다. 조용히
+    # 내보내면 그 category의 점수는 언제나 0이 되고 원인은 보이지 않습니다.
+    #
+    # 비교 대상은 각도를 빼기 **전의** category 집합입니다. validation에 남은 것만
+    # 보면, train 그룹에서는 빼는 각도에만 있고 validation 그룹에서는 다른 각도에만
+    # 있어 양쪽에서 동시에 사라지는 category를 놓칩니다. 그런 class는 class map에는
+    # 남아 학습 예시 없는 class가 됩니다.
+    before = set(split_result.train_category_counts) | set(
+        split_result.validation_category_counts
+    )
+    lost_from_train = sorted(before - set(train_counts))
+    if lost_from_train:
+        raise DatasetPreparationError(
+            f"각도 '{validation_angle}'을 빼면 category "
+            + ", ".join(str(value) for value in lost_from_train)
+            + "가 train에서 사라집니다. 다른 각도를 고르세요."
+        )
+    # validation에서 사라진 category는 지표를 잴 수 없을 뿐이라, 그룹 분할이 쓰는
+    # 것과 같은 자리에 적어 둡니다.
+    train_only = tuple(
+        sorted(
+            set(split_result.train_only_category_ids)
+            | (set(train_counts) - set(validation_counts))
+        )
+    )
+
+    def groups_of(image_ids: set[int]) -> int:
+        return len({group_by_image[image_id] for image_id in image_ids})
+
+    return (
+        SplitResult(
+            train_image_ids=train_image_ids,
+            validation_image_ids=validation_image_ids,
+            train_category_counts=dict(train_counts),
+            validation_category_counts=dict(validation_counts),
+            train_only_category_ids=train_only,
+            group_count=split_result.group_count,
+            train_group_count=groups_of(train_image_ids),
+            validation_group_count=groups_of(validation_image_ids),
+        ),
+        dropped,
     )

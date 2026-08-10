@@ -1538,6 +1538,160 @@ def test_pass_through_still_works_when_preparation_is_not_requested():
     assert not [uri for uri in stored if "/processed/" in uri]
 
 
+def angle_stem(image_index: int, group: int, angle: str) -> str:
+    """조합 하나를 각도만 바꿔 여러 장 찍은 원본 이름입니다."""
+
+    return f"K-{group:06d}-016548_0_2_{image_index:03d}_{angle}_000_200"
+
+
+def angled_objects() -> dict[str, Any]:
+    """조합 40개를 각도 70/75/90으로 세 번씩 찍은 원본입니다."""
+
+    objects: dict[str, Any] = {}
+    index = 0
+    for group in range(1, 41):
+        for angle in ("70", "75", "90"):
+            index += 1
+            stem = angle_stem(index, group, angle)
+            objects[f"s3://{BUCKET}/{RAW_PREFIX}train_images/{stem}.jpg"] = {
+                "placeholder": "image bytes"
+            }
+            objects[f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/{stem}.json"] = (
+                annotation_document(index, [(group - 1) % 3 + 1], stem=stem)
+            )
+    for number in range(1, 6):
+        objects[f"s3://{BUCKET}/{RAW_PREFIX}test_images/{number:03d}.png"] = image_bytes(
+            30 + number, 40 + number
+        )
+    return objects
+
+
+def split_stems(stored: dict[str, Any], result: dict[str, Any], key: str) -> list[str]:
+    document = artifact_document(stored, result, key)
+    return [
+        Path(str(image["file_name"])).stem for image in document["images"]
+    ]
+
+
+def test_angle_holdout_keeps_the_validation_angle_out_of_train():
+    """검증에 쓰는 각도는 학습에서 한 장도 보이면 안 됩니다.
+
+    그래야 validation이 "학습에서 못 본 시점"을 재게 됩니다. 한 장이라도 남으면
+    그 시점을 이미 배운 model을 재는 것이라 지금과 다를 바가 없습니다.
+    """
+
+    result, stored = prepare(
+        prepare_config("8:2", split_method="group-angle"), angled_objects()
+    )
+
+    assert result["status"] == "ok", result["message"]
+    train_angles = {stem.split("_")[-3] for stem in split_stems(stored, result, "train_manifest_uri")}
+    validation_angles = {
+        stem.split("_")[-3] for stem in split_stems(stored, result, "validation_manifest_uri")
+    }
+    assert validation_angles == {"90"}
+    assert "90" not in train_angles
+
+
+def test_angle_holdout_still_keeps_combinations_apart():
+    """각도를 뺐다고 조합 분리를 잃으면 안 됩니다.
+
+    같은 조합이 양쪽에 있으면 model은 그 장면을 이미 외운 채로 채점받습니다.
+    """
+
+    result, stored = prepare(
+        prepare_config("8:2", split_method="group-angle"), angled_objects()
+    )
+
+    train_groups = {stem.split("_")[0] for stem in split_stems(stored, result, "train_manifest_uri")}
+    validation_groups = {
+        stem.split("_")[0] for stem in split_stems(stored, result, "validation_manifest_uri")
+    }
+    assert train_groups & validation_groups == set()
+
+
+def test_angle_holdout_records_what_it_dropped():
+    """버린 이미지 수를 남기지 않으면 왜 학습이 줄었는지 알 수 없습니다."""
+
+    result, stored = prepare(
+        prepare_config("8:2", split_method="group-angle"), angled_objects()
+    )
+
+    summary = artifact_document(stored, result, "dataset_summary_uri")
+    holdout = summary["split"]["angle_holdout"]
+    assert holdout["validation_angle"] == "90"
+    # 조합 40개 × 각도 3장 = 120장에서, train 조합의 90도와 validation 조합의
+    # 나머지 각도를 버립니다.
+    assert holdout["dropped_images"] > 0
+    assert summary["train_images"] + summary["validation_images"] + holdout[
+        "dropped_images"
+    ] == 120
+
+
+def test_angle_holdout_lives_in_its_own_directory():
+    """분할 방식이 다르면 내용이 다른 dataset이라 덮어쓰면 안 됩니다."""
+
+    result, _ = prepare(
+        prepare_config("8:2", split_method="group-angle"), angled_objects()
+    )
+
+    assert "-group-angle/" in result["artifacts"]["train_manifest_uri"]
+
+
+def test_a_name_without_an_angle_never_reaches_validation():
+    """규칙에 맞지 않는 이름은 각도를 알 수 없습니다.
+
+    모르는 것을 validation에 넣으면 그 각도가 학습에도 있었는지 말할 수 없게 됩니다.
+    train에 두는 쪽이 안전합니다.
+    """
+
+    objects = angled_objects()
+    stem = "no-angle-name"
+    objects[f"s3://{BUCKET}/{RAW_PREFIX}train_images/{stem}.jpg"] = {
+        "placeholder": "image bytes"
+    }
+    objects[f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/{stem}.json"] = (
+        annotation_document(999, [1], stem=stem)
+    )
+
+    result, stored = prepare(
+        prepare_config("8:2", split_method="group-angle"), objects
+    )
+
+    assert result["status"] == "ok", result["message"]
+    assert stem not in split_stems(stored, result, "validation_manifest_uri")
+
+
+def test_angle_holdout_stops_when_a_category_would_lose_all_training_examples():
+    """양쪽에서 동시에 사라지는 category도 잡아야 합니다.
+
+    train 그룹에서는 빼는 각도에만 있고 validation 그룹에서는 다른 각도에만 있는
+    category는 각도 필터 뒤 양쪽에서 모두 사라집니다. class map에는 남아 있으므로
+    model은 학습 예시가 하나도 없는 class를 배우게 되고, 그 class의 점수는 언제나
+    0이 되는데 원인은 보이지 않습니다.
+    """
+
+    CATEGORY_NAMES.setdefault(9, "pill_lost")
+    objects = angled_objects()
+    # category 9는 train 조합 하나의 90도 사진과 validation 조합 하나의 70도
+    # 사진에만 있습니다. 90도를 빼면 어느 쪽에도 남지 않습니다.
+    for group, angle in ((1, "90"), (40, "70")):
+        index = 1000 + group
+        stem = angle_stem(index, group, angle)
+        objects[f"s3://{BUCKET}/{RAW_PREFIX}train_images/{stem}.jpg"] = {
+            "placeholder": "image bytes"
+        }
+        objects[f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/{stem}.json"] = (
+            annotation_document(index, [9], stem=stem)
+        )
+    result, _ = prepare(
+        prepare_config("8:2", split_method="group-angle"), objects
+    )
+
+    assert result["status"] == "error"
+    assert "9" in result["message"]
+
+
 def real_image_objects() -> dict[str, Any]:
     """train image까지 진짜 픽셀을 담은 원본입니다.
 
