@@ -36,7 +36,7 @@ from src.common import LocalStorage, Storage, StorageError, create_storage
 from .coco import ConsolidatedDataset, consolidate
 from .errors import DatasetPreparationError
 from .progress import ProgressEmitter
-from .split import GroupRule, SplitResult, split_images
+from .split import AngleRule, GroupRule, SplitResult, hold_out_angle, split_images
 from .test_manifest import build_test_manifest
 
 
@@ -76,7 +76,7 @@ _RATIO_DIRECTORY_TOKENS: dict[str, str] = {"8:2": "8020", "9:1": "9010"}
 # 나누면 거의 같은 사진이 train과 validation 양쪽에 들어갑니다. 그래서 기본은
 # 그룹 분할입니다. `"image"`는 예전 이미지 단위 분할이며, 이미 만들어 둔 산출물을
 # 다시 만들 때만 씁니다.
-SPLIT_METHOD_OPTIONS = ("group", "image")
+SPLIT_METHOD_OPTIONS = ("group", "image", "group-angle")
 DEFAULT_SPLIT_METHOD = "group"
 # 그룹 이름은 file 이름의 첫 `_` 앞부분, 즉 알약 조합 코드입니다.
 # 예: K-001900-016548-019607-029451_0_2_0_2_70_000_200.png
@@ -84,9 +84,20 @@ DEFAULT_SPLIT_METHOD = "group"
 # 원본 이름 규칙이 바뀌면 이 두 값을 바꿉니다. 파일별로 예외를 두지 않습니다.
 GROUP_KEY_DELIMITER = "_"
 GROUP_KEY_TOKENS = 1
+# 촬영 각도는 file 이름의 끝에서 세 번째 토큰입니다.
+# 예: K-001900-016548_0_2_0_2_70_000_200 -> 70
+# 조합 코드 뒤의 토큰 수는 원본 판마다 다르지만 뒤쪽 세 개는 같습니다.
+ANGLE_KEY_DELIMITER = "_"
+ANGLE_KEY_POSITION_FROM_END = 3
+# `group-angle`에서 validation 전용으로 뗄 각도입니다.
+DEFAULT_VALIDATION_ANGLE = "90"
 # 분할 방식이 다르면 내용이 완전히 다른 dataset이므로 directory 이름으로
 # 구분합니다. 이미지 분할은 이름을 그대로 두어 기존 산출물을 덮지 않습니다.
-_METHOD_DIRECTORY_TOKENS: dict[str, str] = {"group": "-group", "image": ""}
+_METHOD_DIRECTORY_TOKENS: dict[str, str] = {
+    "group": "-group",
+    "image": "",
+    "group-angle": "-group-angle",
+}
 
 ARTIFACT_FILE_NAMES: dict[str, str] = {
     "train_manifest_uri": "train_manifest.json",
@@ -137,6 +148,9 @@ class PreparationSettings:
     overwrite: bool
     split_method: str
     group_rule: GroupRule | None
+    # `group-angle`일 때만 값이 있습니다. 그 각도는 train에서 통째로 빠집니다.
+    angle_rule: AngleRule | None
+    validation_angle: str | None
 
 
 def _data_config(config: Any) -> Mapping[str, Any]:
@@ -233,6 +247,30 @@ def _split_method(section: Mapping[str, Any]) -> str:
     return value.strip()
 
 
+def _angle_rule(split_method: str) -> AngleRule | None:
+    """`group-angle`에서만 각도 규칙을 씁니다."""
+
+    if split_method != "group-angle":
+        return None
+    return AngleRule(
+        delimiter=ANGLE_KEY_DELIMITER,
+        position_from_end=ANGLE_KEY_POSITION_FROM_END,
+    )
+
+
+def _validation_angle(section: Mapping[str, Any], split_method: str) -> str | None:
+    """validation 전용으로 뗄 각도를 읽습니다."""
+
+    if split_method != "group-angle":
+        return None
+    value = section.get("validation_angle", DEFAULT_VALIDATION_ANGLE)
+    if not isinstance(value, str) or not value.strip():
+        raise DatasetPreparationError(
+            "config['data']['validation_angle']은 비어 있지 않은 문자열이어야 합니다."
+        )
+    return value.strip()
+
+
 def _group_rule(split_method: str) -> GroupRule | None:
     """그룹 이름을 뽑는 규칙을 정합니다.
 
@@ -270,6 +308,8 @@ def resolve_settings(config: Any) -> PreparationSettings:
     split_ratio = _split_ratio(section)
     split_method = _split_method(section)
     group_rule = _group_rule(split_method)
+    angle_rule = _angle_rule(split_method)
+    validation_angle = _validation_angle(section, split_method)
     seed = _seed(section)
     raw_prefix = _normalized_prefix(section.get("raw_prefix"), "raw_prefix", DEFAULT_RAW_PREFIX)
     processed_root = _normalized_prefix(
@@ -291,6 +331,8 @@ def resolve_settings(config: Any) -> PreparationSettings:
         overwrite=_overwrite(section),
         split_method=split_method,
         group_rule=group_rule,
+        angle_rule=angle_rule,
+        validation_angle=validation_angle,
     )
 
 
@@ -544,6 +586,7 @@ def _dataset_summary(
     test_image_count: int,
     annotation_document_count: int,
     generated_at: str,
+    dropped_by_angle: int = 0,
 ) -> dict[str, Any]:
     """어떤 원본을 어떤 비율과 seed로 나눴는지 남기는 요약을 만듭니다."""
 
@@ -586,6 +629,18 @@ def _dataset_summary(
                 for category_id in split_result.train_only_category_ids
             ],
             "checksums": _split_checksums(manifests),
+            # 각도를 떼지 않은 실행에는 이 key가 없습니다. 왜 학습 이미지가 줄었는지
+            # 나중에 알 수 있어야 합니다.
+            **(
+                {
+                    "angle_holdout": {
+                        "validation_angle": settings.validation_angle,
+                        "dropped_images": dropped_by_angle,
+                    }
+                }
+                if settings.validation_angle is not None
+                else {}
+            ),
         },
         "raw": {
             "listed_train_images": raw_image_count,
@@ -793,6 +848,19 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         seed=settings.seed,
         group_rule=settings.group_rule,
     )
+    # 그룹 분할 위에 각도를 하나 더 뗍니다. validation은 그 각도만, train은 그
+    # 각도를 뺀 나머지만 남습니다. 이미지를 잃는 대신 학습에서 못 본 시점으로
+    # 채점하게 됩니다.
+    dropped_by_angle = 0
+    if settings.angle_rule is not None and settings.validation_angle is not None:
+        split_result, dropped_by_angle = hold_out_angle(
+            split_result,
+            dataset.images,
+            dataset.annotations,
+            group_rule=settings.group_rule,
+            angle_rule=settings.angle_rule,
+            validation_angle=settings.validation_angle,
+        )
 
     progress.emit("step_started", step="manifests")
     manifests = {
@@ -850,6 +918,7 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         test_image_count=len(test_image_locations),
         annotation_document_count=len(annotation_locations),
         generated_at=_utc_now(),
+        dropped_by_angle=dropped_by_angle,
     )
     artifacts["dataset_summary_uri"] = publisher.artifact_uri(
         storage.write_json(
