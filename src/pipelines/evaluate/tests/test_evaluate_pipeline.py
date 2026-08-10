@@ -741,3 +741,59 @@ def test_run_id_falls_back_to_train_run_id(base_config: dict, repository_root: P
 
     assert settings.run_id == "train-0001"
     assert settings.metrics_uri == "artifacts/evaluate/train-0001/metrics.json"
+
+
+def test_metrics_exclusion_drops_a_category_from_validation_scoring(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """채점되지 않는 class를 validation 지표에서도 뺄 수 있어야 합니다.
+
+    `기타 알약`은 제출 CSV에서 빠지므로 대회 점수에 들어가지 않는데, 지금은 로컬
+    mAP에만 포함돼 두 숫자가 서로 다른 class 집합을 평균합니다. 그러면 로컬이
+    올랐는지 내렸는지로 대회 점수를 짐작할 수 없습니다.
+    """
+
+    from src.pipelines.evaluate import pipeline
+
+    base_config["evaluate"]["metrics_excluded_category_ids"] = [1]
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    metrics = _read_json(repository_root, result["artifacts"]["metrics_uri"])
+    # 뺀 class는 per_class에도 지표에도 남지 않습니다.
+    assert 1 not in {entry["category_id"] for entry in metrics["per_class"]}
+    assert metrics["metrics_excluded_category_ids"] == [1]
+    assert result["summary"]["metrics_excluded_category_ids"] == [1]
+    assert validate_pipeline_result(result, pipeline_name="evaluate") is result
+
+
+def test_metrics_exclusion_keeps_the_predictions_file_whole(
+    base_config: dict, repository_root: Path
+):
+    """지표에서 뺀다고 예측까지 지우면 안 됩니다.
+
+    저장된 예측은 다시 채점할 수 있어야 하는 원본입니다. 여기서 지우면 나중에 다른
+    class 집합으로 재계산할 수 없습니다.
+    """
+
+    base_config["evaluate"]["metrics_excluded_category_ids"] = [1]
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    document = _read_json(repository_root, result["artifacts"]["predictions_uri"])
+    assert 1 in {entry["category_id"] for entry in document["predictions"]}
+
+
+def test_summary_has_no_metrics_exclusion_key_when_unset(
+    base_config: dict, repository_root: Path
+):
+    """설정하지 않은 실행의 결과 모양은 지금과 완전히 같아야 합니다."""
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    assert "metrics_excluded_category_ids" not in result["summary"]
+    metrics = _read_json(repository_root, result["artifacts"]["metrics_uri"])
+    assert "metrics_excluded_category_ids" not in metrics
