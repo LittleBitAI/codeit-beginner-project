@@ -50,7 +50,7 @@ python -m src.main_pipeline --only data
 python -m pytest src/pipelines/data/tests -q
 ```
 
-Tests use a fake storage; no AWS.
+Tests use a fake storage.
 
 ## Local Rules
 
