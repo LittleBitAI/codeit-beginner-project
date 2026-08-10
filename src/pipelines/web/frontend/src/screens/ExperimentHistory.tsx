@@ -21,6 +21,9 @@ export function ExperimentHistory() {
   const listing = usePolling(() => api.listExperiments(), 5000);
   const [onlyEvaluated, setOnlyEvaluated] = useState(true);
   const [onlySubmitted, setOnlySubmitted] = useState(false);
+  // 기록된 실제 mAP는 기본으로 잠급니다. 표를 지나가다 누른 저장이 이미 적어 둔
+  // 점수를 갈아치우면 그 값이 무엇이었는지 아무도 모릅니다. 고칠 때만 켭니다.
+  const [editingScores, setEditingScores] = useState(false);
 
   const experiments = useMemo(() => listing.data?.experiments ?? [], [listing.data]);
   const shown = useMemo(
@@ -71,12 +74,54 @@ export function ExperimentHistory() {
       <Panel
         title="실험 내역"
         right={
-          <span style={{ font: `400 12px/1 ${font.mono}`, color: color.textMuted }}>
-            {shown.length}건
+          <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ font: `400 12px/1 ${font.mono}`, color: color.textMuted }}>
+              {shown.length}건
+            </span>
+            <button
+              type="button"
+              aria-pressed={editingScores}
+              title={
+                editingScores
+                  ? '다 고쳤으면 다시 눌러 잠그세요'
+                  : '이미 기록된 실제 mAP를 고칩니다'
+              }
+              onClick={() => setEditingScores((value) => !value)}
+              style={{
+                font: `${editingScores ? 600 : 500} 11.5px/1 ${font.sans}`,
+                padding: '6px 10px',
+                borderRadius: 4,
+                color: editingScores ? '#fff' : color.textBody,
+                background: editingScores ? color.amber : color.surface,
+                border: `1px solid ${editingScores ? color.amber : color.borderControl}`,
+              }}
+            >
+              실제 mAP 수정
+            </button>
           </span>
         }
         bodyStyle={{ padding: 0 }}
       >
+        {/* 켠 것을 잊고 표를 만지면 잠근 뜻이 없어지므로, 켜져 있는 동안 계속 말합니다. */}
+        {editingScores && (
+          <div
+            style={{
+              display: 'flex',
+              gap: 8,
+              alignItems: 'center',
+              padding: '10px 13px',
+              background: color.amberTint,
+              borderBottom: `1px solid ${color.borderInner}`,
+              font: `400 12px/1.5 ${font.sans}`,
+              color: color.textStrong,
+            }}
+          >
+            <b style={{ color: color.amber }}>실제 mAP를 고칠 수 있습니다.</b>
+            잘못 적은 칸의 숫자를 바꾼 뒤 그 줄의 <b>수정</b>을 누르세요. 다 고쳤으면 위
+            <b> 실제 mAP 수정</b>을 다시 눌러 잠그세요.
+          </div>
+        )}
+
         <div
           style={{
             display: 'flex',
@@ -123,10 +168,11 @@ export function ExperimentHistory() {
           <ExperimentTable
             experiments={shown}
             onOpen={(experiment) => navigate(`/history/${encodeURIComponent(experiment.run_id)}`)}
-            onKaggleScoreSave={async (runId, score) => {
-              await api.saveKaggleScore(runId, score);
+            onKaggleScoreSave={async (runId, score, overwrite) => {
+              await api.saveKaggleScore(runId, score, overwrite);
               listing.refresh();
             }}
+            kaggleScoreEditable={editingScores}
             emptyMessage={
               (onlyEvaluated || onlySubmitted) && experiments.length > 0
                 ? '선택한 완료 조건에 맞는 실험이 없습니다. 위 체크를 풀면 나머지가 보입니다.'

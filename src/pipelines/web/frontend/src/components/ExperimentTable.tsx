@@ -62,21 +62,37 @@ function metric(value: number | null): string {
   return value === null ? '-' : value.toFixed(4);
 }
 
+/**
+ * 실제 mAP 한 칸. 아직 없으면 바로 적을 수 있고, 이미 적혀 있으면 잠급니다.
+ *
+ * 표를 지나가다 누른 저장이 이미 적어 둔 점수를 갈아치우면 그 값이 무엇이었는지
+ * 아무도 모릅니다. 그래서 기록된 칸을 여는 열쇠는 이 칸이 아니라 화면 우상단의
+ * "실제 mAP 수정" 하나뿐이고, 그 상태가 `editable`로 내려옵니다.
+ */
 function KaggleScoreCell({
   experiment,
   onSave,
+  editable = false,
 }: {
   experiment: ExperimentSummary;
-  onSave?: (runId: string, score: number) => Promise<void>;
+  onSave?: (runId: string, score: number, overwrite: boolean) => Promise<void>;
+  editable?: boolean;
 }) {
   const recorded = experiment.metrics.kaggle_score ?? null;
   const [draft, setDraft] = useState(recorded === null ? '' : String(recorded));
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  useEffect(() => setDraft(recorded === null ? '' : String(recorded)), [recorded]);
+  // 수정을 끝내면 고치다 만 값도 함께 버립니다. 남겨 두면 다음에 열었을 때 기록된
+  // 점수 대신 그 값이 보여, 저장하지 않은 숫자를 기록으로 착각합니다.
+  useEffect(() => {
+    setDraft(recorded === null ? '' : String(recorded));
+    setMessage(null);
+  }, [recorded, editable]);
   if (!onSave) return <span>{metric(recorded)}</span>;
+  const locked = recorded !== null && !editable;
   const score = Number(draft);
   const invalid = draft.trim() === '' || !Number.isFinite(score) || score < 0 || score > 1;
+  const unchanged = recorded !== null && score === recorded;
   return (
     <span
       style={{ display: 'flex', alignItems: 'center', gap: 5 }}
@@ -89,24 +105,30 @@ function KaggleScoreCell({
         max="1"
         step="0.0001"
         value={draft}
-        disabled={recorded !== null}
+        disabled={locked}
         aria-label={`${experiment.run_id} Kaggle 점수`}
         placeholder="0.0000"
         onChange={(event) => {
           setDraft(event.target.value);
           setMessage(null);
         }}
-        style={{ width: 82, padding: '5px 6px', font: `400 11.5px/1 ${font.mono}` }}
+        style={{
+          width: 82,
+          padding: '5px 6px',
+          font: `400 11.5px/1 ${font.mono}`,
+          ...(editable && recorded !== null ? { border: `1px solid ${color.amber}` } : {}),
+        }}
       />
       <button
         type="button"
-        disabled={recorded !== null || invalid || saving}
+        disabled={locked || invalid || saving || unchanged}
         aria-label={`${experiment.run_id} Kaggle 점수 저장`}
         onClick={async () => {
           setSaving(true);
           setMessage(null);
           try {
-            await onSave(experiment.run_id, score);
+            // 고치는 요청에만 덮어쓰기를 붙입니다. 처음 적는 값은 지울 것이 없습니다.
+            await onSave(experiment.run_id, score, recorded !== null);
             setMessage('저장됨');
           } catch (error) {
             setMessage(error instanceof Error ? error.message : '저장 실패');
@@ -116,7 +138,7 @@ function KaggleScoreCell({
         }}
         style={{ padding: '5px 7px', font: `500 11px/1 ${font.sans}` }}
       >
-        {recorded !== null ? '기록됨' : saving ? '저장 중' : '저장'}
+        {locked ? '기록됨' : saving ? '저장 중' : recorded !== null ? '수정' : '저장'}
       </button>
       {message && (
         <span title={message} style={{ color: message === '저장됨' ? color.greenDark : color.red }}>
@@ -181,6 +203,7 @@ export function ExperimentTable({
   onToggle,
   onOpen,
   onKaggleScoreSave,
+  kaggleScoreEditable = false,
   emptyMessage,
   selectLabel = '선택',
 }: {
@@ -188,7 +211,9 @@ export function ExperimentTable({
   selectedIds?: string[];
   onToggle?: (experimentId: string) => void;
   onOpen?: (experiment: ExperimentSummary) => void;
-  onKaggleScoreSave?: (runId: string, score: number) => Promise<void>;
+  onKaggleScoreSave?: (runId: string, score: number, overwrite: boolean) => Promise<void>;
+  /** 이미 기록된 실제 mAP까지 고칠 수 있는지. 부르는 화면이 버튼으로 켭니다. */
+  kaggleScoreEditable?: boolean;
   emptyMessage: string;
   /** 화면마다 고르는 뜻이 달라서 checkbox 이름을 부르는 쪽이 정합니다. */
   selectLabel?: string;
@@ -355,7 +380,11 @@ export function ExperimentTable({
               )}
             </span>
             <span style={{ padding: '9px 12px', font: `400 12px/1.3 ${font.mono}`, color: color.textStrong }}>
-              <KaggleScoreCell experiment={experiment} onSave={onKaggleScoreSave} />
+              <KaggleScoreCell
+                experiment={experiment}
+                onSave={onKaggleScoreSave}
+                editable={kaggleScoreEditable}
+              />
             </span>
             <span style={{ padding: '9px 12px', font: `400 12px/1.3 ${font.mono}`, color: color.textStrong }}>
               {loss(experiment.metrics.best_validation_loss)}

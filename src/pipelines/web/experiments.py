@@ -509,8 +509,15 @@ def compare_registry_experiments(run_ids: list[str]) -> dict[str, Any]:
         raise WebError(f"실험 비교 정보를 읽지 못했습니다({type(error).__name__}).") from error
 
 
-def save_kaggle_score(run_id: str, score: float) -> dict[str, Any]:
-    """생성된 submission을 실제로 제출해 받은 점수를 기록합니다."""
+def save_kaggle_score(
+    run_id: str, score: float, overwrite: bool = False
+) -> dict[str, Any]:
+    """생성된 submission을 실제로 제출해 받은 점수를 기록합니다.
+
+    ``overwrite``는 사람이 화면에서 "실제 mAP 수정"을 켜고 보낸 요청에만 붙습니다.
+    표를 지나가다 누른 저장이 이미 적어 둔 점수를 갈아치우면 안 되므로, 고치겠다는
+    말이 없는 요청은 지금까지처럼 400으로 막고 기존 기록을 그대로 둡니다.
+    """
 
     if not isinstance(run_id, str) or not run_id.strip():
         raise WebValidationError([FieldError("run_id", "실험 이름이 필요합니다.")])
@@ -534,12 +541,22 @@ def save_kaggle_score(run_id: str, score: float) -> dict[str, Any]:
         raise WebValidationError(
             [FieldError("kaggle_score", "submission.csv를 먼저 생성해야 합니다.")]
         )
-    if wanted in kaggle_scores.load_scores():
+    if not overwrite and wanted in kaggle_scores.load_scores():
         raise WebValidationError(
-            [FieldError("kaggle_score", "이미 기록된 실제 점수는 덮어쓸 수 없습니다.")]
+            [
+                FieldError(
+                    "kaggle_score",
+                    "이미 기록된 실제 점수입니다. 고치려면 '실제 mAP 수정'을 켜세요.",
+                )
+            ]
         )
-    if not kaggle_scores.save_score(wanted, score):
+    if not kaggle_scores.save_score(wanted, score, overwrite=overwrite):
         raise WebValidationError(
-            [FieldError("kaggle_score", "이미 기록된 실제 점수는 덮어쓸 수 없습니다.")]
+            [
+                FieldError(
+                    "kaggle_score",
+                    "이미 기록된 실제 점수입니다. 고치려면 '실제 mAP 수정'을 켜세요.",
+                )
+            ]
         )
     return {"run_id": wanted, "kaggle_score": score}

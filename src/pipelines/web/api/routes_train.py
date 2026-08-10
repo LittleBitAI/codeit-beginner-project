@@ -163,13 +163,15 @@ class KaggleScoreRequest(BaseModel):
     """Kaggle에 실제 제출한 뒤 받은 0~1 점수입니다."""
 
     score: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+    # 잘못 적은 점수를 고치는 요청에만 붙습니다. 화면이 수정 버튼을 켜야 True가 옵니다.
+    overwrite: bool = False
 
 
 @router.put("/experiments/{run_id}/kaggle-score")
 def save_kaggle_score(
     run_id: str, payload: KaggleScoreRequest = Body(...)
 ) -> dict[str, Any]:
-    return experiments.save_kaggle_score(run_id, payload.score)
+    return experiments.save_kaggle_score(run_id, payload.score, payload.overwrite)
 
 
 class CompareExperimentsRequest(BaseModel):
