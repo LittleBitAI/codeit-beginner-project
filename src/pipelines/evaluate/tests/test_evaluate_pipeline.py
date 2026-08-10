@@ -797,3 +797,41 @@ def test_summary_has_no_metrics_exclusion_key_when_unset(
     assert "metrics_excluded_category_ids" not in result["summary"]
     metrics = _read_json(repository_root, result["artifacts"]["metrics_uri"])
     assert "metrics_excluded_category_ids" not in metrics
+
+
+def test_metrics_exclusion_applies_before_the_per_image_cap(
+    base_config: dict, repository_root: Path
+):
+    """제외를 상한 뒤에 적용하면 채점될 예측이 상한 밖에서 이미 버려집니다.
+
+    한 이미지에 제외 class의 고득점 예측이 상한 안을 차지하고 채점 대상 예측이 그
+    뒤로 밀려 있으면, 상한을 먼저 적용한 뒤 제외하는 순서에서는 그 예측이 사라집니다.
+    제출 CSV는 제외를 상한보다 먼저 적용하므로(`006`) 로컬 지표가 대회가 실제로
+    채점하는 목록과 달라집니다.
+    """
+
+    # img-1의 정답 두 개 중 category 2는 상한 밖으로 밀려 있습니다. 제외 class 1이
+    # 앞자리 세 개를 차지하기 때문입니다.
+    crowded = [
+        {"image_id": "img-1", "category_id": 1, "bbox": [10, 10, 20, 20], "score": 0.99},
+        {"image_id": "img-1", "category_id": 1, "bbox": [11, 11, 20, 20], "score": 0.98},
+        {"image_id": "img-1", "category_id": 1, "bbox": [12, 12, 20, 20], "score": 0.97},
+        {"image_id": "img-1", "category_id": 1, "bbox": [13, 13, 20, 20], "score": 0.96},
+        {"image_id": "img-1", "category_id": 2, "bbox": [50, 50, 20, 20], "score": 0.10},
+        {"image_id": "img-2", "category_id": 1, "bbox": [30, 30, 10, 10], "score": 0.80},
+    ]
+    write_json(repository_root / "data/val/crowded.json", crowded)
+    base_config["evaluate"]["predictions_input_uri"] = "data/val/crowded.json"
+    base_config["evaluate"]["metrics_excluded_category_ids"] = [1]
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    metrics = _read_json(repository_root, result["artifacts"]["metrics_uri"])
+    scored = {entry["category_id"] for entry in metrics["per_class"]}
+    # category 2를 채점할 수 있어야 합니다. 상한을 먼저 적용했다면 예측이 없어
+    # per_class에서 사라지거나 AP가 0이 됩니다.
+    assert scored == {2}
+    [entry] = metrics["per_class"]
+    assert entry["prediction_count"] == 1
+    assert entry["ap"] is not None and entry["ap"] > 0.0

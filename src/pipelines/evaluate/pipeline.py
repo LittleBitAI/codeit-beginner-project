@@ -477,14 +477,24 @@ def run(config: dict) -> dict:
         # 채점되지 않는 class를 평균에 넣으면 로컬 mAP와 대회 점수가 서로 다른 집합을
         # 재게 됩니다. 저장되는 예측 원본은 건드리지 않습니다. 나중에 다른 집합으로
         # 다시 채점할 수 있어야 하기 때문입니다.
+        #
+        # 거르는 순서가 중요합니다. 이미지당 상한을 먼저 적용하면 제외 class의 고득점
+        # 예측이 앞자리를 차지한 채 채점 대상 예측을 상한 밖으로 밀어내고, 그 뒤에
+        # 제외해 봐야 밀려난 예측은 이미 없습니다. 제출 CSV가 상한보다 먼저 거르므로
+        # (`006`) 그대로 두면 로컬 지표가 대회가 채점하는 목록과 달라집니다.
         scored_records = _without_categories(
             records, settings.metrics_excluded_category_ids
         )
-        scored_predictions = [
-            prediction
-            for prediction in predictions
-            if prediction["category_id"] not in settings.metrics_excluded_category_ids
-        ]
+        scored_predictions = (
+            predictions
+            if not settings.metrics_excluded_category_ids
+            else filter_predictions(
+                raw_predictions,
+                score_threshold=settings.score_threshold,
+                max_detections_per_image=settings.max_detections_per_image,
+                excluded_category_ids=settings.metrics_excluded_category_ids,
+            )
+        )
         report = evaluate_detections(
             scored_records,
             scored_predictions,
