@@ -1536,3 +1536,64 @@ def test_pass_through_still_works_when_preparation_is_not_requested():
     assert result["artifacts"] == artifacts
     assert result["summary"] == {"pipeline": "data", "mode": "integration"}
     assert not [uri for uri in stored if "/processed/" in uri]
+
+
+def real_image_objects() -> dict[str, Any]:
+    """train image까지 진짜 픽셀을 담은 원본입니다.
+
+    기본 fixture의 train image는 자리표시자라 열 수 없습니다. 유사도 측정은 이미지를
+    실제로 열어야 하므로 여기서만 진짜 bytes를 넣습니다. 모든 이미지가 같은 흰색이라
+    validation crop은 train crop과 구분되지 않습니다.
+    """
+
+    objects = raw_objects()
+    for uri in list(objects):
+        if "/train_images/" in uri:
+            objects[uri] = image_bytes(100, 100)
+    return objects
+
+
+def test_validation_similarity_is_absent_unless_asked(monkeypatch: pytest.MonkeyPatch):
+    """기본값은 꺼짐입니다. 켜지 않은 실행의 summary 모양은 그대로여야 합니다."""
+
+    result, stored = prepare(prepare_config("8:2"))
+
+    summary = artifact_document(stored, result, "dataset_summary_uri")
+    assert "validation_similarity" not in summary["split"]
+
+
+def test_measuring_similarity_does_not_open_train_images_when_off():
+    """켜지 않으면 train image를 한 장도 열지 않아야 합니다.
+
+    전처리가 갑자기 dataset 전체를 내려받으면 준비 시간이 통째로 달라집니다.
+    """
+
+    storage, _ = make_fake_s3_storage(raw_objects())
+
+    run_with_fake_storage(storage, prepare_config("8:2"))
+
+    opened = [
+        call.args[0]
+        for call in storage.download_file.call_args_list
+        if "/train_images/" in str(call.args[0])
+    ]
+    assert opened == []
+
+
+def test_similarity_summary_reports_that_validation_is_indistinguishable():
+    """켜면 validation이 train과 얼마나 비슷한지 summary에 남습니다.
+
+    이 fixture는 모든 이미지가 같은 흰색이라 구분될 수 없습니다. 그 사실이 숫자로
+    나와야 이 dataset의 검증 점수를 믿어도 되는지 나중에 알 수 있습니다.
+    """
+
+    result, stored = prepare(
+        prepare_config("8:2", measure_validation_similarity=True), real_image_objects()
+    )
+
+    assert result["status"] == "ok", result["message"]
+    summary = artifact_document(stored, result, "dataset_summary_uri")
+    similarity = summary["split"]["validation_similarity"]
+    assert similarity["measured_crops"] > 0
+    assert similarity["near_duplicate_ratio_3"] == 1.0
+    assert similarity["median_distance"] == 0.0
