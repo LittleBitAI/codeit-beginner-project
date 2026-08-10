@@ -10,6 +10,7 @@ import type { ExperimentSummary } from '../api/types';
 
 export interface Completion {
   evaluated: boolean;
+  submission_generated: boolean;
   submitted: boolean;
   submission_checked: boolean;
   submission_rows: number | null;
@@ -17,10 +18,19 @@ export interface Completion {
 
 export function completionOf(experiment: ExperimentSummary): Completion {
   const recorded = experiment.completion;
-  if (recorded) return recorded;
+  if (recorded) {
+    return {
+      evaluated: recorded.evaluated,
+      submission_generated: recorded.submission_generated ?? false,
+      submitted: recorded.submitted,
+      submission_checked: recorded.submission_checked,
+      submission_rows: recorded.submission_rows,
+    };
+  }
   // 옛 응답에도 지표는 있습니다. 평가 여부는 그것으로 알 수 있고, 제출은 알 수 없습니다.
   return {
     evaluated: experiment.metrics.map !== null,
+    submission_generated: false,
     submitted: false,
     submission_checked: false,
     submission_rows: null,

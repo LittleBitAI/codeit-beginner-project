@@ -8,9 +8,11 @@ import할 수 없으므로 검증 규칙은 여기에 복제하고, 이어서 �
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 import pytest
 
+from src.pipelines.web import train_config
 from src.pipelines.web.errors import TeamSyncAuthError, WebValidationError
 from src.pipelines.web.train_config import (
     build_resume_config,
@@ -183,6 +185,25 @@ def test_resume_config_keeps_the_whole_plan_and_takes_a_new_name():
     assert resumed["inputs"] == _runtime_config("local")["inputs"]
 
 
+def test_resume_config_shortens_a_long_original_name_without_losing_the_suffix(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        train_config,
+        "_utc_now",
+        lambda: datetime(2026, 8, 10, 9, 8, 7, 654321, tzinfo=timezone.utc),
+    )
+    source = _runtime_config("local")
+    source["train"]["run_id"] = "a" * 128
+
+    resumed = build_resume_config(source)
+
+    name = resumed["train"]["run_id"]
+    assert len(name) == 128
+    assert name.endswith("-resume-20260810T090807654321Z")
+    assert train_config.RUN_ID_PATTERN.fullmatch(name)
+
+
 def test_resume_config_can_extend_the_plan():
     resumed = build_resume_config(_runtime_config("local"), epochs=80)
 
@@ -241,7 +262,7 @@ def test_resume_route_queues_a_new_run_from_an_interrupted_job(
 
     assert response.status_code == 201, response.text
     body = response.json()
-    assert body["run_id"] != "web-run"
+    assert body["run_id"].startswith("web-run-resume-")
     assert body["resumed_from_job_id"] == record.job_id
 
 

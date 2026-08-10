@@ -259,6 +259,7 @@ def test_experiment_list_exports_every_metric_and_loss(client, monkeypatch):
         "map75": 0.28,
         "precision50": 0.61,
         "recall50": 0.47,
+        "kaggle_score": None,
     }
 
 
@@ -346,7 +347,7 @@ def submitted_summary(run_id: str) -> dict:
 
 
 def test_experiment_list_reports_how_far_each_run_got(client, monkeypatch):
-    """평가와 제출을 마쳤는지는 index summary에 이미 있는 값으로만 판단합니다."""
+    """CSV 생성은 실제 Kaggle 제출 완료로 오해하지 않습니다."""
 
     monkeypatch.setattr(
         experiments,
@@ -359,12 +360,73 @@ def test_experiment_list_reports_how_far_each_run_got(client, monkeypatch):
 
     assert by_run["done"] == {
         "evaluated": True,
-        "submitted": True,
+        "submission_generated": True,
+        "submitted": False,
         "submission_checked": True,
         "submission_rows": 2942,
     }
+    assert by_run["trained-only"]["submission_generated"] is False
     assert by_run["trained-only"]["submitted"] is False
     assert by_run["trained-only"]["submission_rows"] is None
+
+
+def test_kaggle_score_marks_a_generated_submission_as_actually_submitted(
+    client, monkeypatch
+):
+    """직접 입력한 실제 점수만 Kaggle 제출을 확인하는 증거입니다."""
+
+    monkeypatch.setattr(
+        experiments,
+        "list_experiment_summaries",
+        lambda config: [submitted_summary("done")],
+    )
+
+    saved = client.put(
+        "/api/train/experiments/done/kaggle-score", json={"score": 0.8734}
+    )
+    listed = client.get("/api/train/experiments").json()["experiments"][0]
+
+    assert saved.status_code == 200
+    assert saved.json() == {"run_id": "done", "kaggle_score": 0.8734}
+    assert listed["metrics"]["kaggle_score"] == 0.8734
+    assert listed["completion"]["submission_generated"] is True
+    assert listed["completion"]["submitted"] is True
+
+
+def test_kaggle_score_rejects_values_outside_the_metric_range(client, monkeypatch):
+    monkeypatch.setattr(
+        experiments,
+        "list_experiment_summaries",
+        lambda config: [submitted_summary("done")],
+    )
+
+    response = client.put(
+        "/api/train/experiments/done/kaggle-score", json={"score": 1.01}
+    )
+
+    assert response.status_code == 422
+
+
+def test_kaggle_score_does_not_overwrite_an_existing_record(client, monkeypatch):
+    """입력 실수 수정 정책이 생기기 전에는 기존 실제 점수를 보존합니다."""
+
+    monkeypatch.setattr(
+        experiments,
+        "list_experiment_summaries",
+        lambda config: [submitted_summary("done")],
+    )
+
+    first = client.put(
+        "/api/train/experiments/done/kaggle-score", json={"score": 0.8123}
+    )
+    second = client.put(
+        "/api/train/experiments/done/kaggle-score", json={"score": 0.9999}
+    )
+    listed = client.get("/api/train/experiments").json()["experiments"][0]
+
+    assert first.status_code == 200
+    assert second.status_code == 400
+    assert listed["metrics"]["kaggle_score"] == 0.8123
 
 
 def test_experiment_list_says_whether_the_registry_is_shared(client, monkeypatch):

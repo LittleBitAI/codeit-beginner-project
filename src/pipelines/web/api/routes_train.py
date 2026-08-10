@@ -151,6 +151,19 @@ def get_experiment(run_id: str) -> dict[str, Any]:
     return experiments.read_registry_experiment(run_id)
 
 
+class KaggleScoreRequest(BaseModel):
+    """Kaggle에 실제 제출한 뒤 받은 0~1 점수입니다."""
+
+    score: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+
+
+@router.put("/experiments/{run_id}/kaggle-score")
+def save_kaggle_score(
+    run_id: str, payload: KaggleScoreRequest = Body(...)
+) -> dict[str, Any]:
+    return experiments.save_kaggle_score(run_id, payload.score)
+
+
 class CompareExperimentsRequest(BaseModel):
     run_ids: list[str]
 
