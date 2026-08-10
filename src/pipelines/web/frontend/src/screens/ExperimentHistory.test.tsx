@@ -119,7 +119,35 @@ describe('ExperimentHistory', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'done Kaggle 점수 저장' }));
 
-    await waitFor(() => expect(saveKaggleScore).toHaveBeenCalledWith('done', 0.8123));
+    await waitFor(() => expect(saveKaggleScore).toHaveBeenCalledWith('done', 0.8123, false));
+  });
+
+  it('기록된 실제 mAP는 수정 버튼을 켜야 고칠 수 있다', async () => {
+    // 표를 지나가다 누른 저장이 이미 적어 둔 점수를 갈아치우면 안 됩니다.
+    listExperiments.mockResolvedValue(listing([makeExperiment('done', {}, 0.8123)]));
+    show();
+
+    expect(await screen.findByLabelText('done Kaggle 점수')).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: '실제 mAP 수정' }));
+    fireEvent.change(screen.getByLabelText('done Kaggle 점수'), {
+      target: { value: '0.9012' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'done Kaggle 점수 저장' }));
+
+    await waitFor(() => expect(saveKaggleScore).toHaveBeenCalledWith('done', 0.9012, true));
+  });
+
+  it('수정을 끝내면 기록된 실제 mAP가 다시 잠긴다', async () => {
+    listExperiments.mockResolvedValue(listing([makeExperiment('done', {}, 0.8123)]));
+    show();
+
+    fireEvent.click(await screen.findByRole('button', { name: '실제 mAP 수정' }));
+    expect(screen.getByLabelText('done Kaggle 점수')).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: '실제 mAP 수정' }));
+
+    expect(screen.getByLabelText('done Kaggle 점수')).toBeDisabled();
   });
 
   it('자체평가 mAP와 실제 Kaggle 점수를 따로 정렬한다', async () => {

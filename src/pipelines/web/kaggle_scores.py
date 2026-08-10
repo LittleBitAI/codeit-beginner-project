@@ -98,14 +98,19 @@ def load_scores() -> dict[str, float]:
     return scores
 
 
-def save_score(run_id: str, score: float) -> bool:
-    """새 실제 점수를 저장합니다. 이미 있으면 보존하고 ``False``를 반환합니다."""
+def save_score(run_id: str, score: float, *, overwrite: bool = False) -> bool:
+    """새 실제 점수를 저장합니다. 이미 있으면 보존하고 ``False``를 반환합니다.
+
+    ``overwrite=True``는 사람이 화면에서 수정 버튼을 켜고 기존 기록을 고치겠다고
+    밝혔을 때만 옵니다. 손이 미끄러진 저장이 기록을 지우지 못하도록 기본값은
+    ``False``로 두고, 덮어쓸지 말지는 부르는 쪽이 매번 정하게 합니다.
+    """
 
     config, prefix, cache_key = _scope()
     document = {"version": 1, "run_id": run_id, "score": score}
     try:
         create_storage(config).write_json(
-            _document_path(prefix, run_id), document, overwrite=False
+            _document_path(prefix, run_id), document, overwrite=overwrite
         )
     except ObjectAlreadyExistsError:
         return False

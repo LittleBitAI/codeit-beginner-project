@@ -91,10 +91,12 @@ export const api = {
 
   listExperiments: () => request<ExperimentListing>('/api/train/experiments'),
 
-  saveKaggleScore: (runId: string, score: number) =>
+  // overwrite는 사람이 "실제 mAP 수정"을 켜고 고칠 때만 true입니다. 서버는 그 말이
+  // 없는 요청으로는 이미 기록된 점수를 바꾸지 않습니다.
+  saveKaggleScore: (runId: string, score: number, overwrite = false) =>
     request<{ run_id: string; kaggle_score: number }>(
       `/api/train/experiments/${encodeURIComponent(runId)}/kaggle-score`,
-      { method: 'PUT', body: JSON.stringify({ score }) },
+      { method: 'PUT', body: JSON.stringify({ score, overwrite }) },
     ),
 
   // 목록에는 지표 9개 중 5개만 있고 loss 곡선은 없습니다. 상세는 record가 가리키는

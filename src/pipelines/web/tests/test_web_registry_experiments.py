@@ -408,7 +408,7 @@ def test_kaggle_score_rejects_values_outside_the_metric_range(client, monkeypatc
 
 
 def test_kaggle_score_does_not_overwrite_an_existing_record(client, monkeypatch):
-    """입력 실수 수정 정책이 생기기 전에는 기존 실제 점수를 보존합니다."""
+    """수정을 요청하지 않은 저장은 기존 실제 점수를 그대로 둡니다."""
 
     monkeypatch.setattr(
         experiments,
@@ -427,6 +427,29 @@ def test_kaggle_score_does_not_overwrite_an_existing_record(client, monkeypatch)
     assert first.status_code == 200
     assert second.status_code == 400
     assert listed["metrics"]["kaggle_score"] == 0.8123
+
+
+def test_kaggle_score_is_corrected_only_when_the_request_asks_to_overwrite(
+    client, monkeypatch
+):
+    """잘못 적은 점수는 화면에서 수정 버튼을 켠 요청에서만 바뀝니다."""
+
+    monkeypatch.setattr(
+        experiments,
+        "list_experiment_summaries",
+        lambda config: [submitted_summary("done")],
+    )
+
+    client.put("/api/train/experiments/done/kaggle-score", json={"score": 0.8123})
+    corrected = client.put(
+        "/api/train/experiments/done/kaggle-score",
+        json={"score": 0.9012, "overwrite": True},
+    )
+    listed = client.get("/api/train/experiments").json()["experiments"][0]
+
+    assert corrected.status_code == 200
+    assert corrected.json() == {"run_id": "done", "kaggle_score": 0.9012}
+    assert listed["metrics"]["kaggle_score"] == 0.9012
 
 
 def test_experiment_list_says_whether_the_registry_is_shared(client, monkeypatch):
