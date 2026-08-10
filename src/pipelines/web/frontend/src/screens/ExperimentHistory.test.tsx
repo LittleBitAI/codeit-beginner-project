@@ -1,13 +1,17 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ExperimentListing, ExperimentSummary } from '../api/types';
 
 const listExperiments = vi.fn();
+const saveKaggleScore = vi.fn();
 
 vi.mock('../api/client', () => ({
-  api: { listExperiments: () => listExperiments() },
+  api: {
+    listExperiments: () => listExperiments(),
+    saveKaggleScore: (...args: unknown[]) => saveKaggleScore(...args),
+  },
 }));
 
 const { ExperimentHistory } = await import('./ExperimentHistory');
@@ -15,6 +19,7 @@ const { ExperimentHistory } = await import('./ExperimentHistory');
 function makeExperiment(
   runId: string,
   completion: Partial<ExperimentSummary['completion']> = {},
+  kaggleScore: number | null = null,
 ): ExperimentSummary {
   return {
     experiment_id: runId,
@@ -53,10 +58,12 @@ function makeExperiment(
       map75: null,
       precision50: null,
       recall50: null,
+      kaggle_score: kaggleScore,
     },
     completion: {
       evaluated: true,
-      submitted: true,
+      submission_generated: true,
+      submitted: kaggleScore !== null,
       submission_checked: true,
       submission_rows: 2942,
       ...completion,
@@ -79,33 +86,55 @@ function show() {
 describe('ExperimentHistory', () => {
   beforeEach(() => {
     listExperiments.mockReset();
+    saveKaggleScore.mockReset();
+    saveKaggleScore.mockResolvedValue({ run_id: 'done', kaggle_score: 0.8123 });
   });
 
-  it('평가와 제출까지 끝난 실험만 보여 주고 몇 건을 감췄는지 말한다', async () => {
+  it('평가 완료와 실제 제출 완료를 서로 다른 필터로 고른다', async () => {
     listExperiments.mockResolvedValue(
       listing([
-        makeExperiment('done'),
-        makeExperiment('no-submission', { submitted: false }),
+        makeExperiment('submitted', {}, 0.8123),
+        makeExperiment('evaluated-only'),
         makeExperiment('no-evaluation', { evaluated: false, submitted: false }),
       ]),
     );
     show();
 
-    expect(await screen.findByText('done')).toBeInTheDocument();
-    expect(screen.queryByText('no-submission')).not.toBeInTheDocument();
-    // 조용히 빼면 그만큼이 없는 줄 압니다. 항상 몇 건인지 말합니다.
-    expect(screen.getByText('아직 끝나지 않은 2건을 감췄습니다')).toBeInTheDocument();
+    expect(await screen.findByText('submitted')).toBeInTheDocument();
+    expect(screen.getByText('evaluated-only')).toBeInTheDocument();
+    expect(screen.queryByText('no-evaluation')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('Kaggle 제출까지 끝난 실험만 보기'));
+
+    expect(screen.getByText('submitted')).toBeInTheDocument();
+    expect(screen.queryByText('evaluated-only')).not.toBeInTheDocument();
   });
 
-  it('체크를 풀면 아직 끝나지 않은 실험도 보여 준다', async () => {
-    listExperiments.mockResolvedValue(
-      listing([makeExperiment('done'), makeExperiment('no-submission', { submitted: false })]),
-    );
+  it('실험 행에서 Kaggle 점수를 직접 저장한다', async () => {
+    listExperiments.mockResolvedValue(listing([makeExperiment('done')]));
     show();
 
-    fireEvent.click(await screen.findByLabelText('평가와 제출까지 끝난 실험만 보기'));
+    fireEvent.change(await screen.findByLabelText('done Kaggle 점수'), {
+      target: { value: '0.8123' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'done Kaggle 점수 저장' }));
 
-    expect(screen.getByText('no-submission')).toBeInTheDocument();
+    await waitFor(() => expect(saveKaggleScore).toHaveBeenCalledWith('done', 0.8123));
+  });
+
+  it('자체평가 mAP와 실제 Kaggle 점수를 따로 정렬한다', async () => {
+    const selfBest = makeExperiment('self-best', {}, 0.7);
+    selfBest.metrics.map = 0.95;
+    const actualBest = makeExperiment('actual-best', {}, 0.9);
+    actualBest.metrics.map = 0.8;
+    listExperiments.mockResolvedValue(listing([selfBest, actualBest]));
+    show();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'mAP 높은 순(실제 점수)' }));
+
+    const rows = document.querySelectorAll('[data-experiment-row]');
+    expect(rows[0]).toHaveTextContent('actual-best');
+    expect(screen.getByRole('button', { name: 'mAP 높은 순(자체평가)' })).toBeInTheDocument();
   });
 
   it('저장소가 팀 공용이 아니면 팀원 기록이 안 보인다고 알린다', async () => {
@@ -125,7 +154,7 @@ describe('ExperimentHistory', () => {
     show();
 
     // 지표가 있으므로 평가는 끝난 것으로 보고, 제출은 알 수 없으니 아직으로 둡니다.
-    fireEvent.click(await screen.findByLabelText('평가와 제출까지 끝난 실험만 보기'));
+    fireEvent.click(await screen.findByLabelText('평가가 끝난 실험만 보기'));
     expect(screen.getByText('legacy')).toBeInTheDocument();
   });
 

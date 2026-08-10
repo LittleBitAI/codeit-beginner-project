@@ -14,17 +14,27 @@ import { ExperimentTable } from '../components/ExperimentTable';
 import { AlertRow, Panel, ScreenIntro } from '../components/primitives';
 import { color, font } from '../design/tokens';
 import { usePolling } from '../hooks/usePolling';
-import { isComplete } from '../lib/completion';
+import { completionOf } from '../lib/completion';
 
 export function ExperimentHistory() {
   const navigate = useNavigate();
   const listing = usePolling(() => api.listExperiments(), 5000);
-  const [onlyComplete, setOnlyComplete] = useState(true);
+  const [onlyEvaluated, setOnlyEvaluated] = useState(true);
+  const [onlySubmitted, setOnlySubmitted] = useState(false);
 
   const experiments = useMemo(() => listing.data?.experiments ?? [], [listing.data]);
-  const complete = useMemo(() => experiments.filter(isComplete), [experiments]);
-  const shown = onlyComplete ? complete : experiments;
-  const hidden = experiments.length - complete.length;
+  const shown = useMemo(
+    () =>
+      experiments.filter((experiment) => {
+        const completion = completionOf(experiment);
+        return (
+          (!onlyEvaluated || completion.evaluated) &&
+          (!onlySubmitted || completion.submitted)
+        );
+      }),
+    [experiments, onlyEvaluated, onlySubmitted],
+  );
+  const hidden = experiments.length - shown.length;
   const scope = listing.data?.scope;
 
   return (
@@ -33,7 +43,7 @@ export function ExperimentHistory() {
         title="팀원 것까지, 끝까지 마친 실험의 결과를 봅니다"
         terms={[
           { term: '평가', meaning: 'checkpoint로 mAP 같은 지표를 낸 단계입니다' },
-          { term: '제출', meaning: '대회에 낼 submission.csv를 만들고 등록까지 마친 단계입니다' },
+          { term: '제출', meaning: 'Kaggle에 올린 뒤 실제 점수까지 기록한 단계입니다' },
         ]}
       >
         <b>행을 누르면 그 실험의 세팅과 평가 결과 전체가 열립니다.</b> 학습 개요와 달리 이
@@ -67,31 +77,43 @@ export function ExperimentHistory() {
         }
         bodyStyle={{ padding: 0 }}
       >
-        <label
+        <div
           style={{
             display: 'flex',
-            gap: 8,
+            gap: 16,
             alignItems: 'center',
             padding: '10px 13px',
             borderBottom: `1px solid ${color.borderInner}`,
-            cursor: 'pointer',
+            flexWrap: 'wrap',
           }}
         >
-          <input
-            type="checkbox"
-            checked={onlyComplete}
-            onChange={() => setOnlyComplete((value) => !value)}
-          />
-          <span style={{ font: `500 12px/1.4 ${font.sans}`, color: color.textStrong }}>
-            평가와 제출까지 끝난 실험만 보기
-          </span>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={onlyEvaluated}
+              onChange={() => setOnlyEvaluated((value) => !value)}
+            />
+            <span style={{ font: `500 12px/1.4 ${font.sans}`, color: color.textStrong }}>
+              평가가 끝난 실험만 보기
+            </span>
+          </label>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={onlySubmitted}
+              onChange={() => setOnlySubmitted((value) => !value)}
+            />
+            <span style={{ font: `500 12px/1.4 ${font.sans}`, color: color.textStrong }}>
+              Kaggle 제출까지 끝난 실험만 보기
+            </span>
+          </label>
           {/* 감춘 것이 있으면 몇 건인지 항상 말해 줍니다. 조용히 빼면 그만큼이 없는 줄 압니다. */}
-          {onlyComplete && hidden > 0 && (
+          {(onlyEvaluated || onlySubmitted) && hidden > 0 && (
             <span style={{ font: `400 11.5px/1.4 ${font.sans}`, color: color.textMuted }}>
-              아직 끝나지 않은 {hidden}건을 감췄습니다
+              조건에 맞지 않는 {hidden}건을 감췄습니다
             </span>
           )}
-        </label>
+        </div>
 
         {listing.loading && experiments.length === 0 ? (
           <div style={{ padding: 20, font: `400 13px/1.6 ${font.sans}`, color: color.textBody }}>
@@ -101,9 +123,13 @@ export function ExperimentHistory() {
           <ExperimentTable
             experiments={shown}
             onOpen={(experiment) => navigate(`/history/${encodeURIComponent(experiment.run_id)}`)}
+            onKaggleScoreSave={async (runId, score) => {
+              await api.saveKaggleScore(runId, score);
+              listing.refresh();
+            }}
             emptyMessage={
-              onlyComplete && experiments.length > 0
-                ? '평가와 제출까지 끝난 실험이 아직 없습니다. 위 체크를 풀면 나머지가 보입니다.'
+              (onlyEvaluated || onlySubmitted) && experiments.length > 0
+                ? '선택한 완료 조건에 맞는 실험이 없습니다. 위 체크를 풀면 나머지가 보입니다.'
                 : '등록된 실험이 아직 없습니다. 학습을 마치고 평가를 돌리면 여기에 쌓입니다.'
             }
           />

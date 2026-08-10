@@ -73,6 +73,7 @@ __all__ = [
 
 # train/pipeline.py:32 와 동일
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_RUN_ID_MAX_LENGTH = 128
 
 # train/pipeline.py:26-31 과 동일한 4개. 화면 표시 순서를 위해 tuple로 둡니다.
 DATA_ARTIFACT_KEYS = (
@@ -235,10 +236,20 @@ def generate_run_id() -> str:
     """시각으로만 만드는 run_id입니다. 설정을 모를 때 쓰는 마지막 수단입니다.
 
     train의 기본값은 ``train-`` 접두사를 쓰므로, CLI로 돌린 실행과 구분됩니다.
-    이어서 학습도 이 이름을 씁니다(아래 ``build_resume_config`` 설명 참고).
     """
 
     return _utc_now().strftime("web-%Y%m%dT%H%M%S%fZ")
+
+
+def _generate_resume_run_id(original_run_id: str) -> str:
+    """원래 실행을 알아볼 수 있으면서 충돌하지 않는 이어서 학습 이름을 만듭니다."""
+
+    if not RUN_ID_PATTERN.fullmatch(original_run_id):
+        return generate_run_id()
+    suffix = _utc_now().strftime("-resume-%Y%m%dT%H%M%S%fZ")
+    base = original_run_id[: _RUN_ID_MAX_LENGTH - len(suffix)]
+    candidate = f"{base}{suffix}"
+    return candidate if RUN_ID_PATTERN.fullmatch(candidate) else generate_run_id()
 
 
 # 표에서 한눈에 읽히도록 줄인 이름입니다. train에 모델이 늘면 아래 fallback이 받습니다.
@@ -1020,7 +1031,7 @@ def build_resume_config(
     resumed = copy.deepcopy(config)
     train = resumed["train"]
     train["resume_from"] = resume_checkpoint_uri(config)
-    new_run_id = run_id or generate_run_id()
+    new_run_id = run_id or _generate_resume_run_id(str(train.get("run_id") or ""))
     if not isinstance(new_run_id, str) or not RUN_ID_PATTERN.fullmatch(new_run_id):
         raise WebValidationError(
             [FieldError("train.run_id", "실행 이름에 쓸 수 없는 글자가 있습니다.")]

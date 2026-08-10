@@ -15,7 +15,7 @@ from src.common import (
     read_experiment_record,
 )
 
-from . import experiment_detail, train_capabilities
+from . import experiment_detail, kaggle_scores, train_capabilities
 from .datasets import storage_environment
 from .errors import FieldError, JobNotFoundError, WebError, WebValidationError
 from .masking import redact
@@ -29,6 +29,7 @@ __all__ = [
     "read_registry_experiment",
     "registry_config",
     "registry_scope",
+    "save_kaggle_score",
 ]
 
 
@@ -113,13 +114,13 @@ def _dataset_from_artifacts(artifacts: Any) -> dict[str, Any]:
     }
 
 
-def _completion_block(summary: Mapping[str, Any]) -> dict[str, Any]:
-    """학습이 평가와 제출까지 갔는지. index summary에 있는 값만 씁니다.
+def _completion_block(
+    summary: Mapping[str, Any], kaggle_score: float | None
+) -> dict[str, Any]:
+    """평가, CSV 생성, 실제 Kaggle 제출을 서로 다른 사실로 둡니다.
 
-    ``submitted``의 근거는 registry가 기록한 ``artifacts.submission_uri``입니다.
-    제출 파일을 실제로 만들었는지가 사람이 알고 싶은 것이고, 그 값은 원격이든
-    로컬이든 남습니다. ``submission_check``는 registry가 CSV 규격을 확인한 결과라
-    원격 artifact에서는 건너뛴 채로 남으므로, 없다고 제출이 아닌 것은 아닙니다.
+    Registry의 ``submission_uri``는 CSV를 만들었다는 증거일 뿐 Kaggle에 올렸다는
+    증거가 아닙니다. 사람이 실제 점수를 입력했을 때만 ``submitted``가 됩니다.
     """
 
     metrics = summary.get("metrics")
@@ -130,7 +131,8 @@ def _completion_block(summary: Mapping[str, Any]) -> dict[str, Any]:
     check_values = check if isinstance(check, Mapping) else {}
     return {
         "evaluated": _number(metric_values.get("mAP")) is not None,
-        "submitted": _text(artifact_values.get("submission_uri")) is not None,
+        "submission_generated": _text(artifact_values.get("submission_uri")) is not None,
+        "submitted": kaggle_score is not None,
         "submission_checked": check_values.get("checked") is True,
         "submission_rows": _integer(check_values.get("row_count")),
     }
@@ -264,7 +266,9 @@ def _index_blocks(summary: Mapping[str, Any]) -> dict[str, Any]:
     return _training_blocks(settings, fallback_seed)
 
 
-def _metrics_block(summary: Mapping[str, Any]) -> dict[str, Any]:
+def _metrics_block(
+    summary: Mapping[str, Any], kaggle_score: float | None
+) -> dict[str, Any]:
     """Index summary 하나에서 화면이 비교할 결과값을 모두 꺼냅니다.
 
     지표는 registry가 evaluate의 이름(``mAP``, ``mAP50``, ...)으로 적어 두므로 화면이
@@ -288,10 +292,13 @@ def _metrics_block(summary: Mapping[str, Any]) -> dict[str, Any]:
         "map75": _number(metric_values.get("mAP75")),
         "precision50": _number(metric_values.get("precision50")),
         "recall50": _number(metric_values.get("recall50")),
+        "kaggle_score": kaggle_score,
     }
 
 
-def _summary_base(summary: Mapping[str, Any]) -> dict[str, Any]:
+def _summary_base(
+    summary: Mapping[str, Any], kaggle_score: float | None = None
+) -> dict[str, Any]:
     run_id = _text(summary.get("run_id")) or ""
     created_at = _text(summary.get("created_at")) or ""
     blocks = _index_blocks(summary)
@@ -308,8 +315,8 @@ def _summary_base(summary: Mapping[str, Any]) -> dict[str, Any]:
         "model": blocks["model"],
         "optimizer": blocks["optimizer"],
         "training": blocks["training"],
-        "metrics": _metrics_block(summary),
-        "completion": _completion_block(summary),
+        "metrics": _metrics_block(summary, kaggle_score),
+        "completion": _completion_block(summary, kaggle_score),
     }
 
 
@@ -321,8 +328,12 @@ def _record_settings(record: Mapping[str, Any]) -> Mapping[str, Any]:
     return train
 
 
-def _enrich_summary(summary: Mapping[str, Any], record: Mapping[str, Any]) -> dict[str, Any]:
-    value = _summary_base(summary)
+def _enrich_summary(
+    summary: Mapping[str, Any],
+    record: Mapping[str, Any],
+    kaggle_score: float | None = None,
+) -> dict[str, Any]:
+    value = _summary_base(summary, kaggle_score)
     # record가 진실이므로 목록이 index로 채운 세 블록을 record 값으로 다시 계산합니다.
     value.update(
         _training_blocks(_record_settings(record), _integer(summary.get("seed")))
@@ -355,9 +366,13 @@ def registry_scope() -> dict[str, Any]:
 
 def list_registry_experiments() -> list[dict[str, Any]]:
     try:
+        summaries = list_experiment_summaries(registry_config())
+        if not summaries:
+            return []
+        scores = kaggle_scores.load_scores()
         return [
-            _sanitized(_summary_base(item))
-            for item in list_experiment_summaries(registry_config())
+            _sanitized(_summary_base(item, scores.get(str(item.get("run_id", "")))))
+            for item in summaries
         ]
     except ExperimentRegistryError as error:
         raise WebError(f"실험 목록을 읽지 못했습니다({type(error).__name__}).") from error
@@ -437,8 +452,9 @@ def read_registry_experiment(run_id: str) -> dict[str, Any]:
         raise WebError(f"실험 기록을 읽지 못했습니다({type(error).__name__}).") from error
 
     storage_config = config["storage"]
+    score = kaggle_scores.load_scores().get(wanted)
     return {
-        "experiment": _enrich_summary(summary, record),
+        "experiment": _enrich_summary(summary, record, score),
         "evaluation": _sanitized(
             experiment_detail.evaluation_block(
                 _artifact_uri(record, "evaluate", "metrics_uri"), storage_config
@@ -483,10 +499,47 @@ def compare_registry_experiments(run_ids: list[str]) -> dict[str, Any]:
             if isinstance(uri, str) and uri.strip():
                 targets.append((run_id, uri))
 
+        scores = kaggle_scores.load_scores()
         resolved = [
-            _enrich_summary(summaries[run_id], record)
+            _enrich_summary(summaries[run_id], record, scores.get(run_id))
             for run_id, record in _read_records(targets, config)
         ]
         return {"experiments": resolved, "missing": missing}
     except ExperimentRegistryError as error:
         raise WebError(f"실험 비교 정보를 읽지 못했습니다({type(error).__name__}).") from error
+
+
+def save_kaggle_score(run_id: str, score: float) -> dict[str, Any]:
+    """생성된 submission을 실제로 제출해 받은 점수를 기록합니다."""
+
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise WebValidationError([FieldError("run_id", "실험 이름이 필요합니다.")])
+    wanted = run_id.strip()
+    try:
+        summary = next(
+            (
+                item
+                for item in list_experiment_summaries(registry_config())
+                if item.get("run_id") == wanted
+            ),
+            None,
+        )
+    except ExperimentRegistryError as error:
+        raise WebError(f"실험 목록을 읽지 못했습니다({type(error).__name__}).") from error
+    if summary is None:
+        raise JobNotFoundError(f"'{wanted}' 실험을 registry에서 찾을 수 없습니다.")
+    artifacts = summary.get("artifacts")
+    submission_uri = artifacts.get("submission_uri") if isinstance(artifacts, Mapping) else None
+    if _text(submission_uri) is None:
+        raise WebValidationError(
+            [FieldError("kaggle_score", "submission.csv를 먼저 생성해야 합니다.")]
+        )
+    if wanted in kaggle_scores.load_scores():
+        raise WebValidationError(
+            [FieldError("kaggle_score", "이미 기록된 실제 점수는 덮어쓸 수 없습니다.")]
+        )
+    if not kaggle_scores.save_score(wanted, score):
+        raise WebValidationError(
+            [FieldError("kaggle_score", "이미 기록된 실제 점수는 덮어쓸 수 없습니다.")]
+        )
+    return {"run_id": wanted, "kaggle_score": score}

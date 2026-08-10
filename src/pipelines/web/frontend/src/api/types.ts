@@ -247,6 +247,8 @@ export interface ExperimentSummary {
     map75: number | null;
     precision50: number | null;
     recall50: number | null;
+    /** 사람이 Kaggle에 제출한 뒤 직접 기록한 실제 점수입니다. */
+    kaggle_score?: number | null;
   };
   /**
    * 학습이 평가와 제출까지 갔는지. registry index에 있는 값으로만 판단합니다.
@@ -256,6 +258,7 @@ export interface ExperimentSummary {
    */
   completion?: {
     evaluated: boolean;
+    submission_generated?: boolean;
     submitted: boolean;
     submission_checked: boolean;
     submission_rows: number | null;

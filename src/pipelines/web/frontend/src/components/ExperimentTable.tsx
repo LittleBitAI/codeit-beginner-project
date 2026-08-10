@@ -6,7 +6,7 @@
  * 있어 세로로 훑을 수 없었습니다. 값을 견주는 화면이라면 값이 한 줄에 서야 합니다.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import type { ExperimentSummary } from '../api/types';
 import { color, font } from '../design/tokens';
@@ -14,14 +14,19 @@ import { completionOf } from '../lib/completion';
 import { loss, startedAt } from '../lib/format';
 import { EmptyState } from './primitives';
 
-const HEADINGS = ['실행 이름', '단계', 'mAP', 'VAL LOSS', '등록'];
-const BODY_COLUMNS = '1.7fr 122px .8fr .8fr .9fr';
+const HEADINGS = ['실행 이름', '단계', '자체 mAP', '실제 mAP', 'VAL LOSS', '등록'];
+const BODY_COLUMNS = '1.6fr 122px .72fr 170px .72fr .82fr';
 
 /** 표를 세울 기준. 값이 없는 실험은 어느 기준에서도 뒤로 보냅니다. */
-export type SortKey = 'map' | 'best_validation_loss' | 'created_at';
+export type SortKey = 'map' | 'kaggle_score' | 'best_validation_loss' | 'created_at';
 
 const SORTS: { key: SortKey; label: string; pick: (item: ExperimentSummary) => number | null }[] = [
-  { key: 'map', label: 'mAP 높은 순', pick: (item) => item.metrics.map },
+  { key: 'map', label: 'mAP 높은 순(자체평가)', pick: (item) => item.metrics.map },
+  {
+    key: 'kaggle_score',
+    label: 'mAP 높은 순(실제 점수)',
+    pick: (item) => item.metrics.kaggle_score ?? null,
+  },
   {
     key: 'best_validation_loss',
     label: 'VAL LOSS 낮은 순',
@@ -55,6 +60,71 @@ function bestMap(experiments: ExperimentSummary[]): number | null {
 
 function metric(value: number | null): string {
   return value === null ? '-' : value.toFixed(4);
+}
+
+function KaggleScoreCell({
+  experiment,
+  onSave,
+}: {
+  experiment: ExperimentSummary;
+  onSave?: (runId: string, score: number) => Promise<void>;
+}) {
+  const recorded = experiment.metrics.kaggle_score ?? null;
+  const [draft, setDraft] = useState(recorded === null ? '' : String(recorded));
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  useEffect(() => setDraft(recorded === null ? '' : String(recorded)), [recorded]);
+  if (!onSave) return <span>{metric(recorded)}</span>;
+  const score = Number(draft);
+  const invalid = draft.trim() === '' || !Number.isFinite(score) || score < 0 || score > 1;
+  return (
+    <span
+      style={{ display: 'flex', alignItems: 'center', gap: 5 }}
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      <input
+        type="number"
+        min="0"
+        max="1"
+        step="0.0001"
+        value={draft}
+        disabled={recorded !== null}
+        aria-label={`${experiment.run_id} Kaggle 점수`}
+        placeholder="0.0000"
+        onChange={(event) => {
+          setDraft(event.target.value);
+          setMessage(null);
+        }}
+        style={{ width: 82, padding: '5px 6px', font: `400 11.5px/1 ${font.mono}` }}
+      />
+      <button
+        type="button"
+        disabled={recorded !== null || invalid || saving}
+        aria-label={`${experiment.run_id} Kaggle 점수 저장`}
+        onClick={async () => {
+          setSaving(true);
+          setMessage(null);
+          try {
+            await onSave(experiment.run_id, score);
+            setMessage('저장됨');
+          } catch (error) {
+            setMessage(error instanceof Error ? error.message : '저장 실패');
+          } finally {
+            setSaving(false);
+          }
+        }}
+        style={{ padding: '5px 7px', font: `500 11px/1 ${font.sans}` }}
+      >
+        {recorded !== null ? '기록됨' : saving ? '저장 중' : '저장'}
+      </button>
+      {message && (
+        <span title={message} style={{ color: message === '저장됨' ? color.greenDark : color.red }}>
+          {message === '저장됨' ? '✓' : '!'}
+        </span>
+      )}
+    </span>
+  );
 }
 
 /** 평가와 제출을 마쳤는지. 색만으로 뜻을 전하지 않도록 글자를 함께 둡니다. */
@@ -110,6 +180,7 @@ export function ExperimentTable({
   selectedIds = [],
   onToggle,
   onOpen,
+  onKaggleScoreSave,
   emptyMessage,
   selectLabel = '선택',
 }: {
@@ -117,6 +188,7 @@ export function ExperimentTable({
   selectedIds?: string[];
   onToggle?: (experimentId: string) => void;
   onOpen?: (experiment: ExperimentSummary) => void;
+  onKaggleScoreSave?: (runId: string, score: number) => Promise<void>;
   emptyMessage: string;
   /** 화면마다 고르는 뜻이 달라서 checkbox 이름을 부르는 쪽이 정합니다. */
   selectLabel?: string;
@@ -207,6 +279,7 @@ export function ExperimentTable({
             }}
             // 선택된 행은 자기 배경을 쓰고, 나머지만 global.css의 hover가 칠합니다.
             {...(checked ? {} : { 'data-row-hover': '' })}
+            data-experiment-row={experiment.run_id}
             {...openProps}
           >
             {selectable && (
@@ -280,6 +353,9 @@ export function ExperimentTable({
                   최고
                 </span>
               )}
+            </span>
+            <span style={{ padding: '9px 12px', font: `400 12px/1.3 ${font.mono}`, color: color.textStrong }}>
+              <KaggleScoreCell experiment={experiment} onSave={onKaggleScoreSave} />
             </span>
             <span style={{ padding: '9px 12px', font: `400 12px/1.3 ${font.mono}`, color: color.textStrong }}>
               {loss(experiment.metrics.best_validation_loss)}
