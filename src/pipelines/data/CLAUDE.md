@@ -39,7 +39,7 @@ Because a group moves whole, the ratio comes last: leakage, coverage, class dist
 
 `data.split_method` is `"group"` (default), `"image"` (the previous image-level split), or `"group-angle"`, part of the directory name (`…-group/`, `…-8020/`, `…-group-angle/`). `split.method` and `split.grouping` say which data a model trained on (`schema_version` `1.2`).
 
-`"group-angle"` also gives validation one camera angle only (`data.validation_angle`, default `90`, the token third from the end) and takes that angle out of train entirely. Disjoint combinations are not enough: 79% of validation crops were indistinguishable from a train crop, 0.6% once the angle is held out. It costs a third of the training images, so such a model compares runs rather than being submitted. `split.angle_holdout` records the angle and dropped count; a category left with no training example, including one vanishing from both splits at once, stops the run.
+`"group-angle"` also gives validation one camera angle only (`data.validation_angle`, default `90`, the token third from the end) and takes that angle out of train entirely. Disjoint combinations are not enough: 79% of validation crops were indistinguishable from a train crop, 0.6% once the angle is held out. It costs a third of the training images, so such a model compares runs rather than being submitted. `split.angle_holdout` records the angle and dropped count; a category left with no training example, including one vanishing from both splits, stops the run.
 
 With `overwrite == false`, an exact legacy set of four artifacts is the backfill case: only the missing test manifest is written. Any other partial set fails; an existing file is never replaced.
 
