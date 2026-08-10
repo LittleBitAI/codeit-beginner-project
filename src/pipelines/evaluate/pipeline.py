@@ -61,6 +61,9 @@ class Settings:
     max_detections_per_image: int | None
     # 제출 CSV에서 뺄 category id입니다. 대회에 없는 보조 class를 여기에 넣습니다.
     submission_excluded_category_ids: frozenset[int]
+    # validation 지표에서 뺄 category id입니다. 채점되지 않는 class를 평균에 넣으면
+    # 로컬 mAP와 대회 점수가 서로 다른 class 집합을 재게 됩니다.
+    metrics_excluded_category_ids: frozenset[int]
     device: str
     seed: int
     overwrite: bool
@@ -133,27 +136,54 @@ def _resolve_iou_thresholds(value: Any, *, competition: bool) -> tuple[float, ..
     return thresholds
 
 
-def _resolve_excluded_category_ids(value: Any) -> frozenset[int]:
-    """제출 CSV에서 뺄 category id 목록을 읽습니다.
+def _resolve_excluded_category_ids(
+    value: Any, *, setting: str = "submission_excluded_category_ids"
+) -> frozenset[int]:
+    """뺄 category id 목록을 읽습니다.
 
-    기본값은 빈 집합이라 설정하지 않으면 동작이 달라지지 않습니다.
+    기본값은 빈 집합이라 설정하지 않으면 동작이 달라지지 않습니다. 제출과 지표가
+    같은 형식을 쓰므로 검사도 하나로 둡니다. 어느 설정이 틀렸는지 알려면 이름이
+    메시지에 들어가야 합니다.
     """
 
     if value is None:
         return frozenset()
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise ConfigurationError(
-            "evaluate.submission_excluded_category_ids는 category id의 list여야 합니다."
+            f"evaluate.{setting}는 category id의 list여야 합니다."
         )
     identifiers = []
     for item in value:
         if not isinstance(item, int) or isinstance(item, bool) or item < 0:
             raise ConfigurationError(
-                "evaluate.submission_excluded_category_ids의 값은 0 이상의 정수여야 "
-                "합니다."
+                f"evaluate.{setting}의 값은 0 이상의 정수여야 합니다."
             )
         identifiers.append(item)
     return frozenset(identifiers)
+
+
+def _without_categories(
+    records: Sequence[Mapping[str, Any]], excluded: frozenset[int]
+) -> list[Mapping[str, Any]]:
+    """정답에서 특정 category의 annotation만 뺍니다.
+
+    이미지는 남깁니다. 그 이미지에 다른 class의 정답이 있을 수 있고, 이미지를 지우면
+    거기서 나온 예측이 갈 곳을 잃어 false positive로 둔갑합니다.
+    """
+
+    if not excluded:
+        return list(records)
+    return [
+        {
+            **record,
+            "annotations": [
+                annotation
+                for annotation in record["annotations"]
+                if annotation["category_id"] not in excluded
+            ],
+        }
+        for record in records
+    ]
 
 
 def _resolve_max_detections(value: Any) -> int | None:
@@ -250,6 +280,10 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
     submission_excluded_category_ids = _resolve_excluded_category_ids(
         settings.get("submission_excluded_category_ids")
     )
+    metrics_excluded_category_ids = _resolve_excluded_category_ids(
+        settings.get("metrics_excluded_category_ids"),
+        setting="metrics_excluded_category_ids",
+    )
 
     seed = settings.get("seed", config.get("seed", DEFAULT_SEED))
     if not isinstance(seed, int) or isinstance(seed, bool):
@@ -303,6 +337,7 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         score_threshold=float(score_threshold),
         max_detections_per_image=_resolve_max_detections(settings.get("max_detections_per_image")),
         submission_excluded_category_ids=submission_excluded_category_ids,
+        metrics_excluded_category_ids=metrics_excluded_category_ids,
         device=device,
         seed=seed,
         overwrite=overwrite,
@@ -439,13 +474,42 @@ def run(config: dict) -> dict:
             score_threshold=settings.score_threshold,
             max_detections_per_image=settings.max_detections_per_image,
         )
+        # 채점되지 않는 class를 평균에 넣으면 로컬 mAP와 대회 점수가 서로 다른 집합을
+        # 재게 됩니다. 저장되는 예측 원본은 건드리지 않습니다. 나중에 다른 집합으로
+        # 다시 채점할 수 있어야 하기 때문입니다.
+        #
+        # 거르는 순서가 중요합니다. 이미지당 상한을 먼저 적용하면 제외 class의 고득점
+        # 예측이 앞자리를 차지한 채 채점 대상 예측을 상한 밖으로 밀어내고, 그 뒤에
+        # 제외해 봐야 밀려난 예측은 이미 없습니다. 제출 CSV가 상한보다 먼저 거르므로
+        # (`006`) 그대로 두면 로컬 지표가 대회가 채점하는 목록과 달라집니다.
+        scored_records = _without_categories(
+            records, settings.metrics_excluded_category_ids
+        )
+        scored_predictions = (
+            predictions
+            if not settings.metrics_excluded_category_ids
+            else filter_predictions(
+                raw_predictions,
+                score_threshold=settings.score_threshold,
+                max_detections_per_image=settings.max_detections_per_image,
+                excluded_category_ids=settings.metrics_excluded_category_ids,
+            )
+        )
         report = evaluate_detections(
-            records,
-            predictions,
+            scored_records,
+            scored_predictions,
             iou_thresholds=settings.iou_thresholds,
-            class_names=class_map,
+            class_names={
+                category_id: name
+                for category_id, name in class_map.items()
+                if category_id not in settings.metrics_excluded_category_ids
+            },
             max_detections_per_image=settings.max_detections_per_image,
         )
+        if settings.metrics_excluded_category_ids:
+            report["metrics_excluded_category_ids"] = sorted(
+                settings.metrics_excluded_category_ids
+            )
         progress.metrics_computed(report["metrics"])
 
         submission_text: str | None = None
@@ -558,6 +622,15 @@ def run(config: dict) -> dict:
                     )
                 }
                 if settings.submission_excluded_category_ids
+                else {}
+            ),
+            **(
+                {
+                    "metrics_excluded_category_ids": sorted(
+                        settings.metrics_excluded_category_ids
+                    )
+                }
+                if settings.metrics_excluded_category_ids
                 else {}
             ),
         },
