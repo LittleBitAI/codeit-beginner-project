@@ -147,6 +147,19 @@ def _png_with_corrupt_idat() -> bytes:
     raise AssertionError("PNG fixture has no IDAT chunk")
 
 
+def _png_without_idat() -> bytes:
+    stream = io.BytesIO()
+    Image.new("RGB", (20, 20), color="red").save(stream, format="PNG")
+    payload = stream.getvalue()
+    position = 8
+    while position < len(payload):
+        length = struct.unpack(">I", payload[position : position + 4])[0]
+        if payload[position + 4 : position + 8] == b"IDAT":
+            return payload[:position] + payload[position + length + 12 :]
+        position += length + 12
+    raise AssertionError("PNG fixture has no IDAT chunk")
+
+
 def _truncated_jpeg() -> bytes:
     stream = io.BytesIO()
     Image.new("RGB", (100, 100), color="blue").save(stream, format="JPEG")
@@ -176,8 +189,8 @@ def test_repeated_corrupt_s3_download_never_publishes_a_cache_entry(tmp_path):
 
 @pytest.mark.parametrize(
     "corrupt_payload",
-    (_png_with_corrupt_idat(), _truncated_jpeg()),
-    ids=("png-syntax-error", "jpeg-load-error"),
+    (_png_with_corrupt_idat(), _png_without_idat(), _truncated_jpeg()),
+    ids=("png-syntax-error", "png-index-error", "jpeg-load-error"),
 )
 def test_shared_archive_image_that_cannot_be_fully_decoded_is_downloaded_again(
     tmp_path, corrupt_payload

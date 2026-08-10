@@ -190,6 +190,7 @@ def _is_valid_image(path: Path) -> bool:
         SyntaxError,
         ValueError,
         EOFError,
+        IndexError,
         Image.DecompressionBombError,
         Image.DecompressionBombWarning,
     ):
