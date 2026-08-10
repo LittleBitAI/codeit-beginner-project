@@ -176,12 +176,23 @@ def _directory_size(path: Path) -> int:
 
 
 def _is_valid_image(path: Path) -> bool:
-    """Cache 파일을 실제 이미지로 끝까지 읽을 수 있는지 확인합니다."""
+    """형식 검사와 pixel 전체 decode가 모두 성공한 image인지 확인합니다."""
 
     try:
         with Image.open(path) as image:
             image.verify()
-    except (OSError, ValueError):
+        # verify()는 JPEG pixel을 decode하지 않습니다. 같은 파일을 다시 열어야
+        # 끝이 잘린 JPEG처럼 verify만 통과하는 손상도 잡을 수 있습니다.
+        with Image.open(path) as image:
+            image.load()
+    except (
+        OSError,
+        SyntaxError,
+        ValueError,
+        EOFError,
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+    ):
         return False
     return True
 
@@ -429,6 +440,7 @@ class ImageCacheSession:
         suffix = Path(urlsplit(location).path).suffix or ".image"
         objects = self.namespace / "objects"
         objects.mkdir(parents=True, exist_ok=True)
+        last_download_was_corrupt = False
         for _ in range(_DOWNLOAD_IDENTITY_ATTEMPTS):
             identity = self._object_identities.get(location)
             if identity is None:
@@ -454,11 +466,13 @@ class ImageCacheSession:
             downloaded = temporary / f"image{suffix}"
             try:
                 storage.download_file(location, downloaded)
-                with Image.open(downloaded) as image:
-                    image.verify()
+                if not _is_valid_image(downloaded):
+                    last_download_was_corrupt = True
+                    continue
                 if identity is not None:
                     downloaded_identity = _s3_object_identity(location, storage)
                     if downloaded_identity != identity:
+                        last_download_was_corrupt = False
                         if downloaded_identity is not None:
                             self._object_identities[location] = downloaded_identity
                         continue
@@ -482,4 +496,6 @@ class ImageCacheSession:
             finally:
                 if temporary.exists():
                     shutil.rmtree(temporary, ignore_errors=True)
+        if last_download_was_corrupt:
+            raise TrainError("S3 image remained corrupt after repeated downloads")
         raise TrainError("S3 image changed repeatedly during cache download")
