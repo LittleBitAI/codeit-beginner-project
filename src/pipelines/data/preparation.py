@@ -36,6 +36,7 @@ from src.common import LocalStorage, Storage, StorageError, create_storage
 from .coco import ConsolidatedDataset, consolidate
 from .errors import DatasetPreparationError
 from .progress import ProgressEmitter
+from .similarity import measure_validation_similarity
 from .split import AngleRule, GroupRule, SplitResult, hold_out_angle, split_images
 from .test_manifest import build_test_manifest
 
@@ -127,7 +128,8 @@ MAX_READ_WORKERS = 16
 # 방식("group"/"image")을 뜻하고, 1.1까지 그 자리에 있던 알고리즘 이름은
 # `split.strategy`로 옮겼습니다. 1.3에서 `split.train_only_categories`가
 # 추가됐습니다. 나머지 key는 그대로입니다.
-SUMMARY_SCHEMA_VERSION = "1.3"
+# 1.4에서 split.validation_similarity가 생겼습니다. 재지 않은 실행에는 없습니다.
+SUMMARY_SCHEMA_VERSION = "1.4"
 CHECKSUM_ALGORITHM = "sha256"
 # hash를 남길 split 산출물입니다. 순서가 요약에 그대로 드러납니다.
 SPLIT_CHECKSUM_KEYS: tuple[tuple[str, str], ...] = (
@@ -151,6 +153,9 @@ class PreparationSettings:
     # `group-angle`일 때만 값이 있습니다. 그 각도는 train에서 통째로 빠집니다.
     angle_rule: AngleRule | None
     validation_angle: str | None
+    # 켜면 이미지를 전부 열어 validation이 train과 얼마나 비슷한지 잽니다. 준비
+    # 시간이 크게 늘어나므로 기본값은 꺼짐입니다.
+    measure_validation_similarity: bool
 
 
 def _data_config(config: Any) -> Mapping[str, Any]:
@@ -310,6 +315,11 @@ def resolve_settings(config: Any) -> PreparationSettings:
     group_rule = _group_rule(split_method)
     angle_rule = _angle_rule(split_method)
     validation_angle = _validation_angle(section, split_method)
+    measure_similarity = section.get("measure_validation_similarity", False)
+    if not isinstance(measure_similarity, bool):
+        raise DatasetPreparationError(
+            "config['data']['measure_validation_similarity']는 true 또는 false여야 합니다."
+        )
     seed = _seed(section)
     raw_prefix = _normalized_prefix(section.get("raw_prefix"), "raw_prefix", DEFAULT_RAW_PREFIX)
     processed_root = _normalized_prefix(
@@ -330,6 +340,7 @@ def resolve_settings(config: Any) -> PreparationSettings:
         processed_prefix=processed_prefix,
         overwrite=_overwrite(section),
         split_method=split_method,
+        measure_validation_similarity=measure_similarity,
         group_rule=group_rule,
         angle_rule=angle_rule,
         validation_angle=validation_angle,
@@ -587,6 +598,7 @@ def _dataset_summary(
     annotation_document_count: int,
     generated_at: str,
     dropped_by_angle: int = 0,
+    validation_similarity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """어떤 원본을 어떤 비율과 seed로 나눴는지 남기는 요약을 만듭니다."""
 
@@ -639,6 +651,13 @@ def _dataset_summary(
                     }
                 }
                 if settings.validation_angle is not None
+                else {}
+            ),
+            # 재지 않은 실행에는 이 key 자체가 없습니다. 0으로 두면 "완전히 똑같다"로
+            # 읽혀 사실과 정반대가 됩니다.
+            **(
+                {"validation_similarity": validation_similarity}
+                if validation_similarity is not None
                 else {}
             ),
         },
@@ -892,6 +911,23 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         ),
     )
 
+    # 이미지를 전부 여는 단계라 켠 실행만 이 비용을 냅니다. **산출물을 쓰기 전에**
+    # 잽니다. 여기서 실패했는데 manifest가 이미 나가 있으면 반쪽짜리 dataset이 남고,
+    # 다음 실행은 덮어쓰기 거부에 걸립니다.
+    validation_similarity = None
+    if settings.measure_validation_similarity:
+        progress.emit("step_started", step="similarity")
+        validation_similarity = measure_validation_similarity(
+            storage,
+            dataset.images,
+            dataset.annotations,
+            train_image_ids=split_result.train_image_ids,
+            validation_image_ids=split_result.validation_image_ids,
+            on_progress=lambda stage, done, total: progress.read_progress(
+                stage, done, total
+            ),
+        )
+
     progress.emit("step_started", step="publish")
     artifacts: dict[str, str] = {}
     for key, value in (
@@ -919,6 +955,7 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         annotation_document_count=len(annotation_locations),
         generated_at=_utc_now(),
         dropped_by_angle=dropped_by_angle,
+        validation_similarity=validation_similarity,
     )
     artifacts["dataset_summary_uri"] = publisher.artifact_uri(
         storage.write_json(
