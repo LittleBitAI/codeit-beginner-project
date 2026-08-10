@@ -175,6 +175,17 @@ def _directory_size(path: Path) -> int:
     return total
 
 
+def _is_valid_image(path: Path) -> bool:
+    """Cache 파일을 실제 이미지로 끝까지 읽을 수 있는지 확인합니다."""
+
+    try:
+        with Image.open(path) as image:
+            image.verify()
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 class ImageCacheSession:
     """한 train run 동안 cache lease와 다운로드 publish를 관리합니다."""
 
@@ -198,6 +209,7 @@ class ImageCacheSession:
         self._lease: Path | None = None
         self._persistent = False
         self._object_identities: dict[str, str] = {}
+        self._verified_entries: set[str] = set()
         self.namespace = temporary_root
 
     def __enter__(self) -> ImageCacheSession:
@@ -432,7 +444,9 @@ class ImageCacheSession:
             entry = objects / digest
             destination = entry / f"image{suffix}"
             if destination.is_file():
-                return destination
+                if digest in self._verified_entries or _is_valid_image(destination):
+                    self._verified_entries.add(digest)
+                    return destination
 
             temporary = Path(
                 tempfile.mkdtemp(prefix=f".{digest}-", suffix=".tmp", dir=objects)
@@ -450,11 +464,20 @@ class ImageCacheSession:
                         continue
                 try:
                     temporary.rename(entry)
-                except OSError as error:
-                    if not destination.is_file():
-                        raise TrainError("image cache publish failed") from error
+                except OSError:
+                    if destination.is_file() and _is_valid_image(destination):
+                        self._verified_entries.add(digest)
+                        return destination
+                    try:
+                        downloaded.replace(destination)
+                    except OSError as replace_error:
+                        if not (
+                            destination.is_file() and _is_valid_image(destination)
+                        ):
+                            raise TrainError("image cache repair failed") from replace_error
                 if not destination.is_file():
                     raise TrainError("image cache publish failed")
+                self._verified_entries.add(digest)
                 return destination
             finally:
                 if temporary.exists():

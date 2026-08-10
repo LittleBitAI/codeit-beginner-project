@@ -132,6 +132,33 @@ def test_half_filled_cache_is_never_published(tmp_path):
     assert storage.published == {}
 
 
+def test_corrupt_image_from_shared_archive_is_downloaded_again(tmp_path):
+    storage = _s3_cache_storage()
+    temporary_root = tmp_path / "temporary"
+
+    with ImageCacheSession(
+        _summary(), cache_root=tmp_path / "producer", temporary_root=temporary_root
+    ) as producer:
+        cached = producer.fetch(IMAGES[0], storage)
+        cached.write_bytes(b"corrupt image")
+        assert producer.publish_archive(storage, expected_entries=1) is True
+
+    with ImageCacheSession(
+        _summary(), cache_root=tmp_path / "consumer", temporary_root=temporary_root
+    ) as consumer:
+        assert consumer.seed_from_archive(storage) is True
+        repaired = consumer.fetch(IMAGES[0], storage)
+        with Image.open(repaired) as image:
+            image.verify()
+
+    source_downloads = [
+        call
+        for call in storage.download_file.call_args_list
+        if call.args[0] == IMAGES[0]
+    ]
+    assert len(source_downloads) == 2
+
+
 @pytest.mark.parametrize(
     "name",
     ["../escaped.png", "/etc/escaped.png", "C:/escaped.png", "..\\escaped.png"],
