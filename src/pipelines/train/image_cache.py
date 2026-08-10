@@ -175,6 +175,29 @@ def _directory_size(path: Path) -> int:
     return total
 
 
+def _is_valid_image(path: Path) -> bool:
+    """형식 검사와 pixel 전체 decode가 모두 성공한 image인지 확인합니다."""
+
+    try:
+        with Image.open(path) as image:
+            image.verify()
+        # verify()는 JPEG pixel을 decode하지 않습니다. 같은 파일을 다시 열어야
+        # 끝이 잘린 JPEG처럼 verify만 통과하는 손상도 잡을 수 있습니다.
+        with Image.open(path) as image:
+            image.load()
+    except (
+        OSError,
+        SyntaxError,
+        ValueError,
+        EOFError,
+        IndexError,
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+    ):
+        return False
+    return True
+
+
 class ImageCacheSession:
     """한 train run 동안 cache lease와 다운로드 publish를 관리합니다."""
 
@@ -198,6 +221,7 @@ class ImageCacheSession:
         self._lease: Path | None = None
         self._persistent = False
         self._object_identities: dict[str, str] = {}
+        self._verified_entries: set[str] = set()
         self.namespace = temporary_root
 
     def __enter__(self) -> ImageCacheSession:
@@ -417,6 +441,7 @@ class ImageCacheSession:
         suffix = Path(urlsplit(location).path).suffix or ".image"
         objects = self.namespace / "objects"
         objects.mkdir(parents=True, exist_ok=True)
+        last_download_was_corrupt = False
         for _ in range(_DOWNLOAD_IDENTITY_ATTEMPTS):
             identity = self._object_identities.get(location)
             if identity is None:
@@ -432,7 +457,9 @@ class ImageCacheSession:
             entry = objects / digest
             destination = entry / f"image{suffix}"
             if destination.is_file():
-                return destination
+                if digest in self._verified_entries or _is_valid_image(destination):
+                    self._verified_entries.add(digest)
+                    return destination
 
             temporary = Path(
                 tempfile.mkdtemp(prefix=f".{digest}-", suffix=".tmp", dir=objects)
@@ -440,23 +467,36 @@ class ImageCacheSession:
             downloaded = temporary / f"image{suffix}"
             try:
                 storage.download_file(location, downloaded)
-                with Image.open(downloaded) as image:
-                    image.verify()
+                if not _is_valid_image(downloaded):
+                    last_download_was_corrupt = True
+                    continue
                 if identity is not None:
                     downloaded_identity = _s3_object_identity(location, storage)
                     if downloaded_identity != identity:
+                        last_download_was_corrupt = False
                         if downloaded_identity is not None:
                             self._object_identities[location] = downloaded_identity
                         continue
                 try:
                     temporary.rename(entry)
-                except OSError as error:
-                    if not destination.is_file():
-                        raise TrainError("image cache publish failed") from error
+                except OSError:
+                    if destination.is_file() and _is_valid_image(destination):
+                        self._verified_entries.add(digest)
+                        return destination
+                    try:
+                        downloaded.replace(destination)
+                    except OSError as replace_error:
+                        if not (
+                            destination.is_file() and _is_valid_image(destination)
+                        ):
+                            raise TrainError("image cache repair failed") from replace_error
                 if not destination.is_file():
                     raise TrainError("image cache publish failed")
+                self._verified_entries.add(digest)
                 return destination
             finally:
                 if temporary.exists():
                     shutil.rmtree(temporary, ignore_errors=True)
+        if last_download_was_corrupt:
+            raise TrainError("S3 image remained corrupt after repeated downloads")
         raise TrainError("S3 image changed repeatedly during cache download")
