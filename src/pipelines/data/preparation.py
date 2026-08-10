@@ -843,6 +843,23 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         ),
     )
 
+    # 이미지를 전부 여는 단계라 켠 실행만 이 비용을 냅니다. **산출물을 쓰기 전에**
+    # 잽니다. 여기서 실패했는데 manifest가 이미 나가 있으면 반쪽짜리 dataset이 남고,
+    # 다음 실행은 덮어쓰기 거부에 걸립니다.
+    validation_similarity = None
+    if settings.measure_validation_similarity:
+        progress.emit("step_started", step="similarity")
+        validation_similarity = measure_validation_similarity(
+            storage,
+            dataset.images,
+            dataset.annotations,
+            train_image_ids=split_result.train_image_ids,
+            validation_image_ids=split_result.validation_image_ids,
+            on_progress=lambda stage, done, total: progress.read_progress(
+                stage, done, total
+            ),
+        )
+
     progress.emit("step_started", step="publish")
     artifacts: dict[str, str] = {}
     for key, value in (
@@ -857,19 +874,6 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
                 value,
                 overwrite=settings.overwrite,
             )
-        )
-
-    # 이미지를 전부 여는 단계라 켠 실행만 이 비용을 냅니다. 산출물을 다 쓴 뒤에
-    # 재므로, 여기서 실패해도 이미 쓴 manifest는 그대로 남습니다.
-    validation_similarity = None
-    if settings.measure_validation_similarity:
-        progress.emit("step_started", step="similarity")
-        validation_similarity = measure_validation_similarity(
-            storage,
-            manifests,
-            on_progress=lambda stage, done, total: progress.read_progress(
-                stage, done, total
-            ),
         )
 
     summary_document = _dataset_summary(

@@ -1597,3 +1597,54 @@ def test_similarity_summary_reports_that_validation_is_indistinguishable():
     assert similarity["measured_crops"] > 0
     assert similarity["near_duplicate_ratio_3"] == 1.0
     assert similarity["median_distance"] == 0.0
+
+
+def test_similarity_runs_on_local_backend(
+    local_storage_root, clean_storage_environment
+):
+    """Local backend에서도 유사도를 잴 수 있어야 합니다.
+
+    manifest의 `file_name`은 manifest directory 기준 상대 경로(`../../raw/...`)라
+    그대로 LocalStorage에 넘기면 storage root 밖이라며 거부됩니다. 원본 위치를
+    써야 합니다.
+    """
+
+    build_local_raw(local_storage_root, image_count=20)
+    images = local_storage_root / RAW_PREFIX / "train_images"
+    for path in images.glob("*.jpg"):
+        path.write_bytes(image_bytes(100, 100, image_format="JPEG"))
+
+    config = local_config(local_storage_root)
+    config["data"]["measure_validation_similarity"] = True
+
+    result = run(config)
+
+    assert result["status"] == "ok", result["message"]
+    summary = json.loads(
+        (REPOSITORY_ROOT / result["artifacts"]["dataset_summary_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    similarity = summary["split"]["validation_similarity"]
+    assert similarity["measured_crops"] > 0
+
+
+def test_a_failed_similarity_measurement_leaves_no_artifacts(
+    local_storage_root, clean_storage_environment, monkeypatch
+):
+    """측정이 실패하면 산출물이 하나도 남지 않아야 합니다.
+
+    반쯤 만들어진 dataset이 남으면 다음 실행이 덮어쓰기 거부에 걸립니다.
+    """
+
+    build_local_raw(local_storage_root, image_count=20)
+    config = local_config(local_storage_root)
+    config["data"]["measure_validation_similarity"] = True
+
+    result = run(config)
+
+    # 이미지가 진짜 JPEG이 아니라 측정이 실패합니다.
+    assert result["status"] == "error"
+    processed = local_storage_root / "datasets/pill_detection/processed"
+    leftovers = list(processed.rglob("*.json")) if processed.exists() else []
+    assert leftovers == []

@@ -45,23 +45,26 @@ def _thumbnail(image: Image.Image, bbox: Sequence[float]) -> np.ndarray | None:
 
 def _collect(
     storage: Any,
-    manifest: Mapping[str, Any],
+    images: Sequence[Mapping[str, Any]],
+    annotations_by_image: Mapping[Any, list[Mapping[str, Any]]],
+    keep: set[Any],
     on_progress: Callable[[int, int], None] | None,
 ) -> list[tuple[int, np.ndarray]]:
-    """manifest 한 개의 crop을 모읍니다. 이미지는 받는 즉시 지웁니다."""
+    """split 한쪽의 crop을 모읍니다. 이미지는 받는 즉시 지웁니다.
 
-    locations = {item["id"]: str(item["file_name"]) for item in manifest["images"]}
-    by_image: dict[Any, list[Mapping[str, Any]]] = defaultdict(list)
-    for annotation in manifest["annotations"]:
-        by_image[annotation["image_id"]].append(annotation)
+    manifest의 `file_name`이 아니라 **원본 storage 위치**를 씁니다. manifest 값은
+    manifest directory 기준 상대 경로(`../../raw/...`)라 LocalStorage에 그대로
+    넘기면 storage root 밖이라며 거부됩니다.
+    """
 
+    chosen = [image for image in images if image["id"] in keep]
     rows: list[tuple[int, np.ndarray]] = []
-    total = len(locations)
-    for done, (image_id, location) in enumerate(sorted(locations.items()), start=1):
-        annotations = by_image.get(image_id)
+    for done, image in enumerate(chosen, start=1):
+        location = str(image["file_name"])
+        annotations = annotations_by_image.get(image["id"])
         if annotations:
             with tempfile.TemporaryDirectory(prefix="similarity-") as scratch:
-                local = Path(scratch) / posixpath.basename(location)
+                local = Path(scratch) / posixpath.basename(location.replace("\\", "/"))
                 try:
                     storage.download_file(location, local)
                     with Image.open(local) as opened:
@@ -75,14 +78,17 @@ def _collect(
                         f"유사도를 재려고 이미지를 여는 데 실패했습니다: {location}"
                     ) from error
         if on_progress is not None:
-            on_progress(done, total)
+            on_progress(done, len(chosen))
     return rows
 
 
 def measure_validation_similarity(
     storage: Any,
-    manifests: Mapping[str, Mapping[str, Any]],
+    images: Sequence[Mapping[str, Any]],
+    annotations: Sequence[Mapping[str, Any]],
     *,
+    train_image_ids: set[Any],
+    validation_image_ids: set[Any],
     on_progress: Callable[[str, int, int], None] | None = None,
 ) -> dict[str, Any] | None:
     """validation crop마다 같은 class의 가장 비슷한 train crop까지의 거리를 잽니다.
@@ -94,14 +100,24 @@ def measure_validation_similarity(
     똑같다"로 읽혀 사실과 정반대가 됩니다.
     """
 
+    annotations_by_image: defaultdict[Any, list[Mapping[str, Any]]] = defaultdict(list)
+    for annotation in annotations:
+        annotations_by_image[annotation["image_id"]].append(annotation)
+
     def report(stage: str) -> Callable[[int, int], None] | None:
         if on_progress is None:
             return None
         return lambda done, total: on_progress(stage, done, total)
 
-    train = _collect(storage, manifests["train"], report("similarity_train"))
+    train = _collect(
+        storage, images, annotations_by_image, train_image_ids, report("similarity_train")
+    )
     validation = _collect(
-        storage, manifests["validation"], report("similarity_validation")
+        storage,
+        images,
+        annotations_by_image,
+        validation_image_ids,
+        report("similarity_validation"),
     )
     if not train or not validation:
         return None
