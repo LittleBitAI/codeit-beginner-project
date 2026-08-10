@@ -10,6 +10,8 @@ from fastapi import APIRouter, Body, Header, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from src.common import StorageError
+
 from .. import train_capabilities
 from ..errors import FieldError, JobConflictError, WebValidationError
 from ..evaluate_metrics import read_per_class_summary
@@ -17,13 +19,19 @@ from ..evaluation import DEFAULT_MAX_DETECTIONS, get_evaluation_runner
 from .. import experiments
 from ..gpu import cuda_is_available
 from ..jobs import get_manager
-from ..jobs.model import TERMINAL_STATUSES, JobRecord
+from ..jobs.model import (
+    STATUS_FAILED,
+    STATUS_INTERRUPTED,
+    TERMINAL_STATUSES,
+    JobRecord,
+)
 from ..masking import redact
 from ..train_config import (
     build_resume_config,
     data_field_specs,
     field_specs,
     read_runtime_config,
+    resume_checkpoint_exists,
     validate_request,
     write_runtime_config,
 )
@@ -379,7 +387,7 @@ def resume_job(
     payload: ResumeRequest = Body(...),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """중단된 학습을 그 checkpoint에서 이어서 시작합니다.
+    """중단됐거나 checkpoint를 남기고 실패한 학습을 이어서 시작합니다.
 
     이어서 하는 실행은 **새 이름**을 받습니다. 같은 이름을 다시 쓰면 train이 남아 있는
     작업 폴더를 보고 시작을 거부하고, 결과도 섞입니다. `epochs`는 남은 수가 아니라
@@ -388,11 +396,27 @@ def resume_job(
 
     manager = get_manager()
     record = manager.get(job_id)
-    if record.status != "interrupted":
-        raise JobConflictError("중단된 학습만 이어서 할 수 있습니다.")
+    if record.status not in {STATUS_INTERRUPTED, STATUS_FAILED}:
+        raise JobConflictError(
+            "중단된 학습이나 checkpoint를 남기고 실패한 학습만 이어갈 수 있습니다."
+        )
+
+    source_config = read_runtime_config(record.config_id)
+    if record.status == STATUS_FAILED:
+        try:
+            checkpoint_exists = resume_checkpoint_exists(source_config)
+        except StorageError as error:
+            raise JobConflictError(
+                "실패한 학습의 checkpoint를 확인하지 못했습니다. "
+                "저장소 설정과 권한을 확인하세요."
+            ) from error
+        if not checkpoint_exists:
+            raise JobConflictError(
+                "실패한 학습의 checkpoint를 찾을 수 없어 이어서 학습할 수 없습니다."
+            )
 
     config = build_resume_config(
-        read_runtime_config(record.config_id),
+        source_config,
         run_id=payload.run_id,
         epochs=payload.epochs,
     )

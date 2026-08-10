@@ -335,4 +335,30 @@ describe('LiveMonitor · 중단된 학습', () => {
     await screen.findByText('진행률 정보 없음');
     expect(screen.queryByRole('button', { name: '이어서 학습' })).toBeNull();
   });
+
+  it('완료한 epoch가 있는 실패 학습도 이어서 학습할 수 있다', async () => {
+    getJob.mockResolvedValue({
+      ...makeJob({ ...NO_PROGRESS, completed_epochs: 15, epochs: [] }),
+      status: 'failed',
+      status_label: '실패',
+      message: '학습 결과 JSON을 해석하지 못했습니다.',
+    });
+
+    renderMonitor();
+
+    expect(await screen.findByRole('button', { name: '이어서 학습' })).toBeInTheDocument();
+  });
+
+  it('checkpoint가 생기기 전에 실패한 학습에는 이어서 학습 단추를 두지 않는다', async () => {
+    getJob.mockResolvedValue({
+      ...makeJob(NO_PROGRESS),
+      status: 'failed',
+      status_label: '실패',
+    });
+
+    renderMonitor();
+
+    await screen.findByText('학습이 실패했습니다');
+    expect(screen.queryByRole('button', { name: '이어서 학습' })).toBeNull();
+  });
 });
