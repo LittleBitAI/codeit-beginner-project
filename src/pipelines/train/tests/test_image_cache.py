@@ -4,6 +4,7 @@ import gc
 import io
 import os
 import pickle
+import struct
 import tarfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -130,6 +131,119 @@ def test_half_filled_cache_is_never_published(tmp_path):
         assert cache.publish_archive(storage, expected_entries=len(IMAGES)) is False
 
     assert storage.published == {}
+
+
+def _png_with_corrupt_idat() -> bytes:
+    stream = io.BytesIO()
+    Image.new("RGB", (20, 20), color="red").save(stream, format="PNG")
+    payload = bytearray(stream.getvalue())
+    position = 8
+    while position < len(payload):
+        length = struct.unpack(">I", payload[position : position + 4])[0]
+        if payload[position + 4 : position + 8] == b"IDAT":
+            payload[position + 8 + length // 2] ^= 1
+            return bytes(payload)
+        position += length + 12
+    raise AssertionError("PNG fixture has no IDAT chunk")
+
+
+def _png_without_idat() -> bytes:
+    stream = io.BytesIO()
+    Image.new("RGB", (20, 20), color="red").save(stream, format="PNG")
+    payload = stream.getvalue()
+    position = 8
+    while position < len(payload):
+        length = struct.unpack(">I", payload[position : position + 4])[0]
+        if payload[position + 4 : position + 8] == b"IDAT":
+            return payload[:position] + payload[position + length + 12 :]
+        position += length + 12
+    raise AssertionError("PNG fixture has no IDAT chunk")
+
+
+def _truncated_jpeg() -> bytes:
+    stream = io.BytesIO()
+    Image.new("RGB", (100, 100), color="blue").save(stream, format="JPEG")
+    return stream.getvalue()[:-2]
+
+
+def test_repeated_corrupt_s3_download_never_publishes_a_cache_entry(tmp_path):
+    storage = _storage()
+
+    def download(source, destination, *, overwrite=False):
+        Path(destination).write_bytes(_truncated_jpeg())
+        return Path(destination)
+
+    storage.download_file.side_effect = download
+    with ImageCacheSession(
+        _summary(),
+        cache_root=tmp_path / "cache",
+        temporary_root=tmp_path / "temporary",
+    ) as cache:
+        with pytest.raises(TrainError, match="remained corrupt"):
+            cache.fetch(IMAGES[0], storage)
+        objects = cache.namespace / "objects"
+        assert not [path for path in objects.iterdir() if path.is_dir()]
+
+    assert storage.download_file.call_count == image_cache_module._DOWNLOAD_IDENTITY_ATTEMPTS
+
+
+@pytest.mark.parametrize(
+    "corrupt_payload",
+    (_png_with_corrupt_idat(), _png_without_idat(), _truncated_jpeg()),
+    ids=("png-syntax-error", "png-index-error", "jpeg-load-error"),
+)
+def test_shared_archive_image_that_cannot_be_fully_decoded_is_downloaded_again(
+    tmp_path, corrupt_payload
+):
+    storage = _s3_cache_storage()
+    temporary_root = tmp_path / "temporary"
+
+    with ImageCacheSession(
+        _summary(), cache_root=tmp_path / "producer", temporary_root=temporary_root
+    ) as producer:
+        cached = producer.fetch(IMAGES[0], storage)
+        cached.write_bytes(corrupt_payload)
+        assert producer.publish_archive(storage, expected_entries=1) is True
+
+    with ImageCacheSession(
+        _summary(), cache_root=tmp_path / "consumer", temporary_root=temporary_root
+    ) as consumer:
+        assert consumer.seed_from_archive(storage) is True
+        repaired = consumer.fetch(IMAGES[0], storage)
+        with Image.open(repaired) as image:
+            image.load()
+
+    source_downloads = [
+        call
+        for call in storage.download_file.call_args_list
+        if call.args[0] == IMAGES[0]
+    ]
+    assert len(source_downloads) == 2
+
+
+def test_corrupt_s3_download_is_retried_before_cache_publish(tmp_path):
+    storage = _storage()
+
+    def download(source, destination, *, overwrite=False):
+        assert source == IMAGES[0]
+        assert overwrite is False
+        if storage.download_file.call_count == 1:
+            Path(destination).write_bytes(_truncated_jpeg())
+        else:
+            Image.new("RGB", (3, 2), color="red").save(destination, format="PNG")
+        return Path(destination)
+
+    storage.download_file.side_effect = download
+    with ImageCacheSession(
+        _summary(),
+        cache_root=tmp_path / "cache",
+        temporary_root=tmp_path / "temporary",
+    ) as cache:
+        repaired = cache.fetch(IMAGES[0], storage)
+        with Image.open(repaired) as image:
+            image.load()
+
+    assert storage.download_file.call_count == 2
 
 
 @pytest.mark.parametrize(
