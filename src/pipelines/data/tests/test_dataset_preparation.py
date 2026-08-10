@@ -1660,3 +1660,33 @@ def test_a_name_without_an_angle_never_reaches_validation():
 
     assert result["status"] == "ok", result["message"]
     assert stem not in split_stems(stored, result, "validation_manifest_uri")
+
+
+def test_angle_holdout_stops_when_a_category_would_lose_all_training_examples():
+    """양쪽에서 동시에 사라지는 category도 잡아야 합니다.
+
+    train 그룹에서는 빼는 각도에만 있고 validation 그룹에서는 다른 각도에만 있는
+    category는 각도 필터 뒤 양쪽에서 모두 사라집니다. class map에는 남아 있으므로
+    model은 학습 예시가 하나도 없는 class를 배우게 되고, 그 class의 점수는 언제나
+    0이 되는데 원인은 보이지 않습니다.
+    """
+
+    CATEGORY_NAMES.setdefault(9, "pill_lost")
+    objects = angled_objects()
+    # category 9는 train 조합 하나의 90도 사진과 validation 조합 하나의 70도
+    # 사진에만 있습니다. 90도를 빼면 어느 쪽에도 남지 않습니다.
+    for group, angle in ((1, "90"), (40, "70")):
+        index = 1000 + group
+        stem = angle_stem(index, group, angle)
+        objects[f"s3://{BUCKET}/{RAW_PREFIX}train_images/{stem}.jpg"] = {
+            "placeholder": "image bytes"
+        }
+        objects[f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/{stem}.json"] = (
+            annotation_document(index, [9], stem=stem)
+        )
+    result, _ = prepare(
+        prepare_config("8:2", split_method="group-angle"), objects
+    )
+
+    assert result["status"] == "error"
+    assert "9" in result["message"]

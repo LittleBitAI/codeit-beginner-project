@@ -488,7 +488,15 @@ def hold_out_angle(
     )
     # 각도를 빼면서 train에서 사라진 category는 model이 배울 수 없습니다. 조용히
     # 내보내면 그 category의 점수는 언제나 0이 되고 원인은 보이지 않습니다.
-    lost_from_train = sorted(set(validation_counts) - set(train_counts))
+    #
+    # 비교 대상은 각도를 빼기 **전의** category 집합입니다. validation에 남은 것만
+    # 보면, train 그룹에서는 빼는 각도에만 있고 validation 그룹에서는 다른 각도에만
+    # 있어 양쪽에서 동시에 사라지는 category를 놓칩니다. 그런 class는 class map에는
+    # 남아 학습 예시 없는 class가 됩니다.
+    before = set(split_result.train_category_counts) | set(
+        split_result.validation_category_counts
+    )
+    lost_from_train = sorted(before - set(train_counts))
     if lost_from_train:
         raise DatasetPreparationError(
             f"각도 '{validation_angle}'을 빼면 category "
