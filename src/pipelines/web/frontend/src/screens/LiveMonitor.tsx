@@ -59,6 +59,8 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
   const active = job.status === 'running' || job.status === 'queued';
   const epochs = progress.epochs ?? [];
   const last = epochs.length > 0 ? epochs[epochs.length - 1] : undefined;
+  const failedAfterCompletedEpoch =
+    job.status === 'failed' && Math.max(progress.completed_epochs ?? 0, epochs.length) > 0;
   const device = gpu.data?.telemetry.devices[0] ?? null;
   const telemetryDown = gpu.data && gpu.data.telemetry.source !== 'nvidia-smi';
 
@@ -200,8 +202,22 @@ export function LiveMonitor({ listing }: { listing: JobListing | null }) {
       )}
 
       {job.status === 'failed' && (
-        <AlertRow level="error" title="학습이 실패했습니다">
+        <AlertRow
+          level="error"
+          title="학습이 실패했습니다"
+          action={
+            failedAfterCompletedEpoch ? (
+              <Button onClick={resume} disabled={resuming}>
+                {resuming ? '시작하는 중…' : '이어서 학습'}
+              </Button>
+            ) : undefined
+          }
+        >
           {job.message ?? '원인을 알 수 없습니다. 아래 로그를 확인해 주세요.'}
+          {failedAfterCompletedEpoch &&
+            ' 완료한 epoch가 있어 checkpoint가 저장소에 남아 있으면 새 실행 이름으로 이어갑니다.'}
+          {resumed && ` '${resumed}' 이름으로 대기열에 넣었습니다.`}
+          {resumeError && ` ${resumeError}`}
         </AlertRow>
       )}
       {job.status === 'cancelled' && job.orphan_note && (

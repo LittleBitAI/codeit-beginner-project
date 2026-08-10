@@ -18,6 +18,8 @@ from src.pipelines.web.train_config import (
     build_resume_config,
     field_specs,
     normalize_train_settings,
+    read_runtime_config,
+    resume_checkpoint_exists,
     resume_checkpoint_uri,
     check_run_id_collision,
     run_id_working_path,
@@ -162,6 +164,23 @@ def test_s3_runs_resume_from_the_common_storage_prefix(monkeypatch):
     )
 
 
+def test_s3_resume_checks_the_complete_checkpoint_uri(monkeypatch):
+    checked = []
+
+    class FakeStorage:
+        def exists(self, location):
+            checked.append(location)
+            return True
+
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "team-bucket")
+    monkeypatch.setattr(train_config, "create_storage", lambda _config: FakeStorage())
+
+    assert resume_checkpoint_exists(_runtime_config("s3")) is True
+    assert checked == [
+        "s3://team-bucket/experiments/completed/web-run/running/last_checkpoint.pt"
+    ]
+
+
 def test_s3_runs_say_what_is_missing_without_a_bucket():
     with pytest.raises(WebValidationError) as error:
         resume_checkpoint_uri(_runtime_config("s3"))
@@ -264,6 +283,38 @@ def test_resume_route_queues_a_new_run_from_an_interrupted_job(
     body = response.json()
     assert body["run_id"].startswith("web-run-resume-")
     assert body["resumed_from_job_id"] == record.job_id
+
+
+def test_resume_route_queues_a_failed_run_when_its_checkpoint_exists(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.status = "failed"
+    config = read_runtime_config(record.config_id)
+    checkpoint = run_id_working_path(config["train"]) / "last_checkpoint.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"resumable")
+
+    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={})
+
+    assert response.status_code == 201, response.text
+    assert response.json()["resumed_from_job_id"] == record.job_id
+
+
+def test_resume_route_refuses_a_failed_run_without_a_checkpoint(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.status = "failed"
+
+    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={})
+
+    assert response.status_code == 409
+    assert "checkpoint" in response.text
 
 
 def test_resume_route_passes_the_login_token_to_the_started_run(

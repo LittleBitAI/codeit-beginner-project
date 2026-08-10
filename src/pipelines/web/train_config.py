@@ -22,6 +22,8 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from src.common import create_storage
+
 from .errors import (
     FieldError,
     JobNotFoundError,
@@ -66,6 +68,7 @@ __all__ = [
     "normalize_data_inputs",
     "normalize_train_settings",
     "read_runtime_config",
+    "resume_checkpoint_exists",
     "validate_request",
     "write_runtime_config",
 ]
@@ -1014,6 +1017,15 @@ def resume_checkpoint_uri(config: dict[str, Any]) -> str:
         f"{directory}/.{train['run_id']}{WORKING_DIRECTORY_SUFFIX}"
         f"/{RESUME_CHECKPOINT_NAME}"
     )
+
+
+def resume_checkpoint_exists(config: dict[str, Any]) -> bool:
+    """이 실행을 이어갈 checkpoint가 실제 저장소에 남아 있는지 확인합니다."""
+
+    location = resume_checkpoint_uri(config)
+    if location.lower().startswith("s3://"):
+        return create_storage(config).exists(location)
+    return resolve_within_repo(location, label="이어서 학습할 checkpoint").is_file()
 
 
 def build_resume_config(
