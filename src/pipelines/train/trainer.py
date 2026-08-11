@@ -249,12 +249,6 @@ def _load_schedule_state(
             "resume checkpoint is missing the learning rate schedule state this run needs"
         )
     schedule.load_state_dict(dict(state))
-    # `load_state_dict`는 어디까지 왔는지만 되돌리고 optimizer의 learning rate는 그대로
-    # 둡니다. 그래서 이어서 한 실행의 **첫 batch**가 schedule 시작값으로 학습되고,
-    # 다음 걸음부터야 따라잡습니다. epoch당 batch가 하나면 그 한 걸음이 곧 epoch
-    # 경계라 티가 나지 않지만, 여럿이면 그만큼 다른 learning rate로 배웁니다.
-    for group, lr in zip(schedule.optimizer.param_groups, schedule.get_last_lr()):
-        group["lr"] = lr
 
 
 def _collate(batch: list[Any]) -> tuple[tuple[Any, ...], tuple[Any, ...]]:

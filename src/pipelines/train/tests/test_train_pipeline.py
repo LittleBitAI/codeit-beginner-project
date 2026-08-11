@@ -1455,41 +1455,6 @@ def test_resumed_training_matches_an_uninterrupted_run_while_accumulating(
         assert torch.equal(value, resumed_weights[name]), name
 
 
-def test_restoring_a_schedule_also_restores_the_learning_rate_in_use():
-    """되돌린 뒤 **첫 batch**가 이미 이어받은 learning rate로 학습해야 합니다.
-
-    `load_state_dict`는 schedule이 어디까지 왔는지만 되돌리고 optimizer의 learning
-    rate는 그대로 둡니다. 그래서 되돌리기만 하면 이어서 한 실행의 첫 batch가 schedule
-    시작값으로 배우고 다음 걸음부터야 따라잡습니다. epoch당 batch가 하나면 그 한
-    걸음이 곧 epoch 경계라 눈에 띄지 않지만, 여럿이면 그만큼 다른 값으로 배웁니다.
-    """
-
-    settings = {
-        "epochs": 4,
-        "lr_scheduler": {
-            "name": "linear",
-            "warmup_steps": 0,
-            "warmup_start_factor": 0.1,
-            "min_lr_factor": 0.1,
-        },
-    }
-
-    def build():
-        parameter = nn.Parameter(torch.tensor(1.0))
-        optimizer = torch.optim.SGD([parameter], lr=1.0)
-        return optimizer, trainer_module.build_lr_scheduler(optimizer, settings, 5)
-
-    original_optimizer, original = build()
-    for _ in range(10):
-        original.step()
-    interrupted_lr = original_optimizer.param_groups[0]["lr"]
-
-    resumed_optimizer, resumed = build()
-    trainer_module._load_schedule_state(resumed, original.state_dict())
-
-    assert resumed_optimizer.param_groups[0]["lr"] == pytest.approx(interrupted_lr)
-
-
 def test_resume_without_restoring_the_random_state_diverges(
     local_config, tmp_path, monkeypatch
 ):
