@@ -55,3 +55,9 @@ Tests use contract-shaped fixtures with no upstream pipeline; inference on CPU.
 - If a later write fails, only files **this run created** are removed; S3 objects are never auto-deleted.
 - Every failure is an `EvaluateError` subclass returned as `status="error"`, never raised from `run()`.
 - The checkpoint payload is a contract with train. If it does not match, stop with a clear error instead of guessing.
+- `mmdetection_backend.py` reads `backend="mmdetection"` checkpoints; no `backend` key still means torchvision, and any other value stops. Contract: `contracts/proposals/012-mmdetection-checkpoint-inference.md`. Five traps:
+  - Detector settings are **copied** from train — the ownership boundary forbids importing it. A changed module layout fails loudly on `state_dict`, but a drift in **values only** (thresholds, normalization constants) still loads and only lowers the score. `model_config.schema_version` covers that, and raising it is train's duty.
+  - MMDetection gets `num_classes - 1`. Predicted labels `0..N-1` get 1 added back to repository labels `1..N` before the `category_ids` lookup, so `category_ids[0]` stays the background slot.
+  - `category_ids` is **required** here, unlike the torchvision path. Missing, it turns a model label straight into a COCO category id; too short, a label that happens to be in range returns another pill's id with no error. Its length is checked against `num_classes` before the model is built.
+  - Every `state_dict` key must start with `detector.` — train saves the wrapping adapter. Dropping unprefixed keys quietly would score with a partly loaded model.
+  - mmdet is imported only once this backend is chosen. mmcv ships a compiled extension, so a broken install raises things other than `ImportError`; all of it becomes `PredictionError`.
