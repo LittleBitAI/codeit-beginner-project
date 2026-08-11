@@ -40,13 +40,18 @@ URL을 넣지 않습니다.
 1. `backend`가 없으면 기존과 같이 torchvision checkpoint로 읽습니다.
 2. `backend="mmdetection"`이면 architecture allowlist에서 모델을 만듭니다. 임의의
    builder나 import 경로를 실행하지 않습니다.
-3. MMDetection에는 `num_classes - 1`을 전달합니다. checkpoint의 model label 0은
-   계속 background이고 실제 label은 1부터 시작합니다.
-4. 긴 변이 `input_size`가 되도록 비율을 유지해 resize하고 32 배수로 padding합니다.
+3. MMDetection에는 `num_classes - 1`을 전달합니다. Train adapter는 저장소의 foreground
+   label `1..N`에서 1을 빼 MMDetection foreground label `0..N-1`로 바꿉니다.
+   MMDetection의 background sentinel `N`은 checkpoint의 class label이나 예측 label로
+   공개하지 않습니다.
+4. Evaluate adapter는 MMDetection 예측 label `0..N-1`에 1을 더해 저장소 model label
+   `1..N`으로 되돌린 뒤 `category_ids`를 조회합니다. 그래서 `category_ids[0]`은 기존과
+   같이 background 자리로 남고 실제 예측에는 사용되지 않습니다.
+5. 긴 변이 `input_size`가 되도록 비율을 유지해 resize하고 32 배수로 padding합니다.
    예측 box는 원본 이미지 좌표로 되돌립니다.
-5. 출력은 기존과 같은 `boxes`, `labels`, `scores`로 정규화하고 `category_ids`로 원래
+6. 출력은 기존과 같은 `boxes`, `labels`, `scores`로 정규화하고 `category_ids`로 원래
    COCO category id를 복원합니다.
-6. 알 수 없는 backend, architecture, `model_config.schema_version`, 잘못된 state shape는
+7. 알 수 없는 backend, architecture, `model_config.schema_version`, 잘못된 state shape는
    추측하거나 fallback하지 않고 기존 `PredictionError`로 보고합니다.
 
 ## 호환성과 검증
@@ -54,6 +59,9 @@ URL을 넣지 않습니다.
 - 기존 torchvision checkpoint 추론 결과는 변하지 않아야 합니다.
 - 두 신규 architecture의 작은 checkpoint fixture로 모델 재생성 및 state 적용을
   contract test로 확인합니다.
+- Train 입력의 첫 foreground `1`이 MMDetection `0`이 되고 마지막 foreground `N`이
+  `N-1`이 되는지, Evaluate 출력에서 각각 다시 `1`과 `N`으로 복원되어 올바른
+  `category_ids`를 조회하는지 경계 test로 확인합니다.
 - resize 후 box를 원본 좌표로 되돌리는 test와 잘못된 backend/recipe/state 실패 test를
   둡니다.
 - MMDetection dependency가 없을 때는 import 시점이 아니라 해당 backend를 선택했을 때
