@@ -17,10 +17,9 @@ CASCADE_ARCHITECTURE = "cascade_rcnn_swin_t_fpn"
 MMDETECTION_ARCHITECTURES = (DINO_ARCHITECTURE, CASCADE_ARCHITECTURE)
 PAD_MULTIPLE = 32
 MODEL_CONFIG_SCHEMA_VERSION = 1
-# mmdet 3.3.0이 거부하지만 실제로는 맞는 mmcv 구간입니다. 자세한 이유는
-# _shimmed_mmcv_version에 적었습니다. 이 밖의 버전은 손대지 않습니다.
-MMCV_SHIM_MINIMUM = (2, 2, 0)
-MMCV_SHIM_MAXIMUM = (2, 3, 0)
+# mmdet 3.3.0이 거부하지만 **직접 확인해 본** mmcv 버전 하나입니다. 자세한 이유는
+# _shimmed_mmcv_version에 적었습니다. 이 하나 말고는 손대지 않습니다.
+MMCV_SHIM_EXACT = (2, 2, 0)
 MMCV_SHIM_VERSION = "2.1.999"
 
 DINO_CHECKPOINT = (
@@ -329,16 +328,21 @@ def _shimmed_mmcv_version(version: str) -> str | None:
     없어 이 상한이 열릴 일이 없습니다. mmcv 2.2.0 release note에는 2.1.0 대비
     breaking change가 없고 NPU 연산자 추가와 버그 수정뿐입니다.
 
-    **검증한 구간만** 통과시킵니다. 범위를 열어 두면 정말로 맞지 않는 조합까지 조용히
-    지나가, 설치 문제를 알리는 대신 알 수 없는 자리에서 깨집니다.
+    **직접 확인한 그 버전에만** 적용합니다. 범위로 열어 두면 아직 나오지도 않은 2.2.1이나
+    2.2.99까지 함께 통과해, 정말로 맞지 않는 조합이 설치 문제로 보고되는 대신 알 수 없는
+    자리에서 깨집니다. 공식 호환표는 여전히 mmdet 3.3.0에 ``mmcv<2.2.0``을 적어 두고
+    있으므로, 새 버전을 쓰려면 그때 다시 확인하고 이 값을 옮겨야 합니다.
+
+    ``+a8073c7pt2.12.0cu126`` 같은 local 꼬리표는 같은 소스를 어느 torch에 맞춰
+    빌드했는지만 나타내므로 떼고 봅니다.
     """
 
     parts = version.split("+", 1)[0].split(".")
     try:
-        numbers = tuple(int(part) for part in parts[:3])
+        numbers = tuple(int(part) for part in parts)
     except ValueError:
         return None
-    if MMCV_SHIM_MINIMUM <= numbers < MMCV_SHIM_MAXIMUM:
+    if numbers == MMCV_SHIM_EXACT:
         return MMCV_SHIM_VERSION
     return None
 
