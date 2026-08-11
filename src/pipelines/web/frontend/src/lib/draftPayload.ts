@@ -39,6 +39,27 @@ export function selectedSchedule(
   return train.lr_scheduler?.trim() || fallback;
 }
 
+/** 모델 선택의 현재 값입니다. 손대지 않았으면 서버가 알려 준 기본값입니다. */
+export function selectedArchitecture(
+  train: Record<string, string>,
+  fields: FieldSpec[],
+): string {
+  const spec = fields.find((item) => item.name === 'architecture');
+  const fallback = typeof spec?.default === 'string' ? spec.default : '';
+  return train.architecture?.trim() || fallback;
+}
+
+/**
+ * 지금 고른 모델이 쓰지 않는 칸입니다. 서버가 `only_for_architectures`로 알려 줍니다.
+ *
+ * 감추기만 하고 payload에 남기면 더 나쁩니다. MMDetection에서 값을 넣었다가 모델을
+ * 되돌리면 그 값이 draft에 남아 그대로 실려 가고, 서버는 거부하는데 사용자에게는 그
+ * 칸이 보이지 않아 지울 수도 없습니다.
+ */
+function isIrrelevantForArchitecture(spec: FieldSpec, architecture: string): boolean {
+  return Boolean(spec.only_for_architectures && !spec.only_for_architectures.includes(architecture));
+}
+
 /**
  * 조기 종료 스위치의 현재 값입니다. 손대지 않았으면 서버가 알려 준 기본값입니다.
  *
@@ -78,9 +99,11 @@ export function toPayload(draft: Draft, fields: FieldSpec[]): ConfigDraftPayload
   for (const name of LR_FIELDS) {
     if (!shown.has(name)) irrelevant.add(name);
   }
+  const architecture = selectedArchitecture(draft.train, fields);
 
   for (const spec of fields) {
     if (irrelevant.has(spec.name)) continue;
+    if (isIrrelevantForArchitecture(spec, architecture)) continue;
     const raw = draft.train[spec.name];
     if (raw === undefined || raw.trim() === '') {
       // 새 enum 선택은 명시적으로 저장해 legacy config와 구분합니다.

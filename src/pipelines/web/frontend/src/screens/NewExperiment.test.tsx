@@ -382,6 +382,17 @@ describe('NewExperiment · 자동 실행 이름', () => {
     fireEvent.click(screen.getByText('하이퍼파라미터'));
 
     expect(screen.getByLabelText('입력 크기')).toBeInTheDocument();
+
+    // 값을 적어 둔 뒤 모델을 되돌려도 칸은 사라집니다. draft에 남은 그 값을 빼는 것은
+    // toPayload의 몫이라 lib.test.ts가 함께 지킵니다.
+    fireEvent.change(screen.getByLabelText('입력 크기'), { target: { value: '800' } });
+    fireEvent.click(screen.getByText('기본 정보'));
+    fireEvent.change(screen.getByLabelText('모델'), {
+      target: { value: 'fasterrcnn_mobilenet_v3_large_320_fpn' },
+    });
+    fireEvent.click(screen.getByText('하이퍼파라미터'));
+
+    expect(screen.queryByLabelText('입력 크기')).toBeNull();
   });
 
   it('고른 모델에 따라 안내하는 기본값이 달라진다', () => {

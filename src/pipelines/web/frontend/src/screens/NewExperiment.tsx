@@ -21,6 +21,7 @@ import {
   isEarlyStoppingOn,
   lrFieldsFor,
   messageFor,
+  selectedArchitecture,
   selectedSchedule,
   toPayload,
 } from '../lib/draftPayload';
@@ -141,9 +142,10 @@ export function NewExperiment({
 
   const capability = resolveTrainCapability(defaults);
   const selectedOptimizer = draft.train.optimizer || capability.optimizer.default;
-  const selectedArchitecture = String(
-    draft.train.architecture || capability.model.default,
-  );
+  // 감추는 규칙과 payload에서 빼는 규칙이 같은 모델 이름을 봐야 합니다. 둘이 어긋나면
+  // 화면에 없는 값이 실려 가고, 사용자는 오류가 난 칸을 찾지 못합니다.
+  const architecture =
+    selectedArchitecture(draft.train, fields) || capability.model.default;
   const earlyStoppingOn = isEarlyStoppingOn(draft.train, fields);
   // 고른 schedule이 쓰지 않는 칸은 감춥니다. 보이면 그 값이 학습에 쓰이는 것처럼
   // 읽히고, 서버도 쓰지 않는 값이라며 거부합니다. payload의 제외 규칙과 같은 함수를
@@ -255,7 +257,7 @@ export function NewExperiment({
                 // 어긋나도 아무도 모릅니다.
                 if (
                   spec.only_for_architectures &&
-                  !spec.only_for_architectures.includes(selectedArchitecture)
+                  !spec.only_for_architectures.includes(architecture)
                 ) {
                   return null;
                 }
@@ -282,7 +284,7 @@ export function NewExperiment({
                 // 하나만 보여 주면 비워 둔 사람에게 실제와 다른 값을 안내합니다.
                 const variableDefault =
                   spec.defaults_by_optimizer?.[selectedOptimizer] ??
-                  spec.defaults_by_architecture?.[selectedArchitecture];
+                  spec.defaults_by_architecture?.[architecture];
                 const shownSpec =
                   variableDefault === undefined
                     ? spec

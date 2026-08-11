@@ -142,6 +142,29 @@ describe('toPayload', () => {
     expect(payload.train.lr_gamma).toBeUndefined();
   });
 
+  it('고른 모델이 쓰지 않는 칸은 값이 남아 있어도 보내지 않는다', () => {
+    // MMDetection을 고르고 입력 크기를 적었다가 모델을 되돌리면 화면에서는 칸이
+    // 사라지지만 draft에는 값이 남습니다. 그대로 실어 보내면 서버가 거부하는데,
+    // 사용자에게는 그 칸이 보이지 않아 지울 수도 없습니다.
+    const fields: FieldSpec[] = [
+      ...FIELDS,
+      {
+        name: 'input_size',
+        type: 'integer',
+        default: 640,
+        only_for_architectures: ['resnet'],
+        label: '입력 크기',
+        hint: '',
+      },
+    ];
+    const draft = { train: { input_size: '800' }, data: {} };
+
+    expect(toPayload({ ...draft, train: { ...draft.train, architecture: 'mobile' } }, fields).train)
+      .not.toHaveProperty('input_size');
+    expect(toPayload({ ...draft, train: { ...draft.train, architecture: 'resnet' } }, fields).train.input_size)
+      .toBe(800);
+  });
+
   it('손대지 않은 device도 화면에 보이는 기본값 그대로 실어 보낸다', () => {
     // GPU가 있는 PC에서 서버는 device 기본값을 cuda로, precision을 amp로 내려 줍니다.
     // 둘은 짝이라 device만 빼고 보내면 서버 fallback인 cpu가 이깁니다. 그러면 화면에는
