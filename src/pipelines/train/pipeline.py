@@ -31,6 +31,11 @@ from .dataset import (
     read_json_artifact,
 )
 from .image_cache import ImageCacheSession
+from .mmdetection_adapter import (
+    DEFAULT_INPUT_SIZE,
+    MMDETECTION_ARCHITECTURES,
+    model_config_metadata,
+)
 from .model import ARCHITECTURE, SUPPORTED_ARCHITECTURES, build_model
 from .progress import ProgressEmitter
 from .trainer import (
@@ -386,6 +391,12 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "gradient_accumulation_steps": _integer(
             raw, "gradient_accumulation_steps", 1, minimum=1
         ),
+        # MMDetection model만 씁니다. torchvision architecture와 함께 오면 아래에서
+        # 거부합니다. 조용히 무시하면 사용자는 크기를 정했다고 믿는데 학습은 원래
+        # 크기로 돕니다.
+        "input_size": _integer(
+            raw, "input_size", DEFAULT_INPUT_SIZE, minimum=1
+        ),
         "batch_size": _integer(raw, "batch_size", 1, minimum=1),
         "num_workers": _integer(raw, "num_workers", 0, minimum=0),
         "learning_rate": _float(
@@ -416,6 +427,7 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         normalized["epsilon"] = _float(
             raw, "epsilon", profile["epsilon"], minimum=1e-16
         )
+    _check_mmdetection_settings(normalized, raw)
     return normalized
 
 
@@ -455,15 +467,60 @@ def _checkpoint_payload(
     category_ids_by_label = [0] + [
         category_ids[label] for label in range(1, len(class_map) + 1)
     ]
+    architecture = settings.get("architecture", ARCHITECTURE)
+    # MMDetection model은 evaluate가 torchvision에서 찾을 수 없습니다. 어느 쪽으로
+    # 읽어야 하는지와 전처리를 함께 남깁니다. 계약은 제안서 012입니다. backend key가
+    # 없는 checkpoint는 evaluate가 지금까지처럼 torchvision으로 읽습니다.
+    mmdetection = (
+        {
+            "backend": "mmdetection",
+            "model_config": model_config_metadata(settings["input_size"]),
+        }
+        if architecture in MMDETECTION_ARCHITECTURES
+        else {}
+    )
     return {
         **checkpoint,
-        "architecture": settings.get("architecture", ARCHITECTURE),
+        **mmdetection,
+        "architecture": architecture,
         "num_classes": len(class_map) + 1,
         "class_map": dict(class_map),
         "category_ids": category_ids_by_label,
         "seed": settings["seed"],
         "training_config": _training_config(settings),
     }
+
+
+# 8GB GPU에서 batch 1로 도는 조합입니다. 학습을 시작한 뒤 메모리로 터지면 그 밤을
+# 통째로 버리므로 첫 batch 전에 막습니다.
+_MMDETECTION_REQUIRED = {
+    "device": "cuda",
+    "precision": "amp",
+    "optimizer": "AdamW",
+    "batch_size": 1,
+}
+
+
+def _check_mmdetection_settings(settings: Mapping[str, Any], raw: Mapping[str, Any]) -> None:
+    """MMDetection architecture에만 걸리는 제약을 확인합니다."""
+
+    if settings["architecture"] not in MMDETECTION_ARCHITECTURES:
+        if "input_size" in raw:
+            raise ValueError(
+                "train.input_size is only used by MMDetection architectures: "
+                + ", ".join(MMDETECTION_ARCHITECTURES)
+            )
+        return
+    for name, required in _MMDETECTION_REQUIRED.items():
+        value = settings[name]
+        # precision은 정규화 뒤 object라 mode만 봅니다.
+        if name == "precision":
+            value = value.get("mode") if isinstance(value, Mapping) else value
+        if value != required:
+            raise ValueError(
+                f"train.{name} must be {required!r} for {settings['architecture']} "
+                "so the run fits in 8GB of GPU memory"
+            )
 
 
 def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:

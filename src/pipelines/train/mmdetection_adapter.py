@@ -17,6 +17,8 @@ CASCADE_ARCHITECTURE = "cascade_rcnn_swin_t_fpn"
 MMDETECTION_ARCHITECTURES = (DINO_ARCHITECTURE, CASCADE_ARCHITECTURE)
 PAD_MULTIPLE = 32
 MODEL_CONFIG_SCHEMA_VERSION = 1
+# 두 모델을 맞춰 둔 입력 크기입니다. 8GB에서 batch 1로 도는 기준입니다.
+DEFAULT_INPUT_SIZE = 640
 # mmdet 3.3.0이 거부하지만 **직접 확인해 본** mmcv 버전 하나입니다. 자세한 이유는
 # _shimmed_mmcv_version에 적었습니다. 이 하나 말고는 손대지 않습니다.
 MMCV_SHIM_EXACT = (2, 2, 0)

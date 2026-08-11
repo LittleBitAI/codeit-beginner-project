@@ -202,6 +202,8 @@ def test_experiment_list_fills_training_from_index_summary(client, monkeypatch):
         "epochs": 50,
         "batch_size": 4,
         "num_workers": 0,
+        "gradient_accumulation_steps": None,
+        "input_size": None,
         "seed": 42,
     }
 
@@ -223,6 +225,8 @@ def test_experiment_list_shows_nothing_for_index_without_training_key(client, mo
         "epochs": None,
         "batch_size": None,
         "num_workers": None,
+        "gradient_accumulation_steps": None,
+        "input_size": None,
         "seed": 42,
     }
 

@@ -56,6 +56,8 @@ def test_defaults_expose_every_train_field(client):
         "checkpoint_every",
         "batch_size",
         "num_workers",
+        "gradient_accumulation_steps",
+        "input_size",
         "learning_rate",
         "momentum",
         "weight_decay",

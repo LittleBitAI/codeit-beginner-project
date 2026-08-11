@@ -234,6 +234,10 @@ export interface ExperimentSummary {
     epochs: number | null;
     batch_size: number | null;
     num_workers: number | null;
+    /** 몇 batch를 모아 한 번 갱신했는지. 이 값을 모르던 옛 기록은 null입니다. */
+    gradient_accumulation_steps: number | null;
+    /** MMDetection 모델만 쓰는 입력 크기. 다른 모델이면 null입니다. */
+    input_size: number | null;
     seed: number | null;
   };
   /** 학습이 남긴 loss와 evaluate가 낸 지표. 기록에 없으면 null이고 화면은 - 로 둡니다. */

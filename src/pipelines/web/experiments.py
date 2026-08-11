@@ -216,6 +216,12 @@ def _training_blocks(
             "epochs": _integer(settings.get("epochs")),
             "batch_size": _integer(settings.get("batch_size")),
             "num_workers": _integer(settings.get("num_workers")),
+            # 이 두 값을 모르던 옛 기록은 None이라 화면에 -로 남습니다. 1이나 640으로
+            # 지어내면 그때 무엇으로 돌았는지 모르는 채 숫자만 그럴듯해집니다.
+            "gradient_accumulation_steps": _integer(
+                settings.get("gradient_accumulation_steps")
+            ),
+            "input_size": _integer(settings.get("input_size")),
             "seed": seed if seed is not None else fallback_seed,
         },
     }
@@ -245,6 +251,8 @@ def _unknown_blocks(fallback_seed: int | None) -> dict[str, Any]:
             "epochs": None,
             "batch_size": None,
             "num_workers": None,
+            "gradient_accumulation_steps": None,
+            "input_size": None,
             "seed": fallback_seed,
         },
     }

@@ -20,6 +20,7 @@ from src.pipelines.web import train_config
 from src.pipelines.web.api.routes_train import ARCHITECTURE
 from src.pipelines.web.train_capabilities import (
     DEFAULT_AUGMENTATION,
+    MMDETECTION_ARCHITECTURES,
     DEFAULT_LR_SCHEDULER,
     DEFAULT_PRECISION,
     LEGACY_OPTIMIZER,
@@ -79,12 +80,18 @@ def module_constant(source: str, name: str) -> object:
                 return ast.literal_eval(value)
             except ValueError:
                 if isinstance(value, (ast.Tuple, ast.List)):
-                    resolved = [
-                        module_constant(source, item.id)
-                        if isinstance(item, ast.Name)
-                        else ast.literal_eval(item)
-                        for item in value.elts
-                    ]
+                    resolved: list[object] = []
+                    for item in value.elts:
+                        if isinstance(item, ast.Name):
+                            resolved.append(module_constant(source, item.id))
+                        elif isinstance(item, ast.Starred) and isinstance(
+                            item.value, ast.Name
+                        ):
+                            # ``*OTHER`` 는 다른 상수를 펼쳐 담은 것입니다. train이
+                            # 목록을 나눠 두면 이 모양이 됩니다.
+                            resolved.extend(module_constant(source, item.value.id))
+                        else:
+                            resolved.append(ast.literal_eval(item))
                     return tuple(resolved) if isinstance(value, ast.Tuple) else resolved
                 pytest.fail(f"train의 {name} 값을 읽지 못했습니다.")
     pytest.fail(f"train source에서 {name} 상수를 찾지 못했습니다.")
@@ -144,8 +151,17 @@ def test_architecture_matches_train_source():
 
 
 def test_model_and_optimizer_choices_match_train_source():
+    # train은 목록을 두 파일에 나눠 둡니다. torchvision 이름은 model.py에, MMDetection
+    # 이름은 adapter에 있고 model.py가 그것을 펼쳐 담습니다. 한쪽만 읽으면 이 감시가
+    # 반쪽이 되므로 두 source를 이어 붙여 읽습니다.
+    train_source = (
+        read_source("model.py") + chr(10) + read_source("mmdetection_adapter.py")
+    )
     assert SUPPORTED_ARCHITECTURES == module_constant(
-        read_source("model.py"), "SUPPORTED_ARCHITECTURES"
+        train_source, "SUPPORTED_ARCHITECTURES"
+    )
+    assert MMDETECTION_ARCHITECTURES == module_constant(
+        read_source("mmdetection_adapter.py"), "MMDETECTION_ARCHITECTURES"
     )
     assert SUPPORTED_OPTIMIZERS == module_constant(
         read_source("trainer.py"), "SUPPORTED_OPTIMIZERS"
@@ -387,35 +403,21 @@ def test_gradient_accumulation_default_is_mirrored_before_train_reads_it():
     assert mirrored["gradient_accumulation_steps"] == 1
 
 
-def test_gradient_accumulation_is_not_offered_on_the_screen_yet():
-    """train이 아직 이 key를 읽지 않습니다. 읽지 않는 값을 칸으로 내밀면 안 됩니다.
+def test_gradient_accumulation_above_one_is_accepted_now_that_train_reads_it():
+    """train이 이 값을 읽기 시작했으므로 화면도 열립니다.
 
-    train은 모르는 key를 거부하지 않고 조용히 무시합니다. 그래서 지금 칸을 열면
-    사용자가 4를 넣어도 microbatch가 모이지 않는 채로 학습이 끝나고, 화면에는
-    4라고 적힌 기록만 남습니다. train이 architecture를 공개할 때 함께 엽니다.
+    읽지 않던 동안에는 기본값 말고 어떤 값도 받지 않았습니다. 받아 두면 config에는
+    실리지만 학습은 그대로 돌아가고, 화면 기록에만 그 숫자가 남기 때문입니다.
     """
 
-    offered = {spec["name"] for spec in field_specs()}
+    settings = normalize_train_settings({"gradient_accumulation_steps": 4})
 
-    assert "gradient_accumulation_steps" not in offered
+    assert settings["gradient_accumulation_steps"] == 4
 
 
 @pytest.mark.parametrize("value", [0, -1, 1.5, True, "2"])
 def test_gradient_accumulation_rejects_values_train_would_not_take(value):
     """train은 bool이 아닌 1 이상의 정수만 받습니다."""
-
-    with pytest.raises(Exception, match="gradient_accumulation_steps"):
-        normalize_train_settings({"gradient_accumulation_steps": value})
-
-
-@pytest.mark.parametrize("value", [2, 4, 8])
-def test_gradient_accumulation_refuses_values_train_cannot_honour_yet(value):
-    """train이 읽지 않는 동안에는 1 말고 어떤 값도 받으면 안 됩니다.
-
-    화면에서 칸을 감추는 것만으로는 부족합니다. API로 곧장 보내면 그대로 정규화되어
-    config에 실리고, train은 모르는 key라 무시합니다. 그러면 microbatch가 모이지 않은
-    채 학습이 끝나고 기록에는 4라고 남습니다. 받을 수 없는 값은 받지 않아야 합니다.
-    """
 
     with pytest.raises(Exception, match="gradient_accumulation_steps"):
         normalize_train_settings({"gradient_accumulation_steps": value})
@@ -439,3 +441,70 @@ def test_gradient_accumulation_does_not_change_the_automatic_run_name():
     assert train_config._settings_fingerprint(
         settings, None
     ) == train_config._settings_fingerprint(without, None)
+
+
+def _mmdetection_request(**overrides):
+    """8GB 제약을 갖춘 최소 요청입니다."""
+
+    raw = {
+        "architecture": "dino_r50_4scale",
+        "device": "cuda",
+        "precision": "amp",
+        "optimizer": "AdamW",
+        "batch_size": 1,
+    }
+    raw.update(overrides)
+    return raw
+
+
+def test_mmdetection_architectures_are_offered_on_the_new_experiment_form():
+    choices = {spec["name"]: spec for spec in field_specs()}
+
+    assert set(MMDETECTION_ARCHITECTURES) <= set(choices["architecture"]["choices"])
+    assert "input_size" in choices
+    assert "gradient_accumulation_steps" in choices
+
+
+def test_input_size_defaults_to_the_value_train_uses(monkeypatch):
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
+
+    settings = normalize_train_settings(_mmdetection_request())
+
+    assert settings["input_size"] == 640
+
+
+def test_input_size_is_refused_with_a_torchvision_architecture():
+    """train이 거부하는 조합입니다. queue까지 가서 실패할 이유가 없습니다."""
+
+    with pytest.raises(Exception, match="input_size"):
+        normalize_train_settings(
+            {"architecture": "retinanet_resnet50_fpn_v2", "input_size": 640}
+        )
+
+
+def test_a_torchvision_run_sends_no_input_size(monkeypatch):
+    """train은 이 key가 오면 거부합니다. 기본값이라도 실어 보내면 안 됩니다."""
+
+    settings = normalize_train_settings({})
+
+    assert "input_size" not in settings
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("device", "cpu"),
+        ("precision", "fp32"),
+        ("optimizer", "SGD"),
+        ("batch_size", 2),
+    ],
+)
+def test_mmdetection_refuses_combinations_that_do_not_fit_8gb(
+    monkeypatch, field, value
+):
+    """학습을 시작한 뒤 메모리로 터지면 그 밤을 통째로 버립니다."""
+
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
+
+    with pytest.raises(Exception, match=field):
+        normalize_train_settings(_mmdetection_request(**{field: value}))

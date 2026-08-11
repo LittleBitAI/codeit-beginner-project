@@ -41,7 +41,7 @@ function detail(overrides: Partial<Detail> = {}): Detail {
         beta2: 0.999,
         epsilon: 1e-8,
       },
-      training: { device: 'cuda', epochs: 15, batch_size: 4, num_workers: 0, seed: 42 },
+      training: { device: 'cuda', epochs: 15, batch_size: 4, num_workers: 0, gradient_accumulation_steps: 8, input_size: 640, seed: 42 },
       metrics: {
         best_epoch: 9,
         best_validation_loss: 0.0575,
@@ -243,5 +243,19 @@ describe('ExperimentDetail', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: '세팅' }));
     expect(screen.getByText('retinanet_resnet50_fpn_v2')).toBeInTheDocument();
+  });
+
+  it('MMDetection 실행의 모으는 수와 입력 크기를 보여 준다', async () => {
+    // 두 값이 학습 결과를 크게 바꾸는데 화면에 없으면, 나중에 그 실행이 무엇이었는지
+    // checkpoint를 열어 봐야 알 수 있습니다.
+    experimentDetail.mockResolvedValue(detail());
+    show();
+    // 기본 탭은 평가 결과입니다. 학습 설정은 세팅 탭에 있습니다.
+    fireEvent.click(await screen.findByRole('tab', { name: '세팅' }));
+
+    expect(await screen.findByText('Gradient accumulation')).toBeInTheDocument();
+    expect(screen.getByText('8')).toBeInTheDocument();
+    expect(screen.getByText('입력 크기')).toBeInTheDocument();
+    expect(screen.getByText('640')).toBeInTheDocument();
   });
 });

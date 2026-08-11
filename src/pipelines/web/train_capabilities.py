@@ -24,6 +24,9 @@ __all__ = [
     "DEFAULT_PRECISION",
     "LEGACY_ARCHITECTURE",
     "LEGACY_OPTIMIZER",
+    "DEFAULT_INPUT_SIZE",
+    "MMDETECTION_ARCHITECTURES",
+    "MMDETECTION_REQUIRED",
     "SUPPORTED_ARCHITECTURES",
     "SUPPORTED_AUGMENTATIONS",
     "SUPPORTED_LR_SCHEDULERS",
@@ -41,11 +44,25 @@ CAPABILITY_SCHEMA_VERSION = 1
 # 감시합니다. 기존 설정에서 값이 빠진 경우에만 legacy 기본값을 사용합니다.
 LEGACY_ARCHITECTURE = "fasterrcnn_mobilenet_v3_large_320_fpn"
 LEGACY_OPTIMIZER = "SGD"
+# MMDetection으로 학습하는 두 모델입니다. 8GB에서 도는 조합이 정해져 있어 아래
+# MMDETECTION_REQUIRED가 그 조합만 받게 합니다.
+MMDETECTION_ARCHITECTURES = ("dino_r50_4scale", "cascade_rcnn_swin_t_fpn")
 SUPPORTED_ARCHITECTURES = (
     LEGACY_ARCHITECTURE,
     "fasterrcnn_resnet50_fpn_v2",
     "retinanet_resnet50_fpn_v2",
+    *MMDETECTION_ARCHITECTURES,
 )
+# train이 MMDetection architecture에 요구하는 조합입니다. 값이 다르면 학습을 시작한
+# 뒤 메모리로 터지므로 queue에 넣기 전에 막습니다.
+MMDETECTION_REQUIRED = {
+    "device": "cuda",
+    "precision": "amp",
+    "optimizer": "AdamW",
+    "batch_size": 1,
+}
+# MMDetection model만 쓰는 입력 크기입니다. train의 기본값과 같아야 합니다.
+DEFAULT_INPUT_SIZE = 640
 SUPPORTED_OPTIMIZERS = ("AdamW", "SGD", "Adam")
 NEW_EXPERIMENT_OPTIMIZER = "AdamW"
 # train의 AUGMENTATION_PRESETS key와 같은 순서로 둡니다. 값 자체는 train이 갖고
