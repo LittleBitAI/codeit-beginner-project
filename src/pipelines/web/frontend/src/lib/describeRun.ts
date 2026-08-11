@@ -31,9 +31,22 @@ export function describeRun(config: RuntimeConfig | null): string {
   const scheduleSentence = schedule
     ? `learning rate는 ${SCHEDULE_WORDS[String(schedule.name)] ?? String(schedule.name)}` +
       (Number(schedule.warmup_steps) > 0
-        ? `, 처음 ${String(schedule.warmup_steps)} batch 동안은 작은 값에서 올라갑니다. `
+        ? // batch가 아니라 optimizer 갱신을 셉니다. 모아서 갱신하면 둘이 달라집니다.
+          `, 처음 ${String(schedule.warmup_steps)}번의 갱신 동안은 작은 값에서 올라갑니다. `
         : '. ')
     : '';
+  // 모아서 갱신할 때만 말합니다. 1이면 batch마다 갱신하므로 설명할 것이 없습니다.
+  const accumulation = Number(train.gradient_accumulation_steps ?? 1);
+  const accumulationSentence =
+    accumulation > 1
+      ? `batch ${String(accumulation)}개를 모아 한 번씩 가중치를 갱신하므로 유효 batch는 ` +
+        `${String(Number(train.batch_size) * accumulation)}입니다. `
+      : '';
+  // MMDetection 모델만 쓰는 값이라 있을 때만 말합니다.
+  const inputSentence =
+    train.input_size != null
+      ? `이미지는 비율을 유지해 긴 변이 ${String(train.input_size)}이 되게 맞춥니다. `
+      : '';
   const earlyStopping = train.early_stopping as { patience?: unknown; min_delta?: unknown } | null;
   // 켰을 때만 말합니다. 쓰지 않는 설명을 붙이면 안 쓰는 기능을 쓰는 줄 압니다.
   const stopSentence = earlyStopping
@@ -43,11 +56,15 @@ export function describeRun(config: RuntimeConfig | null): string {
 
   return (
     `data pipeline이 만든 artifact ${sources}개(학습 manifest, 검증 manifest, 클래스 맵, 데이터셋 요약)로 ` +
-    `torchvision Faster R-CNN 모델을 ${start}에서 시작해 ${String(train.epochs)} epoch 동안 학습합니다. ` +
-    `batch ${String(train.batch_size)}, SGD optimizer(learning rate ${String(train.learning_rate)}, ` +
-    `momentum ${String(train.momentum)}, weight decay ${String(train.weight_decay)})를 쓰고, ` +
+    // 모델과 optimizer 이름을 설정에서 읽습니다. 단정해 두면 다른 모델을 골라도
+    // 화면은 늘 같은 이름을 말해, 무엇으로 학습했는지 기록이 틀어집니다.
+    `${String(train.architecture)} 모델을 ${start}에서 시작해 ${String(train.epochs)} epoch 동안 학습합니다. ` +
+    `batch ${String(train.batch_size)}, ${String(train.optimizer)} optimizer(learning rate ${String(train.learning_rate)}, ` +
+    `weight decay ${String(train.weight_decay)})를 쓰고, ` +
     `random seed는 ${String(train.seed)}이라 같은 데이터면 같은 결과가 나옵니다. ` +
     `DataLoader worker는 ${String(train.num_workers)}개이며 실행 대상은 ${device}입니다. ` +
+    accumulationSentence +
+    inputSentence +
     scheduleSentence +
     stopSentence +
     `결과 checkpoint와 학습 이력은 ${backend}의 '${String(train.output_dir)}/${String(train.run_id)}'에 저장됩니다.`

@@ -50,6 +50,10 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
     fields: [
       'epochs',
       'batch_size',
+      // GPU 메모리가 모자라 batch size를 못 올릴 때 쓰는 값이라 그 옆에 둡니다.
+      'gradient_accumulation_steps',
+      // MMDetection 모델만 쓰는 값입니다. 다른 모델을 고르면 서버가 거부합니다.
+      'input_size',
       'learning_rate',
       'momentum',
       'weight_decay',

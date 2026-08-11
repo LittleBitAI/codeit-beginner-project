@@ -329,4 +329,33 @@ describe('NewExperiment · 자동 실행 이름', () => {
     expect(screen.queryByText(/자동 이름:/)).not.toBeInTheDocument();
     expect(screen.getByText('결과 폴더 이름입니다.')).toBeInTheDocument();
   });
+
+  it('MMDetection 모델이 쓰는 두 칸을 실제로 그린다', () => {
+    // 서버가 칸을 내밀어도 이 화면은 고정 목록만 그립니다. 목록에 넣지 않으면
+    // 서버 test는 통과하는데 사용자는 값을 조정할 수 없습니다.
+    const defaults: Defaults = {
+      ...LEGACY_DEFAULTS,
+      fields: [
+        {
+          name: 'gradient_accumulation_steps',
+          type: 'integer',
+          default: 1,
+          label: 'Gradient accumulation',
+          hint: '',
+        },
+        { name: 'input_size', type: 'integer', default: 640, label: '입력 크기', hint: '' },
+      ],
+    };
+    render(
+      <MemoryRouter>
+        <DraftProvider>
+          <NewExperiment defaults={defaults} source={null} />
+        </DraftProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText('하이퍼파라미터'));
+
+    expect(screen.getByLabelText('Gradient accumulation')).toBeInTheDocument();
+    expect(screen.getByLabelText('입력 크기')).toBeInTheDocument();
+  });
 });

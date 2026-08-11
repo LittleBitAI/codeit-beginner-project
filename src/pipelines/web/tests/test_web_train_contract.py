@@ -19,8 +19,11 @@ import pytest
 from src.pipelines.web import train_config
 from src.pipelines.web.api.routes_train import ARCHITECTURE
 from src.pipelines.web.train_capabilities import (
+    DEFAULT_ACCUMULATION_STEPS,
     DEFAULT_AUGMENTATION,
+    DEFAULT_INPUT_SIZE,
     MMDETECTION_ARCHITECTURES,
+    MMDETECTION_REQUIRED,
     DEFAULT_LR_SCHEDULER,
     DEFAULT_PRECISION,
     LEGACY_OPTIMIZER,
@@ -148,6 +151,30 @@ def test_architecture_matches_train_source():
     """화면에 보여 주는 모델 이름이 실제로 학습되는 모델과 같아야 합니다."""
 
     assert ARCHITECTURE == module_constant(read_source("model.py"), "ARCHITECTURE")
+
+
+def test_mmdetection_8gb_combination_matches_train_source():
+    """8GB 조합을 두 곳이 따로 들고 있으므로 값이 같은지 감시합니다.
+
+    소유 경계 때문에 상수를 나눠 쓸 수 없습니다. 한쪽만 바꾸면 화면은 통과시키고
+    train이 거부하거나, 반대로 화면이 막는데 train은 받는 상태가 됩니다. 둘 다
+    사용자가 이유를 알 수 없는 실패로 보입니다.
+    """
+
+    assert MMDETECTION_REQUIRED == module_constant(
+        read_source("pipeline.py"), "_MMDETECTION_REQUIRED"
+    )
+
+
+def test_mmdetection_numeric_defaults_match_train_source():
+    """입력 크기와 모으는 수의 기본값도 train이 정한 값이어야 합니다."""
+
+    adapter = read_source("mmdetection_adapter.py")
+
+    assert DEFAULT_INPUT_SIZE == module_constant(adapter, "DEFAULT_INPUT_SIZE")
+    assert DEFAULT_ACCUMULATION_STEPS == module_constant(
+        adapter, "DEFAULT_ACCUMULATION_STEPS"
+    )
 
 
 def test_model_and_optimizer_choices_match_train_source():

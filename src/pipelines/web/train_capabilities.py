@@ -24,6 +24,7 @@ __all__ = [
     "DEFAULT_PRECISION",
     "LEGACY_ARCHITECTURE",
     "LEGACY_OPTIMIZER",
+    "DEFAULT_ACCUMULATION_STEPS",
     "DEFAULT_INPUT_SIZE",
     "MMDETECTION_ARCHITECTURES",
     "MMDETECTION_REQUIRED",
@@ -63,6 +64,9 @@ MMDETECTION_REQUIRED = {
 }
 # MMDetection model만 쓰는 입력 크기입니다. train의 기본값과 같아야 합니다.
 DEFAULT_INPUT_SIZE = 640
+# MMDetection model을 고르면 이만큼 모읍니다. 8GB에서 batch 1로 도는 두 모델이 쓸 만한
+# 유효 batch를 갖게 하는 값이고, train의 기본값과 같아야 합니다.
+DEFAULT_ACCUMULATION_STEPS = 8
 SUPPORTED_OPTIMIZERS = ("AdamW", "SGD", "Adam")
 NEW_EXPERIMENT_OPTIMIZER = "AdamW"
 # train의 AUGMENTATION_PRESETS key와 같은 순서로 둡니다. 값 자체는 train이 갖고

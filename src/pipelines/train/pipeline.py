@@ -32,6 +32,7 @@ from .dataset import (
 )
 from .image_cache import ImageCacheSession
 from .mmdetection_adapter import (
+    DEFAULT_ACCUMULATION_STEPS,
     DEFAULT_INPUT_SIZE,
     MMDETECTION_ARCHITECTURES,
     model_config_metadata,
@@ -388,8 +389,15 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "checkpoint_every": _integer(raw, "checkpoint_every", 1, minimum=1),
         # microbatch를 몇 개 모아 한 번 갱신할지입니다. 1이면 지금까지와 같습니다.
         # web이 이 기본값을 먼저 복제해 두었습니다(PR 143).
+        # 기본값이 architecture에 따라 다릅니다. 8GB에서 batch 1로 도는 두 모델은
+        # 그만큼 모아야 쓸 만한 유효 batch가 됩니다. 기존 모델은 지금까지처럼 1입니다.
         "gradient_accumulation_steps": _integer(
-            raw, "gradient_accumulation_steps", 1, minimum=1
+            raw,
+            "gradient_accumulation_steps",
+            DEFAULT_ACCUMULATION_STEPS
+            if architecture in MMDETECTION_ARCHITECTURES
+            else 1,
+            minimum=1,
         ),
         # MMDetection model만 씁니다. torchvision architecture와 함께 오면 아래에서
         # 거부합니다. 조용히 무시하면 사용자는 크기를 정했다고 믿는데 학습은 원래
@@ -546,7 +554,8 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
         # 3: lr_scheduler block이 생겼습니다. 상수 learning rate면 그 값이 None입니다.
         # 4: gradient_accumulation_steps가 생겼습니다. 이 key를 몰랐던 옛 checkpoint는
         #    1로 읽습니다. 그때는 모으지 않고 batch마다 갱신했기 때문입니다.
-        "schema_version": 4,
+        # 5: input_size가 생겼습니다. MMDetection이 아니면 None입니다.
+        "schema_version": 5,
         "run_id": settings.get("run_id"),
         "architecture": settings.get("architecture", ARCHITECTURE),
         "optimizer": optimizer_settings,
@@ -559,6 +568,13 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
         # 몇 개를 모아 한 번 갱신했는지입니다. 값이 다르면 optimizer와 schedule의
         # 궤적이 달라지므로 이어서 학습할 때 대조합니다.
         "gradient_accumulation_steps": settings.get("gradient_accumulation_steps", 1),
+        # MMDetection이 아니면 쓰지 않는 값이라 None입니다. 값이 달라지면 전처리가
+        # 달라져 이어붙인 실행이 앞선 epoch과 다른 크기로 배웁니다.
+        "input_size": (
+            settings.get("input_size")
+            if settings.get("architecture") in MMDETECTION_ARCHITECTURES
+            else None
+        ),
         "num_workers": settings.get("num_workers"),
         "device": settings.get("device"),
         "precision": dict(
@@ -846,6 +862,15 @@ def _load_resume(
             f"({recorded_accumulation}) than this run "
             f"({expected['gradient_accumulation_steps']})"
         )
+    # 같은 이유입니다. 크기가 달라지면 resize와 padding이 달라져 이어붙인 실행이 앞선
+    # epoch과 다른 그림으로 배웁니다. 이 key를 몰랐던 옛 checkpoint는 None이라 지금
+    # 설정도 MMDetection이 아니어야 통과합니다.
+    recorded_input_size = training_config.get("input_size")
+    if recorded_input_size != expected["input_size"]:
+        raise ValueError(
+            "resume checkpoint used a different train.input_size "
+            f"({recorded_input_size}) than this run ({expected['input_size']})"
+        )
     if expected["lr_scheduler"] is not None and "scheduler_state_dict" not in state:
         raise ValueError(
             "resume_state is missing the learning rate schedule state this run needs"
@@ -1127,6 +1152,9 @@ def _execute_claimed(
             len(class_map) + 1,
             architecture=settings["architecture"],
             pretrained=settings["pretrained"],
+            # 빠뜨리면 학습은 기본 크기로 돌고 checkpoint에는 설정값이 적힙니다.
+            # evaluate는 적힌 값으로 전처리하므로 학습과 추론이 조용히 갈라집니다.
+            input_size=settings["input_size"],
         )
         try:
             best, last, history = train_model(

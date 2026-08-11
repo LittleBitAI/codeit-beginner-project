@@ -43,6 +43,7 @@ from .paths import (
 )
 from .train_capabilities import (
     CUDA_ONLY_PRECISIONS,
+    DEFAULT_ACCUMULATION_STEPS,
     DEFAULT_INPUT_SIZE,
     MMDETECTION_ARCHITECTURES,
     MMDETECTION_REQUIRED,
@@ -109,9 +110,11 @@ _INTEGER_FIELDS = (
     ("batch_size", 1, 1),
     ("num_workers", 0, 0),
     ("checkpoint_every", 1, 1),
-    # microbatch를 몇 개 모아 한 번 갱신할지입니다. 1이면 지금까지와 같습니다.
-    ("gradient_accumulation_steps", 1, 1),
 )
+# 기본값이 architecture에 따라 다른 정수 설정입니다. train과 같은 규칙입니다.
+# MMDetection 두 모델은 8GB에서 batch 1로 도므로 그만큼 모아야 쓸 만한 유효 batch가
+# 됩니다. 기존 모델은 지금까지처럼 1입니다.
+_ACCUMULATION_FIELD = ("gradient_accumulation_steps", 1, 1)
 # MMDetection architecture에만 쓰는 정수 설정입니다. 다른 architecture와 함께 오면
 # train이 거부하므로 여기서 먼저 막고, 보내지도 않습니다.
 _MMDETECTION_INTEGER_FIELDS = (("input_size", DEFAULT_INPUT_SIZE, 1),)
@@ -420,7 +423,9 @@ def field_specs() -> list[dict[str, Any]]:
             "placeholder": "비워 두면 자동으로 만듭니다",
         }
     )
-    for name, default, minimum in _INTEGER_FIELDS + _MMDETECTION_INTEGER_FIELDS:
+    for name, default, minimum in (
+        _INTEGER_FIELDS + (_ACCUMULATION_FIELD,) + _MMDETECTION_INTEGER_FIELDS
+    ):
         label, hint = _FIELD_LABELS[name]
         specs.append(
             {
@@ -825,6 +830,14 @@ def normalize_train_settings(
     for name, default, minimum in _INTEGER_FIELDS:
         settings[name] = _normalize_integer(raw, name, default, minimum, errors)
     uses_mmdetection = architecture in MMDETECTION_ARCHITECTURES
+    accumulation_name, accumulation_default, accumulation_minimum = _ACCUMULATION_FIELD
+    settings[accumulation_name] = _normalize_integer(
+        raw,
+        accumulation_name,
+        DEFAULT_ACCUMULATION_STEPS if uses_mmdetection else accumulation_default,
+        accumulation_minimum,
+        errors,
+    )
     for name, default, minimum in _MMDETECTION_INTEGER_FIELDS:
         if uses_mmdetection:
             settings[name] = _normalize_integer(raw, name, default, minimum, errors)

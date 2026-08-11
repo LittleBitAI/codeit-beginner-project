@@ -275,6 +275,7 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
             "epochs",
             "batch_size",
             "gradient_accumulation_steps",
+            "input_size",
             "num_workers",
             "device",
             "precision",
@@ -282,7 +283,7 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
             "early_stopping",
             "resume",
         }
-        assert recorded["schema_version"] == 4
+        assert recorded["schema_version"] == 5
         assert recorded["resume"] is None
         assert recorded["run_id"] == "cpu-smoke"
         assert recorded["architecture"] == checkpoint["architecture"]
