@@ -37,16 +37,19 @@ def test_clean_repository_has_no_violation(tmp_path):
     assert check_docs.collect_violations(build_repo(tmp_path)) == []
 
 
-# --- 5,000자 제한 -----------------------------------------------------------
+# --- 8,000자 제한 -----------------------------------------------------------
 
 
 def test_document_over_the_limit_is_reported(tmp_path):
     root = build_repo(tmp_path)
-    (root / "README.md").write_text("가" * 5001, encoding="utf-8")
+    over_limit = check_docs.MAX_CHARACTERS + 1
+    (root / "README.md").write_text("가" * over_limit, encoding="utf-8")
 
     violations = check_docs.collect_violations(root)
 
-    assert any("README.md" in item and "5001" in item for item in violations)
+    assert any(
+        "README.md" in item and str(over_limit) in item for item in violations
+    )
 
 
 def test_document_exactly_at_the_limit_passes(tmp_path):
@@ -208,7 +211,9 @@ def test_exit_code_is_zero_when_clean(tmp_path, capsys):
 
 def test_exit_code_is_one_and_every_violation_is_printed(tmp_path, capsys):
     root = build_repo(tmp_path)
-    (root / "README.md").write_text("가" * 5001, encoding="utf-8")
+    (root / "README.md").write_text(
+        "가" * (check_docs.MAX_CHARACTERS + 1), encoding="utf-8"
+    )
     (root / "src" / "pipelines" / "data" / "AGENTS.md").unlink()
 
     exit_code = check_docs.main([str(root)])
