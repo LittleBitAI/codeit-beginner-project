@@ -21,6 +21,7 @@ from src.pipelines.train.mmdetection_adapter import (
     prepare_mmdetection_batch,
 )
 from src.pipelines.train.model import SUPPORTED_ARCHITECTURES, build_model
+from src.pipelines.train import pipeline as pipeline_module
 from src.pipelines.train.pipeline import _checkpoint_payload, _settings
 
 
@@ -321,12 +322,23 @@ def test_real_detector_is_built_and_produces_a_finite_loss(architecture):
 
 
 @pytest.mark.parametrize("architecture", MMDETECTION_ARCHITECTURES)
-def test_mmdetection_architectures_are_selectable(architecture: str):
+def test_mmdetection_architectures_are_selectable(pretend_cuda, architecture: str):
     """이제 고를 수 있어야 합니다. 이 test가 그 문을 여는 표시입니다."""
 
     assert architecture in SUPPORTED_ARCHITECTURES
     settings = _settings(_mmdetection_raw(architecture=architecture))
     assert settings["architecture"] == architecture
+
+
+@pytest.fixture
+def pretend_cuda(monkeypatch):
+    """GPU가 없는 곳에서도 같은 결과가 나오게 합니다.
+
+    두 모델은 device가 cuda여야 하는데 CI runner에는 GPU가 없습니다. 실제로 CUDA를
+    쓰는 test가 아니라 설정 검증만 보는 test이므로 확인 함수만 바꿉니다.
+    """
+
+    monkeypatch.setattr(pipeline_module.torch.cuda, "is_available", lambda: True)
 
 
 def _mmdetection_raw(**overrides):
@@ -344,14 +356,14 @@ def _mmdetection_raw(**overrides):
     return {"train": raw}
 
 
-def test_input_size_defaults_to_the_size_the_models_were_tuned_for():
+def test_input_size_defaults_to_the_size_the_models_were_tuned_for(pretend_cuda):
     settings = _settings(_mmdetection_raw())
 
     assert settings["input_size"] == 640
 
 
 @pytest.mark.parametrize("value", [0, -1, 1.5, True, "640"])
-def test_input_size_rejects_values_that_are_not_positive_integers(value):
+def test_input_size_rejects_values_that_are_not_positive_integers(pretend_cuda, value):
     with pytest.raises(ValueError, match="input_size"):
         _settings(_mmdetection_raw(input_size=value))
 
@@ -383,7 +395,7 @@ def test_input_size_is_refused_with_a_torchvision_architecture():
         ("batch_size", 2),
     ],
 )
-def test_mmdetection_refuses_combinations_that_do_not_fit_8gb(field, value):
+def test_mmdetection_refuses_combinations_that_do_not_fit_8gb(pretend_cuda, field, value):
     """8GB에서 도는 조합만 받습니다. 학습을 시작한 뒤 터지면 밤을 버립니다."""
 
     raw = {
@@ -400,7 +412,7 @@ def test_mmdetection_refuses_combinations_that_do_not_fit_8gb(field, value):
         _settings({"train": raw})
 
 
-def test_mmdetection_checkpoint_carries_what_evaluate_needs():
+def test_mmdetection_checkpoint_carries_what_evaluate_needs(pretend_cuda):
     """제안서 012가 정한 값입니다. 없으면 evaluate가 torchvision으로 읽으려 듭니다."""
 
     settings = _settings(_mmdetection_raw(input_size=512))
