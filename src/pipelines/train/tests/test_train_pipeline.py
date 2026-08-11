@@ -266,6 +266,7 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
             "seed",
             "epochs",
             "batch_size",
+            "gradient_accumulation_steps",
             "num_workers",
             "device",
             "precision",
@@ -273,7 +274,7 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
             "early_stopping",
             "resume",
         }
-        assert recorded["schema_version"] == 3
+        assert recorded["schema_version"] == 4
         assert recorded["resume"] is None
         assert recorded["run_id"] == "cpu-smoke"
         assert recorded["architecture"] == checkpoint["architecture"]
@@ -1657,6 +1658,68 @@ def test_run_rejects_resuming_into_a_different_schedule(
     build_model_spy.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [(1, 2), (2, 1)],
+)
+def test_run_rejects_resuming_into_a_different_accumulation(
+    local_config, monkeypatch, first, second
+):
+    """모으는 수가 바뀌면 갱신 횟수와 schedule 걸음이 함께 달라집니다.
+
+    optimizer나 schedule이 바뀐 것과 같은 이유입니다. 막지 않으면 이어붙인 실행이
+    끊기지 않고 돈 실행과 달라지는데, 오류는 나지 않고 점수로만 드러납니다.
+    """
+
+    local_config["train"]["gradient_accumulation_steps"] = first
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"].update({"epochs": 4, "gradient_accumulation_steps": second})
+    build_model_spy = Mock()
+    monkeypatch.setattr(pipeline, "build_model", build_model_spy)
+
+    result = train.run(resumed)
+
+    assert result["status"] == "error"
+    assert "gradient_accumulation_steps" in result["message"]
+    build_model_spy.assert_not_called()
+
+
+def test_an_old_checkpoint_without_the_accumulation_key_resumes_as_one(
+    local_config, tmp_path
+):
+    """이 key를 몰랐던 옛 checkpoint는 1로 읽습니다.
+
+    그때는 모으지 않고 batch마다 갱신했으므로 1이 맞습니다. 없다고 거부하면 이미
+    돌던 학습을 이어서 할 수 없게 됩니다.
+    """
+
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+    checkpoint = torch.load(source, map_location="cpu", weights_only=False)
+    checkpoint["training_config"].pop("gradient_accumulation_steps")
+    torch.save(checkpoint, source)
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"]["epochs"] = 4
+
+    result = train.run(resumed)
+
+    assert result["status"] == "ok", result["message"]
+
+
 def test_run_rejects_absolute_resume_path_before_recording_it(local_config):
     local_config["train"]["resume_from"] = str(
         (REPOSITORY_ROOT / "artifacts" / "private-checkpoint.pt").resolve()
@@ -2604,6 +2667,7 @@ class _AccumulationSpy:
     def __init__(self) -> None:
         self.events: list[str] = []
         self.scaled_losses: list[float] = []
+        self.learning_rates: list[float] = []
 
     def autocast(self):
         class Context:
@@ -2622,6 +2686,7 @@ class _AccumulationSpy:
 
     def step(self, optimizer):
         self.events.append("step")
+        self.learning_rates.append(optimizer.param_groups[0]["lr"])
         optimizer.step()
 
     def state_dict(self):
@@ -2631,7 +2696,15 @@ class _AccumulationSpy:
         assert state is None
 
 
-def _train_with_accumulation(monkeypatch, spy, *, images: int, accumulation: int):
+def _train_with_accumulation(
+    monkeypatch,
+    spy,
+    *,
+    images: int,
+    accumulation: int,
+    lr_scheduler=None,
+    learning_rate: float = 0.0,
+):
     monkeypatch.setattr(
         trainer_module, "_PrecisionRuntime", lambda precision, device: spy
     )
@@ -2643,16 +2716,20 @@ def _train_with_accumulation(monkeypatch, spy, *, images: int, accumulation: int
         return real_zero(self, set_to_none=set_to_none)
 
     monkeypatch.setattr(torch.optim.SGD, "zero_grad", counting_zero_grad)
+    spy.zeroed = zeroed
     settings = {
         "seed": 17,
         "device": "cpu",
         "batch_size": 1,
         "num_workers": 0,
-        "learning_rate": 0.01,
+        # 0으로 두어 묶음 사이에 가중치가 변하지 않게 합니다. 변하면 손실도 함께
+        # 달라져서, 나눗셈이 맞는지와 model이 바뀐 것이 뒤섞입니다.
+        "learning_rate": learning_rate,
         "momentum": 0.0,
         "weight_decay": 0.0,
         "epochs": 1,
         "gradient_accumulation_steps": accumulation,
+        "lr_scheduler": lr_scheduler,
         "precision": {"mode": "fp32", "dtype": "fp32", "grad_scaler": False},
     }
     train_model(
@@ -2679,6 +2756,9 @@ def test_gradient_accumulation_steps_once_per_group(monkeypatch):
         "backward",
         "step",
     ]
+    # 묶음마다 한 번만 비워야 합니다. 매 microbatch마다 비우면 앞의 gradient가
+    # 사라져 모으는 의미가 없어지는데, 학습은 그대로 돌아가 오류가 나지 않습니다.
+    assert len(spy.zeroed) == 2
 
 
 def test_gradient_accumulation_divides_the_loss_by_the_group_size(monkeypatch):
@@ -2710,3 +2790,39 @@ def test_a_partial_last_group_still_updates_the_weights(monkeypatch):
     assert spy.events.count("backward") == 3
     assert spy.events.count("step") == 2
     assert spy.events[-1] == "step"
+    assert len(spy.zeroed) == 2
+    # 마지막 묶음은 microbatch가 하나뿐입니다. 그런데도 accumulation으로 나누면
+    # 그 몇 장의 gradient만 작아져, 오류 없이 그 데이터가 덜 반영됩니다.
+    assert spy.scaled_losses[2] == pytest.approx(spy.scaled_losses[0] * 2)
+
+
+def test_schedule_length_counts_updates_not_microbatches(monkeypatch):
+    """schedule은 갱신할 때마다 한 걸음 갑니다. 길이도 갱신 수로 재야 합니다.
+
+    microbatch 수로 재면 accumulation만큼 짧게 걸어, linear와 cosine이 설정한 최저
+    learning rate에 닿지 못한 채 학습이 끝납니다. step schedule의 epoch 경계도
+    늦어집니다. 오류는 나지 않고 learning rate 궤적만 조용히 달라집니다.
+    """
+
+    spy = _AccumulationSpy()
+
+    _train_with_accumulation(
+        monkeypatch,
+        spy,
+        images=4,
+        accumulation=2,
+        learning_rate=1.0,
+        lr_scheduler={
+            "name": "linear",
+            "warmup_steps": 0,
+            "warmup_start_factor": 0.001,
+            "min_lr_factor": 0.1,
+        },
+    )
+
+    # microbatch 4개를 2개씩 모으면 갱신은 2번입니다. 그 2번에 걸쳐 1.0에서
+    # min_lr_factor까지 내려가야 합니다.
+    assert spy.events.count("step") == 2
+    # 갱신 2번에 걸쳐 1.0에서 min_lr_factor 0.1까지 내려갑니다. microbatch 수로
+    # 재면 [1.0, 0.7]에서 끝나 최저값을 한 번도 쓰지 못합니다.
+    assert spy.learning_rates == pytest.approx([1.0, 0.1])

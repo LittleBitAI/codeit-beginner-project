@@ -368,7 +368,12 @@ def _train_model(
     if not parameters:
         raise RuntimeError("model has no trainable parameters")
     optimizer = build_optimizer(parameters, settings)
-    schedule = build_lr_scheduler(optimizer, settings, len(train_loader))
+    # schedule은 optimizer를 **갱신할 때마다** 한 걸음 갑니다. microbatch 수로 길이를
+    # 재면 accumulation만큼 짧게 걸어 linear와 cosine이 최저 learning rate에 닿지
+    # 못하고 step schedule의 epoch 경계도 늦어집니다.
+    _accumulation = max(1, int(settings.get("gradient_accumulation_steps", 1) or 1))
+    _updates_per_epoch = math.ceil(len(train_loader) / _accumulation)
+    schedule = build_lr_scheduler(optimizer, settings, _updates_per_epoch)
     precision = _PrecisionRuntime(
         settings.get(
             "precision",
@@ -439,9 +444,12 @@ def _train_model(
                 loss, components = _loss(model, images, targets, device)
             # 이 batch가 실제로 쓴 값이므로 schedule을 넘기기 전에 읽습니다.
             learning_rate = optimizer.param_groups[0]["lr"]
-            # 모은 수로 나눕니다. 나누지 않으면 gradient가 그 배로 커져 사실상
-            # learning rate를 올린 것과 같아집니다.
-            precision.backward(loss / accumulation)
+            # **그 묶음이 실제로 모은 수**로 나눕니다. 나누지 않으면 gradient가 그
+            # 배로 커져 사실상 learning rate를 올린 것과 같아지고, 마지막 묶음까지
+            # accumulation으로 나누면 반대로 그 몇 장의 gradient가 작아집니다.
+            group_start = ((step - 1) // accumulation) * accumulation
+            group_size = min(accumulation, total_steps - group_start)
+            precision.backward(loss / group_size)
             # 마지막 묶음이 N개를 못 채우고 끝나면 그 gradient가 통째로 버려집니다.
             # 오류는 나지 않고 그 몇 장만 학습에서 빠지므로 알아채기 어렵습니다.
             if step % accumulation == 0 or step == total_steps:
