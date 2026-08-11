@@ -358,4 +358,54 @@ describe('NewExperiment · 자동 실행 이름', () => {
     expect(screen.getByLabelText('Gradient accumulation')).toBeInTheDocument();
     expect(screen.getByLabelText('입력 크기')).toBeInTheDocument();
   });
+
+  it('고른 모델에 따라 안내하는 기본값이 달라진다', () => {
+    // 하나만 보여 주면 MMDetection을 고르고 비워 둔 사람에게 1이라고 안내하면서
+    // 실제로는 8로 돕니다. 화면이 거짓말을 하는 셈입니다.
+    const defaults: Defaults = {
+      ...LEGACY_DEFAULTS,
+      fields: [
+        {
+          name: 'architecture',
+          type: 'enum',
+          default: 'fasterrcnn_mobilenet_v3_large_320_fpn',
+          choices: ['fasterrcnn_mobilenet_v3_large_320_fpn', 'dino_r50_4scale'],
+          label: '모델',
+          hint: '',
+        },
+        {
+          name: 'gradient_accumulation_steps',
+          type: 'integer',
+          default: 1,
+          defaults_by_architecture: { dino_r50_4scale: 8 },
+          label: 'Gradient accumulation',
+          hint: '',
+        },
+      ],
+    };
+    render(
+      <MemoryRouter>
+        <DraftProvider>
+          <NewExperiment defaults={defaults} source={null} />
+        </DraftProvider>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByText('하이퍼파라미터'));
+    expect(screen.getByLabelText('Gradient accumulation')).toHaveAttribute(
+      'placeholder',
+      '기본값 1',
+    );
+
+    fireEvent.click(screen.getByText('기본 정보'));
+    fireEvent.change(screen.getByLabelText('모델'), {
+      target: { value: 'dino_r50_4scale' },
+    });
+    fireEvent.click(screen.getByText('하이퍼파라미터'));
+
+    expect(screen.getByLabelText('Gradient accumulation')).toHaveAttribute(
+      'placeholder',
+      '기본값 8',
+    );
+  });
 });

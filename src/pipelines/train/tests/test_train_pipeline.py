@@ -1753,6 +1753,66 @@ def test_run_rejects_resuming_into_a_different_accumulation(
     build_model_spy.assert_not_called()
 
 
+@pytest.mark.parametrize("recorded", [512, 640])
+def test_run_rejects_resuming_into_a_different_input_size(
+    local_config, monkeypatch, recorded
+):
+    """입력 크기가 바뀌면 resize와 padding이 달라져 다른 그림으로 배웁니다.
+
+    MMDetection 실행을 실제로 돌리려면 GPU와 mmdet이 필요하므로, 여기서는 그 값을
+    기록한 checkpoint를 만들어 같은 거부 경로를 지나게 합니다. 이 실행은 그 값을 쓰지
+    않아 기대값이 ``None``이므로, 기록된 값이 무엇이든 달라 거부되어야 합니다.
+    """
+
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+    checkpoint = torch.load(source, map_location="cpu", weights_only=False)
+    checkpoint["training_config"]["input_size"] = recorded
+    torch.save(checkpoint, source)
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"]["epochs"] = 4
+    build_model_spy = Mock()
+    monkeypatch.setattr(pipeline, "build_model", build_model_spy)
+
+    result = train.run(resumed)
+
+    assert result["status"] == "error"
+    assert "input_size" in result["message"]
+    build_model_spy.assert_not_called()
+
+
+def test_an_old_checkpoint_without_the_input_size_key_resumes(local_config):
+    """이 key를 몰랐던 옛 checkpoint는 없음으로 읽습니다.
+
+    그때는 MMDetection을 고를 수 없었으므로 그 실행은 이 값을 쓰지 않았습니다.
+    없다고 거부하면 이미 돌던 학습을 이어서 할 수 없게 됩니다.
+    """
+
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+    checkpoint = torch.load(source, map_location="cpu", weights_only=False)
+    checkpoint["training_config"].pop("input_size")
+    torch.save(checkpoint, source)
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"]["epochs"] = 4
+
+    result = train.run(resumed)
+
+    assert result["status"] == "ok", result["message"]
+
+
 def test_an_old_checkpoint_without_the_accumulation_key_resumes_as_one(
     local_config, tmp_path
 ):

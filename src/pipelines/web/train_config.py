@@ -212,8 +212,9 @@ _FIELD_LABELS = {
     ),
     "lr_warmup_steps": (
         "Warmup steps",
-        "처음 몇 batch 동안 learning rate를 조금씩 올릴지 정합니다. 0이면 쓰지 않습니다."
-        " 사전학습 가중치로 시작할 때 초반에 손실이 튀는 것을 막아 줍니다.",
+        "처음 몇 번의 가중치 갱신 동안 learning rate를 조금씩 올릴지 정합니다. 0이면"
+        " 쓰지 않습니다. 모아서 갱신하면 batch 수와 갱신 수가 달라지므로 batch가 아니라"
+        " 갱신을 셉니다. 사전학습 가중치로 시작할 때 초반에 손실이 튀는 것을 막아 줍니다.",
     ),
     "lr_warmup_start_factor": (
         "Warmup 시작 배율",
@@ -427,16 +428,22 @@ def field_specs() -> list[dict[str, Any]]:
         _INTEGER_FIELDS + (_ACCUMULATION_FIELD,) + _MMDETECTION_INTEGER_FIELDS
     ):
         label, hint = _FIELD_LABELS[name]
-        specs.append(
-            {
-                "name": name,
-                "type": "integer",
-                "default": default,
-                "minimum": minimum,
-                "label": label,
-                "hint": hint,
+        spec: dict[str, Any] = {
+            "name": name,
+            "type": "integer",
+            "default": default,
+            "minimum": minimum,
+            "label": label,
+            "hint": hint,
+        }
+        # 기본값이 architecture마다 다른 칸입니다. 하나만 내려보내면 MMDetection을
+        # 고르고 비워 둔 사람에게 1이라고 안내하면서 실제로는 8로 돕니다.
+        if name == _ACCUMULATION_FIELD[0]:
+            spec["defaults_by_architecture"] = {
+                architecture: DEFAULT_ACCUMULATION_STEPS
+                for architecture in MMDETECTION_ARCHITECTURES
             }
-        )
+        specs.append(spec)
     default_profile = OPTIMIZER_PROFILES[NEW_EXPERIMENT_OPTIMIZER]
     for name in (
         "learning_rate",

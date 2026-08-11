@@ -14,6 +14,8 @@ export interface FieldSpec {
   type: 'string' | 'integer' | 'number' | 'boolean' | 'enum' | 'uri';
   default?: unknown;
   defaults_by_optimizer?: Record<string, number>;
+  /** 고른 모델마다 기본값이 다른 칸입니다. 없으면 default가 그대로 기본값입니다. */
+  defaults_by_architecture?: Record<string, number>;
   minimum?: number;
   choices?: string[];
   label: string;

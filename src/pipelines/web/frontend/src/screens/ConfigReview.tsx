@@ -41,12 +41,17 @@ export function ConfigReview({
 
   const train = saved.config.train as Record<string, unknown>;
   const optimizer = String(train.optimizer ?? 'SGD');
+  // 기본값이 고른 모델에 따라 달라지는 칸이 있습니다. 하나만 쓰면 그 모델의 기본값이
+  // "기본값과 다른 값"으로 잘못 나오고, 반대로 일부러 준 값은 diff에서 사라집니다.
+  const architecture = String(train.architecture ?? '');
   const defaultValues = Object.fromEntries(
     (defaults?.fields ?? [])
       .filter((spec) => spec.default !== undefined && spec.default !== null)
       .map((spec) => [
         spec.name,
-        spec.defaults_by_optimizer?.[optimizer] ?? spec.default,
+        spec.defaults_by_optimizer?.[optimizer] ??
+          spec.defaults_by_architecture?.[architecture] ??
+          spec.default,
       ]),
   );
   const diff = diffAgainstDefaults(train, defaultValues);

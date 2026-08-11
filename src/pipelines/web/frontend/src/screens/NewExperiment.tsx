@@ -141,6 +141,9 @@ export function NewExperiment({
 
   const capability = resolveTrainCapability(defaults);
   const selectedOptimizer = draft.train.optimizer || capability.optimizer.default;
+  const selectedArchitecture = String(
+    draft.train.architecture || capability.model.default,
+  );
   const earlyStoppingOn = isEarlyStoppingOn(draft.train, fields);
   // 고른 schedule이 쓰지 않는 칸은 감춥니다. 보이면 그 값이 학습에 쓰이는 것처럼
   // 읽히고, 서버도 쓰지 않는 값이라며 거부합니다. payload의 제외 규칙과 같은 함수를
@@ -265,11 +268,15 @@ export function NewExperiment({
                     />
                   );
                 }
-                const optimizerDefault = spec.defaults_by_optimizer?.[selectedOptimizer];
+                // 기본값이 고른 optimizer나 모델에 따라 달라지는 칸이 있습니다.
+                // 하나만 보여 주면 비워 둔 사람에게 실제와 다른 값을 안내합니다.
+                const variableDefault =
+                  spec.defaults_by_optimizer?.[selectedOptimizer] ??
+                  spec.defaults_by_architecture?.[selectedArchitecture];
                 const shownSpec =
-                  optimizerDefault === undefined
+                  variableDefault === undefined
                     ? spec
-                    : { ...spec, default: optimizerDefault };
+                    : { ...spec, default: variableDefault };
                 return (
                   <TrainField
                     key={name}

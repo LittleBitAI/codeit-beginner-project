@@ -166,6 +166,26 @@ def test_mmdetection_8gb_combination_matches_train_source():
     )
 
 
+def test_the_form_says_eight_for_models_that_default_to_eight():
+    """비워 둔 칸에 화면이 안내하는 값이 실제로 쓰이는 값과 같아야 합니다.
+
+    기본값 하나만 내려보내면 MMDetection을 고르고 비워 둔 사람에게 1이라고 안내하면서
+    실제로는 8로 돕니다. 검토 화면의 diff도 그 값을 기본값과 다른 값으로 잘못 봅니다.
+    """
+
+    spec = next(
+        item
+        for item in field_specs()
+        if item["name"] == "gradient_accumulation_steps"
+    )
+
+    assert spec["default"] == 1
+    assert spec["defaults_by_architecture"] == {
+        architecture: DEFAULT_ACCUMULATION_STEPS
+        for architecture in MMDETECTION_ARCHITECTURES
+    }
+
+
 def test_mmdetection_numeric_defaults_match_train_source():
     """입력 크기와 모으는 수의 기본값도 train이 정한 값이어야 합니다."""
 
