@@ -112,7 +112,8 @@ LR_SCHEDULER_DEFAULTS = {
 _LR_SCHEDULER_KEYS = {
     key for defaults in LR_SCHEDULER_DEFAULTS.values() for key in defaults
 }
-# ``amp``는 GPU를 보고 dtype을 대신 골라 주고, ``fp16``·``bf16``은 고른 그대로 씁니다.
+# ``amp``는 architecture와 GPU가 함께 지원하는 dtype을 골라 주고, ``fp16``·``bf16``은
+# 고른 그대로 씁니다.
 # 자동 선택만 있으면 어떤 GPU에서 무엇으로 돌지 미리 알 수 없고, 그 GPU에 맞는 쪽을
 # 사람이 고를 수도 없습니다.
 PRECISION_MODES = ("fp32", "amp", "fp16", "bf16")
@@ -293,8 +294,10 @@ def _native_bf16_supported() -> bool:
         return torch.cuda.get_device_capability()[0] >= 8
 
 
-def _precision(raw: Mapping[str, Any], device: str) -> dict[str, str | bool]:
-    """요청한 정밀도를 실제 CUDA가 빠르게 지원하는 dtype으로 확정합니다."""
+def _precision(
+    raw: Mapping[str, Any], device: str, architecture: str
+) -> dict[str, str | bool]:
+    """요청한 정밀도를 GPU와 architecture가 함께 지원하는 dtype으로 확정합니다."""
 
     mode = raw.get("precision", "fp32")
     if not isinstance(mode, str) or mode not in PRECISION_MODES:
@@ -307,6 +310,11 @@ def _precision(raw: Mapping[str, Any], device: str) -> dict[str, str | bool]:
         # fp16은 어느 CUDA GPU에서나 됩니다. 표현할 수 있는 수의 범위가 좁아 gradient가
         # 0으로 내려앉으므로 GradScaler가 필요합니다. bf16 지원 여부는 물을 필요가 없습니다.
         return {"mode": "fp16", "dtype": "fp16", "grad_scaler": True}
+    if mode == "amp" and architecture in MMDETECTION_ARCHITECTURES:
+        # MMCV custom CUDA op는 bf16 dispatch가 없습니다. Ampere 이후 GPU만 보고 bf16을
+        # 고르면 DINO의 ms_deform_attn 같은 연산이 첫 batch에서 실패합니다. fp16은 해당
+        # op가 지원하며 표현 범위가 좁으므로 GradScaler를 함께 씁니다.
+        return {"mode": "amp", "dtype": "fp16", "grad_scaler": True}
     native_bf16 = _native_bf16_supported()
     if mode == "bf16":
         if not native_bf16:
@@ -416,7 +424,7 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "augmentation": _augmentation(raw),
         "lr_scheduler": _lr_scheduler(raw),
         "device": device,
-        "precision": _precision(raw, device),
+        "precision": _precision(raw, device, architecture),
         "pretrained": pretrained,
         "early_stopping": _early_stopping(raw),
         "output_dir": output_dir,
