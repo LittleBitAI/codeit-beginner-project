@@ -166,6 +166,19 @@ def test_mmdetection_8gb_combination_matches_train_source():
     )
 
 
+def test_the_form_is_told_which_models_use_input_size():
+    """화면이 어느 모델에서 이 칸을 보일지 스스로 판단하지 않게 합니다.
+
+    목록을 화면에 옮겨 적으면 여기서 architecture를 더해도 화면은 모르고, 그 값을
+    쓰지 않는 모델에서 칸이 보인 채로 남습니다. 사용자는 값을 정할 수 있다고 믿는데
+    보내면 거부됩니다.
+    """
+
+    spec = next(item for item in field_specs() if item["name"] == "input_size")
+
+    assert spec["only_for_architectures"] == list(MMDETECTION_ARCHITECTURES)
+
+
 def test_the_form_says_eight_for_models_that_default_to_eight():
     """비워 둔 칸에 화면이 안내하는 값이 실제로 쓰이는 값과 같아야 합니다.
 

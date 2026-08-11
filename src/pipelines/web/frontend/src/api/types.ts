@@ -16,6 +16,8 @@ export interface FieldSpec {
   defaults_by_optimizer?: Record<string, number>;
   /** 고른 모델마다 기본값이 다른 칸입니다. 없으면 default가 그대로 기본값입니다. */
   defaults_by_architecture?: Record<string, number>;
+  /** 여기 적힌 모델에서만 쓰는 칸입니다. 다른 모델이면 감춥니다. */
+  only_for_architectures?: string[];
   minimum?: number;
   choices?: string[];
   label: string;

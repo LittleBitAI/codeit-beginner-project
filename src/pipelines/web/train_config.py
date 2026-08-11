@@ -443,6 +443,10 @@ def field_specs() -> list[dict[str, Any]]:
                 architecture: DEFAULT_ACCUMULATION_STEPS
                 for architecture in MMDETECTION_ARCHITECTURES
             }
+        # 그 모델을 고르지 않았으면 화면에서 감춥니다. 보이면 값을 정할 수 있는 것처럼
+        # 읽히는데 이쪽은 거부합니다. 어느 모델이 쓰는지 화면이 옮겨 적지 않게 합니다.
+        if name in {field[0] for field in _MMDETECTION_INTEGER_FIELDS}:
+            spec["only_for_architectures"] = list(MMDETECTION_ARCHITECTURES)
         specs.append(spec)
     default_profile = OPTIMIZER_PROFILES[NEW_EXPERIMENT_OPTIMIZER]
     for name in (

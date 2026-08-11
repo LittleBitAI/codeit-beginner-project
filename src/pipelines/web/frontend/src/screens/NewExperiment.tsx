@@ -249,6 +249,16 @@ export function NewExperiment({
                 if (LR_FIELDS.includes(name) && !shownLrFields.has(name)) return null;
                 const spec = fields.find((item) => item.name === name);
                 if (!spec) return null;
+                // 이 칸을 쓰지 않는 모델에서는 감춥니다. 보이면 값을 정할 수 있는
+                // 것처럼 읽히는데, 서버는 그 모델이 쓰지 않는 값이라며 거부합니다.
+                // 어떤 모델이 쓰는지는 서버가 알려 줍니다. 여기에 옮겨 적으면 목록이
+                // 어긋나도 아무도 모릅니다.
+                if (
+                  spec.only_for_architectures &&
+                  !spec.only_for_architectures.includes(selectedArchitecture)
+                ) {
+                  return null;
+                }
                 // 이름을 비워 두면 서버가 설정을 읽어 지어 줍니다. 규칙을 여기에
                 // 옮겨 적지 않고, 매 입력마다 받는 검증 결과의 이름을 그대로 보여 줍니다.
                 if (name === 'run_id') {
