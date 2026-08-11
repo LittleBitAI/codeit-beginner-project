@@ -46,16 +46,24 @@ class _PrecisionRuntime:
             return nullcontext()
         return torch.autocast(device_type=self._device.type, dtype=self._dtype)
 
-    def backward_and_step(
-        self, loss: torch.Tensor, optimizer: torch.optim.Optimizer
-    ) -> None:
-        """fp16은 scale하고, 나머지 dtype은 기존 backward/step을 사용합니다."""
+    def backward(self, loss: torch.Tensor) -> None:
+        """gradient를 쌓습니다. fp16은 scale한 뒤 쌓습니다.
+
+        갱신과 나눠 둔 이유는 gradient accumulation 때문입니다. microbatch마다
+        backward는 하되 optimizer는 묶음이 끝날 때 한 번만 움직여야 합니다.
+        """
 
         if self._scaler is None:
             loss.backward()
-            optimizer.step()
             return
         self._scaler.scale(loss).backward()
+
+    def step(self, optimizer: torch.optim.Optimizer) -> None:
+        """쌓인 gradient로 가중치를 갱신합니다."""
+
+        if self._scaler is None:
+            optimizer.step()
+            return
         self._scaler.step(optimizer)
         self._scaler.update()
 
@@ -115,8 +123,14 @@ def build_lr_scheduler(
     이것이 schedule을 몰랐던 옛 checkpoint를 그대로 이어서 학습할 수 있게 하는 조건이기도
     합니다.
 
-    배율은 epoch이 아니라 **batch마다** 계산합니다. warmup을 epoch 단위로만 셀 수 있으면
-    가장 짧은 warmup이 1 epoch인데, 이미지가 만 장이 넘는 지금은 그것도 수천 batch입니다.
+    배율은 epoch이 아니라 **optimizer를 갱신할 때마다** 계산합니다. warmup을 epoch
+    단위로만 셀 수 있으면 가장 짧은 warmup이 1 epoch인데, 이미지가 만 장이 넘는 지금은
+    그것도 수천 번입니다.
+
+    ``steps_per_epoch``도 batch 수가 아니라 **갱신 수**를 받습니다. gradient
+    accumulation을 쓰면 batch마다 갱신하지 않으므로 둘이 달라지고, batch 수로 재면
+    schedule이 그만큼 짧게 걸어 ``linear``와 ``cosine``이 설정한 최저 배율에 닿지
+    못합니다. accumulation이 1이면 둘은 같습니다.
     """
 
     schedule = settings.get("lr_scheduler")
@@ -140,7 +154,7 @@ def build_lr_scheduler(
         if name == "none":
             return 1.0
         minimum = schedule["min_lr_factor"]
-        # 남은 step에서 1을 빼야 **마지막 batch가** min_lr_factor를 실제로 씁니다.
+        # 남은 step에서 1을 빼야 **마지막 갱신이** min_lr_factor를 실제로 씁니다.
         # 빼지 않으면 설정한 최저 learning rate는 한 번도 쓰이지 않고 끝납니다.
         progress = min(
             1.0, (step - warmup_steps) / max(1, total_steps - warmup_steps - 1)
@@ -360,7 +374,12 @@ def _train_model(
     if not parameters:
         raise RuntimeError("model has no trainable parameters")
     optimizer = build_optimizer(parameters, settings)
-    schedule = build_lr_scheduler(optimizer, settings, len(train_loader))
+    # schedule은 optimizer를 **갱신할 때마다** 한 걸음 갑니다. microbatch 수로 길이를
+    # 재면 accumulation만큼 짧게 걸어 linear와 cosine이 최저 learning rate에 닿지
+    # 못하고 step schedule의 epoch 경계도 늦어집니다.
+    _accumulation = max(1, int(settings.get("gradient_accumulation_steps", 1) or 1))
+    _updates_per_epoch = math.ceil(len(train_loader) / _accumulation)
+    schedule = build_lr_scheduler(optimizer, settings, _updates_per_epoch)
     precision = _PrecisionRuntime(
         settings.get(
             "precision",
@@ -409,6 +428,9 @@ def _train_model(
         _load_schedule_state(schedule, state.get("scheduler_state_dict"))
         restore_rng(state["rng"], generator)
         start_epoch = int(state["completed_epoch"]) + 1
+    # 몇 개의 microbatch를 모아 한 번 갱신할지입니다. 1이면 지금까지와 같습니다.
+    # GPU 메모리가 모자라 batch_size를 못 올릴 때 같은 효과를 냅니다.
+    accumulation = max(1, int(settings.get("gradient_accumulation_steps", 1) or 1))
     for epoch in range(start_epoch, settings["epochs"] + 1):
         epoch_started_at = time.perf_counter()
         if progress is not None:
@@ -418,15 +440,28 @@ def _train_model(
         train_component_totals: dict[str, float] = {}
         # epoch이 끝난 뒤 남길 값입니다. 아래에서 batch마다 갱신합니다.
         learning_rate = optimizer.param_groups[0]["lr"]
+        total_steps = len(train_loader)
         for step, (images, targets) in enumerate(train_loader, start=1):
-            optimizer.zero_grad(set_to_none=True)
+            # 묶음의 첫 microbatch에서만 비웁니다. 매번 비우면 앞의 것이 사라져
+            # 모으는 의미가 없어집니다.
+            if (step - 1) % accumulation == 0:
+                optimizer.zero_grad(set_to_none=True)
             with precision.autocast():
                 loss, components = _loss(model, images, targets, device)
             # 이 batch가 실제로 쓴 값이므로 schedule을 넘기기 전에 읽습니다.
             learning_rate = optimizer.param_groups[0]["lr"]
-            precision.backward_and_step(loss, optimizer)
-            if schedule is not None:
-                schedule.step()
+            # **그 묶음이 실제로 모은 수**로 나눕니다. 나누지 않으면 gradient가 그
+            # 배로 커져 사실상 learning rate를 올린 것과 같아지고, 마지막 묶음까지
+            # accumulation으로 나누면 반대로 그 몇 장의 gradient가 작아집니다.
+            group_start = ((step - 1) // accumulation) * accumulation
+            group_size = min(accumulation, total_steps - group_start)
+            precision.backward(loss / group_size)
+            # 마지막 묶음이 N개를 못 채우고 끝나면 그 gradient가 통째로 버려집니다.
+            # 오류는 나지 않고 그 몇 장만 학습에서 빠지므로 알아채기 어렵습니다.
+            if step % accumulation == 0 or step == total_steps:
+                precision.step(optimizer)
+                if schedule is not None:
+                    schedule.step()
             train_total += float(loss.detach().cpu())
             _add_components(train_component_totals, components, phase="train")
             if progress is not None:

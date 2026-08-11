@@ -77,11 +77,12 @@ class BatchNormDetector(nn.Module):
 
 
 class InMemoryDetectionDataset(torch.utils.data.Dataset):
-    def __init__(self, value: float) -> None:
+    def __init__(self, value: float, size: int = 1) -> None:
         self.image = torch.full((3, 2, 2), value)
+        self.size = size
 
     def __len__(self):
-        return 1
+        return self.size
 
     def __getitem__(self, index):
         return self.image, {
@@ -108,19 +109,27 @@ def _write_json(path: Path, value) -> None:
     )
 
 
-def _manifest(image_name: str) -> dict:
+def _manifest(image_name: str, images: int = 1) -> dict:
+    """같은 이미지를 ``images``장 담은 manifest입니다.
+
+    한 장짜리로는 microbatch를 모으는 경로를 지나지 못합니다. 학습에 쓰는 값이 아니라
+    batch가 몇 개 나오는지가 필요한 test가 있어 같은 그림을 여러 번 넣습니다.
+    """
+
     return {
         "images": [
-            {"id": 1, "file_name": image_name, "width": 16, "height": 12}
+            {"id": index, "file_name": image_name, "width": 16, "height": 12}
+            for index in range(1, images + 1)
         ],
         "annotations": [
             {
-                "id": 1,
-                "image_id": 1,
+                "id": index,
+                "image_id": index,
                 "category_id": 7,
                 "bbox": [2, 3, 5, 4],
                 "iscrowd": 0,
             }
+            for index in range(1, images + 1)
         ],
         "categories": [{"id": 7, "name": "pill"}],
     }
@@ -265,6 +274,7 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
             "seed",
             "epochs",
             "batch_size",
+            "gradient_accumulation_steps",
             "num_workers",
             "device",
             "precision",
@@ -272,7 +282,7 @@ def test_run_trains_and_writes_contract_artifacts_without_mutating_inputs(local_
             "early_stopping",
             "resume",
         }
-        assert recorded["schema_version"] == 3
+        assert recorded["schema_version"] == 4
         assert recorded["resume"] is None
         assert recorded["run_id"] == "cpu-smoke"
         assert recorded["architecture"] == checkpoint["architecture"]
@@ -1393,6 +1403,58 @@ def test_resumed_training_matches_an_uninterrupted_run(
         assert torch.equal(value, resumed_weights[name]), name
 
 
+@pytest.mark.parametrize("accumulation", [1, 2])
+def test_resumed_training_matches_an_uninterrupted_run_while_accumulating(
+    local_config, tmp_path, monkeypatch, accumulation
+):
+    """모으는 중에 끊겼다 이어서 해도 끊기지 않은 학습과 같아야 합니다.
+
+    기본 fixture는 학습 이미지가 한 장이라 accumulation을 올려도 묶음이 생기지
+    않습니다. 그래서 여러 장으로 바꿔 microbatch를 실제로 모으게 한 뒤, epoch 경계에서
+    끊었다 이어 붙입니다. 모으는 도중 optimizer와 schedule의 걸음이 어긋나면 여기서
+    갈라집니다.
+    """
+
+    monkeypatch.setattr(
+        pipeline, "build_model", lambda *args, **kwargs: RandomWalkDetector()
+    )
+    fixture_directory = tmp_path / "fixtures"
+    _write_json(
+        fixture_directory / "train.json", _manifest("train.png", images=5)
+    )
+    _write_json(fixture_directory / "summary.json", {"train_images": 5, "validation_images": 1})
+    # 5장을 2개씩 모으면 마지막 묶음이 한 장만 남습니다. 못 채운 묶음까지 지나갑니다.
+    local_config["train"]["gradient_accumulation_steps"] = accumulation
+    # schedule은 일부러 켜지 않습니다. schedule 길이는 epochs에서 나오므로, 2 epoch로
+    # 끊었다가 4로 이어 붙이면 곡선 자체가 곧게 4를 돈 실행과 달라집니다. 그것은
+    # 의도된 동작이라 여기서 섞으면 accumulation이 원인인지 알 수 없게 됩니다.
+
+    straight = copy.deepcopy(local_config)
+    straight["train"]["run_id"] = "cpu-straight"
+    straight["train"]["epochs"] = 4
+    straight_result = train.run(straight)
+    assert straight_result["status"] == "ok", straight_result["message"]
+
+    interrupted = copy.deepcopy(local_config)
+    interrupted["train"]["epochs"] = 2
+    train.run(interrupted)
+    source = REPOSITORY_ROOT / interrupted["train"]["output_dir"] / "cpu-smoke"
+
+    resumed = _resume_config(local_config, source / "last_checkpoint.pt")
+    resumed["train"]["epochs"] = 4
+    resumed_result = train.run(resumed)
+
+    assert resumed_result["status"] == "ok", resumed_result["message"]
+    straight_weights = _load(
+        REPOSITORY_ROOT / straight_result["artifacts"]["last_checkpoint_uri"]
+    )["model_state_dict"]
+    resumed_weights = _load(
+        REPOSITORY_ROOT / resumed_result["artifacts"]["last_checkpoint_uri"]
+    )["model_state_dict"]
+    for name, value in straight_weights.items():
+        assert torch.equal(value, resumed_weights[name]), name
+
+
 def test_resume_without_restoring_the_random_state_diverges(
     local_config, tmp_path, monkeypatch
 ):
@@ -1654,6 +1716,68 @@ def test_run_rejects_resuming_into_a_different_schedule(
     assert result["status"] == "error"
     assert "learning rate schedule" in result["message"]
     build_model_spy.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [(1, 2), (2, 1)],
+)
+def test_run_rejects_resuming_into_a_different_accumulation(
+    local_config, monkeypatch, first, second
+):
+    """모으는 수가 바뀌면 갱신 횟수와 schedule 걸음이 함께 달라집니다.
+
+    optimizer나 schedule이 바뀐 것과 같은 이유입니다. 막지 않으면 이어붙인 실행이
+    끊기지 않고 돈 실행과 달라지는데, 오류는 나지 않고 점수로만 드러납니다.
+    """
+
+    local_config["train"]["gradient_accumulation_steps"] = first
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"].update({"epochs": 4, "gradient_accumulation_steps": second})
+    build_model_spy = Mock()
+    monkeypatch.setattr(pipeline, "build_model", build_model_spy)
+
+    result = train.run(resumed)
+
+    assert result["status"] == "error"
+    assert "gradient_accumulation_steps" in result["message"]
+    build_model_spy.assert_not_called()
+
+
+def test_an_old_checkpoint_without_the_accumulation_key_resumes_as_one(
+    local_config, tmp_path
+):
+    """이 key를 몰랐던 옛 checkpoint는 1로 읽습니다.
+
+    그때는 모으지 않고 batch마다 갱신했으므로 1이 맞습니다. 없다고 거부하면 이미
+    돌던 학습을 이어서 할 수 없게 됩니다.
+    """
+
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+    checkpoint = torch.load(source, map_location="cpu", weights_only=False)
+    checkpoint["training_config"].pop("gradient_accumulation_steps")
+    torch.save(checkpoint, source)
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"]["epochs"] = 4
+
+    result = train.run(resumed)
+
+    assert result["status"] == "ok", result["message"]
 
 
 def test_run_rejects_absolute_resume_path_before_recording_it(local_config):
@@ -2027,7 +2151,8 @@ def test_fp16_runtime_uses_autocast_and_grad_scaler(monkeypatch):
 
     with runtime.autocast():
         loss = parameter.square()
-    runtime.backward_and_step(loss, optimizer)
+    runtime.backward(loss)
+    runtime.step(optimizer)
 
     autocast.assert_called_once_with(device_type="cuda", dtype=torch.float16)
     scaler_factory.assert_called_once_with("cuda", enabled=True)
@@ -2068,7 +2193,7 @@ def test_fp16_runtime_saves_and_restores_grad_scaler_state(monkeypatch):
 
 
 def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
-    calls = {"autocast": 0, "backward_and_step": 0}
+    calls = {"autocast": 0, "backward": 0, "step": 0}
 
     class Runtime:
         def autocast(self):
@@ -2081,9 +2206,12 @@ def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
 
             return Context()
 
-        def backward_and_step(self, loss, optimizer):
-            calls["backward_and_step"] += 1
+        def backward(self, loss):
+            calls["backward"] += 1
             loss.backward()
+
+        def step(self, optimizer):
+            calls["step"] += 1
             optimizer.step()
 
         def state_dict(self):
@@ -2116,7 +2244,7 @@ def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
         settings,
     )
 
-    assert calls == {"autocast": 2, "backward_and_step": 1}
+    assert calls == {"autocast": 2, "backward": 1, "step": 1}
 
 
 def _s3_storage_with(existing: set[str]) -> S3Storage:
@@ -2591,3 +2719,202 @@ def test_a_new_runtime_fills_its_image_cache_from_one_archive(tmp_path, monkeypa
     downloaded = [call.args[1] for call in storage.client.download_file.call_args_list]
     assert archives[0] in downloaded
     assert not [key for key in downloaded if key.endswith(".png")]
+
+
+class _AccumulationSpy:
+    """microbatch마다 무엇이 불렸는지 순서대로 적어 둡니다."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.scaled_losses: list[float] = []
+        self.learning_rates: list[float] = []
+
+    def autocast(self):
+        class Context:
+            def __enter__(self_inner):
+                return None
+
+            def __exit__(self_inner, *args):
+                return None
+
+        return Context()
+
+    def backward(self, loss):
+        self.events.append("backward")
+        self.scaled_losses.append(float(loss.detach().cpu()))
+        loss.backward()
+
+    def step(self, optimizer):
+        self.events.append("step")
+        self.learning_rates.append(optimizer.param_groups[0]["lr"])
+        optimizer.step()
+
+    def state_dict(self):
+        return None
+
+    def load_state_dict(self, state):
+        assert state is None
+
+
+def _train_with_accumulation(
+    monkeypatch,
+    spy,
+    *,
+    images: int,
+    accumulation: int,
+    lr_scheduler=None,
+    learning_rate: float = 0.0,
+):
+    monkeypatch.setattr(
+        trainer_module, "_PrecisionRuntime", lambda precision, device: spy
+    )
+    zeroed: list[int] = []
+    real_zero = torch.optim.SGD.zero_grad
+
+    def counting_zero_grad(self, set_to_none=True):
+        zeroed.append(1)
+        return real_zero(self, set_to_none=set_to_none)
+
+    monkeypatch.setattr(torch.optim.SGD, "zero_grad", counting_zero_grad)
+    spy.zeroed = zeroed
+    settings = {
+        "seed": 17,
+        "device": "cpu",
+        "batch_size": 1,
+        "num_workers": 0,
+        # 0으로 두어 묶음 사이에 가중치가 변하지 않게 합니다. 변하면 손실도 함께
+        # 달라져서, 나눗셈이 맞는지와 model이 바뀐 것이 뒤섞입니다.
+        "learning_rate": learning_rate,
+        "momentum": 0.0,
+        "weight_decay": 0.0,
+        "epochs": 1,
+        "gradient_accumulation_steps": accumulation,
+        "lr_scheduler": lr_scheduler,
+        "precision": {"mode": "fp32", "dtype": "fp32", "grad_scaler": False},
+    }
+    train_model(
+        TinyDetector(),
+        InMemoryDetectionDataset(1.0, size=images),
+        InMemoryDetectionDataset(0.0, size=1),
+        settings,
+    )
+    return len(zeroed)
+
+
+def test_gradient_accumulation_steps_once_per_group(monkeypatch):
+    """N개를 모아 한 번만 갱신해야 batch_size를 못 늘리는 GPU에서 의미가 있습니다."""
+
+    spy = _AccumulationSpy()
+
+    _train_with_accumulation(monkeypatch, spy, images=4, accumulation=2)
+
+    assert spy.events == [
+        "backward",
+        "backward",
+        "step",
+        "backward",
+        "backward",
+        "step",
+    ]
+    # 묶음마다 한 번만 비워야 합니다. 매 microbatch마다 비우면 앞의 gradient가
+    # 사라져 모으는 의미가 없어지는데, 학습은 그대로 돌아가 오류가 나지 않습니다.
+    assert len(spy.zeroed) == 2
+
+
+def test_gradient_accumulation_divides_the_loss_by_the_group_size(monkeypatch):
+    """나누지 않으면 gradient가 N배가 되어 사실상 learning rate가 N배가 됩니다."""
+
+    spy = _AccumulationSpy()
+
+    _train_with_accumulation(monkeypatch, spy, images=2, accumulation=2)
+
+    # InMemoryDetectionDataset(1.0)은 batch마다 같은 손실을 냅니다.
+    assert spy.scaled_losses == pytest.approx(
+        [spy.scaled_losses[0]] * 2
+    ), spy.scaled_losses
+    unscaled = _AccumulationSpy()
+    _train_with_accumulation(monkeypatch, unscaled, images=2, accumulation=1)
+    assert spy.scaled_losses[0] == pytest.approx(unscaled.scaled_losses[0] / 2)
+
+
+def test_a_partial_last_group_still_updates_the_weights(monkeypatch):
+    """마지막에 N개가 안 되면 그 gradient가 통째로 버려집니다.
+
+    오류가 나지 않고 그 몇 장만 학습에서 빠집니다. epoch 수가 적을수록 비율이 큽니다.
+    """
+
+    spy = _AccumulationSpy()
+
+    _train_with_accumulation(monkeypatch, spy, images=3, accumulation=2)
+
+    assert spy.events.count("backward") == 3
+    assert spy.events.count("step") == 2
+    assert spy.events[-1] == "step"
+    assert len(spy.zeroed) == 2
+    # 마지막 묶음은 microbatch가 하나뿐입니다. 그런데도 accumulation으로 나누면
+    # 그 몇 장의 gradient만 작아져, 오류 없이 그 데이터가 덜 반영됩니다.
+    assert spy.scaled_losses[2] == pytest.approx(spy.scaled_losses[0] * 2)
+
+
+def test_schedule_length_counts_updates_not_microbatches(monkeypatch):
+    """schedule은 갱신할 때마다 한 걸음 갑니다. 길이도 갱신 수로 재야 합니다.
+
+    microbatch 수로 재면 accumulation만큼 짧게 걸어, linear와 cosine이 설정한 최저
+    learning rate에 닿지 못한 채 학습이 끝납니다. step schedule의 epoch 경계도
+    늦어집니다. 오류는 나지 않고 learning rate 궤적만 조용히 달라집니다.
+    """
+
+    spy = _AccumulationSpy()
+
+    _train_with_accumulation(
+        monkeypatch,
+        spy,
+        images=4,
+        accumulation=2,
+        learning_rate=1.0,
+        lr_scheduler={
+            "name": "linear",
+            "warmup_steps": 0,
+            "warmup_start_factor": 0.001,
+            "min_lr_factor": 0.1,
+        },
+    )
+
+    # microbatch 4개를 2개씩 모으면 갱신은 2번입니다. 그 2번에 걸쳐 1.0에서
+    # min_lr_factor까지 내려가야 합니다.
+    assert spy.events.count("step") == 2
+    # 갱신 2번에 걸쳐 1.0에서 min_lr_factor 0.1까지 내려갑니다. microbatch 수로
+    # 재면 [1.0, 0.7]에서 끝나 최저값을 한 번도 쓰지 못합니다.
+    assert spy.learning_rates == pytest.approx([1.0, 0.1])
+
+
+def test_warmup_counts_updates_not_microbatches(monkeypatch):
+    """warmup은 batch가 아니라 optimizer 갱신을 셉니다.
+
+    accumulation이 1보다 크면 둘이 달라집니다. batch로 세면 warmup이 실제보다 빨리
+    끝나 초반 learning rate가 설정보다 크게 올라갑니다. 사전학습 가중치로 시작할 때
+    초반 손실이 튀는 것을 막으려고 켜는 기능이라, 빨리 끝나면 켠 의미가 옅어집니다.
+    """
+
+    spy = _AccumulationSpy()
+
+    _train_with_accumulation(
+        monkeypatch,
+        spy,
+        images=8,
+        accumulation=2,
+        learning_rate=1.0,
+        lr_scheduler={
+            "name": "linear",
+            "warmup_steps": 2,
+            "warmup_start_factor": 0.5,
+            "min_lr_factor": 0.1,
+        },
+    )
+
+    # microbatch 8개를 2개씩 모으면 갱신은 4번이고, warmup 2번은 그중 앞의 두 번
+    # 곧 microbatch 4개에 걸칩니다. 0.5에서 출발해 0.75를 지나 1.0에 닿은 뒤 본곡선을
+    # 타고 최저 배율 0.1로 끝납니다. batch로 세면 마지막이 0.82가 되어 최저값에 닿지
+    # 못합니다.
+    assert spy.events.count("step") == 4
+    assert spy.learning_rates == pytest.approx([0.5, 0.75, 1.0, 0.1])

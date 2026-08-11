@@ -381,6 +381,11 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "seed": _integer(raw, "seed", 42, minimum=0),
         "epochs": _integer(raw, "epochs", 1, minimum=1),
         "checkpoint_every": _integer(raw, "checkpoint_every", 1, minimum=1),
+        # microbatch를 몇 개 모아 한 번 갱신할지입니다. 1이면 지금까지와 같습니다.
+        # web이 이 기본값을 먼저 복제해 두었습니다(PR 143).
+        "gradient_accumulation_steps": _integer(
+            raw, "gradient_accumulation_steps", 1, minimum=1
+        ),
         "batch_size": _integer(raw, "batch_size", 1, minimum=1),
         "num_workers": _integer(raw, "num_workers", 0, minimum=0),
         "learning_rate": _float(
@@ -482,7 +487,9 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
     return {
         # 2: resume block이 생겼습니다. 처음부터 학습한 실행은 그 값이 None입니다.
         # 3: lr_scheduler block이 생겼습니다. 상수 learning rate면 그 값이 None입니다.
-        "schema_version": 3,
+        # 4: gradient_accumulation_steps가 생겼습니다. 이 key를 몰랐던 옛 checkpoint는
+        #    1로 읽습니다. 그때는 모으지 않고 batch마다 갱신했기 때문입니다.
+        "schema_version": 4,
         "run_id": settings.get("run_id"),
         "architecture": settings.get("architecture", ARCHITECTURE),
         "optimizer": optimizer_settings,
@@ -492,6 +499,9 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
         "seed": settings["seed"],
         "epochs": settings.get("epochs"),
         "batch_size": settings.get("batch_size"),
+        # 몇 개를 모아 한 번 갱신했는지입니다. 값이 다르면 optimizer와 schedule의
+        # 궤적이 달라지므로 이어서 학습할 때 대조합니다.
+        "gradient_accumulation_steps": settings.get("gradient_accumulation_steps", 1),
         "num_workers": settings.get("num_workers"),
         "device": settings.get("device"),
         "precision": dict(
@@ -768,6 +778,16 @@ def _load_resume(
     ) != expected["lr_scheduler"]:
         raise ValueError(
             "resume checkpoint used a different learning rate schedule than this run"
+        )
+    # 같은 이유입니다. 모으는 수가 달라지면 갱신 횟수와 schedule 걸음이 함께 달라져
+    # 이어붙인 실행이 끊기지 않고 돈 실행과 달라집니다. 이 key를 몰랐던 옛 checkpoint는
+    # 1로 읽습니다. 그때는 모으지 않고 batch마다 갱신했기 때문입니다.
+    recorded_accumulation = training_config.get("gradient_accumulation_steps", 1)
+    if recorded_accumulation != expected["gradient_accumulation_steps"]:
+        raise ValueError(
+            "resume checkpoint used a different train.gradient_accumulation_steps "
+            f"({recorded_accumulation}) than this run "
+            f"({expected['gradient_accumulation_steps']})"
         )
     if expected["lr_scheduler"] is not None and "scheduler_state_dict" not in state:
         raise ValueError(
