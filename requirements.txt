@@ -3,6 +3,29 @@
 boto3==1.43.63
 fastapi==0.141.1
 httpx==0.28.1
+# MMDetection의 mmcv는 torch와 CUDA에 맞춰 **컴파일된 확장**을 함께 싣습니다. 공식
+# openmmlab 색인에는 이 torch용 wheel이 없어(cu126/torch2.12.0 -> 404) 아래 파일을
+# 직접 가리킵니다.
+#
+# 색인이 아니라 파일 하나를 지목하고 #sha256으로 내용까지 못 박습니다. 그래서 같은
+# 이름의 wheel이 나중에 다시 올라와도 내용이 다르면 설치가 멈춥니다. 직접 URL의
+# hash 조각은 그 package에만 적용되므로, --hash처럼 모든 package에 hash를 달 필요가
+# 없습니다. 색인을 더하지 않으니 torch나 numpy가 다른 경로의 같은 이름 package로
+# 바뀔 여지도 없습니다.
+#
+# mmcv-lite를 대신 깔면 안 됩니다. 그쪽은 CUDA 연산자가 없어서 mmcv._ext를 찾지
+# 못하고, DINO의 MultiScaleDeformableAttention과 Cascade R-CNN의 RoIAlign이 모두
+# import 단계에서 멈춥니다.
+#
+# 지금 wheel이 있는 것은 이 두 platform뿐입니다. 그 밖에서는 mmcv가 설치되지 않고,
+# MMDetection backend를 고른 순간에 설치 안내 오류가 납니다.
+mmcv @ https://github.com/MiroPsota/torch_packages_builder/releases/download/mmcv-2.2.0%2Ba8073c7/mmcv-2.2.0%2Ba8073c7pt2.12.0cu126-cp311-cp311-linux_x86_64.whl#sha256=2ce1bf3a4e3dd2e6b98ed7cd1306de29af4a19cc95fd0da46663ee7bd13a8534 ; sys_platform == "linux"
+mmcv @ https://github.com/MiroPsota/torch_packages_builder/releases/download/mmcv-2.2.0%2Ba8073c7/mmcv-2.2.0%2Ba8073c7pt2.12.0cu126-cp311-cp311-win_amd64.whl#sha256=f6d3b7892c8fd8c6b35303c6114debd543b5a5767d3be7c9b147173de52fb5a7 ; sys_platform == "win32"
+# mmdet 3.3.0은 mmcv 2.2.0 미만을 요구하지만 2024-01 이후 새 release가 없고, 위
+# 조합이 유일하게 설치 가능한 wheel입니다. mmcv 2.2.0에는 2.1.0 대비 breaking
+# change가 없어 각 pipeline이 그 버전 하나에만 상한을 통과시킵니다.
+mmdet==3.3.0
+mmengine==0.10.7
 numpy==2.0.2
 Pillow==11.3.0
 pycocotools==2.0.11

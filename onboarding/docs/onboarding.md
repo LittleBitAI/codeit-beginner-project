@@ -27,6 +27,14 @@ python -m pip install -r requirements.txt
 
 별도의 CUDA Toolkit은 필요하지 않습니다. NVIDIA GPU를 사용하는 팀원은 CUDA 12.x를 지원하는 NVIDIA driver가 필요합니다. Windows에서는 driver 528.33 이상을 사용합니다.
 
+`requirements.txt`는 MMDetection도 함께 설치합니다(mmcv 2.2.0, mmdet 3.3.0, mmengine 0.10.7). mmcv는 torch와 CUDA에 맞춰 컴파일된 확장을 싣는데 공식 색인에 이 torch용 wheel이 없어, wheel 파일을 URL로 직접 가리키고 `#sha256`으로 내용까지 못 박습니다. 색인을 더하지 않으므로 다른 package는 영향을 받지 않고, 파일이 바뀌면 설치가 그 자리에서 멈춥니다. Windows와 Linux wheel만 있으므로 그 밖의 OS에서는 mmcv가 설치되지 않습니다. 설치가 그 줄에서 멈춰도 임의로 `mmcv-lite`를 대신 깔지 마세요. 이름은 비슷하지만 CUDA 연산자가 없어서 모델을 만들 수 없습니다.
+
+설치가 끝나면 컴파일된 확장이 실제로 실리는지 확인합니다. `mmcv-lite`가 깔렸거나 wheel이 torch와 어긋나면 여기서 드러납니다.
+
+```text
+python -c "import mmcv._ext; print('mmcv ops OK')"
+```
+
 ## 3. 로컬 온보딩 검증
 
 Repository root에서 다음 명령을 실행합니다.
