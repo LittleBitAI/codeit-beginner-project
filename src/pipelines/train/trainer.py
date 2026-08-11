@@ -1,4 +1,4 @@
-"""재현 가능한 torchvision detection 학습 loop입니다."""
+"""재현 가능한 detection 학습 loop입니다."""
 
 from __future__ import annotations
 
@@ -51,11 +51,23 @@ class _PrecisionRuntime:
     ) -> None:
         """fp16은 scale하고, 나머지 dtype은 기존 backward/step을 사용합니다."""
 
+        self.backward(loss)
+        self.step(optimizer)
+
+    def backward(self, loss: torch.Tensor) -> None:
+        """누적 가능한 형태로 loss의 gradient를 계산합니다."""
+
         if self._scaler is None:
             loss.backward()
-            optimizer.step()
             return
         self._scaler.scale(loss).backward()
+
+    def step(self, optimizer: torch.optim.Optimizer) -> None:
+        """누적된 gradient로 optimizer를 한 번 갱신합니다."""
+
+        if self._scaler is None:
+            optimizer.step()
+            return
         self._scaler.step(optimizer)
         self._scaler.update()
 
@@ -360,7 +372,9 @@ def _train_model(
     if not parameters:
         raise RuntimeError("model has no trainable parameters")
     optimizer = build_optimizer(parameters, settings)
-    schedule = build_lr_scheduler(optimizer, settings, len(train_loader))
+    accumulation_steps = int(settings.get("gradient_accumulation_steps", 1))
+    optimizer_steps_per_epoch = math.ceil(len(train_loader) / accumulation_steps)
+    schedule = build_lr_scheduler(optimizer, settings, optimizer_steps_per_epoch)
     precision = _PrecisionRuntime(
         settings.get(
             "precision",
@@ -418,15 +432,23 @@ def _train_model(
         train_component_totals: dict[str, float] = {}
         # epoch이 끝난 뒤 남길 값입니다. 아래에서 batch마다 갱신합니다.
         learning_rate = optimizer.param_groups[0]["lr"]
+        optimizer.zero_grad(set_to_none=True)
         for step, (images, targets) in enumerate(train_loader, start=1):
-            optimizer.zero_grad(set_to_none=True)
             with precision.autocast():
                 loss, components = _loss(model, images, targets, device)
-            # 이 batch가 실제로 쓴 값이므로 schedule을 넘기기 전에 읽습니다.
+            window_start = ((step - 1) // accumulation_steps) * accumulation_steps + 1
+            window_size = min(
+                accumulation_steps,
+                len(train_loader) - window_start + 1,
+            )
+            precision.backward(loss / window_size)
             learning_rate = optimizer.param_groups[0]["lr"]
-            precision.backward_and_step(loss, optimizer)
-            if schedule is not None:
-                schedule.step()
+            should_step = step % accumulation_steps == 0 or step == len(train_loader)
+            if should_step:
+                precision.step(optimizer)
+                if schedule is not None:
+                    schedule.step()
+                optimizer.zero_grad(set_to_none=True)
             train_total += float(loss.detach().cpu())
             _add_components(train_component_totals, components, phase="train")
             if progress is not None:

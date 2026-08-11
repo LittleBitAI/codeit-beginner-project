@@ -1572,6 +1572,29 @@ def test_run_rejects_changed_optimizer_settings_before_building_the_model(
     build_model_spy.assert_not_called()
 
 
+def test_run_rejects_changed_gradient_accumulation_before_building_the_model(
+    local_config, monkeypatch
+):
+    local_config["train"]["gradient_accumulation_steps"] = 2
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+    resumed = _resume_config(local_config, source)
+    resumed["train"].update({"epochs": 4, "gradient_accumulation_steps": 3})
+    build_model_spy = Mock()
+    monkeypatch.setattr(pipeline, "build_model", build_model_spy)
+
+    result = train.run(resumed)
+
+    assert result["status"] == "error"
+    assert "gradient accumulation" in result["message"]
+    build_model_spy.assert_not_called()
+
+
 def test_resumed_training_continues_the_learning_rate_schedule(
     local_config, monkeypatch
 ):
@@ -2068,7 +2091,7 @@ def test_fp16_runtime_saves_and_restores_grad_scaler_state(monkeypatch):
 
 
 def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
-    calls = {"autocast": 0, "backward_and_step": 0}
+    calls = {"autocast": 0, "backward": 0, "step": 0}
 
     class Runtime:
         def autocast(self):
@@ -2081,9 +2104,12 @@ def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
 
             return Context()
 
-        def backward_and_step(self, loss, optimizer):
-            calls["backward_and_step"] += 1
+        def backward(self, loss):
+            calls["backward"] += 1
             loss.backward()
+
+        def step(self, optimizer):
+            calls["step"] += 1
             optimizer.step()
 
         def state_dict(self):
@@ -2116,7 +2142,7 @@ def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
         settings,
     )
 
-    assert calls == {"autocast": 2, "backward_and_step": 1}
+    assert calls == {"autocast": 2, "backward": 1, "step": 1}
 
 
 def _s3_storage_with(existing: set[str]) -> S3Storage:

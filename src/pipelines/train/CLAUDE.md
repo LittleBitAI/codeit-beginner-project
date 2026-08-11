@@ -4,7 +4,7 @@ Read the repository root `CLAUDE.md` first. This file adds only what is specific
 
 ## Scope
 
-Trains a config-selected torchvision detector and writes checkpoints plus a training history. The CPU-friendly MobileNetV3 320 FPN Faster R-CNN is the legacy default. It does not prepare data, score it, or register runs.
+Trains a config-selected detector and writes checkpoints plus a training history. The CPU-friendly MobileNetV3 320 FPN Faster R-CNN is the legacy default. It does not prepare data, score it, or register runs.
 
 ## Boundaries
 
