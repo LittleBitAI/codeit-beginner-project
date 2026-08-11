@@ -8,7 +8,7 @@ Read **`CLAUDE.md` only** — `AGENTS.md` is the same content for another tool. 
 
 Korean team docs: `README.md`, `contracts/README.md`, `docs/shared-files.md`. English instructions: this file, `src/pipelines/<area>/CLAUDE.md`, `docs/testing.md`.
 
-Keep every document under 5,000 characters. **Every pipeline has both instruction files and no `README.md`.** Root rules never name a pipeline; pipeline rules do not repeat or contradict them. Ask on conflict.
+Keep every document under 8,000 characters. **Every pipeline has both instruction files and no `README.md`.** Root rules never name a pipeline; pipeline rules do not repeat or contradict them. Ask on conflict.
 
 ## Before Starting Work
 
