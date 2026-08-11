@@ -77,11 +77,12 @@ class BatchNormDetector(nn.Module):
 
 
 class InMemoryDetectionDataset(torch.utils.data.Dataset):
-    def __init__(self, value: float) -> None:
+    def __init__(self, value: float, size: int = 1) -> None:
         self.image = torch.full((3, 2, 2), value)
+        self.size = size
 
     def __len__(self):
-        return 1
+        return self.size
 
     def __getitem__(self, index):
         return self.image, {
@@ -2027,7 +2028,8 @@ def test_fp16_runtime_uses_autocast_and_grad_scaler(monkeypatch):
 
     with runtime.autocast():
         loss = parameter.square()
-    runtime.backward_and_step(loss, optimizer)
+    runtime.backward(loss)
+    runtime.step(optimizer)
 
     autocast.assert_called_once_with(device_type="cuda", dtype=torch.float16)
     scaler_factory.assert_called_once_with("cuda", enabled=True)
@@ -2068,7 +2070,7 @@ def test_fp16_runtime_saves_and_restores_grad_scaler_state(monkeypatch):
 
 
 def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
-    calls = {"autocast": 0, "backward_and_step": 0}
+    calls = {"autocast": 0, "backward": 0, "step": 0}
 
     class Runtime:
         def autocast(self):
@@ -2081,9 +2083,12 @@ def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
 
             return Context()
 
-        def backward_and_step(self, loss, optimizer):
-            calls["backward_and_step"] += 1
+        def backward(self, loss):
+            calls["backward"] += 1
             loss.backward()
+
+        def step(self, optimizer):
+            calls["step"] += 1
             optimizer.step()
 
         def state_dict(self):
@@ -2116,7 +2121,7 @@ def test_training_uses_precision_context_for_train_and_validation(monkeypatch):
         settings,
     )
 
-    assert calls == {"autocast": 2, "backward_and_step": 1}
+    assert calls == {"autocast": 2, "backward": 1, "step": 1}
 
 
 def _s3_storage_with(existing: set[str]) -> S3Storage:
@@ -2591,3 +2596,117 @@ def test_a_new_runtime_fills_its_image_cache_from_one_archive(tmp_path, monkeypa
     downloaded = [call.args[1] for call in storage.client.download_file.call_args_list]
     assert archives[0] in downloaded
     assert not [key for key in downloaded if key.endswith(".png")]
+
+
+class _AccumulationSpy:
+    """microbatch마다 무엇이 불렸는지 순서대로 적어 둡니다."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.scaled_losses: list[float] = []
+
+    def autocast(self):
+        class Context:
+            def __enter__(self_inner):
+                return None
+
+            def __exit__(self_inner, *args):
+                return None
+
+        return Context()
+
+    def backward(self, loss):
+        self.events.append("backward")
+        self.scaled_losses.append(float(loss.detach().cpu()))
+        loss.backward()
+
+    def step(self, optimizer):
+        self.events.append("step")
+        optimizer.step()
+
+    def state_dict(self):
+        return None
+
+    def load_state_dict(self, state):
+        assert state is None
+
+
+def _train_with_accumulation(monkeypatch, spy, *, images: int, accumulation: int):
+    monkeypatch.setattr(
+        trainer_module, "_PrecisionRuntime", lambda precision, device: spy
+    )
+    zeroed: list[int] = []
+    real_zero = torch.optim.SGD.zero_grad
+
+    def counting_zero_grad(self, set_to_none=True):
+        zeroed.append(1)
+        return real_zero(self, set_to_none=set_to_none)
+
+    monkeypatch.setattr(torch.optim.SGD, "zero_grad", counting_zero_grad)
+    settings = {
+        "seed": 17,
+        "device": "cpu",
+        "batch_size": 1,
+        "num_workers": 0,
+        "learning_rate": 0.01,
+        "momentum": 0.0,
+        "weight_decay": 0.0,
+        "epochs": 1,
+        "gradient_accumulation_steps": accumulation,
+        "precision": {"mode": "fp32", "dtype": "fp32", "grad_scaler": False},
+    }
+    train_model(
+        TinyDetector(),
+        InMemoryDetectionDataset(1.0, size=images),
+        InMemoryDetectionDataset(0.0, size=1),
+        settings,
+    )
+    return len(zeroed)
+
+
+def test_gradient_accumulation_steps_once_per_group(monkeypatch):
+    """N개를 모아 한 번만 갱신해야 batch_size를 못 늘리는 GPU에서 의미가 있습니다."""
+
+    spy = _AccumulationSpy()
+
+    _train_with_accumulation(monkeypatch, spy, images=4, accumulation=2)
+
+    assert spy.events == [
+        "backward",
+        "backward",
+        "step",
+        "backward",
+        "backward",
+        "step",
+    ]
+
+
+def test_gradient_accumulation_divides_the_loss_by_the_group_size(monkeypatch):
+    """나누지 않으면 gradient가 N배가 되어 사실상 learning rate가 N배가 됩니다."""
+
+    spy = _AccumulationSpy()
+
+    _train_with_accumulation(monkeypatch, spy, images=2, accumulation=2)
+
+    # InMemoryDetectionDataset(1.0)은 batch마다 같은 손실을 냅니다.
+    assert spy.scaled_losses == pytest.approx(
+        [spy.scaled_losses[0]] * 2
+    ), spy.scaled_losses
+    unscaled = _AccumulationSpy()
+    _train_with_accumulation(monkeypatch, unscaled, images=2, accumulation=1)
+    assert spy.scaled_losses[0] == pytest.approx(unscaled.scaled_losses[0] / 2)
+
+
+def test_a_partial_last_group_still_updates_the_weights(monkeypatch):
+    """마지막에 N개가 안 되면 그 gradient가 통째로 버려집니다.
+
+    오류가 나지 않고 그 몇 장만 학습에서 빠집니다. epoch 수가 적을수록 비율이 큽니다.
+    """
+
+    spy = _AccumulationSpy()
+
+    _train_with_accumulation(monkeypatch, spy, images=3, accumulation=2)
+
+    assert spy.events.count("backward") == 3
+    assert spy.events.count("step") == 2
+    assert spy.events[-1] == "step"
