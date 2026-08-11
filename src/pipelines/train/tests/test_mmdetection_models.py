@@ -339,6 +339,9 @@ def pretend_cuda(monkeypatch):
     """
 
     monkeypatch.setattr(pipeline_module.torch.cuda, "is_available", lambda: True)
+    # precision이 amp면 bf16 지원 여부를 물으려고 GPU를 실제로 건드립니다. GPU가 없는
+    # 곳에서는 그 자리에서 driver를 찾다 죽으므로 함께 흉내 냅니다.
+    monkeypatch.setattr(pipeline_module, "_native_bf16_supported", lambda: True)
 
 
 def _mmdetection_raw(**overrides):
