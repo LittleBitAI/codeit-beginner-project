@@ -6,6 +6,7 @@ import하지 않으므로, 이 test가 두 pipeline 사이 약속을 지키는 �
 
 from __future__ import annotations
 
+import importlib.util
 from types import SimpleNamespace
 from typing import Any
 
@@ -112,6 +113,10 @@ def _fake_dependencies(
     return SimpleNamespace(
         models=SimpleNamespace(build=build),
         data_sample_type=_FakeDataSample,
+        # 진짜 의존성은 mmengine의 ConfigDict를 줍니다. 여기서는 설정이 그대로
+        # 전달되는지만 보면 되므로 dict로 충분합니다. ConfigDict가 정말 필요하다는
+        # 것은 실제 model을 만드는 test가 확인합니다.
+        config_type=dict,
         register=register,
     )
 
@@ -120,6 +125,31 @@ def _install(monkeypatch, dependencies: SimpleNamespace) -> None:
     monkeypatch.setattr(
         mmdetection_backend, "_import_mmdetection", lambda: dependencies
     )
+
+
+MMDETECTION_PACKAGES = ("mmcv", "mmdet", "mmengine")
+
+
+def _require_mmdetection():
+    """package가 **아예 없을 때만** 건너뜁니다. 그 밖의 실패는 실패로 둡니다.
+
+    가짜 registry는 설정 값이 mmdet에 받아들여지는지를 영영 확인하지 못하므로, 있는
+    곳에서는 실제 model을 만들어 계약을 확인합니다.
+
+    설치 실패까지 싸잡아 건너뛰면 안 됩니다. 그러면 잘못된 wheel, `mmcv._ext` 로딩
+    실패, 맞지 않는 버전 조합, import 경로 회귀가 모두 **초록색 CI**로 보입니다.
+    requirements가 mmdet을 설치하기 시작한 뒤에는 그 구분이 특히 중요합니다. 설치가
+    깨진 것과 애초에 설치 대상이 아닌 것은 다릅니다.
+
+    `find_spec`은 module을 실행하지 않으므로, 설치 여부만 보고 import 실패는
+    그대로 드러납니다. 예를 들어 CUDA 연산자가 없는 `mmcv-lite`가 깔려 있으면
+    여기서는 통과하고 뒤에서 실패합니다. 그것이 맞습니다.
+    """
+
+    for name in MMDETECTION_PACKAGES:
+        if importlib.util.find_spec(name) is None:
+            pytest.skip(f"{name}이(가) 설치돼 있지 않습니다. requirements 밖의 선택 사항입니다.")
+    return mmdetection_backend._import_mmdetection()
 
 
 def test_unknown_backend_is_reported_instead_of_falling_back():
@@ -322,6 +352,99 @@ def test_mmdetection_checkpoint_needs_one_category_id_per_class(
 
     # 모델을 만든 뒤에 걸러 내면 무거운 생성이 끝난 다음에야 알게 됩니다.
     assert built == []
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        pytest.param("2.1.0", None, id="아래는_손대지_않는다"),
+        pytest.param("2.2.0", "2.1.999", id="직접_확인한_그_버전"),
+        pytest.param("2.2.0+a8073c7pt2.12.0cu126", "2.1.999", id="local_꼬리표는_떼고_본다"),
+        pytest.param("2.2.1", None, id="확인하지_않은_patch는_열지_않는다"),
+        pytest.param("2.3.0", None, id="확인하지_않은_minor는_열지_않는다"),
+        pytest.param("3.0.0", None, id="다음_major는_열지_않는다"),
+    ],
+)
+def test_mmcv_version_shim_only_covers_the_verified_range(version, expected):
+    """mmdet 3.3.0의 상한이 mmcv 2.2.0을 막지만 그 버전은 실제로는 맞습니다.
+
+    범위로 열면 아직 나오지도 않은 2.2.1까지 함께 통과해, 정말로 맞지 않는 조합이
+    설치 문제로 보고되는 대신 알 수 없는 자리에서 깨집니다. 직접 확인한 그 버전
+    하나만 통과시켜야 합니다.
+    """
+
+    assert mmdetection_backend._shimmed_mmcv_version(version) == expected
+
+
+def test_real_dependencies_expose_the_config_type():
+    """two-stage detector는 train_cfg를 속성으로 읽어 평범한 dict로는 못 만듭니다."""
+
+    dependencies = _require_mmdetection()
+
+    assert dependencies.config_type is not None
+    # 중첩된 dict까지 함께 바뀌어야 roi_head 안쪽도 속성으로 읽힙니다.
+    converted = dependencies.config_type({"a": {"b": 1}})
+    assert converted.a.b == 1
+
+
+@pytest.mark.parametrize(
+    ("architecture", "detector_type"),
+    [
+        ("dino_r50_4scale", "DINO"),
+        ("cascade_rcnn_swin_t_fpn", "CascadeRCNN"),
+    ],
+)
+def test_real_model_is_rebuilt_and_predicts_in_original_coordinates(
+    architecture, detector_type
+):
+    """진짜 mmdet model로 계약을 끝까지 확인합니다.
+
+    가짜 registry는 설정이 mmdet에 **받아들여지는지**를 확인하지 못합니다. 실제로
+    `cascade_rcnn_swin_t_fpn`은 평범한 dict를 넘기던 동안 만들어지지도 않았는데,
+    가짜를 쓰던 test는 모두 통과했습니다.
+    """
+
+    dependencies = _require_mmdetection()
+    dependencies.register()
+    num_classes = 4
+    reference = dependencies.models.build(
+        dependencies.config_type(
+            mmdetection_backend.build_detector_config(
+                architecture, foreground_classes=num_classes - 1
+            )
+        )
+    )
+    assert type(reference).__name__ == detector_type
+    checkpoint = _checkpoint(
+        architecture=architecture,
+        num_classes=num_classes,
+        model_state_dict={
+            f"detector.{name}": value
+            for name, value in reference.state_dict().items()
+        },
+        model_config=_model_config(input_size=320),
+    )
+
+    model = predictor._build_model(checkpoint, source="best.pt")
+    with torch.no_grad():
+        outputs = model([torch.rand(3, 240, 320)])
+
+    output = outputs[0]
+    assert output["boxes"].shape[0] == output["labels"].shape[0]
+    if output["labels"].numel():
+        # MMDetection이 0부터 세는 label을 저장소의 1..N으로 되돌려야 합니다.
+        assert int(output["labels"].min()) >= 1
+        assert int(output["labels"].max()) <= num_classes - 1
+        # box는 padding한 크기가 아니라 원본 이미지 좌표여야 합니다.
+        assert float(output["boxes"][:, 2].max()) <= 320 * 1.05
+        assert float(output["boxes"][:, 3].max()) <= 240 * 1.05
+    predictions = predictor._outputs_to_predictions(
+        output,
+        record={"image_id": "img-1", "image_key": "img-1"},
+        category_ids=checkpoint["category_ids"],
+    )
+    # category_ids[0]은 background 자리라 예측에 나오면 안 됩니다.
+    assert {entry["category_id"] for entry in predictions} <= {10, 20, 30}
 
 
 @pytest.mark.parametrize(
