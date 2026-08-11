@@ -48,6 +48,8 @@ function experimentListing(): ExperimentListing {
       epochs: experiment.train.epochs,
       batch_size: experiment.train.batch_size,
       num_workers: experiment.train.num_workers,
+      gradient_accumulation_steps: 1,
+      input_size: null,
       seed: experiment.train.seed,
     },
     metrics: {

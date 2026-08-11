@@ -31,6 +31,12 @@ from .dataset import (
     read_json_artifact,
 )
 from .image_cache import ImageCacheSession
+from .mmdetection_adapter import (
+    DEFAULT_ACCUMULATION_STEPS,
+    DEFAULT_INPUT_SIZE,
+    MMDETECTION_ARCHITECTURES,
+    model_config_metadata,
+)
 from .model import ARCHITECTURE, SUPPORTED_ARCHITECTURES, build_model
 from .progress import ProgressEmitter
 from .trainer import (
@@ -383,8 +389,21 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "checkpoint_every": _integer(raw, "checkpoint_every", 1, minimum=1),
         # microbatch를 몇 개 모아 한 번 갱신할지입니다. 1이면 지금까지와 같습니다.
         # web이 이 기본값을 먼저 복제해 두었습니다(PR 143).
+        # 기본값이 architecture에 따라 다릅니다. 8GB에서 batch 1로 도는 두 모델은
+        # 그만큼 모아야 쓸 만한 유효 batch가 됩니다. 기존 모델은 지금까지처럼 1입니다.
         "gradient_accumulation_steps": _integer(
-            raw, "gradient_accumulation_steps", 1, minimum=1
+            raw,
+            "gradient_accumulation_steps",
+            DEFAULT_ACCUMULATION_STEPS
+            if architecture in MMDETECTION_ARCHITECTURES
+            else 1,
+            minimum=1,
+        ),
+        # MMDetection model만 씁니다. torchvision architecture와 함께 오면 아래에서
+        # 거부합니다. 조용히 무시하면 사용자는 크기를 정했다고 믿는데 학습은 원래
+        # 크기로 돕니다.
+        "input_size": _integer(
+            raw, "input_size", DEFAULT_INPUT_SIZE, minimum=1
         ),
         "batch_size": _integer(raw, "batch_size", 1, minimum=1),
         "num_workers": _integer(raw, "num_workers", 0, minimum=0),
@@ -416,6 +435,7 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         normalized["epsilon"] = _float(
             raw, "epsilon", profile["epsilon"], minimum=1e-16
         )
+    _check_mmdetection_settings(normalized, raw)
     return normalized
 
 
@@ -455,15 +475,60 @@ def _checkpoint_payload(
     category_ids_by_label = [0] + [
         category_ids[label] for label in range(1, len(class_map) + 1)
     ]
+    architecture = settings.get("architecture", ARCHITECTURE)
+    # MMDetection model은 evaluate가 torchvision에서 찾을 수 없습니다. 어느 쪽으로
+    # 읽어야 하는지와 전처리를 함께 남깁니다. 계약은 제안서 012입니다. backend key가
+    # 없는 checkpoint는 evaluate가 지금까지처럼 torchvision으로 읽습니다.
+    mmdetection = (
+        {
+            "backend": "mmdetection",
+            "model_config": model_config_metadata(settings["input_size"]),
+        }
+        if architecture in MMDETECTION_ARCHITECTURES
+        else {}
+    )
     return {
         **checkpoint,
-        "architecture": settings.get("architecture", ARCHITECTURE),
+        **mmdetection,
+        "architecture": architecture,
         "num_classes": len(class_map) + 1,
         "class_map": dict(class_map),
         "category_ids": category_ids_by_label,
         "seed": settings["seed"],
         "training_config": _training_config(settings),
     }
+
+
+# 8GB GPU에서 batch 1로 도는 조합입니다. 학습을 시작한 뒤 메모리로 터지면 그 밤을
+# 통째로 버리므로 첫 batch 전에 막습니다.
+_MMDETECTION_REQUIRED = {
+    "device": "cuda",
+    "precision": "amp",
+    "optimizer": "AdamW",
+    "batch_size": 1,
+}
+
+
+def _check_mmdetection_settings(settings: Mapping[str, Any], raw: Mapping[str, Any]) -> None:
+    """MMDetection architecture에만 걸리는 제약을 확인합니다."""
+
+    if settings["architecture"] not in MMDETECTION_ARCHITECTURES:
+        if "input_size" in raw:
+            raise ValueError(
+                "train.input_size is only used by MMDetection architectures: "
+                + ", ".join(MMDETECTION_ARCHITECTURES)
+            )
+        return
+    for name, required in _MMDETECTION_REQUIRED.items():
+        value = settings[name]
+        # precision은 정규화 뒤 object라 mode만 봅니다.
+        if name == "precision":
+            value = value.get("mode") if isinstance(value, Mapping) else value
+        if value != required:
+            raise ValueError(
+                f"train.{name} must be {required!r} for {settings['architecture']} "
+                "so the run fits in 8GB of GPU memory"
+            )
 
 
 def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
@@ -489,7 +554,8 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
         # 3: lr_scheduler block이 생겼습니다. 상수 learning rate면 그 값이 None입니다.
         # 4: gradient_accumulation_steps가 생겼습니다. 이 key를 몰랐던 옛 checkpoint는
         #    1로 읽습니다. 그때는 모으지 않고 batch마다 갱신했기 때문입니다.
-        "schema_version": 4,
+        # 5: input_size가 생겼습니다. MMDetection이 아니면 None입니다.
+        "schema_version": 5,
         "run_id": settings.get("run_id"),
         "architecture": settings.get("architecture", ARCHITECTURE),
         "optimizer": optimizer_settings,
@@ -502,6 +568,13 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
         # 몇 개를 모아 한 번 갱신했는지입니다. 값이 다르면 optimizer와 schedule의
         # 궤적이 달라지므로 이어서 학습할 때 대조합니다.
         "gradient_accumulation_steps": settings.get("gradient_accumulation_steps", 1),
+        # MMDetection이 아니면 쓰지 않는 값이라 None입니다. 값이 달라지면 전처리가
+        # 달라져 이어붙인 실행이 앞선 epoch과 다른 크기로 배웁니다.
+        "input_size": (
+            settings.get("input_size")
+            if settings.get("architecture") in MMDETECTION_ARCHITECTURES
+            else None
+        ),
         "num_workers": settings.get("num_workers"),
         "device": settings.get("device"),
         "precision": dict(
@@ -789,6 +862,15 @@ def _load_resume(
             f"({recorded_accumulation}) than this run "
             f"({expected['gradient_accumulation_steps']})"
         )
+    # 같은 이유입니다. 크기가 달라지면 resize와 padding이 달라져 이어붙인 실행이 앞선
+    # epoch과 다른 그림으로 배웁니다. 이 key를 몰랐던 옛 checkpoint는 None이라 지금
+    # 설정도 MMDetection이 아니어야 통과합니다.
+    recorded_input_size = training_config.get("input_size")
+    if recorded_input_size != expected["input_size"]:
+        raise ValueError(
+            "resume checkpoint used a different train.input_size "
+            f"({recorded_input_size}) than this run ({expected['input_size']})"
+        )
     if expected["lr_scheduler"] is not None and "scheduler_state_dict" not in state:
         raise ValueError(
             "resume_state is missing the learning rate schedule state this run needs"
@@ -1070,6 +1152,9 @@ def _execute_claimed(
             len(class_map) + 1,
             architecture=settings["architecture"],
             pretrained=settings["pretrained"],
+            # 빠뜨리면 학습은 기본 크기로 돌고 checkpoint에는 설정값이 적힙니다.
+            # evaluate는 적힌 값으로 전처리하므로 학습과 추론이 조용히 갈라집니다.
+            input_size=settings["input_size"],
         )
         try:
             best, last, history = train_model(

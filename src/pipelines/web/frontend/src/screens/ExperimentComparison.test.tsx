@@ -53,7 +53,7 @@ function makeExperiment(
       beta2: null,
       epsilon: null,
     },
-    training: { device: 'cpu', epochs: 2, batch_size: 1, num_workers: 0, seed: 42 },
+    training: { device: 'cpu', epochs: 2, batch_size: 1, num_workers: 0, gradient_accumulation_steps: 1, input_size: null, seed: 42 },
     metrics: {
       best_epoch: 2,
       best_validation_loss: 0.4,

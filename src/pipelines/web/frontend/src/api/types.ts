@@ -14,6 +14,10 @@ export interface FieldSpec {
   type: 'string' | 'integer' | 'number' | 'boolean' | 'enum' | 'uri';
   default?: unknown;
   defaults_by_optimizer?: Record<string, number>;
+  /** 고른 모델마다 기본값이 다른 칸입니다. 없으면 default가 그대로 기본값입니다. */
+  defaults_by_architecture?: Record<string, number>;
+  /** 여기 적힌 모델에서만 쓰는 칸입니다. 다른 모델이면 감춥니다. */
+  only_for_architectures?: string[];
   minimum?: number;
   choices?: string[];
   label: string;
@@ -234,6 +238,10 @@ export interface ExperimentSummary {
     epochs: number | null;
     batch_size: number | null;
     num_workers: number | null;
+    /** 몇 batch를 모아 한 번 갱신했는지. 이 값을 모르던 옛 기록은 null입니다. */
+    gradient_accumulation_steps: number | null;
+    /** MMDetection 모델만 쓰는 입력 크기. 다른 모델이면 null입니다. */
+    input_size: number | null;
     seed: number | null;
   };
   /** 학습이 남긴 loss와 evaluate가 낸 지표. 기록에 없으면 null이고 화면은 - 로 둡니다. */

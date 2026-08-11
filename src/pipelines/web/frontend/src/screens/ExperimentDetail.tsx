@@ -155,6 +155,8 @@ function SettingsTab({ experiment }: { experiment: ExperimentSummary }) {
             ['Epochs', shown(training.epochs)],
             ['Batch size', shown(training.batch_size)],
             ['Num workers', shown(training.num_workers)],
+            ['Gradient accumulation', shown(training.gradient_accumulation_steps)],
+            ['입력 크기', shown(training.input_size)],
             ['Seed', shown(training.seed)],
           ]}
         />

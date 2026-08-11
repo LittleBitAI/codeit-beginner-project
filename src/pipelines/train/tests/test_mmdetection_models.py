@@ -21,7 +21,12 @@ from src.pipelines.train.mmdetection_adapter import (
     prepare_mmdetection_batch,
 )
 from src.pipelines.train.model import SUPPORTED_ARCHITECTURES, build_model
-from src.pipelines.train.pipeline import _settings
+import ast
+from pathlib import Path
+
+from src.pipelines.train import model as model_module
+from src.pipelines.train import pipeline as pipeline_module
+from src.pipelines.train.pipeline import _checkpoint_payload, _settings
 
 
 @pytest.mark.parametrize(
@@ -49,30 +54,18 @@ def test_mmdetection_architectures_build_allowlisted_bbox_configs(
         assert "mask_head" not in config["roi_head"]
 
 
-@pytest.mark.parametrize("architecture", MMDETECTION_ARCHITECTURES)
-def test_mmdetection_architectures_are_not_selectable_yet(architecture: str):
-    """evaluate·web·requirements 통합 전까지는 설정으로 고를 수 없어야 합니다.
-
-    checkpoint를 evaluate가 읽지 못하고 clean Colab에는 mmdet이 없으므로, 지금 고를 수
-    있게 두면 학습만 되고 채점은 못 하는 실행이 공개됩니다. 통합이 끝나면
-    ``contracts/proposals/012``대로 이 문을 엽니다.
-    """
-
-    assert architecture not in SUPPORTED_ARCHITECTURES
-    with pytest.raises(ValueError, match="train.architecture must be one of"):
-        _settings({"train": {"architecture": architecture}})
-    with pytest.raises(ValueError, match="unsupported train architecture"):
-        build_model(4, architecture=architecture)
-
-
 def test_every_selectable_architecture_stays_loadable_by_evaluate():
-    """evaluate의 predictor는 이름을 torchvision.models.detection에서 찾습니다.
+    """고를 수 있는 이름은 모두 evaluate가 읽을 수 있어야 합니다.
 
     거기 없는 이름을 train이 고를 수 있게 되는 순간, 학습은 되는데 채점은 못 하는
     checkpoint가 공개됩니다. evaluate를 import하지 않고 같은 규칙만 확인합니다.
+    torchvision 이름은 ``torchvision.models.detection``에서, MMDetection 이름은
+    checkpoint의 ``backend``로 evaluate가 찾습니다.
     """
 
     for architecture in SUPPORTED_ARCHITECTURES:
+        if architecture in MMDETECTION_ARCHITECTURES:
+            continue
         assert getattr(torchvision.models.detection, architecture, None) is not None
 
 
@@ -330,3 +323,221 @@ def test_real_detector_is_built_and_produces_a_finite_loss(architecture):
     assert all("loss" in name for name in losses), sorted(losses)
     total = sum(losses.values())
     assert torch.isfinite(total), f"loss가 유한하지 않습니다: {total}"
+
+
+@pytest.mark.parametrize("architecture", MMDETECTION_ARCHITECTURES)
+def test_mmdetection_architectures_are_selectable(pretend_cuda, architecture: str):
+    """이제 고를 수 있어야 합니다. 이 test가 그 문을 여는 표시입니다."""
+
+    assert architecture in SUPPORTED_ARCHITECTURES
+    settings = _settings(_mmdetection_raw(architecture=architecture))
+    assert settings["architecture"] == architecture
+
+
+@pytest.fixture
+def pretend_cuda(monkeypatch):
+    """GPU가 없는 곳에서도 같은 결과가 나오게 합니다.
+
+    두 모델은 device가 cuda여야 하는데 CI runner에는 GPU가 없습니다. 실제로 CUDA를
+    쓰는 test가 아니라 설정 검증만 보는 test이므로 확인 함수만 바꿉니다.
+    """
+
+    monkeypatch.setattr(pipeline_module.torch.cuda, "is_available", lambda: True)
+    # precision이 amp면 bf16 지원 여부를 물으려고 GPU를 실제로 건드립니다. GPU가 없는
+    # 곳에서는 그 자리에서 driver를 찾다 죽으므로 함께 흉내 냅니다.
+    monkeypatch.setattr(pipeline_module, "_native_bf16_supported", lambda: True)
+
+
+def _mmdetection_raw(**overrides):
+    """8GB 제약을 갖춘 최소 설정입니다. 그것 말고를 보고 싶을 때 씁니다."""
+
+    raw = {
+        "run_id": "t",
+        "architecture": "dino_r50_4scale",
+        "device": "cuda",
+        "precision": "amp",
+        "optimizer": "AdamW",
+        "batch_size": 1,
+    }
+    raw.update(overrides)
+    return {"train": raw}
+
+
+def test_input_size_defaults_to_the_size_the_models_were_tuned_for(pretend_cuda):
+    settings = _settings(_mmdetection_raw())
+
+    assert settings["input_size"] == 640
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, True, "640"])
+def test_input_size_rejects_values_that_are_not_positive_integers(pretend_cuda, value):
+    with pytest.raises(ValueError, match="input_size"):
+        _settings(_mmdetection_raw(input_size=value))
+
+
+def test_input_size_is_refused_with_a_torchvision_architecture():
+    """torchvision model은 이 값을 쓰지 않습니다. 받으면 안 쓰고 버리는 셈입니다.
+
+    조용히 무시하면 사용자는 크기를 정했다고 믿는데 학습은 원래 크기로 돕니다.
+    """
+
+    with pytest.raises(ValueError, match="input_size"):
+        _settings(
+            {
+                "train": {
+                    "run_id": "t",
+                    "architecture": "retinanet_resnet50_fpn_v2",
+                    "input_size": 640,
+                }
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("device", "cpu"),
+        ("precision", "fp32"),
+        ("optimizer", "SGD"),
+        ("batch_size", 2),
+    ],
+)
+def test_mmdetection_refuses_combinations_that_do_not_fit_8gb(pretend_cuda, field, value):
+    """8GB에서 도는 조합만 받습니다. 학습을 시작한 뒤 터지면 밤을 버립니다."""
+
+    raw = {
+        "run_id": "t",
+        "architecture": "dino_r50_4scale",
+        "device": "cuda",
+        "precision": "amp",
+        "optimizer": "AdamW",
+        "batch_size": 1,
+    }
+    raw[field] = value
+
+    with pytest.raises(ValueError, match=field):
+        _settings({"train": raw})
+
+
+def test_mmdetection_checkpoint_carries_what_evaluate_needs(pretend_cuda):
+    """제안서 012가 정한 값입니다. 없으면 evaluate가 torchvision으로 읽으려 듭니다."""
+
+    settings = _settings(_mmdetection_raw(input_size=512))
+
+    payload = _checkpoint_payload(
+        {"epoch": 1, "model_state_dict": {}, "optimizer_state_dict": {}},
+        settings,
+        {"pill": 1},
+        {1: 7},
+    )
+
+    assert payload["backend"] == "mmdetection"
+    assert payload["architecture"] == "dino_r50_4scale"
+    assert payload["model_config"] == {
+        "schema_version": 1,
+        "input_size": 512,
+        "resize": "longest_edge",
+        "pad_multiple": 32,
+    }
+
+
+def test_a_torchvision_checkpoint_carries_no_backend_key():
+    """backend key가 없어야 evaluate가 지금까지처럼 torchvision으로 읽습니다.
+
+    넣어 두면 옛 checkpoint와 모양이 달라지고, evaluate는 모르는 backend를 추측하지
+    않고 멈춥니다.
+    """
+
+    settings = _settings({"train": {"run_id": "t"}})
+
+    payload = _checkpoint_payload(
+        {"epoch": 1, "model_state_dict": {}, "optimizer_state_dict": {}},
+        settings,
+        {"pill": 1},
+        {1: 7},
+    )
+
+    assert "backend" not in payload
+    assert "model_config" not in payload
+
+
+def test_input_size_reaches_the_model_and_matches_the_checkpoint(pretend_cuda, monkeypatch):
+    """설정한 크기로 학습해야 checkpoint에 적은 값과 같아집니다.
+
+    adapter까지 닿지 않으면 학습은 기본값으로 돌고 checkpoint에는 설정값이 적힙니다.
+    evaluate는 적힌 값으로 전처리하므로 학습과 추론이 조용히 갈라집니다. 오류는 나지
+    않고 점수만 나빠집니다.
+    """
+
+    seen: dict[str, int] = {}
+    monkeypatch.setattr(
+        model_module,
+        "build_mmdetection_model",
+        lambda num_classes, *, architecture, pretrained, input_size: seen.update(
+            {"input_size": input_size}
+        ),
+    )
+    settings = _settings(_mmdetection_raw(input_size=512))
+
+    model_module.build_model(
+        4,
+        architecture=settings["architecture"],
+        pretrained=settings["pretrained"],
+        input_size=settings["input_size"],
+    )
+    payload = _checkpoint_payload(
+        {"epoch": 1, "model_state_dict": {}, "optimizer_state_dict": {}},
+        settings,
+        {"pill": 1},
+        {1: 7},
+    )
+
+    assert seen["input_size"] == 512
+    assert payload["model_config"]["input_size"] == seen["input_size"]
+
+
+def test_the_pipeline_hands_the_configured_input_size_to_the_builder():
+    """호출부가 이 값을 빠뜨리면 위 test는 통과하고 학습만 기본값으로 돕니다."""
+
+    source = Path(pipeline_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "build_model"
+    ]
+
+    assert calls, "pipeline이 build_model을 부르지 않습니다."
+    for call in calls:
+        passed = {keyword.arg for keyword in call.keywords}
+        assert "input_size" in passed, sorted(passed)
+
+
+def test_training_config_records_input_size_only_for_mmdetection(pretend_cuda):
+    """torchvision 실행은 이 값을 쓰지 않으므로 None으로 남깁니다."""
+
+    mm = pipeline_module._training_config(_settings(_mmdetection_raw(input_size=512)))
+    torchvision_run = pipeline_module._training_config(
+        _settings({"train": {"run_id": "t"}})
+    )
+
+    assert mm["input_size"] == 512
+    assert torchvision_run["input_size"] is None
+
+
+def test_new_models_default_to_accumulating_eight_microbatches(pretend_cuda):
+    """제안서 013이 정한 값입니다. 8GB에서 batch 1이라 그만큼 모아야 쓸 만합니다."""
+
+    settings = _settings(_mmdetection_raw())
+
+    assert settings["gradient_accumulation_steps"] == 8
+
+
+def test_existing_models_keep_accumulating_one():
+    """기존 모델의 학습 동작은 이 변경 전과 같아야 합니다."""
+
+    settings = _settings({"train": {"run_id": "t"}})
+
+    assert settings["gradient_accumulation_steps"] == 1

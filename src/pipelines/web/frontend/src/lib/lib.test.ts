@@ -142,6 +142,29 @@ describe('toPayload', () => {
     expect(payload.train.lr_gamma).toBeUndefined();
   });
 
+  it('고른 모델이 쓰지 않는 칸은 값이 남아 있어도 보내지 않는다', () => {
+    // MMDetection을 고르고 입력 크기를 적었다가 모델을 되돌리면 화면에서는 칸이
+    // 사라지지만 draft에는 값이 남습니다. 그대로 실어 보내면 서버가 거부하는데,
+    // 사용자에게는 그 칸이 보이지 않아 지울 수도 없습니다.
+    const fields: FieldSpec[] = [
+      ...FIELDS,
+      {
+        name: 'input_size',
+        type: 'integer',
+        default: 640,
+        only_for_architectures: ['resnet'],
+        label: '입력 크기',
+        hint: '',
+      },
+    ];
+    const draft = { train: { input_size: '800' }, data: {} };
+
+    expect(toPayload({ ...draft, train: { ...draft.train, architecture: 'mobile' } }, fields).train)
+      .not.toHaveProperty('input_size');
+    expect(toPayload({ ...draft, train: { ...draft.train, architecture: 'resnet' } }, fields).train.input_size)
+      .toBe(800);
+  });
+
   it('손대지 않은 device도 화면에 보이는 기본값 그대로 실어 보낸다', () => {
     // GPU가 있는 PC에서 서버는 device 기본값을 cuda로, precision을 amp로 내려 줍니다.
     // 둘은 짝이라 device만 빼고 보내면 서버 fallback인 cpu가 이깁니다. 그러면 화면에는
@@ -253,6 +276,43 @@ describe('describeRun', () => {
     expect(describeRun(config)).not.toContain('조기 종료');
   });
 
+  it('고른 모델과 optimizer를 그대로 말한다', () => {
+    // 이름을 단정해 두면 다른 모델을 골라도 화면은 늘 같은 이름을 말합니다.
+    // 사용자는 무엇으로 학습하는지 여기서만 확인하므로 기록이 조용히 틀어집니다.
+    const text = describeRun({
+      ...config,
+      train: { ...config.train, architecture: 'dino_r50_4scale', optimizer: 'AdamW' },
+    });
+
+    expect(text).toContain('dino_r50_4scale');
+    expect(text).toContain('AdamW');
+    expect(text).not.toContain('torchvision Faster R-CNN');
+  });
+
+  it('모아서 갱신하면 유효 batch를 알려 준다', () => {
+    const text = describeRun({
+      ...config,
+      train: { ...config.train, batch_size: 1, gradient_accumulation_steps: 8 },
+    });
+
+    expect(text).toContain('유효 batch는 8');
+  });
+
+  it('모으지 않으면 그 말을 꺼내지 않는다', () => {
+    expect(describeRun(config)).not.toContain('유효 batch');
+  });
+
+  it('MMDetection 모델이면 입력 크기를 말한다', () => {
+    const text = describeRun({
+      ...config,
+      train: { ...config.train, architecture: 'dino_r50_4scale', input_size: 640 },
+    });
+
+    expect(text).toContain('긴 변이 640');
+    // 쓰지 않는 실행에는 그 말을 꺼내지 않습니다.
+    expect(describeRun(config)).not.toContain('긴 변이');
+  });
+
   it('learning rate schedule을 쓰면 어떻게 변하는지 말한다', () => {
     const text = describeRun({
       ...config,
@@ -263,7 +323,9 @@ describe('describeRun', () => {
     });
 
     expect(text).toContain('곡선');
-    expect(text).toContain('500 batch');
+    // warmup은 batch가 아니라 optimizer 갱신을 셉니다. 모아서 갱신하면 둘이 달라져,
+    // batch라고 적어 두면 실제보다 짧은 구간을 말하게 됩니다.
+    expect(text).toContain('500번의 갱신');
   });
 
   it('schedule을 쓰지 않으면 learning rate 이야기를 꺼내지 않는다', () => {

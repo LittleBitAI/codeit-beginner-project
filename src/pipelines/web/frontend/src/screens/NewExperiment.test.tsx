@@ -329,4 +329,124 @@ describe('NewExperiment · 자동 실행 이름', () => {
     expect(screen.queryByText(/자동 이름:/)).not.toBeInTheDocument();
     expect(screen.getByText('결과 폴더 이름입니다.')).toBeInTheDocument();
   });
+
+  it('입력 크기 칸은 그 값을 쓰는 모델을 골랐을 때만 보인다', () => {
+    // 서버가 칸을 내밀어도 이 화면은 고정 목록만 그립니다. 목록에 넣지 않으면 서버
+    // test는 통과하는데 사용자는 값을 조정할 수 없습니다. 반대로 늘 보여 주면 그 값을
+    // 쓰지 않는 모델에서도 정할 수 있는 것처럼 읽히는데 서버는 거부합니다.
+    const defaults: Defaults = {
+      ...LEGACY_DEFAULTS,
+      fields: [
+        {
+          name: 'architecture',
+          type: 'enum',
+          default: 'fasterrcnn_mobilenet_v3_large_320_fpn',
+          choices: ['fasterrcnn_mobilenet_v3_large_320_fpn', 'dino_r50_4scale'],
+          label: '모델',
+          hint: '',
+        },
+        {
+          name: 'gradient_accumulation_steps',
+          type: 'integer',
+          default: 1,
+          label: 'Gradient accumulation',
+          hint: '',
+        },
+        {
+          name: 'input_size',
+          type: 'integer',
+          default: 640,
+          only_for_architectures: ['dino_r50_4scale'],
+          label: '입력 크기',
+          hint: '',
+        },
+      ],
+    };
+    render(
+      <MemoryRouter>
+        <DraftProvider>
+          <NewExperiment defaults={defaults} source={null} />
+        </DraftProvider>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText('하이퍼파라미터'));
+
+    // 모으는 수는 모든 모델이 씁니다.
+    expect(screen.getByLabelText('Gradient accumulation')).toBeInTheDocument();
+    expect(screen.queryByLabelText('입력 크기')).toBeNull();
+
+    fireEvent.click(screen.getByText('기본 정보'));
+    fireEvent.change(screen.getByLabelText('모델'), {
+      target: { value: 'dino_r50_4scale' },
+    });
+    fireEvent.click(screen.getByText('하이퍼파라미터'));
+
+    expect(screen.getByLabelText('입력 크기')).toBeInTheDocument();
+
+    // 값을 적어 둔 뒤 모델을 되돌려도 칸은 사라집니다. draft에 남은 그 값을 빼는 것은
+    // toPayload의 몫이라 lib.test.ts가 함께 지킵니다.
+    fireEvent.change(screen.getByLabelText('입력 크기'), { target: { value: '800' } });
+    fireEvent.click(screen.getByText('기본 정보'));
+    fireEvent.change(screen.getByLabelText('모델'), {
+      target: { value: 'fasterrcnn_mobilenet_v3_large_320_fpn' },
+    });
+    fireEvent.click(screen.getByText('하이퍼파라미터'));
+
+    expect(screen.queryByLabelText('입력 크기')).toBeNull();
+  });
+
+  it('고른 모델에 따라 안내하는 기본값이 달라진다', () => {
+    // 하나만 보여 주면 MMDetection을 고르고 비워 둔 사람에게 1이라고 안내하면서
+    // 실제로는 8로 돕니다. 화면이 거짓말을 하는 셈입니다.
+    const defaults: Defaults = {
+      ...LEGACY_DEFAULTS,
+      fields: [
+        {
+          name: 'architecture',
+          type: 'enum',
+          default: 'fasterrcnn_mobilenet_v3_large_320_fpn',
+          choices: ['fasterrcnn_mobilenet_v3_large_320_fpn', 'dino_r50_4scale'],
+          label: '모델',
+          hint: '',
+        },
+        {
+          name: 'gradient_accumulation_steps',
+          type: 'integer',
+          default: 1,
+          defaults_by_architecture: { dino_r50_4scale: 8 },
+          label: 'Gradient accumulation',
+          hint: '',
+        },
+      ],
+    };
+    render(
+      <MemoryRouter>
+        <DraftProvider>
+          <NewExperiment defaults={defaults} source={null} />
+        </DraftProvider>
+      </MemoryRouter>,
+    );
+
+    // draft는 화면 밖에서 이어지므로 앞선 test가 고른 모델이 남아 있을 수 있습니다.
+    // 여기서 두 방향을 모두 확인해 그 상태와 무관하게 만듭니다.
+    fireEvent.click(screen.getByText('기본 정보'));
+    fireEvent.change(screen.getByLabelText('모델'), {
+      target: { value: 'dino_r50_4scale' },
+    });
+    fireEvent.click(screen.getByText('하이퍼파라미터'));
+    expect(screen.getByLabelText('Gradient accumulation')).toHaveAttribute(
+      'placeholder',
+      '기본값 8',
+    );
+
+    fireEvent.click(screen.getByText('기본 정보'));
+    fireEvent.change(screen.getByLabelText('모델'), {
+      target: { value: 'fasterrcnn_mobilenet_v3_large_320_fpn' },
+    });
+    fireEvent.click(screen.getByText('하이퍼파라미터'));
+    expect(screen.getByLabelText('Gradient accumulation')).toHaveAttribute(
+      'placeholder',
+      '기본값 1',
+    );
+  });
 });

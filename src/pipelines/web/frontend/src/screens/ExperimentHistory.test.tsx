@@ -47,7 +47,7 @@ function makeExperiment(
       beta2: 0.999,
       epsilon: 1e-8,
     },
-    training: { device: 'cuda', epochs: 15, batch_size: 4, num_workers: 0, seed: 42 },
+    training: { device: 'cuda', epochs: 15, batch_size: 4, num_workers: 0, gradient_accumulation_steps: 1, input_size: null, seed: 42 },
     metrics: {
       best_epoch: 9,
       best_validation_loss: 0.06,
