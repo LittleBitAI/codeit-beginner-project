@@ -39,6 +39,11 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 # 학습 checkpoint는 detector를 감싼 adapter의 state_dict라 이 접두사가 붙습니다.
 WRAPPER_PREFIX = "detector."
+# mmdet 3.3.0이 거부하지만 실제로는 맞는 mmcv 구간입니다. 자세한 이유는
+# `_shimmed_mmcv_version`에 적었습니다. 이 밖의 버전은 손대지 않습니다.
+MMCV_SHIM_MINIMUM = (2, 2, 0)
+MMCV_SHIM_MAXIMUM = (2, 3, 0)
+MMCV_SHIM_VERSION = "2.1.999"
 
 
 def _data_preprocessor() -> dict[str, Any]:
@@ -457,22 +462,59 @@ def to_output(instances: Any, *, metainfo: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _shimmed_mmcv_version(version: str) -> str | None:
+    """mmdet의 상한만 통과시킬 가짜 버전을 정합니다. 필요 없으면 `None`입니다.
+
+    mmdet 3.3.0은 `import mmdet` 도중 `assert mmcv < 2.2.0`을 겁니다. 그런데 지금
+    torch에 맞는 mmcv 확장 wheel은 **2.2.0뿐이고**, mmdet은 2024-01 이후 새 release가
+    없어 이 상한이 열릴 일이 없습니다. mmcv 2.2.0 release note에는 2.1.0 대비
+    breaking change가 없고 NPU 연산자 추가와 버그 수정뿐입니다.
+
+    그래서 **검증한 구간만** 통과시킵니다. 범위를 열어 두면 진짜로 맞지 않는 조합까지
+    조용히 지나가, 계약 오류 대신 알 수 없는 곳에서 깨집니다.
+    """
+
+    parts = version.split("+", 1)[0].split(".")
+    try:
+        numbers = tuple(int(part) for part in parts[:3])
+    except ValueError:
+        return None
+    if MMCV_SHIM_MINIMUM <= numbers < MMCV_SHIM_MAXIMUM:
+        return MMCV_SHIM_VERSION
+    return None
+
+
 def _import_mmdetection() -> Any:
     """MMDetection을 늦게 import합니다. 없으면 이 backend를 고른 순간에 알립니다.
 
     `ImportError`만 잡으면 부족합니다. mmcv는 **컴파일된 확장**을 함께 싣기 때문에,
     설치는 됐지만 확장이 깨졌거나 torch 버전과 어긋나면 import 도중
-    `OSError('DLL load failed')`처럼 다른 예외가 납니다. 그것이 그대로 올라가면
-    `run()`이 잡지 못해 실행 자체가 죽습니다. 설치 문제라는 결론은 같으므로 같은
-    오류로 바꿉니다.
+    `OSError('DLL load failed')`처럼 다른 예외가 납니다. mmdet의 버전 검사는 또
+    `AssertionError`로 납니다. 어느 것이든 그대로 올라가면 `run()`이 잡지 못해 실행
+    자체가 죽습니다. 설치 문제라는 결론은 같으므로 같은 오류로 바꿉니다.
+
+    `ConfigDict`도 여기서 함께 가져옵니다. mmdet의 two-stage detector는 `train_cfg`를
+    **속성으로** 읽어서 평범한 `dict`로는 만들어지지 않습니다.
     """
 
     from types import SimpleNamespace
 
     try:
-        from mmdet.registry import MODELS
-        from mmdet.structures import DetDataSample
-        from mmdet.utils import register_all_modules
+        import mmcv
+
+        # mmdet은 import 도중 버전을 재므로 그 전에 바꿔 두고, 끝나면 되돌립니다.
+        # 값을 되돌리지 않으면 다른 코드가 잘못된 버전을 읽게 됩니다.
+        real_version = mmcv.__version__
+        shim = _shimmed_mmcv_version(real_version)
+        try:
+            if shim is not None:
+                mmcv.__version__ = shim
+            from mmdet.registry import MODELS
+            from mmdet.structures import DetDataSample
+            from mmdet.utils import register_all_modules
+            from mmengine.config import ConfigDict
+        finally:
+            mmcv.__version__ = real_version
     except Exception as error:  # noqa: BLE001 - 설치 문제를 계약 오류로 바꿉니다.
         raise PredictionError(
             "MMDetection backend 추론에는 mmdet, mmcv, mmengine이 필요합니다. "
@@ -481,6 +523,7 @@ def _import_mmdetection() -> Any:
     return SimpleNamespace(
         models=MODELS,
         data_sample_type=DetDataSample,
+        config_type=ConfigDict,
         register=lambda: register_all_modules(init_default_scope=True),
     )
 
@@ -593,8 +636,12 @@ def build_predictor(
     # 낼 수 있으므로 계약 오류로 바꿉니다.
     try:
         dependencies.register()
+        # 평범한 dict로 넘기면 two-stage detector가 `train_cfg.rpn`을 읽다 멈춥니다.
+        # ConfigDict는 중첩된 dict까지 함께 바꿔 줍니다.
         detector = dependencies.models.build(
-            build_detector_config(architecture, foreground_classes=num_classes - 1)
+            dependencies.config_type(
+                build_detector_config(architecture, foreground_classes=num_classes - 1)
+            )
         )
         detector.load_state_dict(detector_state)
         model = MMDetectionPredictor(

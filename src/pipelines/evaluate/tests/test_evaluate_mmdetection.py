@@ -112,6 +112,10 @@ def _fake_dependencies(
     return SimpleNamespace(
         models=SimpleNamespace(build=build),
         data_sample_type=_FakeDataSample,
+        # 진짜 의존성은 mmengine의 ConfigDict를 줍니다. 여기서는 설정이 그대로
+        # 전달되는지만 보면 되므로 dict로 충분합니다. ConfigDict가 정말 필요하다는
+        # 것은 실제 model을 만드는 test가 확인합니다.
+        config_type=dict,
         register=register,
     )
 
@@ -120,6 +124,20 @@ def _install(monkeypatch, dependencies: SimpleNamespace) -> None:
     monkeypatch.setattr(
         mmdetection_backend, "_import_mmdetection", lambda: dependencies
     )
+
+
+def _require_mmdetection():
+    """진짜 mmdet 실행 환경이 없으면 건너뜁니다.
+
+    mmcv의 컴파일된 확장은 requirements 밖의 선택 사항이라 CI에는 없습니다. 대신
+    있는 곳에서는 **가짜를 거치지 않고** 실제 model을 만들어 계약을 확인합니다.
+    가짜 registry는 설정 값이 mmdet에 받아들여지는지를 영영 확인하지 못합니다.
+    """
+
+    try:
+        return mmdetection_backend._import_mmdetection()
+    except PredictionError as error:
+        pytest.skip(f"mmdet 실행 환경이 없습니다: {error}")
 
 
 def test_unknown_backend_is_reported_instead_of_falling_back():
@@ -322,6 +340,97 @@ def test_mmdetection_checkpoint_needs_one_category_id_per_class(
 
     # 모델을 만든 뒤에 걸러 내면 무거운 생성이 끝난 다음에야 알게 됩니다.
     assert built == []
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        pytest.param("2.1.0", None, id="아래는_손대지_않는다"),
+        pytest.param("2.2.0", "2.1.999", id="mmdet이_거부하지만_실제로는_맞는_구간"),
+        pytest.param("2.2.0+a8073c7pt2.12.0cu126", "2.1.999", id="local_버전_꼬리표"),
+        pytest.param("2.3.0", None, id="검증하지_않은_위쪽은_열지_않는다"),
+        pytest.param("3.0.0", None, id="다음_major는_열지_않는다"),
+    ],
+)
+def test_mmcv_version_shim_only_covers_the_verified_range(version, expected):
+    """mmdet 3.3.0의 상한이 mmcv 2.2.0을 막지만 실제로는 맞습니다.
+
+    범위를 넓게 열면 정말로 맞지 않는 조합까지 조용히 지나가, 설치 문제를 알리는
+    대신 알 수 없는 자리에서 깨집니다. 검증한 구간만 통과시켜야 합니다.
+    """
+
+    assert mmdetection_backend._shimmed_mmcv_version(version) == expected
+
+
+def test_real_dependencies_expose_the_config_type():
+    """two-stage detector는 train_cfg를 속성으로 읽어 평범한 dict로는 못 만듭니다."""
+
+    dependencies = _require_mmdetection()
+
+    assert dependencies.config_type is not None
+    # 중첩된 dict까지 함께 바뀌어야 roi_head 안쪽도 속성으로 읽힙니다.
+    converted = dependencies.config_type({"a": {"b": 1}})
+    assert converted.a.b == 1
+
+
+@pytest.mark.parametrize(
+    ("architecture", "detector_type"),
+    [
+        ("dino_r50_4scale", "DINO"),
+        ("cascade_rcnn_swin_t_fpn", "CascadeRCNN"),
+    ],
+)
+def test_real_model_is_rebuilt_and_predicts_in_original_coordinates(
+    architecture, detector_type
+):
+    """진짜 mmdet model로 계약을 끝까지 확인합니다.
+
+    가짜 registry는 설정이 mmdet에 **받아들여지는지**를 확인하지 못합니다. 실제로
+    `cascade_rcnn_swin_t_fpn`은 평범한 dict를 넘기던 동안 만들어지지도 않았는데,
+    가짜를 쓰던 test는 모두 통과했습니다.
+    """
+
+    dependencies = _require_mmdetection()
+    dependencies.register()
+    num_classes = 4
+    reference = dependencies.models.build(
+        dependencies.config_type(
+            mmdetection_backend.build_detector_config(
+                architecture, foreground_classes=num_classes - 1
+            )
+        )
+    )
+    assert type(reference).__name__ == detector_type
+    checkpoint = _checkpoint(
+        architecture=architecture,
+        num_classes=num_classes,
+        model_state_dict={
+            f"detector.{name}": value
+            for name, value in reference.state_dict().items()
+        },
+        model_config=_model_config(input_size=320),
+    )
+
+    model = predictor._build_model(checkpoint, source="best.pt")
+    with torch.no_grad():
+        outputs = model([torch.rand(3, 240, 320)])
+
+    output = outputs[0]
+    assert output["boxes"].shape[0] == output["labels"].shape[0]
+    if output["labels"].numel():
+        # MMDetection이 0부터 세는 label을 저장소의 1..N으로 되돌려야 합니다.
+        assert int(output["labels"].min()) >= 1
+        assert int(output["labels"].max()) <= num_classes - 1
+        # box는 padding한 크기가 아니라 원본 이미지 좌표여야 합니다.
+        assert float(output["boxes"][:, 2].max()) <= 320 * 1.05
+        assert float(output["boxes"][:, 3].max()) <= 240 * 1.05
+    predictions = predictor._outputs_to_predictions(
+        output,
+        record={"image_id": "img-1", "image_key": "img-1"},
+        category_ids=checkpoint["category_ids"],
+    )
+    # category_ids[0]은 background 자리라 예측에 나오면 안 됩니다.
+    assert {entry["category_id"] for entry in predictions} <= {10, 20, 30}
 
 
 @pytest.mark.parametrize(
