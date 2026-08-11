@@ -37,6 +37,7 @@ from src.pipelines.web.train_config import (
     LR_WARMUP_DEFAULTS,
     OPTIMIZER_PROFILES,
     RUN_ID_PATTERN,
+    field_specs,
     normalize_train_settings,
 )
 
@@ -371,3 +372,70 @@ def test_required_data_artifact_keys_match_train_source():
     train_keys = module_constant(read_source("pipeline.py"), "DATA_ARTIFACT_KEYS")
 
     assert set(DATA_ARTIFACT_KEYS) == set(train_keys)
+
+
+def test_gradient_accumulation_default_is_mirrored_before_train_reads_it():
+    """train이 이 설정을 받기 시작해도 기본값이 어긋나지 않게 미리 맞춰 둡니다.
+
+    `test_numeric_defaults_match_train_source`는 train의 기본값을 순회하며 web에
+    같은 값이 있는지 봅니다. 그래서 train이 먼저 넣으면 그 순간 web이 깨지고,
+    web이 먼저 넣으면 조용히 통과합니다. 순서가 web -> train인 이유입니다.
+    """
+
+    mirrored = normalize_train_settings({})
+
+    assert mirrored["gradient_accumulation_steps"] == 1
+
+
+def test_gradient_accumulation_is_not_offered_on_the_screen_yet():
+    """train이 아직 이 key를 읽지 않습니다. 읽지 않는 값을 칸으로 내밀면 안 됩니다.
+
+    train은 모르는 key를 거부하지 않고 조용히 무시합니다. 그래서 지금 칸을 열면
+    사용자가 4를 넣어도 microbatch가 모이지 않는 채로 학습이 끝나고, 화면에는
+    4라고 적힌 기록만 남습니다. train이 architecture를 공개할 때 함께 엽니다.
+    """
+
+    offered = {spec["name"] for spec in field_specs()}
+
+    assert "gradient_accumulation_steps" not in offered
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, True, "2"])
+def test_gradient_accumulation_rejects_values_train_would_not_take(value):
+    """train은 bool이 아닌 1 이상의 정수만 받습니다."""
+
+    with pytest.raises(Exception, match="gradient_accumulation_steps"):
+        normalize_train_settings({"gradient_accumulation_steps": value})
+
+
+@pytest.mark.parametrize("value", [2, 4, 8])
+def test_gradient_accumulation_refuses_values_train_cannot_honour_yet(value):
+    """train이 읽지 않는 동안에는 1 말고 어떤 값도 받으면 안 됩니다.
+
+    화면에서 칸을 감추는 것만으로는 부족합니다. API로 곧장 보내면 그대로 정규화되어
+    config에 실리고, train은 모르는 key라 무시합니다. 그러면 microbatch가 모이지 않은
+    채 학습이 끝나고 기록에는 4라고 남습니다. 받을 수 없는 값은 받지 않아야 합니다.
+    """
+
+    with pytest.raises(Exception, match="gradient_accumulation_steps"):
+        normalize_train_settings({"gradient_accumulation_steps": value})
+
+
+def test_gradient_accumulation_does_not_change_the_automatic_run_name():
+    """생략과 1은 같은 동작이므로 자동 이름도 같아야 합니다.
+
+    자동 이름의 꼬리표는 설정 지문입니다. 실제 학습이 이 변경 전과 똑같은데도 이름이
+    달라지면, 같은 설정과 seed로 다시 돌렸을 때 예전 실행과 이름이 달라져 중복 실험을
+    알아채지 못합니다. GPU 시간을 두 번 쓰게 됩니다.
+    """
+
+    settings = normalize_train_settings({})
+    without = {
+        name: value
+        for name, value in settings.items()
+        if name != "gradient_accumulation_steps"
+    }
+
+    assert train_config._settings_fingerprint(
+        settings, None
+    ) == train_config._settings_fingerprint(without, None)

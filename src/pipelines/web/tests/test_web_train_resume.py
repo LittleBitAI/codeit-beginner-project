@@ -223,6 +223,29 @@ def test_resume_config_shortens_a_long_original_name_without_losing_the_suffix(
     assert train_config.RUN_ID_PATTERN.fullmatch(name)
 
 
+def test_resume_carries_every_setting_it_does_not_deliberately_change():
+    """이어서 하는 실행은 원 실행과 같은 설정으로 돌아야 합니다.
+
+    개별 항목을 하나씩 확인하면 **나중에 생기는 설정**이 조용히 빠집니다. 빠진 값은
+    train의 기본값으로 대체되므로 오류가 나지 않고, 이어서 한 실행만 다른 설정으로
+    학습됩니다. 그래서 바꾸기로 한 세 가지 말고는 전부 그대로인지 봅니다.
+    """
+
+    source = _runtime_config("local")
+    source["train"].update(
+        {"gradient_accumulation_steps": 4, "architecture": "retinanet_resnet50_fpn_v2"}
+    )
+
+    resumed = build_resume_config(source)
+
+    changed = {"run_id", "resume_from"}
+    assert set(resumed["train"]) - set(source["train"]) == {"resume_from"}
+    for name, value in source["train"].items():
+        if name in changed:
+            continue
+        assert resumed["train"][name] == value, f"train.{name}이(가) 이어지지 않았습니다."
+
+
 def test_resume_config_can_extend_the_plan():
     resumed = build_resume_config(_runtime_config("local"), epochs=80)
 
