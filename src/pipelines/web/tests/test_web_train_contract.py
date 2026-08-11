@@ -406,3 +406,36 @@ def test_gradient_accumulation_rejects_values_train_would_not_take(value):
 
     with pytest.raises(Exception, match="gradient_accumulation_steps"):
         normalize_train_settings({"gradient_accumulation_steps": value})
+
+
+@pytest.mark.parametrize("value", [2, 4, 8])
+def test_gradient_accumulation_refuses_values_train_cannot_honour_yet(value):
+    """train이 읽지 않는 동안에는 1 말고 어떤 값도 받으면 안 됩니다.
+
+    화면에서 칸을 감추는 것만으로는 부족합니다. API로 곧장 보내면 그대로 정규화되어
+    config에 실리고, train은 모르는 key라 무시합니다. 그러면 microbatch가 모이지 않은
+    채 학습이 끝나고 기록에는 4라고 남습니다. 받을 수 없는 값은 받지 않아야 합니다.
+    """
+
+    with pytest.raises(Exception, match="gradient_accumulation_steps"):
+        normalize_train_settings({"gradient_accumulation_steps": value})
+
+
+def test_gradient_accumulation_does_not_change_the_automatic_run_name():
+    """생략과 1은 같은 동작이므로 자동 이름도 같아야 합니다.
+
+    자동 이름의 꼬리표는 설정 지문입니다. 실제 학습이 이 변경 전과 똑같은데도 이름이
+    달라지면, 같은 설정과 seed로 다시 돌렸을 때 예전 실행과 이름이 달라져 중복 실험을
+    알아채지 못합니다. GPU 시간을 두 번 쓰게 됩니다.
+    """
+
+    settings = normalize_train_settings({})
+    without = {
+        name: value
+        for name, value in settings.items()
+        if name != "gradient_accumulation_steps"
+    }
+
+    assert train_config._settings_fingerprint(
+        settings, None
+    ) == train_config._settings_fingerprint(without, None)
