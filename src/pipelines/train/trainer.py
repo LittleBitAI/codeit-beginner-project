@@ -123,8 +123,14 @@ def build_lr_scheduler(
     이것이 schedule을 몰랐던 옛 checkpoint를 그대로 이어서 학습할 수 있게 하는 조건이기도
     합니다.
 
-    배율은 epoch이 아니라 **batch마다** 계산합니다. warmup을 epoch 단위로만 셀 수 있으면
-    가장 짧은 warmup이 1 epoch인데, 이미지가 만 장이 넘는 지금은 그것도 수천 batch입니다.
+    배율은 epoch이 아니라 **optimizer를 갱신할 때마다** 계산합니다. warmup을 epoch
+    단위로만 셀 수 있으면 가장 짧은 warmup이 1 epoch인데, 이미지가 만 장이 넘는 지금은
+    그것도 수천 번입니다.
+
+    ``steps_per_epoch``도 batch 수가 아니라 **갱신 수**를 받습니다. gradient
+    accumulation을 쓰면 batch마다 갱신하지 않으므로 둘이 달라지고, batch 수로 재면
+    schedule이 그만큼 짧게 걸어 ``linear``와 ``cosine``이 설정한 최저 배율에 닿지
+    못합니다. accumulation이 1이면 둘은 같습니다.
     """
 
     schedule = settings.get("lr_scheduler")
@@ -148,7 +154,7 @@ def build_lr_scheduler(
         if name == "none":
             return 1.0
         minimum = schedule["min_lr_factor"]
-        # 남은 step에서 1을 빼야 **마지막 batch가** min_lr_factor를 실제로 씁니다.
+        # 남은 step에서 1을 빼야 **마지막 갱신이** min_lr_factor를 실제로 씁니다.
         # 빼지 않으면 설정한 최저 learning rate는 한 번도 쓰이지 않고 끝납니다.
         progress = min(
             1.0, (step - warmup_steps) / max(1, total_steps - warmup_steps - 1)
@@ -243,6 +249,12 @@ def _load_schedule_state(
             "resume checkpoint is missing the learning rate schedule state this run needs"
         )
     schedule.load_state_dict(dict(state))
+    # `load_state_dict`는 어디까지 왔는지만 되돌리고 optimizer의 learning rate는 그대로
+    # 둡니다. 그래서 이어서 한 실행의 **첫 batch**가 schedule 시작값으로 학습되고,
+    # 다음 걸음부터야 따라잡습니다. epoch당 batch가 하나면 그 한 걸음이 곧 epoch
+    # 경계라 티가 나지 않지만, 여럿이면 그만큼 다른 learning rate로 배웁니다.
+    for group, lr in zip(schedule.optimizer.param_groups, schedule.get_last_lr()):
+        group["lr"] = lr
 
 
 def _collate(batch: list[Any]) -> tuple[tuple[Any, ...], tuple[Any, ...]]:

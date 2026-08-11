@@ -109,19 +109,27 @@ def _write_json(path: Path, value) -> None:
     )
 
 
-def _manifest(image_name: str) -> dict:
+def _manifest(image_name: str, images: int = 1) -> dict:
+    """같은 이미지를 ``images``장 담은 manifest입니다.
+
+    한 장짜리로는 microbatch를 모으는 경로를 지나지 못합니다. 학습에 쓰는 값이 아니라
+    batch가 몇 개 나오는지가 필요한 test가 있어 같은 그림을 여러 번 넣습니다.
+    """
+
     return {
         "images": [
-            {"id": 1, "file_name": image_name, "width": 16, "height": 12}
+            {"id": index, "file_name": image_name, "width": 16, "height": 12}
+            for index in range(1, images + 1)
         ],
         "annotations": [
             {
-                "id": 1,
-                "image_id": 1,
+                "id": index,
+                "image_id": index,
                 "category_id": 7,
                 "bbox": [2, 3, 5, 4],
                 "iscrowd": 0,
             }
+            for index in range(1, images + 1)
         ],
         "categories": [{"id": 7, "name": "pill"}],
     }
@@ -1393,6 +1401,93 @@ def test_resumed_training_matches_an_uninterrupted_run(
     assert set(straight_weights) == set(resumed_weights)
     for name, value in straight_weights.items():
         assert torch.equal(value, resumed_weights[name]), name
+
+
+@pytest.mark.parametrize("accumulation", [1, 2])
+def test_resumed_training_matches_an_uninterrupted_run_while_accumulating(
+    local_config, tmp_path, monkeypatch, accumulation
+):
+    """모으는 중에 끊겼다 이어서 해도 끊기지 않은 학습과 같아야 합니다.
+
+    기본 fixture는 학습 이미지가 한 장이라 accumulation을 올려도 묶음이 생기지
+    않습니다. 그래서 여러 장으로 바꿔 microbatch를 실제로 모으게 한 뒤, epoch 경계에서
+    끊었다 이어 붙입니다. 모으는 도중 optimizer와 schedule의 걸음이 어긋나면 여기서
+    갈라집니다.
+    """
+
+    monkeypatch.setattr(
+        pipeline, "build_model", lambda *args, **kwargs: RandomWalkDetector()
+    )
+    fixture_directory = tmp_path / "fixtures"
+    _write_json(
+        fixture_directory / "train.json", _manifest("train.png", images=5)
+    )
+    _write_json(fixture_directory / "summary.json", {"train_images": 5, "validation_images": 1})
+    # 5장을 2개씩 모으면 마지막 묶음이 한 장만 남습니다. 못 채운 묶음까지 지나갑니다.
+    local_config["train"]["gradient_accumulation_steps"] = accumulation
+    # schedule은 일부러 켜지 않습니다. schedule 길이는 epochs에서 나오므로, 2 epoch로
+    # 끊었다가 4로 이어 붙이면 곡선 자체가 곧게 4를 돈 실행과 달라집니다. 그것은
+    # 의도된 동작이라 여기서 섞으면 accumulation이 원인인지 알 수 없게 됩니다.
+
+    straight = copy.deepcopy(local_config)
+    straight["train"]["run_id"] = "cpu-straight"
+    straight["train"]["epochs"] = 4
+    straight_result = train.run(straight)
+    assert straight_result["status"] == "ok", straight_result["message"]
+
+    interrupted = copy.deepcopy(local_config)
+    interrupted["train"]["epochs"] = 2
+    train.run(interrupted)
+    source = REPOSITORY_ROOT / interrupted["train"]["output_dir"] / "cpu-smoke"
+
+    resumed = _resume_config(local_config, source / "last_checkpoint.pt")
+    resumed["train"]["epochs"] = 4
+    resumed_result = train.run(resumed)
+
+    assert resumed_result["status"] == "ok", resumed_result["message"]
+    straight_weights = _load(
+        REPOSITORY_ROOT / straight_result["artifacts"]["last_checkpoint_uri"]
+    )["model_state_dict"]
+    resumed_weights = _load(
+        REPOSITORY_ROOT / resumed_result["artifacts"]["last_checkpoint_uri"]
+    )["model_state_dict"]
+    for name, value in straight_weights.items():
+        assert torch.equal(value, resumed_weights[name]), name
+
+
+def test_restoring_a_schedule_also_restores_the_learning_rate_in_use():
+    """되돌린 뒤 **첫 batch**가 이미 이어받은 learning rate로 학습해야 합니다.
+
+    `load_state_dict`는 schedule이 어디까지 왔는지만 되돌리고 optimizer의 learning
+    rate는 그대로 둡니다. 그래서 되돌리기만 하면 이어서 한 실행의 첫 batch가 schedule
+    시작값으로 배우고 다음 걸음부터야 따라잡습니다. epoch당 batch가 하나면 그 한
+    걸음이 곧 epoch 경계라 눈에 띄지 않지만, 여럿이면 그만큼 다른 값으로 배웁니다.
+    """
+
+    settings = {
+        "epochs": 4,
+        "lr_scheduler": {
+            "name": "linear",
+            "warmup_steps": 0,
+            "warmup_start_factor": 0.1,
+            "min_lr_factor": 0.1,
+        },
+    }
+
+    def build():
+        parameter = nn.Parameter(torch.tensor(1.0))
+        optimizer = torch.optim.SGD([parameter], lr=1.0)
+        return optimizer, trainer_module.build_lr_scheduler(optimizer, settings, 5)
+
+    original_optimizer, original = build()
+    for _ in range(10):
+        original.step()
+    interrupted_lr = original_optimizer.param_groups[0]["lr"]
+
+    resumed_optimizer, resumed = build()
+    trainer_module._load_schedule_state(resumed, original.state_dict())
+
+    assert resumed_optimizer.param_groups[0]["lr"] == pytest.approx(interrupted_lr)
 
 
 def test_resume_without_restoring_the_random_state_diverges(
@@ -2826,3 +2921,35 @@ def test_schedule_length_counts_updates_not_microbatches(monkeypatch):
     # 갱신 2번에 걸쳐 1.0에서 min_lr_factor 0.1까지 내려갑니다. microbatch 수로
     # 재면 [1.0, 0.7]에서 끝나 최저값을 한 번도 쓰지 못합니다.
     assert spy.learning_rates == pytest.approx([1.0, 0.1])
+
+
+def test_warmup_counts_updates_not_microbatches(monkeypatch):
+    """warmup은 batch가 아니라 optimizer 갱신을 셉니다.
+
+    accumulation이 1보다 크면 둘이 달라집니다. batch로 세면 warmup이 실제보다 빨리
+    끝나 초반 learning rate가 설정보다 크게 올라갑니다. 사전학습 가중치로 시작할 때
+    초반 손실이 튀는 것을 막으려고 켜는 기능이라, 빨리 끝나면 켠 의미가 옅어집니다.
+    """
+
+    spy = _AccumulationSpy()
+
+    _train_with_accumulation(
+        monkeypatch,
+        spy,
+        images=8,
+        accumulation=2,
+        learning_rate=1.0,
+        lr_scheduler={
+            "name": "linear",
+            "warmup_steps": 2,
+            "warmup_start_factor": 0.5,
+            "min_lr_factor": 0.1,
+        },
+    )
+
+    # microbatch 8개를 2개씩 모으면 갱신은 4번이고, warmup 2번은 그중 앞의 두 번
+    # 곧 microbatch 4개에 걸칩니다. 0.5에서 출발해 0.75를 지나 1.0에 닿은 뒤 본곡선을
+    # 타고 최저 배율 0.1로 끝납니다. batch로 세면 마지막이 0.82가 되어 최저값에 닿지
+    # 못합니다.
+    assert spy.events.count("step") == 4
+    assert spy.learning_rates == pytest.approx([0.5, 0.75, 1.0, 0.1])
