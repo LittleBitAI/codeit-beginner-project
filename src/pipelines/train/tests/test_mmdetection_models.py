@@ -1,4 +1,4 @@
-"""MMDetection 모델 adapter와 8GB 학습 계약 test입니다."""
+"""MMDetection adapter와 그 architecture를 아직 고를 수 없게 막는 문 test입니다."""
 
 from __future__ import annotations
 
@@ -6,17 +6,18 @@ from collections.abc import Mapping
 
 import pytest
 import torch
+import torchvision
 from torch import nn
-from torch.utils.data import Dataset
 
 from src.pipelines.train.mmdetection_adapter import (
+    MMDETECTION_ARCHITECTURES,
+    MMDetectionAdapter,
+    _prepare_detector,
     build_mmdetection_config,
     prepare_mmdetection_batch,
 )
-from src.pipelines.train import model as model_module
-from src.pipelines.train.model import MMDETECTION_ARCHITECTURES, SUPPORTED_ARCHITECTURES
-from src.pipelines.train.pipeline import _checkpoint_payload, _settings
-from src.pipelines.train import trainer as trainer_module
+from src.pipelines.train.model import SUPPORTED_ARCHITECTURES, build_model
+from src.pipelines.train.pipeline import _settings
 
 
 @pytest.mark.parametrize(
@@ -31,7 +32,6 @@ def test_mmdetection_architectures_build_allowlisted_bbox_configs(
 ):
     config = build_mmdetection_config(architecture, foreground_classes=3)
 
-    assert architecture in SUPPORTED_ARCHITECTURES
     assert architecture in MMDETECTION_ARCHITECTURES
     assert config["type"] == detector_type
     if architecture == "dino_r50_4scale":
@@ -43,6 +43,33 @@ def test_mmdetection_architectures_build_allowlisted_bbox_configs(
             3,
         ]
         assert "mask_head" not in config["roi_head"]
+
+
+@pytest.mark.parametrize("architecture", MMDETECTION_ARCHITECTURES)
+def test_mmdetection_architectures_are_not_selectable_yet(architecture: str):
+    """evaluate·web·requirements 통합 전까지는 설정으로 고를 수 없어야 합니다.
+
+    checkpoint를 evaluate가 읽지 못하고 clean Colab에는 mmdet이 없으므로, 지금 고를 수
+    있게 두면 학습만 되고 채점은 못 하는 실행이 공개됩니다. 통합이 끝나면
+    ``contracts/proposals/012``대로 이 문을 엽니다.
+    """
+
+    assert architecture not in SUPPORTED_ARCHITECTURES
+    with pytest.raises(ValueError, match="train.architecture must be one of"):
+        _settings({"train": {"architecture": architecture}})
+    with pytest.raises(ValueError, match="unsupported train architecture"):
+        build_model(4, architecture=architecture)
+
+
+def test_every_selectable_architecture_stays_loadable_by_evaluate():
+    """evaluate의 predictor는 이름을 torchvision.models.detection에서 찾습니다.
+
+    거기 없는 이름을 train이 고를 수 있게 되는 순간, 학습은 되는데 채점은 못 하는
+    checkpoint가 공개됩니다. evaluate를 import하지 않고 같은 규칙만 확인합니다.
+    """
+
+    for architecture in SUPPORTED_ARCHITECTURES:
+        assert getattr(torchvision.models.detection, architecture, None) is not None
 
 
 def test_mmdetection_batch_zero_bases_first_and_last_label_then_resizes_and_pads():
@@ -71,199 +98,164 @@ def test_mmdetection_batch_zero_bases_first_and_last_label_then_resizes_and_pads
             "ori_shape": (4, 8),
             "img_shape": (3, 6),
             "pad_shape": (32, 32),
+            "batch_input_shape": (32, 32),
             "scale_factor": (0.75, 0.75),
         }
     ]
 
 
-def _new_model_config(architecture: str) -> dict[str, object]:
-    return {
-        "train": {
-            "architecture": architecture,
-            "optimizer": "AdamW",
-            "device": "cuda",
-            "precision": "amp",
-            "batch_size": 1,
-        }
-    }
+def test_mmdetection_batch_shares_one_batch_input_shape_across_images():
+    """DINO의 pre_transformer가 batch 전체의 padding 크기를 읽습니다."""
 
-
-@pytest.mark.parametrize("architecture", MMDETECTION_ARCHITECTURES)
-def test_mmdetection_settings_use_the_approved_8gb_defaults(monkeypatch, architecture):
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda **kwargs: False)
-
-    settings = _settings(_new_model_config(architecture))
-
-    assert settings["input_size"] == 640
-    assert settings["gradient_accumulation_steps"] == 8
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("device", "cpu", "train.device='cuda'"),
-        ("precision", "fp32", "train.precision='amp'"),
-        ("optimizer", "SGD", "train.optimizer='AdamW'"),
-        ("batch_size", 2, "train.batch_size=1"),
-    ],
-)
-def test_mmdetection_settings_reject_unverified_runtime_combinations(
-    monkeypatch, field, value, message
-):
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda **kwargs: False)
-    config = _new_model_config("dino_r50_4scale")
-    config["train"][field] = value
-
-    with pytest.raises(ValueError, match=message):
-        _settings(config)
-
-
-def test_checkpoint_records_mmdetection_backend_and_json_safe_model_config():
-    settings = {
-        "architecture": "dino_r50_4scale",
-        "input_size": 640,
-        "gradient_accumulation_steps": 8,
-        "seed": 42,
-        "optimizer": "AdamW",
-        "learning_rate": 0.0001,
-        "weight_decay": 0.0001,
-        "beta1": 0.9,
-        "beta2": 0.999,
-        "epsilon": 1e-8,
-        "precision": {"mode": "amp", "dtype": "fp16", "grad_scaler": True},
-    }
-
-    payload = _checkpoint_payload(
-        {"model_state_dict": {}}, settings, {"a": 1, "b": 2}, {1: 10, 2: 20}
-    )
-
-    assert payload["backend"] == "mmdetection"
-    assert payload["model_config"] == {
-        "schema_version": 1,
-        "input_size": 640,
-        "resize": "longest_edge",
-        "pad_multiple": 32,
-    }
-    assert payload["category_ids"] == [0, 10, 20]
-    assert payload["training_config"]["gradient_accumulation_steps"] == 8
-
-
-def test_legacy_checkpoint_does_not_claim_mmdetection_metadata():
-    payload = _checkpoint_payload(
-        {"model_state_dict": {}},
-        {"seed": 42},
-        {"a": 1},
-        {1: 10},
-    )
-
-    assert "backend" not in payload
-    assert "model_config" not in payload
-    assert payload["training_config"]["schema_version"] == 3
-
-
-@pytest.mark.parametrize("architecture", MMDETECTION_ARCHITECTURES)
-def test_model_builder_routes_mmdetection_class_count_and_input_size(
-    monkeypatch, architecture
-):
-    sentinel = nn.Identity()
-    calls = []
-
-    def build(num_classes, **settings):
-        calls.append((num_classes, settings))
-        return sentinel
-
-    monkeypatch.setattr(model_module, "build_mmdetection_model", build)
-
-    result = model_module.build_model(
-        4,
-        architecture=architecture,
-        pretrained=True,
-        input_size=768,
-    )
-
-    assert result is sentinel
-    assert calls == [
+    images, _, metadata = prepare_mmdetection_batch(
+        (torch.ones((3, 8, 4)), torch.ones((3, 4, 40))),
         (
-            4,
-            {
-                "architecture": architecture,
-                "pretrained": True,
-                "input_size": 768,
-            },
-        )
-    ]
-
-
-class _ConstantDataset(Dataset):
-    def __len__(self) -> int:
-        return 5
-
-    def __getitem__(self, index: int):
-        return torch.ones((1, 1, 1)), {"labels": torch.tensor([1])}
-
-
-class _ConstantLossDetector(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.tensor(1.0))
-
-    def forward(self, images, targets):
-        return {"loss": self.weight * torch.stack(images).mean()}
-
-
-class _CountingSGD(torch.optim.SGD):
-    def __init__(self, parameters, **kwargs):
-        super().__init__(parameters, **kwargs)
-        self.step_calls = 0
-
-    def step(self, closure=None):
-        self.step_calls += 1
-        return super().step(closure)
-
-
-def test_gradient_accumulation_updates_once_per_window_and_keeps_partial_window(
-    monkeypatch,
-):
-    recorded: dict[str, _CountingSGD] = {}
-    schedule_steps = []
-
-    def build(parameters: list[nn.Parameter], settings: Mapping[str, object]):
-        optimizer = _CountingSGD(parameters, lr=0.1, weight_decay=0.0, momentum=0.0)
-        recorded["optimizer"] = optimizer
-        return optimizer
-
-    monkeypatch.setattr(trainer_module, "build_optimizer", build)
-    monkeypatch.setattr(
-        trainer_module,
-        "build_lr_scheduler",
-        lambda optimizer, settings, steps_per_epoch: type(
-            "Schedule",
-            (),
-            {"step": lambda self: schedule_steps.append(steps_per_epoch)},
-        )(),
+            {"boxes": torch.zeros((0, 4)), "labels": torch.zeros((0,), dtype=torch.int64)},
+            {"boxes": torch.zeros((0, 4)), "labels": torch.zeros((0,), dtype=torch.int64)},
+        ),
+        input_size=40,
     )
-    model = _ConstantLossDetector()
-    settings = {
-        "seed": 7,
-        "device": "cpu",
-        "batch_size": 1,
-        "num_workers": 0,
-        "optimizer": "SGD",
-        "learning_rate": 0.1,
-        "weight_decay": 0.0,
-        "momentum": 0.0,
-        "epochs": 1,
-        "checkpoint_every": 1,
-        "gradient_accumulation_steps": 2,
-        "lr_scheduler": None,
-        "early_stopping": None,
-        "precision": {"mode": "fp32", "dtype": "fp32", "grad_scaler": False},
+
+    assert images.shape == (2, 3, 64, 64)
+    assert [entry["batch_input_shape"] for entry in metadata] == [(64, 64), (64, 64)]
+    assert [entry["pad_shape"] for entry in metadata] == [(64, 32), (32, 64)]
+
+
+class _FakeDataSample:
+    def __init__(self) -> None:
+        self.metainfo: dict[str, object] = {}
+        self.gt_instances: object | None = None
+
+    def set_metainfo(self, metainfo: Mapping[str, object]) -> None:
+        self.metainfo.update(metainfo)
+
+
+class _FakeInstanceData:
+    def __init__(self, **fields: torch.Tensor) -> None:
+        self.fields = fields
+
+
+class _MetricAndLossDetector(nn.Module):
+    """Cascade R-CNN처럼 loss와 정확도 지표를 함께 돌려줍니다."""
+
+    def loss(self, batch, samples):
+        return {
+            "loss_rpn_cls": torch.tensor(1.0),
+            "s0.loss_cls": [torch.tensor(2.0), torch.tensor(4.0)],
+            "s0.acc": torch.tensor(97.0),
+            "s1.acc": [torch.tensor(90.0)],
+        }
+
+
+def test_adapter_objective_ignores_accuracy_metrics_from_the_detector():
+    """s0.acc를 더하면 정확도가 오를수록 loss가 커져 학습 목표가 뒤집힙니다."""
+
+    adapter = MMDetectionAdapter(
+        _MetricAndLossDetector(),
+        input_size=32,
+        data_sample_type=_FakeDataSample,
+        instance_data_type=_FakeInstanceData,
+    )
+    target = {
+        "boxes": torch.zeros((0, 4)),
+        "labels": torch.zeros((0,), dtype=torch.int64),
     }
 
-    trainer_module.train_model(model, _ConstantDataset(), _ConstantDataset(), settings)
+    losses = adapter([torch.ones((3, 8, 8))], [target])
 
-    assert recorded["optimizer"].step_calls == 3
-    assert schedule_steps == [3, 3, 3]
-    assert model.weight.item() == pytest.approx(0.7)
+    assert set(losses) == {"loss_rpn_cls", "s0.loss_cls"}
+    assert float(losses["s0.loss_cls"]) == pytest.approx(6.0)
+
+
+class _RecordingDetector(nn.Module):
+    """init_weights와 load_state_dict 호출 순서를 기록하는 가짜 detector입니다."""
+
+    def __init__(self, expected: Mapping[str, torch.Tensor]) -> None:
+        super().__init__()
+        self.expected = dict(expected)
+        self.calls: list[str] = []
+        self.loaded: dict[str, torch.Tensor] = {}
+
+    def init_weights(self) -> None:
+        self.calls.append("init_weights")
+
+    def state_dict(self, *args, **kwargs):
+        return dict(self.expected)
+
+    def load_state_dict(self, state, strict=True):
+        self.calls.append("load_state_dict")
+        self.loaded = dict(state)
+
+
+class _FakeLoader:
+    def __init__(self, state: Mapping[str, torch.Tensor]) -> None:
+        self.state = dict(state)
+
+    def load_checkpoint(self, source: str, map_location: str = "cpu"):
+        return {"state_dict": self.state}
+
+
+def test_pretrained_run_initializes_the_detector_before_loading_weights():
+    """MODELS.build는 init_weights를 부르지 않아 DINO head가 초기화되지 않습니다."""
+
+    detector = _RecordingDetector({"backbone.conv1.weight": torch.zeros(2)})
+
+    _prepare_detector(
+        detector,
+        "dino_r50_4scale",
+        pretrained=True,
+        loader=_FakeLoader({"backbone.conv1.weight": torch.ones(2)}),
+    )
+
+    assert detector.calls == ["init_weights", "load_state_dict"]
+    assert torch.equal(detector.loaded["backbone.conv1.weight"], torch.ones(2))
+
+
+def test_scratch_run_still_initializes_the_detector():
+    detector = _RecordingDetector({})
+
+    _prepare_detector(detector, "dino_r50_4scale", pretrained=False, loader=None)
+
+    assert detector.calls == ["init_weights"]
+
+
+def test_legacy_swin_checkpoint_keys_are_converted_before_filtering():
+    """옛 Swin 이름을 그대로 두면 backbone이 거의 실리지 않고 조용히 scratch가 됩니다."""
+
+    detector = _RecordingDetector(
+        {
+            "backbone.patch_embed.projection.weight": torch.zeros(2),
+            "backbone.stages.0.blocks.0.norm1.weight": torch.zeros(2),
+            "backbone.stages.0.blocks.0.attn.w_msa.qkv.weight": torch.zeros(2),
+            "backbone.stages.0.blocks.0.ffn.layers.0.0.weight": torch.zeros(2),
+            "backbone.stages.0.downsample.reduction.weight": torch.zeros((2, 4)),
+        }
+    )
+
+    _prepare_detector(
+        detector,
+        "cascade_rcnn_swin_t_fpn",
+        pretrained=True,
+        loader=_FakeLoader(
+            {
+                "backbone.patch_embed.proj.weight": torch.ones(2),
+                "backbone.layers.0.blocks.0.norm1.weight": torch.full((2,), 2.0),
+                "backbone.layers.0.blocks.0.attn.qkv.weight": torch.full((2,), 3.0),
+                "backbone.layers.0.blocks.0.mlp.fc1.weight": torch.full((2,), 4.0),
+                "backbone.layers.0.downsample.reduction.weight": torch.tensor(
+                    [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]
+                ),
+            }
+        ),
+    )
+
+    assert set(detector.loaded) == set(detector.expected)
+    assert torch.equal(
+        detector.loaded["backbone.stages.0.blocks.0.attn.w_msa.qkv.weight"],
+        torch.full((2,), 3.0),
+    )
+    # PatchMerging이 원본과 다른 순서로 4칸을 펼치므로 값도 같이 바뀌어야 합니다.
+    assert torch.equal(
+        detector.loaded["backbone.stages.0.downsample.reduction.weight"],
+        torch.tensor([[1.0, 3.0, 2.0, 4.0], [5.0, 7.0, 6.0, 8.0]]),
+    )

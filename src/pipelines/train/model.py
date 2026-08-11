@@ -1,4 +1,4 @@
-"""설정으로 선택한 detection model을 만듭니다."""
+"""설정으로 선택한 torchvision detection model을 만듭니다."""
 
 from __future__ import annotations
 
@@ -16,19 +16,12 @@ from torchvision.models.detection import (
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.models.detection.retinanet import RetinaNetClassificationHead
 
-from .mmdetection_adapter import (
-    MMDETECTION_ARCHITECTURES,
-    build_mmdetection_model,
-)
-
 
 ARCHITECTURE = "fasterrcnn_mobilenet_v3_large_320_fpn"
 SUPPORTED_ARCHITECTURES = (
     ARCHITECTURE,
     "fasterrcnn_resnet50_fpn_v2",
     "retinanet_resnet50_fpn_v2",
-    "dino_r50_4scale",
-    "cascade_rcnn_swin_t_fpn",
 )
 
 
@@ -54,21 +47,12 @@ def build_model(
     *,
     architecture: str = ARCHITECTURE,
     pretrained: bool = False,
-    input_size: int = 640,
 ) -> nn.Module:
     """선택한 detection model을 class 수에 맞춰 만듭니다."""
     if num_classes < 2:
         raise ValueError("num_classes must include background and at least one object class")
     if architecture not in SUPPORTED_ARCHITECTURES:
         raise ValueError(f"unsupported train architecture: {architecture}")
-
-    if architecture in MMDETECTION_ARCHITECTURES:
-        return build_mmdetection_model(
-            num_classes,
-            architecture=architecture,
-            pretrained=pretrained,
-            input_size=input_size,
-        )
 
     if architecture == ARCHITECTURE and pretrained:
         model = fasterrcnn_mobilenet_v3_large_320_fpn(

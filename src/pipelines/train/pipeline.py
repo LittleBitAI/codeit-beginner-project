@@ -31,10 +31,6 @@ from .dataset import (
     read_json_artifact,
 )
 from .image_cache import ImageCacheSession
-from .mmdetection_adapter import (
-    MMDETECTION_ARCHITECTURES,
-    model_config_metadata,
-)
 from .model import ARCHITECTURE, SUPPORTED_ARCHITECTURES, build_model
 from .progress import ProgressEmitter
 from .trainer import (
@@ -352,20 +348,6 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
     device = raw.get("device", "cpu")
     if not isinstance(device, str) or device not in {"cpu", "cuda"}:
         raise ValueError("train.device must be 'cpu' or 'cuda'")
-    batch_size = _integer(raw, "batch_size", 1, minimum=1)
-    precision_mode = raw.get("precision", "fp32")
-    is_mmdetection = architecture in MMDETECTION_ARCHITECTURES
-    if is_mmdetection:
-        if device != "cuda":
-            raise ValueError("MMDetection architectures require train.device='cuda'")
-        if precision_mode != "amp":
-            raise ValueError("MMDetection architectures require train.precision='amp'")
-        if optimizer != "AdamW":
-            raise ValueError("MMDetection architectures require train.optimizer='AdamW'")
-        if batch_size != 1:
-            raise ValueError("MMDetection architectures require train.batch_size=1")
-    elif "input_size" in raw:
-        raise ValueError("train.input_size is only used by MMDetection architectures")
     if device == "cuda" and not torch.cuda.is_available():
         raise ValueError("train.device is 'cuda', but CUDA is not available")
     pretrained = raw.get("pretrained", False)
@@ -399,22 +381,13 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "seed": _integer(raw, "seed", 42, minimum=0),
         "epochs": _integer(raw, "epochs", 1, minimum=1),
         "checkpoint_every": _integer(raw, "checkpoint_every", 1, minimum=1),
-        "batch_size": batch_size,
+        "batch_size": _integer(raw, "batch_size", 1, minimum=1),
         "num_workers": _integer(raw, "num_workers", 0, minimum=0),
         "learning_rate": _float(
             raw, "learning_rate", profile["learning_rate"], minimum=0.0
         ),
         "weight_decay": _float(
-            raw,
-            "weight_decay",
-            (
-                0.0001
-                if architecture == "dino_r50_4scale"
-                else 0.05
-                if architecture == "cascade_rcnn_swin_t_fpn"
-                else profile["weight_decay"]
-            ),
-            minimum=0.0,
+            raw, "weight_decay", profile["weight_decay"], minimum=0.0
         ),
         "augmentation": _augmentation(raw),
         "lr_scheduler": _lr_scheduler(raw),
@@ -427,15 +400,7 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "resume_from": resume_from,
         # 이어서 학습한 출처는 checkpoint를 읽어 봐야 알 수 있으므로 _execute가 채웁니다.
         "resume": None,
-        "gradient_accumulation_steps": _integer(
-            raw,
-            "gradient_accumulation_steps",
-            8 if is_mmdetection else 1,
-            minimum=1,
-        ),
     }
-    if is_mmdetection:
-        normalized["input_size"] = _integer(raw, "input_size", 640, minimum=1)
     if optimizer == "SGD":
         normalized["momentum"] = _float(
             raw, "momentum", profile["momentum"], minimum=0.0
@@ -485,7 +450,7 @@ def _checkpoint_payload(
     category_ids_by_label = [0] + [
         category_ids[label] for label in range(1, len(class_map) + 1)
     ]
-    payload = {
+    return {
         **checkpoint,
         "architecture": settings.get("architecture", ARCHITECTURE),
         "num_classes": len(class_map) + 1,
@@ -494,10 +459,6 @@ def _checkpoint_payload(
         "seed": settings["seed"],
         "training_config": _training_config(settings),
     }
-    if settings.get("architecture") in MMDETECTION_ARCHITECTURES:
-        payload["backend"] = "mmdetection"
-        payload["model_config"] = model_config_metadata(settings["input_size"])
-    return payload
 
 
 def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
@@ -518,12 +479,10 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
         optimizer_settings["epsilon"] = settings.get("epsilon", profile["epsilon"])
     augmentation = settings.get("augmentation", AUGMENTATION_PRESETS["none"])
     lr_scheduler = settings.get("lr_scheduler")
-    is_mmdetection = settings.get("architecture") in MMDETECTION_ARCHITECTURES
-    accumulation_steps = settings.get("gradient_accumulation_steps", 1)
-    result = {
+    return {
         # 2: resume block이 생겼습니다. 처음부터 학습한 실행은 그 값이 None입니다.
         # 3: lr_scheduler block이 생겼습니다. 상수 learning rate면 그 값이 None입니다.
-        "schema_version": 4 if is_mmdetection or accumulation_steps != 1 else 3,
+        "schema_version": 3,
         "run_id": settings.get("run_id"),
         "architecture": settings.get("architecture", ARCHITECTURE),
         "optimizer": optimizer_settings,
@@ -552,12 +511,6 @@ def _training_config(settings: Mapping[str, Any]) -> dict[str, Any]:
             dict(settings["resume"]) if settings.get("resume") is not None else None
         ),
     }
-    if is_mmdetection:
-        result["input_size"] = settings["input_size"]
-        result["gradient_accumulation_steps"] = accumulation_steps
-    elif accumulation_steps != 1:
-        result["gradient_accumulation_steps"] = accumulation_steps
-    return result
 
 
 def _write_checkpoint(path: Path, value: Mapping[str, Any]) -> None:
@@ -795,25 +748,10 @@ def _load_resume(
         raise ValueError(
             "resume checkpoint was trained with a different train.architecture"
         )
-    is_mmdetection = settings["architecture"] in MMDETECTION_ARCHITECTURES
-    if is_mmdetection:
-        if checkpoint.get("backend") != "mmdetection":
-            raise ValueError("resume checkpoint has a different or missing backend")
-        if checkpoint.get("model_config") != model_config_metadata(
-            settings["input_size"]
-        ):
-            raise ValueError(
-                "resume checkpoint model_config does not match current train settings"
-            )
     training_config = checkpoint.get("training_config")
     if not isinstance(training_config, Mapping):
         training_config = {}
     expected = _training_config(settings)
-    recorded_accumulation = training_config.get("gradient_accumulation_steps", 1)
-    if recorded_accumulation != settings.get("gradient_accumulation_steps", 1):
-        raise ValueError(
-            "resume checkpoint used different gradient accumulation than this run"
-        )
     recorded_optimizer = training_config.get("optimizer")
     if not isinstance(recorded_optimizer, Mapping) or dict(
         recorded_optimizer
@@ -1112,7 +1050,6 @@ def _execute_claimed(
             len(class_map) + 1,
             architecture=settings["architecture"],
             pretrained=settings["pretrained"],
-            input_size=settings.get("input_size", 640),
         )
         try:
             best, last, history = train_model(

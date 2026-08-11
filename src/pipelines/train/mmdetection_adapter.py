@@ -347,7 +347,7 @@ def prepare_mmdetection_batch(
     """RGB image와 1-based target을 resize·padding하고 0-based로 바꿉니다."""
     if input_size < 1:
         raise ValueError("input_size must be positive")
-    prepared_images: list[torch.Tensor] = []
+    padded_images: list[torch.Tensor] = []
     prepared_targets: list[dict[str, torch.Tensor]] = []
     metadata: list[dict[str, Any]] = []
     for image, target in zip(images, targets, strict=True):
@@ -369,7 +369,7 @@ def prepare_mmdetection_batch(
         normalized = (resized - mean) / std
         padded_height = ((resized_height + PAD_MULTIPLE - 1) // PAD_MULTIPLE) * PAD_MULTIPLE
         padded_width = ((resized_width + PAD_MULTIPLE - 1) // PAD_MULTIPLE) * PAD_MULTIPLE
-        prepared_images.append(
+        padded_images.append(
             F.pad(
                 normalized,
                 (0, padded_width - resized_width, 0, padded_height - resized_height),
@@ -399,12 +399,34 @@ def prepare_mmdetection_batch(
                 "scale_factor": (scale_x, scale_y),
             }
         )
+    # DeformableDETR.pre_transformer가 batch_data_samples[0].batch_input_shape를 읽습니다.
+    # DetDataPreprocessor를 거치지 않으므로 batch 전체의 padding 크기를 여기서 남깁니다.
+    batch_height = max(image.shape[1] for image in padded_images)
+    batch_width = max(image.shape[2] for image in padded_images)
+    prepared_images = [
+        F.pad(
+            image,
+            (0, batch_width - image.shape[2], 0, batch_height - image.shape[1]),
+        )
+        for image in padded_images
+    ]
+    for entry in metadata:
+        entry["batch_input_shape"] = (batch_height, batch_width)
     return torch.stack(prepared_images), tuple(prepared_targets), metadata
 
 
 def _flatten_losses(losses: Mapping[str, Any]) -> dict[str, torch.Tensor]:
+    """이름에 loss가 든 항목만 남깁니다.
+
+    Cascade R-CNN은 ``s0.acc``처럼 정확도 지표를 loss와 같은 dict에 담아 돌려줍니다.
+    학습 loop은 받은 값을 모두 더하므로, 걸러 내지 않으면 정확도가 오를수록 목적함수가
+    커져 학습과 검증 점수가 모두 뒤집힙니다.
+    """
+
     flattened: dict[str, torch.Tensor] = {}
     for name, value in losses.items():
+        if "loss" not in name:
+            continue
         values = list(value) if isinstance(value, (list, tuple)) else [value]
         if not values or any(not isinstance(item, torch.Tensor) for item in values):
             raise TrainError(f"MMDetection loss '{name}' must contain tensors")
@@ -458,6 +480,53 @@ def _allowed_pretrained_key(architecture: str, key: str) -> bool:
     )
 
 
+def _unfold_reduction_order(value: torch.Tensor) -> torch.Tensor:
+    out_channel, in_channel = value.shape
+    reshaped = value.reshape(out_channel, 4, in_channel // 4)
+    return reshaped[:, (0, 2, 1, 3), :].transpose(1, 2).reshape(out_channel, in_channel)
+
+
+def _unfold_norm_order(value: torch.Tensor) -> torch.Tensor:
+    in_channel = value.shape[0]
+    reshaped = value.reshape(4, in_channel // 4)
+    return reshaped[(0, 2, 1, 3), :].transpose(0, 1).reshape(in_channel)
+
+
+def _modern_backbone_entry(
+    architecture: str, name: str, value: Any
+) -> tuple[str, Any]:
+    """옛 Swin checkpoint의 backbone 항목을 MMDetection 3 이름으로 바꿉니다.
+
+    공개된 Swin 검출 checkpoint는 원래 Swin 저장소의 이름을 씁니다. 지금 backbone은
+    ``stages``, ``patch_embed.projection``, ``attn.w_msa``, ``ffn.layers``를 쓰므로
+    바꾸지 않으면 backbone key가 거의 하나도 맞지 않습니다. 맞지 않는 key는 조용히
+    걸러지므로, ``pretrained=true``인데 사실상 scratch로 학습하게 됩니다.
+
+    ``downsample``은 이름뿐 아니라 **값의 순서**도 다릅니다. MMDetection의 PatchMerging이
+    원본과 다른 순서로 4칸을 펼치기 때문에, 이름만 바꾸면 가중치가 뒤섞인 채 실립니다.
+    바꾸는 규칙은 ``mmdet.models.backbones.swin.swin_converter``와 같습니다.
+    """
+
+    if architecture != CASCADE_ARCHITECTURE or not name.startswith("backbone."):
+        return name, value
+    inner = name.removeprefix("backbone.")
+    if inner.startswith("patch_embed"):
+        return "backbone." + inner.replace("proj.", "projection."), value
+    if not inner.startswith("layers"):
+        return name, value
+    if "attn." in inner:
+        inner = inner.replace("attn.", "attn.w_msa.")
+    elif "mlp.fc1." in inner:
+        inner = inner.replace("mlp.fc1.", "ffn.layers.0.0.")
+    elif "mlp.fc2." in inner:
+        inner = inner.replace("mlp.fc2.", "ffn.layers.1.")
+    elif isinstance(value, torch.Tensor) and "downsample.reduction." in inner:
+        value = _unfold_reduction_order(value)
+    elif isinstance(value, torch.Tensor) and "downsample.norm." in inner:
+        value = _unfold_norm_order(value)
+    return "backbone." + inner.replace("layers", "stages", 1), value
+
+
 def _load_pretrained(detector: nn.Module, architecture: str, loader: Any) -> None:
     source = DINO_CHECKPOINT if architecture == DINO_ARCHITECTURE else CASCADE_CHECKPOINT
     document = loader.load_checkpoint(source, map_location="cpu")
@@ -467,8 +536,10 @@ def _load_pretrained(detector: nn.Module, architecture: str, loader: Any) -> Non
     expected = detector.state_dict()
     filtered: dict[str, torch.Tensor] = {}
     mismatched: list[str] = []
-    for raw_name, value in raw_state.items():
-        name = raw_name.removeprefix("module.")
+    for raw_name, raw_value in raw_state.items():
+        name, value = _modern_backbone_entry(
+            architecture, raw_name.removeprefix("module."), raw_value
+        )
         if _allowed_pretrained_key(architecture, name):
             continue
         if name not in expected:
@@ -482,6 +553,21 @@ def _load_pretrained(detector: nn.Module, architecture: str, loader: Any) -> Non
             "MMDetection pretrained state shape mismatch: " + ", ".join(sorted(mismatched))
         )
     detector.load_state_dict(filtered, strict=False)
+
+
+def _prepare_detector(
+    detector: nn.Module, architecture: str, *, pretrained: bool, loader: Any
+) -> None:
+    """MMEngine Runner처럼 init_weights를 부른 뒤 pretrained 가중치를 덮어씁니다.
+
+    ``MODELS.build``는 module을 만들기만 합니다. DINO의 query embedding이나 head처럼
+    특별한 초기화가 필요한 자리가 그대로 남으므로, 처음부터 학습하는 실행도 pretrained
+    실행도 먼저 초기화해야 합니다.
+    """
+
+    detector.init_weights()
+    if pretrained:
+        _load_pretrained(detector, architecture, loader)
 
 
 def build_mmdetection_model(
@@ -507,8 +593,9 @@ def build_mmdetection_model(
     detector = MODELS.build(
         build_mmdetection_config(architecture, foreground_classes=num_classes - 1)
     )
-    if pretrained:
-        _load_pretrained(detector, architecture, CheckpointLoader)
+    _prepare_detector(
+        detector, architecture, pretrained=pretrained, loader=CheckpointLoader
+    )
     return MMDetectionAdapter(
         detector,
         input_size=input_size,
