@@ -9,11 +9,14 @@ import torch
 import torchvision
 from torch import nn
 
+from src.pipelines.train.errors import TrainError
 from src.pipelines.train.mmdetection_adapter import (
     MMDETECTION_ARCHITECTURES,
     MMDetectionAdapter,
     _prepare_detector,
+    _shimmed_mmcv_version,
     build_mmdetection_config,
+    build_mmdetection_model,
     prepare_mmdetection_batch,
 )
 from src.pipelines.train.model import SUPPORTED_ARCHITECTURES, build_model
@@ -259,3 +262,65 @@ def test_legacy_swin_checkpoint_keys_are_converted_before_filtering():
         detector.loaded["backbone.stages.0.downsample.reduction.weight"],
         torch.tensor([[1.0, 3.0, 2.0, 4.0], [5.0, 7.0, 6.0, 8.0]]),
     )
+
+
+def _require_mmdetection():
+    """진짜 mmdet 실행 환경이 없으면 건너뜁니다.
+
+    mmcv의 컴파일된 확장은 requirements 밖의 선택 사항이라 CI에는 없습니다. 있는
+    곳에서는 실제 detector를 만들어, 설정이 mmdet에 **받아들여지는지**까지 봅니다.
+    가짜 detector를 쓰는 다른 test는 그것을 영영 확인하지 못합니다.
+    """
+
+    try:
+        return build_mmdetection_model(
+            4, architecture="dino_r50_4scale", pretrained=False, input_size=320
+        )
+    except TrainError as error:
+        pytest.skip(f"mmdet 실행 환경이 없습니다: {error}")
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        pytest.param("2.1.0", None, id="below_is_left_alone"),
+        pytest.param("2.2.0", "2.1.999", id="rejected_by_mmdet_but_actually_fine"),
+        pytest.param("2.2.0+a8073c7pt2.12.0cu126", "2.1.999", id="local_version_tag"),
+        pytest.param("2.3.0", None, id="unverified_above_stays_closed"),
+        pytest.param("3.0.0", None, id="next_major_stays_closed"),
+    ],
+)
+def test_mmcv_version_shim_only_covers_the_verified_range(version, expected):
+    """상한을 넓게 열면 맞지 않는 조합까지 조용히 지나가 엉뚱한 곳에서 깨집니다."""
+
+    assert _shimmed_mmcv_version(version) == expected
+
+
+@pytest.mark.parametrize("architecture", MMDETECTION_ARCHITECTURES)
+def test_real_detector_is_built_and_produces_a_finite_loss(architecture):
+    """진짜 mmdet detector로 설정과 loss 경로를 확인합니다.
+
+    cascade_rcnn_swin_t_fpn은 평범한 dict를 넘기던 동안 **만들어지지도 않았는데**,
+    가짜 detector를 쓰는 test는 모두 통과했습니다. train_cfg를 속성으로 읽기
+    때문입니다.
+    """
+
+    _require_mmdetection()
+    model = build_mmdetection_model(
+        4, architecture=architecture, pretrained=False, input_size=320
+    )
+
+    images = [torch.rand(3, 240, 320)]
+    targets = [
+        {
+            "boxes": torch.tensor([[10.0, 10.0, 100.0, 120.0]]),
+            "labels": torch.tensor([1]),
+            "image_id": torch.tensor([1]),
+        }
+    ]
+    losses = model(images, targets)
+
+    assert losses, "loss 항목이 하나도 없습니다"
+    assert all("loss" in name for name in losses), sorted(losses)
+    total = sum(losses.values())
+    assert torch.isfinite(total), f"loss가 유한하지 않습니다: {total}"

@@ -17,6 +17,11 @@ CASCADE_ARCHITECTURE = "cascade_rcnn_swin_t_fpn"
 MMDETECTION_ARCHITECTURES = (DINO_ARCHITECTURE, CASCADE_ARCHITECTURE)
 PAD_MULTIPLE = 32
 MODEL_CONFIG_SCHEMA_VERSION = 1
+# mmdet 3.3.0이 거부하지만 실제로는 맞는 mmcv 구간입니다. 자세한 이유는
+# _shimmed_mmcv_version에 적었습니다. 이 밖의 버전은 손대지 않습니다.
+MMCV_SHIM_MINIMUM = (2, 2, 0)
+MMCV_SHIM_MAXIMUM = (2, 3, 0)
+MMCV_SHIM_VERSION = "2.1.999"
 
 DINO_CHECKPOINT = (
     "https://download.openmmlab.com/mmdetection/v3.0/dino/"
@@ -316,6 +321,28 @@ def _cascade_config(num_classes: int) -> dict[str, Any]:
     }
 
 
+def _shimmed_mmcv_version(version: str) -> str | None:
+    """mmdet의 mmcv 상한만 통과시킬 가짜 버전을 정합니다. 필요 없으면 ``None``입니다.
+
+    mmdet 3.3.0은 ``import mmdet`` 도중 ``assert mmcv < 2.2.0``을 겁니다. 그런데 지금
+    torch에 맞는 mmcv 확장 wheel은 **2.2.0뿐이고**, mmdet은 2024-01 이후 새 release가
+    없어 이 상한이 열릴 일이 없습니다. mmcv 2.2.0 release note에는 2.1.0 대비
+    breaking change가 없고 NPU 연산자 추가와 버그 수정뿐입니다.
+
+    **검증한 구간만** 통과시킵니다. 범위를 열어 두면 정말로 맞지 않는 조합까지 조용히
+    지나가, 설치 문제를 알리는 대신 알 수 없는 자리에서 깨집니다.
+    """
+
+    parts = version.split("+", 1)[0].split(".")
+    try:
+        numbers = tuple(int(part) for part in parts[:3])
+    except ValueError:
+        return None
+    if MMCV_SHIM_MINIMUM <= numbers < MMCV_SHIM_MAXIMUM:
+        return MMCV_SHIM_VERSION
+    return None
+
+
 def build_mmdetection_config(
     architecture: str, *, foreground_classes: int
 ) -> dict[str, Any]:
@@ -579,19 +606,36 @@ def build_mmdetection_model(
 ) -> nn.Module:
     """MMDetection을 늦게 import해 승인된 detector를 만듭니다."""
     try:
-        from mmdet.registry import MODELS
-        from mmdet.structures import DetDataSample
-        from mmdet.utils import register_all_modules
-        from mmengine.runner.checkpoint import CheckpointLoader
-        from mmengine.structures import InstanceData
-    except ImportError as error:
+        import mmcv
+
+        # mmdet은 import 도중 mmcv 버전을 재고 AssertionError를 냅니다. 그래서
+        # ImportError만 잡아서는 부족합니다. 자세한 이유는 _shimmed_mmcv_version에.
+        real_version = mmcv.__version__
+        shim = _shimmed_mmcv_version(real_version)
+        try:
+            if shim is not None:
+                mmcv.__version__ = shim
+            from mmdet.registry import MODELS
+            from mmdet.structures import DetDataSample
+            from mmdet.utils import register_all_modules
+            from mmengine.config import ConfigDict
+            from mmengine.runner.checkpoint import CheckpointLoader
+            from mmengine.structures import InstanceData
+        finally:
+            mmcv.__version__ = real_version
+    except Exception as error:  # noqa: BLE001 - 설치 문제를 계약 오류로 바꿉니다.
         raise TrainError(
-            "MMDetection architecture requires mmdet, mmcv, and mmengine"
+            "MMDetection architecture requires mmdet, mmcv, and mmengine "
+            f"(install path check needed): {error!r}"
         ) from error
 
     register_all_modules(init_default_scope=True)
+    # 평범한 dict로 넘기면 two-stage detector가 train_cfg.rpn을 속성으로 읽다 멈춥니다.
+    # ConfigDict는 중첩된 dict까지 함께 바꿔 줍니다.
     detector = MODELS.build(
-        build_mmdetection_config(architecture, foreground_classes=num_classes - 1)
+        ConfigDict(
+            build_mmdetection_config(architecture, foreground_classes=num_classes - 1)
+        )
     )
     _prepare_detector(
         detector, architecture, pretrained=pretrained, loader=CheckpointLoader
