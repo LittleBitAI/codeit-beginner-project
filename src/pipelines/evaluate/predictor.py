@@ -20,6 +20,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from . import mmdetection_backend
 from .errors import InputArtifactError, PredictionError
 from .manifest import normalize_image_key
 from .storage_io import ArtifactStore
@@ -132,6 +133,20 @@ def _build_model(checkpoint: Mapping[str, Any], *, source: str) -> Any:
         raise PredictionError(f"{source}: checkpoint에 0보다 큰 num_classes 정수가 필요합니다.")
     if not isinstance(state_dict, Mapping):
         raise PredictionError(f"{source}: checkpoint에 state_dict가 필요합니다.")
+
+    # backend key가 없는 checkpoint는 지금까지처럼 torchvision으로 읽습니다.
+    # 모르는 backend는 추측하지 않습니다. 잘못 읽으면 점수만 조용히 틀어집니다.
+    backend = checkpoint.get("backend")
+    if backend == mmdetection_backend.BACKEND_NAME:
+        return mmdetection_backend.build_predictor(
+            checkpoint,
+            source=source,
+            architecture=architecture.strip(),
+            num_classes=num_classes,
+            state_dict=state_dict,
+        )
+    if backend is not None:
+        raise PredictionError(f"{source}: 읽을 수 없는 checkpoint backend입니다: {backend!r}")
 
     torchvision = _import_torchvision()
     builder = getattr(torchvision.models.detection, architecture.strip(), None)
