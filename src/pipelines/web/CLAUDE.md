@@ -17,6 +17,8 @@ You own `src/pipelines/web/`. Never import data, train, evaluate, or registry. T
 
 Because you cannot import train, `train_config.py` copies train's defaults and validation rules, and `tests/test_web_train_contract.py` parses train's source with `ast` and fails when they drift. It exists because an architecture name once drifted and the GUI showed the wrong one. When it fails, fix the copy here — never edit train.
 
+The two contract checks pull in opposite directions, which fixes the order of any joint change. The architecture list is compared for **equality**, so web cannot list a name train has not opened yet. Numeric defaults are walked from **train's** side, so a default train adds before web mirrors it breaks web immediately — web has to go first there. `_PENDING_INTEGER_FIELDS` holds settings mirrored for that reason but deliberately kept off the form: train ignores keys it does not read, so offering a box for one would record a number that changed nothing.
+
 ## Interface
 
 `run(config) -> dict` is the only public symbol. It reads one experiment record when `config["web"]["experiment_record_uri"]` is set, else returns the dummy result. The GUI is served separately and is not part of this contract.

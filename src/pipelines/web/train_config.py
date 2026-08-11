@@ -107,6 +107,21 @@ _INTEGER_FIELDS = (
     ("num_workers", 0, 0),
     ("checkpoint_every", 1, 1),
 )
+# 정규화해서 config에는 넣지만 **아직 화면에 칸으로 내밀지 않는** 정수 설정입니다.
+#
+# `contracts/proposals/013-web-mmdetection-model-options.md`가 요청한 설정인데,
+# train이 아직 이 key를 읽지 않습니다. train은 모르는 key를 거부하지 않고 조용히
+# 무시하므로, 지금 칸을 열면 사용자가 4를 넣어도 microbatch가 모이지 않는 채로 학습이
+# 끝나고 화면에는 4라고 적힌 기록만 남습니다.
+#
+# 그런데도 지금 넣는 이유는 순서 때문입니다. `test_numeric_defaults_match_train_source`는
+# train의 기본값을 순회하며 web에 같은 값이 있는지 봅니다. train이 먼저 넣으면 그
+# 순간 web이 깨지고, web이 먼저 넣으면 조용히 통과합니다. 그래서 web이 먼저 갑니다.
+#
+# train이 MMDetection architecture를 공개할 때 이 항목을 `_INTEGER_FIELDS`로 옮겨
+# 화면에도 엽니다. `input_size`는 그때 함께 옵니다. MMDetection architecture에만
+# 쓰는 값이라 지금은 고를 수 있는 architecture가 없어 시험할 방법이 없습니다.
+_PENDING_INTEGER_FIELDS = (("gradient_accumulation_steps", 1, 1),)
 # 이어서 학습할 checkpoint의 파일 이름과 작업 폴더 규칙입니다. train이 정한 것을
 # 그대로 옮겼습니다(`src/pipelines/train/pipeline.py`).
 RESUME_CHECKPOINT_NAME = "last_checkpoint.pt"
@@ -790,7 +805,7 @@ def normalize_train_settings(
         "output_dir": output_dir,
         "output_prefix": output_prefix.strip("/"),
     }
-    for name, default, minimum in _INTEGER_FIELDS:
+    for name, default, minimum in _INTEGER_FIELDS + _PENDING_INTEGER_FIELDS:
         settings[name] = _normalize_integer(raw, name, default, minimum, errors)
     profile = OPTIMIZER_PROFILES[optimizer]
     for name in ("learning_rate", "weight_decay"):
@@ -829,6 +844,10 @@ def normalize_train_settings(
         "checkpoint_every": settings["checkpoint_every"],
         "batch_size": settings["batch_size"],
         "num_workers": settings["num_workers"],
+        # train은 아직 이 key를 읽지 않습니다. 기본값 1은 지금 동작과 같으므로 실어도
+        # 달라지는 것이 없고, train이 읽기 시작할 때 기본값이 어긋나지 않습니다.
+        # 자세한 이유는 `_PENDING_INTEGER_FIELDS`에 적었습니다.
+        "gradient_accumulation_steps": settings["gradient_accumulation_steps"],
         # 처음부터 학습하는 실행은 key 자체를 넣지 않습니다. train은 없으면 지금과
         # 완전히 같게 동작합니다.
         **({"resume_from": resume_from} if resume_from is not None else {}),
