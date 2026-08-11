@@ -6,6 +6,7 @@ import하지 않으므로, 이 test가 두 pipeline 사이 약속을 지키는 �
 
 from __future__ import annotations
 
+import importlib.util
 from types import SimpleNamespace
 from typing import Any
 
@@ -126,18 +127,29 @@ def _install(monkeypatch, dependencies: SimpleNamespace) -> None:
     )
 
 
-def _require_mmdetection():
-    """진짜 mmdet 실행 환경이 없으면 건너뜁니다.
+MMDETECTION_PACKAGES = ("mmcv", "mmdet", "mmengine")
 
-    mmcv의 컴파일된 확장은 requirements 밖의 선택 사항이라 CI에는 없습니다. 대신
-    있는 곳에서는 **가짜를 거치지 않고** 실제 model을 만들어 계약을 확인합니다.
-    가짜 registry는 설정 값이 mmdet에 받아들여지는지를 영영 확인하지 못합니다.
+
+def _require_mmdetection():
+    """package가 **아예 없을 때만** 건너뜁니다. 그 밖의 실패는 실패로 둡니다.
+
+    가짜 registry는 설정 값이 mmdet에 받아들여지는지를 영영 확인하지 못하므로, 있는
+    곳에서는 실제 model을 만들어 계약을 확인합니다.
+
+    설치 실패까지 싸잡아 건너뛰면 안 됩니다. 그러면 잘못된 wheel, `mmcv._ext` 로딩
+    실패, 맞지 않는 버전 조합, import 경로 회귀가 모두 **초록색 CI**로 보입니다.
+    requirements가 mmdet을 설치하기 시작한 뒤에는 그 구분이 특히 중요합니다. 설치가
+    깨진 것과 애초에 설치 대상이 아닌 것은 다릅니다.
+
+    `find_spec`은 module을 실행하지 않으므로, 설치 여부만 보고 import 실패는
+    그대로 드러납니다. 예를 들어 CUDA 연산자가 없는 `mmcv-lite`가 깔려 있으면
+    여기서는 통과하고 뒤에서 실패합니다. 그것이 맞습니다.
     """
 
-    try:
-        return mmdetection_backend._import_mmdetection()
-    except PredictionError as error:
-        pytest.skip(f"mmdet 실행 환경이 없습니다: {error}")
+    for name in MMDETECTION_PACKAGES:
+        if importlib.util.find_spec(name) is None:
+            pytest.skip(f"{name}이(가) 설치돼 있지 않습니다. requirements 밖의 선택 사항입니다.")
+    return mmdetection_backend._import_mmdetection()
 
 
 def test_unknown_backend_is_reported_instead_of_falling_back():
@@ -346,17 +358,19 @@ def test_mmdetection_checkpoint_needs_one_category_id_per_class(
     ("version", "expected"),
     [
         pytest.param("2.1.0", None, id="아래는_손대지_않는다"),
-        pytest.param("2.2.0", "2.1.999", id="mmdet이_거부하지만_실제로는_맞는_구간"),
-        pytest.param("2.2.0+a8073c7pt2.12.0cu126", "2.1.999", id="local_버전_꼬리표"),
-        pytest.param("2.3.0", None, id="검증하지_않은_위쪽은_열지_않는다"),
+        pytest.param("2.2.0", "2.1.999", id="직접_확인한_그_버전"),
+        pytest.param("2.2.0+a8073c7pt2.12.0cu126", "2.1.999", id="local_꼬리표는_떼고_본다"),
+        pytest.param("2.2.1", None, id="확인하지_않은_patch는_열지_않는다"),
+        pytest.param("2.3.0", None, id="확인하지_않은_minor는_열지_않는다"),
         pytest.param("3.0.0", None, id="다음_major는_열지_않는다"),
     ],
 )
 def test_mmcv_version_shim_only_covers_the_verified_range(version, expected):
-    """mmdet 3.3.0의 상한이 mmcv 2.2.0을 막지만 실제로는 맞습니다.
+    """mmdet 3.3.0의 상한이 mmcv 2.2.0을 막지만 그 버전은 실제로는 맞습니다.
 
-    범위를 넓게 열면 정말로 맞지 않는 조합까지 조용히 지나가, 설치 문제를 알리는
-    대신 알 수 없는 자리에서 깨집니다. 검증한 구간만 통과시켜야 합니다.
+    범위로 열면 아직 나오지도 않은 2.2.1까지 함께 통과해, 정말로 맞지 않는 조합이
+    설치 문제로 보고되는 대신 알 수 없는 자리에서 깨집니다. 직접 확인한 그 버전
+    하나만 통과시켜야 합니다.
     """
 
     assert mmdetection_backend._shimmed_mmcv_version(version) == expected
