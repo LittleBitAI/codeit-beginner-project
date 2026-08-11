@@ -542,9 +542,11 @@ def test_adam_beta_bounds_are_validated_when_the_setting_is_meaningful(local_con
     ("bf16_supported", "dtype", "grad_scaler"),
     [(True, "bf16", False), (False, "fp16", True)],
 )
-def test_amp_precision_chooses_only_native_bf16(
+def test_torchvision_amp_precision_chooses_only_native_bf16(
     monkeypatch, bf16_supported, dtype, grad_scaler
 ):
+    """MMCV custom op를 쓰지 않는 모델은 GPU가 지원하면 bf16을 사용합니다."""
+
     support = Mock(return_value=bf16_supported)
     monkeypatch.setattr(pipeline.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(pipeline.torch.cuda, "is_bf16_supported", support)

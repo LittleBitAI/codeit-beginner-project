@@ -334,6 +334,24 @@ def test_mmdetection_architectures_are_selectable(pretend_cuda, architecture: st
     assert settings["architecture"] == architecture
 
 
+@pytest.mark.parametrize("architecture", MMDETECTION_ARCHITECTURES)
+def test_mmdetection_amp_uses_fp16_for_mmcv_cuda_ops(pretend_cuda, architecture: str):
+    """GPU가 bf16을 지원해도 MMCV custom CUDA op는 fp16으로 실행합니다.
+
+    DINO의 MultiScaleDeformableAttention을 비롯한 MMCV CUDA 확장은 bf16 dispatch가
+    없습니다. GPU 지원만 보고 bf16을 고르면 첫 batch에서 실패하므로, MMDetection의
+    amp는 fp16과 GradScaler를 써야 합니다.
+    """
+
+    settings = _settings(_mmdetection_raw(architecture=architecture))
+
+    assert settings["precision"] == {
+        "mode": "amp",
+        "dtype": "fp16",
+        "grad_scaler": True,
+    }
+
+
 @pytest.fixture
 def pretend_cuda(monkeypatch):
     """GPU가 없는 곳에서도 같은 결과가 나오게 합니다.
@@ -343,8 +361,8 @@ def pretend_cuda(monkeypatch):
     """
 
     monkeypatch.setattr(pipeline_module.torch.cuda, "is_available", lambda: True)
-    # precision이 amp면 bf16 지원 여부를 물으려고 GPU를 실제로 건드립니다. GPU가 없는
-    # 곳에서는 그 자리에서 driver를 찾다 죽으므로 함께 흉내 냅니다.
+    # 이 fixture를 MMDetection 외 precision test도 함께 쓸 수 있어 GPU 조회를 흉내 냅니다.
+    # MMDetection의 amp 자체는 MMCV op가 지원하는 fp16으로 확정되어 이 값을 묻지 않습니다.
     monkeypatch.setattr(pipeline_module, "_native_bf16_supported", lambda: True)
 
 
