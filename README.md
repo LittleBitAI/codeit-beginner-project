@@ -17,7 +17,7 @@
 | `docs/colab.md` | GPU가 없는 팀원 | Colab에서 팀 S3 데이터로 학습 돌리기 |
 | `onboarding/docs/onboarding.md` | 신규 팀원 | 환경 설치와 dependency 확인 |
 
-`CLAUDE.md`와 `AGENTS.md`는 **내용이 같은 파일**입니다. Claude Code는 `CLAUDE.md`만, Codex는 `AGENTS.md`만 읽습니다. 두 파일은 항상 같이 고칩니다. 모든 문서는 5,000자 이내로 유지합니다.
+`CLAUDE.md`와 `AGENTS.md`는 **내용이 같은 파일**입니다. Claude Code는 `CLAUDE.md`만, Codex는 `AGENTS.md`만 읽습니다. 두 파일은 항상 같이 고칩니다. 모든 문서는 8,000자 이내로 유지합니다.
 
 ## 저장소 구조
 

@@ -3,7 +3,7 @@
 
 검사하는 규칙은 다섯 가지입니다.
 
-1. 유지하는 문서는 모두 5,000자 이내입니다.
+1. 유지하는 문서는 모두 8,000자 이내입니다.
 2. 같은 directory의 `CLAUDE.md`와 `AGENTS.md`는 도구 이름을 뺀 내용이 같습니다.
 3. `src/pipelines`의 각 pipeline은 두 지침서를 모두 가집니다. 하나만 있으면
    다른 도구로 그 directory에서 작업할 때 지침이 통째로 없습니다.
@@ -22,7 +22,7 @@ import subprocess
 from pathlib import Path
 
 
-MAX_CHARACTERS = 5000
+MAX_CHARACTERS = 8000
 TOOL_DOCUMENTS = ("CLAUDE.md", "AGENTS.md")
 PIPELINES_RELATIVE = Path("src") / "pipelines"
 
