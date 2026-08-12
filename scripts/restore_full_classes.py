@@ -126,8 +126,11 @@ def restore(source: Path, output: Path) -> dict[str, Any]:
     annotation_root = source / ANNOTATION_DIRECTORY
     if not annotation_root.is_dir():
         raise RestoreError(f"{ANNOTATION_DIRECTORY}/가 없습니다: {source}")
-    if output.exists() and any(output.iterdir()):
-        raise RestoreError(f"출력 자리에 이미 무언가 있습니다: {output}")
+    if output.exists():
+        if not output.is_dir():
+            raise RestoreError(f"출력 자리가 directory가 아닙니다: {output}")
+        if any(output.iterdir()):
+            raise RestoreError(f"출력 자리에 이미 무언가 있습니다: {output}")
 
     documents = sorted(annotation_root.rglob("*.json"))
     if not documents:

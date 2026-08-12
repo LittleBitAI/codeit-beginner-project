@@ -217,6 +217,23 @@ def test_writes_nothing_when_a_later_document_fails(tmp_path: Path) -> None:
     assert not list(output.rglob("*.json"))
 
 
+def test_refuses_when_the_output_place_is_a_file(tmp_path: Path) -> None:
+    """출력 자리가 파일이어도 이 도구의 오류로 알려 줍니다.
+
+    그냥 두면 NotADirectoryError가 그대로 튀어나와, 쓰는 사람은 도구가 멈춘 이유를
+    traceback에서 읽어야 합니다.
+    """
+
+    root = _source(tmp_path / "in")
+    output = tmp_path / "out"
+    output.write_text("파일입니다", encoding="utf-8")
+
+    with pytest.raises(RestoreError, match="directory"):
+        restore(root, output)
+
+    assert output.read_text(encoding="utf-8") == "파일입니다"
+
+
 def test_refuses_when_the_output_place_is_not_empty(tmp_path: Path) -> None:
     """이전 실행의 결과를 말없이 지우거나 위에 덧쓰지 않습니다.
 
