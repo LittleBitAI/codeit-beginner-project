@@ -59,7 +59,7 @@ class ProgressState:
         "reported_completed_epochs",
         "run_id",
         "saw_progress",
-        "seeded",
+        "seeded_epochs",
         "step",
         "stopped_early",
         "suppressed_lines",
@@ -82,8 +82,9 @@ class ProgressState:
         # epoch 번호가 중복되거나 역순으로 와도 안전하도록 dict에 담습니다.
         self.epochs_by_number: dict[int, dict[str, Any]] = {}
         self.malformed_lines = 0
-        # 앞선 실행에서 옮겨 온 epoch가 아직 다듬어지지 않았다는 표시입니다.
-        self.seeded = False
+        # 앞선 실행에서 옮겨 온 epoch 번호입니다. 이 실행이 그 자리를 다시 지나가면
+        # 지웁니다. 이 실행이 직접 끝낸 epoch는 여기 들어오지 않습니다.
+        self.seeded_epochs: set[int] = set()
         # 지금 지나고 있는 epoch 안의 batch 위치입니다. epoch 경계에서 지웁니다.
         self.step: dict[str, Any] | None = None
         # log 줄 없이 상태만 바뀌었다는 표시입니다. `take_quiet_change`가 읽고 지웁니다.
@@ -177,6 +178,22 @@ def _apply_run_started(state: ProgressState, event: dict[str, Any]) -> dict[str,
     return _log(" · ".join(pieces), level="info")
 
 
+def _drop_seeded_from(state: ProgressState, epoch: int) -> None:
+    """이 실행이 `epoch`을 지나고 있다면 그 뒤의 **옮겨 온** epoch를 지웁니다.
+
+    앞선 실행은 checkpoint보다 뒤까지 돌았을 수 있습니다. train은 epoch마다 완료를
+    알리지만 checkpoint는 `checkpoint_every`마다 저장하기 때문입니다. 그 epoch는
+    다시 도는 중이므로 끝난 것으로 두면 진행률이 실제보다 앞섭니다.
+
+    이 실행이 스스로 끝낸 epoch는 목록에 없으므로 지워지지 않습니다. 그래서 어떤
+    event가 먼저 오든 같은 결과가 됩니다.
+    """
+
+    for number in [key for key in state.seeded_epochs if key >= epoch]:
+        state.seeded_epochs.discard(number)
+        state.epochs_by_number.pop(number, None)
+
+
 def _apply_epoch_started(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:
     epoch = _positive_int(event.get("epoch"))
     total = _positive_int(event.get("epochs"))
@@ -185,13 +202,7 @@ def _apply_epoch_started(state: ProgressState, event: dict[str, Any]) -> dict[st
     if epoch is None:
         state.malformed_lines += 1
         return None
-    if state.seeded:
-        # 이제야 실제 재개 지점을 압니다. 앞선 실행이 checkpoint보다 뒤까지 돌았다면
-        # (train은 epoch마다 완료를 알리지만 checkpoint는 `checkpoint_every`마다
-        # 저장합니다) 그 epoch는 다시 도는 것이므로 끝난 것으로 두면 안 됩니다.
-        state.seeded = False
-        for number in [key for key in state.epochs_by_number if key >= epoch]:
-            del state.epochs_by_number[number]
+    _drop_seeded_from(state, epoch)
     state.current_epoch = epoch
     # 새 epoch은 batch 0부터 다시 셉니다.
     state.step = None
@@ -224,6 +235,7 @@ def _apply_step_progress(state: ProgressState, event: dict[str, Any]) -> dict[st
 
     if epoch is not None:
         # epoch_started를 놓쳤어도 몇 번째 epoch인지는 알 수 있습니다.
+        _drop_seeded_from(state, epoch)
         state.current_epoch = epoch
 
     state.step = {
@@ -274,7 +286,7 @@ def seed_epochs(state: ProgressState, entries: Any) -> None:
         # 그 속도로 추정하면 이번 실행과 무관한 숫자가 나옵니다.
         record["epoch_seconds"] = None
         state.epochs_by_number[epoch] = record
-    state.seeded = True
+        state.seeded_epochs.add(epoch)
 
 
 def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:
@@ -289,6 +301,8 @@ def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[
     record = _epoch_record(epoch, event)
     # 같은 epoch이 다시 오면 나중 값으로 덮어씁니다.
     state.epochs_by_number[epoch] = record
+    # 이제 이 실행이 직접 끝낸 epoch입니다. 옮겨 온 것으로 두면 나중에 지워집니다.
+    state.seeded_epochs.discard(epoch)
     state.current_epoch = epoch
     # 끝난 epoch의 batch 위치가 남아 있으면 아직 도는 것처럼 읽힙니다.
     state.step = None
@@ -477,6 +491,9 @@ def snapshot(state: ProgressState) -> dict[str, Any]:
             (state.current_epoch or 1) - 1,
         )
     total = state.epochs
+    if total:
+        # 깨진 event 한 줄에 적힌 epoch 번호가 계획보다 크면 진행률이 100%를 넘습니다.
+        completed = min(completed, total)
     best = None
     scored = [record for record in ordered if record["validation_loss"] is not None]
     if scored:

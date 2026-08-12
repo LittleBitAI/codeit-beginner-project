@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from src.pipelines.web.progress import ProgressState, consume_line, snapshot
+from src.pipelines.web.progress import ProgressState, consume_line, seed_epochs, snapshot
 
 
 def line(event: str, **fields) -> str:
@@ -90,6 +90,50 @@ def test_a_broken_step_event_cannot_push_the_epoch_count_past_the_plan():
     assert result["current_epoch"] == 1
     assert result["completed_epochs"] == 1
     assert result["percent"] == pytest.approx(8.3)
+
+
+@pytest.mark.parametrize("event", ["epoch_started", "epoch_completed"])
+def test_an_epoch_number_past_the_plan_cannot_push_progress_over_100(event):
+    """계획보다 큰 epoch 번호가 적힌 줄 하나로 816%를 그리면 안 됩니다."""
+
+    state = feed(line(event, epoch=99, epochs=12))
+
+    result = snapshot(state)
+
+    assert result["completed_epochs"] == 12
+    assert result["percent"] == 100.0
+
+
+def test_seeded_epochs_are_dropped_wherever_this_run_turns_out_to_be():
+    """재개 지점은 `epoch_started`가 아니라 이 실행이 지나간 자리로 정합니다.
+
+    `epoch_started`를 놓치고 batch 위치부터 와도 다시 도는 epoch가 끝난 것으로
+    남으면 안 되고, 이 실행이 이미 끝낸 epoch는 어떤 순서로 와도 지워지면 안 됩니다.
+    """
+
+    state = ProgressState()
+    seed_epochs(state, [{"epoch": number, "validation_loss": 0.6} for number in range(1, 8)])
+    consume_line(state, line("step_progress", epoch=6, epochs=12, phase="train", step=1, total_steps=9))
+
+    assert sorted(state.epochs_by_number) == [1, 2, 3, 4, 5]
+
+    consume_line(state, line("epoch_completed", epoch=6, epochs=12, validation_loss=0.4))
+    consume_line(state, line("epoch_started", epoch=6, epochs=12))
+
+    assert sorted(state.epochs_by_number) == [1, 2, 3, 4, 5, 6]
+
+
+def test_borrowed_epoch_times_do_not_estimate_this_run():
+    """앞선 실행이 다른 기계에서 돌았으면 그 속도로 남은 시간을 말할 수 없습니다."""
+
+    state = ProgressState()
+    seed_epochs(
+        state,
+        [{"epoch": number, "epoch_seconds": 600.0} for number in range(1, 8)],
+    )
+    consume_line(state, line("epoch_started", epoch=8, epochs=12))
+
+    assert snapshot(state)["eta_seconds"] is None
 
 
 def test_resumed_run_counts_epoch_numbers_not_received_events():
