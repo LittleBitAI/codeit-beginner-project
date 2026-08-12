@@ -111,6 +111,7 @@ def test_학습과_평가가_동시에_출발해도_직렬에서는_하나만_�
     from src.pipelines.web.errors import JobConflictError
     from src.pipelines.web.jobs import get_manager, runner
     from src.pipelines.web.jobs import manager as manager_module
+    from src.pipelines.web.jobs.model import JobRecord
 
     client.put("/api/settings", json={"evaluation_mode": "serial"})
     created = client.post("/api/train/configs", json=valid_payload).json()
@@ -119,12 +120,17 @@ def test_학습과_평가가_동시에_출발해도_직렬에서는_하나만_�
     manager = get_manager()
     evaluation_runner = evaluation.get_evaluation_runner()
 
-    # 평가할 것이 하나 있는 것처럼 꾸밉니다. 실제 subprocess는 띄우지 않고
-    # 상태만 running으로 바꿉니다 — 여기서 보려는 것은 자리 다툼입니다.
-    finished = client.post("/api/train/configs", json=valid_payload).json()
-    done = manager.start(finished["config_id"])
-    manager._records[done.job_id].status = "succeeded"
-    manager._active_job_id = None
+    # 평가 대상 record는 **직접** 만듭니다. manager.start()로 만들면 background
+    # thread가 남아, 늦게 도착한 _finalize()가 이 record를 failed로 되돌립니다.
+    # 그러면 평가가 대상을 못 찾아 시작하지 않고, 자리 다툼을 보려던 테스트가
+    # 아무것도 검사하지 못한 채 통과합니다.
+    done = JobRecord(
+        job_id="평가-대상",
+        config_id=created["config_id"],
+        run_id="이미-끝난-학습",
+        status="succeeded",
+    )
+    manager._records[done.job_id] = done
     manager._evaluation_pending.append(done.job_id)
 
     started_evaluation = threading.Event()
