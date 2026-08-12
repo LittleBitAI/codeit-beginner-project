@@ -82,9 +82,28 @@ beforeEach(() => {
         typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
       if (path === '/api/train/jobs') return jsonResponse({ jobs: [], active_job_id: null });
       if (path === '/api/data/source') return jsonResponse({ source: null });
+      if (path === '/api/train/queue') return jsonResponse({ entries: [], paused: false });
+      if (path === '/api/gpu/status') {
+        return jsonResponse({
+          torch: { cuda_available: false, device_count: 0, reason: 'E2E fixture' },
+          telemetry: { source: 'none', reason: 'E2E fixture', message: null, devices: [] },
+          queried_at: '2026-08-05T00:00:00Z',
+        });
+      }
       if (path === '/api/train/experiments') return jsonResponse(experimentListing());
       if (path === '/api/train/experiments/compare') {
         return jsonResponse({ experiments: experimentListing().experiments, missing: [] });
+      }
+      // 캔버스는 곡선을 실행마다 따로 읽습니다. 이 fixture에는 epoch 기록이 없습니다.
+      if (path.startsWith('/api/train/experiments/')) {
+        const runId = decodeURIComponent(path.split('/').pop() ?? '');
+        const found = experimentListing().experiments.find((item) => item.run_id === runId);
+        if (!found) throw new Error(`E2E fixture에 없는 실험입니다: ${runId}`);
+        return jsonResponse({
+          experiment: found,
+          evaluation: { available: false, reason: 'E2E fixture' },
+          history: { available: false, reason: 'E2E fixture', epochs: [] },
+        });
       }
       if (path === '/api/train/defaults') {
         return jsonResponse({
@@ -106,7 +125,7 @@ afterEach(() => {
 });
 
 describe('Web multi-experiment E2E', () => {
-  it('비교 route에서 최근 두 실험의 dataset과 학습 결과를 나란히 보여 준다', async () => {
+  it('캔버스에서 두 실행을 겹치면 결과와 세팅을 나란히 보여 준다', async () => {
     const listing = experimentListing();
     const best = listing.experiments.reduce((current, candidate) =>
       (candidate.metrics.best_validation_loss ?? Number.POSITIVE_INFINITY) <
@@ -117,24 +136,20 @@ describe('Web multi-experiment E2E', () => {
     expect(best.run_id).toBe(scenario.expectation.best_run_id);
 
     render(
-      <MemoryRouter initialEntries={['/compare']}>
+      <MemoryRouter initialEntries={['/canvas']}>
         <App />
       </MemoryRouter>,
     );
 
-    const selectRecent = await screen.findByRole('button', { name: '최근 2개 선택' });
-    await waitFor(() => expect(selectRecent).toBeEnabled());
-    fireEvent.click(selectRecent);
-    // 고르기와 비교표는 한 화면에 함께 있지 않습니다. 눌러야 비교표로 넘어갑니다.
-    fireEvent.click(screen.getByRole('button', { name: '선택 완료 →' }));
+    // 왼쪽 목록에서 눌러서 겹칩니다. 화면을 갈아 끼우는 단계가 없습니다.
+    for (const runId of ['e2e-baseline', 'e2e-tuned']) {
+      const pick = await screen.findByRole('button', { name: new RegExp(runId) });
+      fireEvent.click(pick);
+    }
 
-    expect(
-      await screen.findByText('같은 dataset 입력으로 기록된 실험입니다'),
-    ).toBeInTheDocument();
-    expect(screen.getAllByText('e2e-baseline').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText('e2e-tuned').length).toBeGreaterThanOrEqual(1);
-    // 기본 탭인 결과값에는 loss가, 학습 세팅 탭에는 optimizer가 있습니다.
-    // 고르는 표에도 같은 값이 있으므로 비교표 칸(data-run이 붙은 곳)만 봅니다.
+    await waitFor(() => expect(document.querySelector('[data-run="e2e-tuned"]')).not.toBeNull());
+
+    // 비교표 칸(data-run이 붙은 곳)만 봅니다. 왼쪽 고르기 목록에도 같은 글자가 있습니다.
     // 가장 좋은 칸에는 값 뒤에 "최고" 표식이 붙으므로 앞부분으로 확인합니다.
     const hasValue = (runId: string, value: string) =>
       [...document.querySelectorAll(`[data-run="${runId}"]`)].some((cell) =>
@@ -143,8 +158,8 @@ describe('Web multi-experiment E2E', () => {
     expect(hasValue('e2e-baseline', '0.7200')).toBe(true);
     expect(hasValue('e2e-tuned', '0.4800')).toBe(true);
 
-    fireEvent.click(screen.getByRole('button', { name: '학습 세팅' }));
-
+    // 결과와 세팅이 한 표에 함께 있습니다. 탭으로 갈아 끼우지 않습니다.
     expect(screen.getAllByText('SGD (호환 기본값)')).toHaveLength(2);
+    expect(screen.getByText(/data artifact URI 4개가 모두 같아/)).toBeInTheDocument();
   });
 });

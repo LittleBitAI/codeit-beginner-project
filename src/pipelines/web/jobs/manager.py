@@ -112,6 +112,16 @@ class JobManager:
         # 멈춘 대기열은 앞 학습이 끝나도 다음을 시작하지 않습니다. 사람이 중지를
         # 눌렀는데 곧바로 다음 학습이 뜨면 멈춘 것이 아니기 때문입니다.
         self._queue_paused = True
+        # GPU 자리를 잡는 문. 학습 시작과 자동 평가 시작이 이 문을 함께 씁니다.
+        # 직렬에서 둘이 서로를 못 보고 동시에 출발하면 8GB 카드에서 둘 다 out of
+        # memory로 잃습니다. 잠금 순서는 언제나 gate → evaluation runner → manager.
+        self._gpu_gate = threading.Lock()
+        # 학습이 끝날 때마다 깨어나 평가를 이어 도는 thread. 처음 필요할 때 만듭니다.
+        self._evaluation_wakeup = threading.Event()
+        self._evaluation_thread: threading.Thread | None = None
+        # **이 서버가 방금 끝낸** 학습만 자동 평가합니다. 디스크에 남은 옛 성공 기록을
+        # 훑으면, 서버를 다시 켤 때마다 몇 십 건이 줄줄이 GPU를 잡습니다.
+        self._evaluation_pending: list[str] = []
 
     # ------------------------------------------------------------------ 조회
 
@@ -325,11 +335,177 @@ class JobManager:
                     self._save_queue()
                 raise
 
+    # -------------------------------------------------------------- 자동 평가
+
+    def wake_evaluation(self) -> None:
+        """평가할 것이 생겼다고 알립니다. thread가 없으면 여기서 띄웁니다.
+
+        학습이 끝날 때마다, 그리고 설정이 바뀔 때마다 불립니다. 실제로 무엇을 언제
+        돌릴지는 thread가 정합니다. 줄이 비어 있거나 사람이 평가 방식을 아직 고르지
+        않았으면 thread 자체를 띄우지 않습니다 — 할 일이 없는데 깨어 있는 thread를
+        두면, 나중에 설정을 저장할 때 이 함수가 다시 불려 그때 띄우면 됩니다.
+        """
+
+        from .. import settings as web_settings
+
+        if web_settings.evaluation_mode() is None:
+            return
+        with self._lock:
+            if not self._evaluation_pending:
+                return
+            if self._evaluation_thread is None or not self._evaluation_thread.is_alive():
+                self._evaluation_thread = threading.Thread(
+                    target=self._evaluation_loop, name="auto-evaluate", daemon=True
+                )
+                self._evaluation_thread.start()
+        self._evaluation_wakeup.set()
+
+    def _next_unevaluated(self) -> JobRecord | None:
+        """줄 서 있는 것 중 아직 평가하지 않은 첫 학습입니다.
+
+        평가를 이미 한 번 돌린 기록은 건너뜁니다. 실패한 평가도 다시 집지 않습니다 —
+        같은 이유로 계속 실패할 텐데 그때마다 GPU를 잡으면 대기열이 통째로 막힙니다.
+        사람이 화면에서 다시 누를 수 있습니다.
+        """
+
+        with self._lock:
+            while self._evaluation_pending:
+                record = self._records.get(self._evaluation_pending.pop(0))
+                if (
+                    record is not None
+                    and record.status == STATUS_SUCCEEDED
+                    and not record.evaluation
+                ):
+                    return record
+        return None
+
+    def _requeue_evaluation(self, job_id: str) -> None:
+        """꺼냈지만 시작하지 못한 학습을 줄 맨 앞에 되돌립니다."""
+
+        with self._lock:
+            self._evaluation_pending.insert(0, job_id)
+
+    def _evaluation_loop(self) -> None:
+        """학습이 끝나면 평가를 이어 돕니다.
+
+        ``serial``이면 도는 학습이 하나도 없을 때까지 기다립니다. 평가가 VRAM을 약
+        1.8GB 더 쓰기 때문에, 8GB 카드에서 학습과 겹치면 둘 다 out of memory로
+        잃습니다. ``parallel``이면 곧바로 시작합니다.
+
+        기록을 꺼내는 것부터 시작까지 EvaluationRunner의 lock을 쥡니다. `/evaluate`
+        route가 같은 이유로 그렇게 합니다 — 놓고 있으면 그 틈에 DELETE가 성공하고,
+        이미 지워진 record로 시작한 평가가 끝나면서 사람이 지운 기록을 다시 저장해
+        되살립니다. lock은 언제나 **runner 먼저, manager 나중** 순서로 잡습니다.
+        DELETE도 그 순서라 서로 엇갈리지 않습니다.
+
+        ponytail: 평가가 끝났는지는 5초마다 상태를 물어봅니다. 평가 하나가 몇 분
+        걸리므로 이 정도 지연은 보이지 않습니다. 더 촘촘해야 하면 EvaluationRunner에
+        완료 callback을 답니다.
+        """
+
+        from .. import settings as web_settings
+        from ..errors import JobConflictError as _Conflict
+        from ..evaluation import get_evaluation_runner
+
+        runner_ = get_evaluation_runner()
+        while True:
+            self._evaluation_wakeup.wait()
+            self._evaluation_wakeup.clear()
+            while True:
+                mode = web_settings.evaluation_mode()
+                # 설정 화면에서 한 번 고르기 전까지는 자동으로 아무것도 돌리지
+                # 않습니다. 서버를 올렸다는 이유만으로 GPU가 몇 시간씩 돌면 안 됩니다.
+                if mode is None:
+                    break
+                if not self._start_one_evaluation(runner_, _Conflict, serial=mode == "serial"):
+                    break
+            # 직렬에서는 평가가 도는 동안 대기열이 멈춰 서 있었습니다. 다 끝났으니
+            # 다시 밀어 줍니다. 여기서 깨우지 않으면 밤새 돌리려던 대기열이 첫
+            # 평가에서 멈춘 채 아침을 맞습니다.
+            try:
+                self._start_next()
+            except Exception:
+                # background thread에는 오류를 응답할 caller가 없습니다.
+                pass
+
+    def _start_one_evaluation(
+        self, runner_: Any, conflict: type[Exception], *, serial: bool
+    ) -> bool:
+        """줄에서 하나를 꺼내 평가를 시작하고 끝날 때까지 기다립니다.
+
+        더 볼 것이 있으면 True입니다. 시작할 것이 없거나 더 봐서는 안 되는 상태면
+        False를 돌려 바깥 반복을 멈춥니다.
+
+        **도는 학습이 있는지 확인하는 것과 평가를 시작하는 것을 같은 문 안에서**
+        합니다. 갈라 두면 학습 시작 쪽과 서로를 못 보고 둘 다 출발해, 직렬로 두었는데
+        8GB 카드에서 둘 다 out of memory로 잃습니다. 잠금 순서는 gate → runner.
+        """
+
+        with self._gpu_gate, runner_.locked():
+            if serial and self.active_job() is not None:
+                return False
+            record = self._next_unevaluated()
+            if record is None:
+                return False
+            try:
+                runner_.start(record, {})
+            except conflict:
+                # 사람이 화면에서 먼저 눌렀습니다. 꺼낸 것을 되돌리고, 그 평가가
+                # 끝나기를 기다렸다 다시 집습니다. 되돌리지 않으면 이 학습은
+                # 영영 자동 평가되지 않습니다.
+                self._requeue_evaluation(record.job_id)
+            except Exception:
+                # 평가 하나가 시작조차 못 했다고 server를 죽이지 않습니다.
+                # 되돌리지 않는 것은 같은 이유로 계속 실패하며 도는 것을 막기
+                # 위해서입니다. 사람이 화면에서 다시 누를 수 있습니다.
+                return False
+        # 한 번에 하나만 돌 수 있으므로 끝날 때까지 기다렸다 다음을 집습니다.
+        # lock은 여기서 이미 놓았습니다 — 쥔 채로 기다리면 사람이 화면에서 누른
+        # 평가와 기록 삭제가 평가가 끝날 때까지 통째로 막힙니다.
+        while runner_.status().get("status") == "running":
+            time.sleep(5)
+        return True
+
     # ------------------------------------------------------------------ 실행
+
+    def _refuse_while_evaluating(self) -> None:
+        """직렬로 두었으면 평가가 도는 동안 학습을 시작하지 않습니다.
+
+        직렬을 고른 이유가 바로 이것입니다 — 8GB 카드에서 학습과 평가가 겹치면 둘
+        다 out of memory로 잃습니다. 평가를 시작할 때만 학습을 확인하고 반대쪽을
+        비워 두면, 평가가 도는 사이에 대기열의 다음 학습이나 사람이 누른 시작이
+        그대로 들어와 약속이 깨집니다.
+
+        **`_gpu_gate`를 쥔 채로 불러야 합니다.** 확인과 시작이 갈라져 있으면 두
+        thread가 각자 "상대는 없다"를 보고 둘 다 진행합니다. 좁은 틈이라고 두었더니
+        그 틈이 곧 둘 다 out of memory로 잃는 경로였습니다.
+        """
+
+        from .. import settings as web_settings
+        from ..evaluation import get_evaluation_runner
+
+        if web_settings.evaluation_mode() != "serial":
+            return
+        if get_evaluation_runner().status().get("status") != STATUS_RUNNING:
+            return
+        raise JobConflictError(
+            "평가가 실행 중입니다. 평가 실행을 '직렬'로 두었으므로 평가가 끝난 뒤에"
+            " 시작할 수 있습니다. 설정에서 '학습과 함께'로 바꾸면 겹쳐서 돌릴 수 있습니다."
+        )
 
     def start(self, config_id: str, *, access_token: str | None = None) -> JobRecord:
         """저장된 설정으로 학습을 시작합니다. 이미 실행 중이면 거부합니다."""
 
+        # GPU 자리를 잡는 구간 전체를 한 번에 하나만 지나갑니다. 자동 평가도 같은
+        # 문을 지나므로, 둘이 서로를 못 보고 동시에 출발하는 일이 없습니다.
+        with self._gpu_gate:
+            record = self._start_locked(config_id, access_token)
+        return self._spawn(record, config_id)
+
+    def _start_locked(self, config_id: str, access_token: str | None) -> JobRecord:
+        """`_gpu_gate`를 쥔 채로만 부릅니다. 기록을 만들고 자리를 잡습니다."""
+
+        self._refuse_while_evaluating()
         self.load()
         config = read_runtime_config(config_id)
         settings = dict(config.get("train") or {})
@@ -370,13 +546,18 @@ class JobManager:
             self._stdout_chunks = []
             record.progress = snapshot(self._progress)
             team_sync.get_team_sync().enqueue_update(record)
+        return record
 
+    def _spawn(self, record: JobRecord, config_id: str) -> JobRecord:
+        """자리를 잡은 기록으로 실제 process를 띄웁니다. gate 밖에서 합니다."""
+
+        job_id = record.job_id
         store.save_record(record)
         thread = threading.Thread(
             target=self._run, args=(job_id, config_id), name=f"train-job-{job_id[:8]}", daemon=True
         )
         thread.start()
-        if cloud_run_id:
+        if record.cloud_run_id:
             threading.Thread(
                 target=self._heartbeat,
                 args=(job_id,),
@@ -539,6 +720,12 @@ class JobManager:
                     # background thread에는 오류를 응답할 caller가 없습니다. _start_next가
                     # 항목을 복원하고 queue를 멈췄으므로 사람이 상태를 보고 재개할 수 있습니다.
                     pass
+            # 성공한 학습만 평가할 것이 있습니다. 취소·실패에는 쓸 checkpoint가 없습니다.
+            with self._lock:
+                finished = self._records.get(job_id)
+                if finished is not None and finished.status == STATUS_SUCCEEDED:
+                    self._evaluation_pending.append(job_id)
+            self.wake_evaluation()
 
     # ------------------------------------------------------------------ 종료
 

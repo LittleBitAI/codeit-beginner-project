@@ -22,23 +22,48 @@ export function usePolling<T>(
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(enabled);
   const inFlight = useRef(false);
+  /**
+   * 도는 중에 들어온 `refresh()` 요청. 끝나면 한 번 더 돕니다.
+   *
+   * 그냥 버리면 방금 바꾼 값이 화면에 안 옵니다. 진행 중이던 응답은 바꾸기 **전**
+   * 상태라, 그것을 넣고 끝내면 다음 주기(최대 60초)까지 옛 값이 남습니다. 실제로
+   * Kaggle 점수를 저장해도 목록이 `-`인 채로 있었습니다.
+   */
+  const again = useRef(false);
   const mounted = useRef(true);
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
-  const run = useCallback(async () => {
-    if (inFlight.current) return;
+  /**
+   * `queueWhenBusy`는 **사람이 누른 refresh**에만 켭니다.
+   *
+   * 주기가 부른 것까지 쌓으면, 한 요청이 주기보다 오래 걸릴 때 tick마다 다음
+   * 요청이 예약되어 쉬는 틈이 사라집니다. 실험 목록처럼 수십 초 걸리는 조회에서는
+   * backend를 쉬지 않고 두드리고 loading도 끝나지 않습니다. 주기가 부른 것은
+   * 지금처럼 그냥 건너뜁니다 — 다음 tick이 곧 옵니다.
+   */
+  const run = useCallback(async (queueWhenBusy: boolean) => {
+    if (inFlight.current) {
+      if (queueWhenBusy) again.current = true;
+      return;
+    }
     inFlight.current = true;
     try {
-      const result = await fetcherRef.current();
-      if (!mounted.current) return;
-      setData(result);
-      setError(null);
-    } catch (caught) {
-      if (!mounted.current) return;
-      setError(caught instanceof Error ? caught.message : '알 수 없는 오류가 발생했습니다.');
+      do {
+        again.current = false;
+        try {
+          const result = await fetcherRef.current();
+          if (!mounted.current) return;
+          setData(result);
+          setError(null);
+        } catch (caught) {
+          if (!mounted.current) return;
+          setError(caught instanceof Error ? caught.message : '알 수 없는 오류가 발생했습니다.');
+        }
+      } while (again.current);
     } finally {
       inFlight.current = false;
+      again.current = false;
       if (mounted.current) setLoading(false);
     }
   }, []);
@@ -55,11 +80,16 @@ export function usePolling<T>(
       setLoading(false);
       return;
     }
-    void run();
+    void run(false);
     if (intervalMs <= 0) return;
-    const timer = window.setInterval(() => void run(), intervalMs);
+    const timer = window.setInterval(() => void run(false), intervalMs);
     return () => window.clearInterval(timer);
   }, [enabled, intervalMs, run]);
 
-  return { data, error, loading, refresh: run };
+  // 화면이 값을 바꾼 직후 부르는 길입니다. 도는 중이면 미뤄 두었다가 한 번 더 돕니다.
+  const refresh = useCallback(() => {
+    void run(true);
+  }, [run]);
+
+  return { data, error, loading, refresh };
 }

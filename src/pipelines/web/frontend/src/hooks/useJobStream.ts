@@ -29,6 +29,18 @@ export function useJobStream(jobId: string | undefined): JobStream {
   const cursor = useRef(0);
   const inFlight = useRef(false);
   const mounted = useRef(true);
+  /**
+   * 보는 대상이 바뀔 때마다 오르는 번호. 응답을 반영하기 전에 대조합니다.
+   *
+   * 확인하지 않으면 job을 옮긴 뒤 늦게 도착한 이전 응답이 화면을 옛 job으로
+   * 되돌려 놓습니다. 주소는 B인데 화면과 삭제 버튼은 A를 가리키게 되어, 지우면
+   * 엉뚱한 기록이 사라집니다.
+   *
+   * job **이름**이 아니라 번호를 세는 이유는 A → B → A로 돌아오는 경우입니다.
+   * 이름만 보면 첫 A의 늦은 응답이 두 번째 A의 것인 양 통과해, 새 상태를 옛
+   * 값으로 덮고 옛 로그를 다시 붙이며, 두 번째 A의 잠금까지 풀어 버립니다.
+   */
+  const generation = useRef(0);
 
   const reset = useCallback(() => {
     cursor.current = 0;
@@ -39,11 +51,12 @@ export function useJobStream(jobId: string | undefined): JobStream {
 
   const tick = useCallback(async () => {
     if (!jobId || inFlight.current) return;
+    const mine = generation.current;
     inFlight.current = true;
     try {
       const record = await api.getJob(jobId);
       const page = await api.logs(jobId, cursor.current);
-      if (!mounted.current) return;
+      if (!mounted.current || generation.current !== mine) return;
       setJob(record);
       if (page.lines.length > 0) {
         cursor.current = page.next;
@@ -52,11 +65,13 @@ export function useJobStream(jobId: string | undefined): JobStream {
       setError(null);
       setStreaming(record.status === 'running' || record.status === 'queued');
     } catch (caught) {
-      if (!mounted.current) return;
+      if (!mounted.current || generation.current !== mine) return;
       setError(caught instanceof Error ? caught.message : '알 수 없는 오류가 발생했습니다.');
       setStreaming(false);
     } finally {
-      inFlight.current = false;
+      // 지금 세대의 요청일 때만 잠금을 풉니다. 옮긴 뒤 늦게 끝난 이전 요청이 새
+      // 요청의 잠금을 풀어 버리면 같은 job 조회가 겹칩니다.
+      if (generation.current === mine) inFlight.current = false;
     }
   }, [jobId]);
 
@@ -68,6 +83,10 @@ export function useJobStream(jobId: string | undefined): JobStream {
   }, []);
 
   useEffect(() => {
+    // 세대를 먼저 올립니다. 이전 요청의 응답은 이 시점부터 버려지고, 아직 끝나지
+    // 않은 그 요청 때문에 새 조회를 거르지도 않습니다.
+    generation.current += 1;
+    inFlight.current = false;
     reset();
     if (!jobId) return;
     void tick();

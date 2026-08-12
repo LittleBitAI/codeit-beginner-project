@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -36,3 +36,11 @@ class StartJobRequest(BaseModel):
     """저장해 둔 설정으로 학습을 시작하는 요청."""
 
     config_id: str = Field(min_length=32, max_length=32)
+
+
+class SettingsBody(BaseModel):
+    """설정 화면이 보내는 값. 지금은 평가를 언제 돌릴지 하나뿐입니다."""
+
+    evaluation_mode: Literal["parallel", "serial"] | None = Field(
+        default=None, description="평가를 학습과 함께 돌릴지(parallel), 끝난 뒤에 돌릴지(serial)"
+    )

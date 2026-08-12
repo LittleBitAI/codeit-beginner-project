@@ -1,5 +1,16 @@
 # Handoff: PillDetect — 알약 객체 탐지 실험 플랫폼
 
+> **Training GUI는 Training Console 디자인을 따릅니다 (2026-08 교체).**
+>
+> 저장소 root의 `Training Console.html`이 지금 구현된 Training GUI의 원본입니다.
+> 어두운 바탕에 amber 하나로 강조하는 단색 계열이고, 화면은 **기록 목록 · 견주기
+> 캔버스 · 라이브** 셋에 **새 실험 · 설정 · dataset 준비** 시트가 얹히는 구조입니다.
+> 구현된 값의 단일 출처는 `src/pipelines/web/frontend/src/design/tokens.ts`입니다.
+>
+> 아래 **Design Tokens**와 **Application Shell**은 그 디자인으로 갱신했습니다.
+> `Screens` 이후 절은 아직 만들지 않은 평가·제출 쪽 화면(08–16)을 포함한 원래
+> 기획이며, Training GUI에 해당하는 02–07·09는 위 세 화면으로 합쳐졌습니다.
+
 ## Overview
 
 An internal engineering tool for a pill (alyak) object-detection project. Each image contains 1–4 pills; the model predicts a class and bounding box for every pill. The tool exists so a small ML team can **configure, run, compare, diagnose and ship** detection models reproducibly, without hand-editing YAML or digging through `runs/` folders.
@@ -73,44 +84,77 @@ Starting a run from 설정 검토 registers a new record, points `monitorExp` at
 
 ### Color — semantics are fixed, do not reassign
 
+Amber 하나만 강조색입니다. **누를 수 있는 것, 지금 도는 것, 좋아진 방향**에만 쓰고,
+그 밖에는 밝기 단계로만 말합니다. 강조색이 하나라서 "지금 중요한 것"이 화면에 언제나
+한 개만 보입니다.
+
 | Token | Hex | Use |
 |---|---|---|
-| `navy` | `#0B2545` | Left rail, code blocks, log viewer background |
-| `navy-ink` | `#172030` | Tooltip background |
-| `primary` | `#1A56A8` | Primary buttons, active chips/tabs, selected state, links |
-| `primary-hover` | `#164A94` | Primary button hover |
-| `primary-tint` | `#EAF1FB` | Selected chip fill, context badge fill |
-| `primary-border` | `#C9DCF3` | Selected chip border |
-| `teal` | `#0D8B84` | Running state, live indicator, "start training" action |
-| `teal-dark` | `#0A6E68` | Running badge text, teal button hover |
-| `teal-tint` | `#E2F5F3` | Running badge fill, dataset badge fill |
-| `green` | `#1F8A3B` | Success icon, improved metric (+) |
-| `green-dark` | `#166B2D` | Completed badge text, best-in-column value |
-| `green-tint` | `#EAF6EC` | Completed badge fill |
-| `amber` | `#B5760A` | Warning icon/title, false positives, estimated values |
-| `amber-tint` | `#FBF4E8` | Warning badge fill |
-| `red` | `#C1332D` | Error icon/title, failed run, false negatives, regressed metric (−) |
-| `red-tint` | `#FBE4E4` | Failed badge fill |
-| `text` | `#111C2E` | Primary text, metric values |
-| `text-strong` | `#31405A` | Labels, table cell text |
-| `text-body` | `#5C6470` | Body prose, hints |
-| `text-muted` | `#8A929E` | Micro-labels, units, secondary meta |
-| `text-faint` | `#9AA2AD` | Chart axes, disabled, placeholders |
-| `border` | `#E4E7EB` | Panel borders — **1px, everywhere** |
-| `border-inner` | `#EEF0F3` | Section dividers inside a panel |
-| `border-row` | `#F2F4F7` | Table row separators |
-| `border-control` | `#D8DCE2` | Input, select, secondary button borders |
-| `border-chart` | `#DFE3E8` | Chart axis lines |
-| `surface` | `#FFFFFF` | All panels |
-| `surface-page` | `#F4F6F9` | Page background |
-| `surface-alt` | `#FAFBFC` | Table header rows, subsection strips, hover |
-| `surface-sunken` | `#F6F7F9` | Grid lines, empty bar tracks |
-| `surface-image` | `#E9ECF0` | Image placeholder fill |
+| `page` | `#130F0C` | Page background — 화면에서 가장 어두운 면 |
+| `rail` | `#0E0B09` | Left rail (dataset 목록) |
+| `panel` | `#1D1713` | 떠 있는 면: 라이브 카드, 코드/로그 블록 |
+| `sheet` | `#171310` | 오른쪽 슬라이드 시트, 캔버스 왼쪽 목록 |
+| `fill` | `#382A20` | 고른 줄의 바탕, 진행 막대의 채운 부분 |
+| `accent` | `#E0A96D` | Primary button, 링크, live dot, 곡선 val, 최고 값 |
+| `on-accent` | `#130F0C` | Primary button 안쪽 글자 |
+| `accent-line` | `#543D28` | 배지 테두리, 보조 버튼 테두리 |
+| `text-strong` | `#FDF4E8` | 제목, 큰 숫자 |
+| `text` | `#F4E8D8` | 기본 글자 |
+| `text-body` | `#B09A85` | 설명 문장 |
+| `text-mid` | `#C4AE97` | 밝은 면 위의 보조 글자(카드 안 지표 이름) |
+| `text-muted` | `#8A7663` | 보조 정보, 단위, 경로 |
+| `text-faint` | `#5E4E42` | 축 눈금, 있는 줄만 알면 되는 글자 |
+| `border` | `#29211B` | 구역을 가르는 선 — **1px** |
+| `border-row` | `#221B16` | 목록 줄 사이의 더 옅은 선 |
+| `danger` | `#E08A7A` | 실패한 학습, 오류 아이콘·제목 |
+| `danger-line` | `#5C2F26` | 오류 alert 테두리, 실패 배지 테두리 |
+| `warn` | `#E0A96D` | 경고 아이콘·제목, 추정값 |
+| `ok` | `#8FC79A` | 성공 아이콘 |
 
-Detection-visualization colors (bounding boxes, TP/FP/FN bars) are separate and slightly desaturated so they read against photos:
-`tp #2E7D5B` · `fp #C98A3A` · `fn #C1332D` · `gt-outline #5C6470` (1.5px dashed).
+원본 디자인은 amber 하나로만 말하지만, `danger` · `warn` · `ok` 세 가지는 남깁니다.
+실패와 성공을 같은 색으로 두면 밤새 돌린 학습이 왜 멈췄는지 화면이 말해 주지 못합니다.
 
-Multi-run comparison series, in order: `#1A56A8`, `#0D8B84`, `#B5760A`, `#7A4FBF`, `#C1332D`.
+Multi-run comparison series, in order: `#E0A96D`, `#8FC79A`, `#9DB4D8`, `#D28FA8`, `#C4AE97`.
+곡선은 validation이 실선(2.6px, accent), train이 점선(1.8px `6 5`, `text-muted`)입니다.
+
+#### 밝은 판 — 종이
+
+화면 오른쪽 아래 단추로 오갑니다. 이름은 그대로 두고 값만 갈립니다. **강조색을 그대로
+가져올 수는 없습니다** — `#E0A96D`를 흰 바탕에 두면 대비가 1.9:1이라 글자가 안 읽힙니다.
+같은 amber 계열에서 본문 기준(4.5:1)을 넘기는 값으로 내립니다.
+
+| Token | Hex | 대비 (page 기준) |
+|---|---|---|
+| `page` | `#FAF7F2` | 따뜻한 베이지 |
+| `rail` | `#F3EDE4` | |
+| `panel` | `#FFFFFF` | |
+| `sheet` | `#FFFFFF` | |
+| `fill` | `#F0E4D4` | |
+| `accent` | `#A25E22` | 4.8:1 |
+| `on-accent` | `#FFFFFF` | accent 위 5.1:1 |
+| `accent-line` | `#E0C9AC` | |
+| `text-strong` | `#17120D` | 16.6:1 |
+| `text` | `#241C14` | 15.7:1 |
+| `text-body` | `#5A4B3C` | 8.0:1 |
+| `text-mid` | `#6B5A48` | 6.4:1 |
+| `text-muted` | `#857462` | 4.3:1 (보조 글자) |
+| `text-faint` | `#A69684` | 2.8:1 (축 눈금 전용) |
+| `border` | `#E5DACB` | |
+| `border-row` | `#F0E8DC` | |
+| `danger` | `#A63A28` | 6.1:1 |
+| `danger-line` | `#E7C4BC` | |
+| `warn` | `#A25E22` | 4.8:1 |
+| `ok` | `#2E7D4F` | 4.7:1 |
+
+Multi-run comparison series(밝은 판): `#A25E22`, `#2E7D4F`, `#3B5F97`, `#9A3B62`, `#6B5A48`.
+
+두 판 모두 `text` · `accent` · `on-accent`가 4.5:1을 넘고 `text-muted`가 3:1을 넘습니다.
+`src/pipelines/web/frontend/src/lib/lib.test.ts`가 이 선을 검사하므로, 색을 바꾸면
+거기서 먼저 걸립니다.
+
+구현 메모: 화면 코드는 hex 대신 `var(--color-*)`를 씁니다. 판을 바꿀 때 350군데를 다시
+쓰지 않으려는 것입니다. SVG presentation attribute는 `var()`를 풀지 않으므로 아이콘은
+`<svg style={{color}}>` + `currentColor`, 곡선은 `style={{ stroke }}`로 얹습니다.
 
 ### Typography — two families, no exceptions
 
@@ -121,33 +165,42 @@ Multi-run comparison series, in order: `#1A56A8`, `#0D8B84`, `#B5760A`, `#7A4FBF
 
 | Role | Size / weight / line-height |
 |---|---|
-| Page title (top bar) | 14.5px / 650 / 1.3 — Pretendard |
-| Panel header | 12px / 600 / 1 — Pretendard |
-| Screen intro title | 13px / 600 / 1.4 — Pretendard |
-| Body prose | 12.5px / 400 / 1.7 — Pretendard |
-| Plain-language note | 11px / 400 / 1.5 — Pretendard |
-| Field label | 11.5px / 600 / 1 — Pretendard |
-| Field hint | 10.5px / 400 / 1.45 — Pretendard |
-| Table cell | 11px / 400 / 1.3 — Mono |
-| Table column header | 10px / 600 / 1.3, `letter-spacing: .04em` — Mono |
-| KPI micro-label | 10px / 500 / 1.3, `letter-spacing: .04–.05em` — Mono |
-| KPI value (large) | 22px / 600 / 1 — Mono |
-| KPI value (compact) | 15–19px / 600 / 1 — Mono |
-| Status badge | 10px / 600 / 1.3 — Mono, uppercase |
-| Log line | 10.5px / 400 / 1.6 — Mono |
-| Code / YAML | 10.5px / 400 / 1.65–1.75 — Mono, `white-space: pre` |
-| Chart axis label | 9px — Mono (SVG only) |
+| Page title | 27px / 600 / 1.25, `letter-spacing: -.02em` — **Mono** (dataset 이름이라 식별자) |
+| Sheet title | 24px / 700 / 1.3, `letter-spacing: -.015em` — Pretendard |
+| Section title | 15px / 600 / 1 — Pretendard |
+| Sub title | 16px / 600 / 1 — Pretendard |
+| List item name | 14.5px / 500 / 1.5 — Pretendard |
+| Body prose | 13.5px / 400 / 1.7 — Pretendard |
+| Body small | 13px / 400 / 1.6 — Pretendard |
+| Note | 12.5px / 400 / 1.6 — Pretendard |
+| Section micro-label | 11px / 500 / 1, `letter-spacing: .1em` — Mono, uppercase |
+| Field label | 11.5px / 500 / 1, `letter-spacing: .06em` — Mono, uppercase |
+| Metric label | 11px / 400 / 1.4, `letter-spacing: .04em` — Mono |
+| Identifier (run_id) | 13px / 400 / 1.6 — Mono |
+| Spec line | 12.5px / 400 / 1.6 — Mono |
+| KPI huge (라이브 val loss) | 46–52px / 600 / 1, `letter-spacing: -.035em` — Mono |
+| KPI large (Kaggle) | 40px / 600 / 1, `letter-spacing: -.03em` — Mono |
+| KPI mid (Δ) | 20–22px / 500 / 1 — Mono |
+| Status badge | 11px / 600 / 1.5, `letter-spacing: .05em` — Mono |
+| Log line | 12px / 400 / 1.7 — Mono |
+| Code / JSON | 12.5px / 400 / 1.9 — Mono |
+| Chart axis label | 11.5px / 400 / 1 — Mono |
 
-**Minimum size for any meaning-carrying text is 9.5px.** 9px is reserved for SVG chart axis labels. Do not go below.
+숫자는 예외 없이 Mono이고 `font-variant-numeric: tabular-nums`입니다. 소수점 정렬이
+실행 간 비교의 전제입니다. **의미를 가진 글자의 최소 크기는 11px입니다.**
 
 ### Spacing, shape, elevation
 
-- 4px grid. Panel padding 13–20px. Form row gap 12px. Card grid gap 10–12px. Section gap 12–14px.
-- Table row height ~34px (`padding: 8px 12px`). Density target: 8/10 — dense but never cramped.
-- Border radius: **badge/chip 3–4px · control 4px · panel 5–6px.** Nothing rounder. No pills, no 12px+ radii.
-- Elevation: only floating elements (tooltip, dropdown, modal) get `0 4px 14px rgba(11,37,69,.22)`. **Panels are separated by 1px borders, never by shadow.**
-- Left rail 216px fixed, full height, `position: sticky`. Content max-width 1560–1720px depending on screen.
-- Top bar: 3px teal accent strip, then a 9px-padded sticky context bar.
+- 4px grid. 화면 padding `36px 40px 60px`. 카드 padding `24px 26px`. 시트 padding `32px 34px`.
+- 지표 격자는 `repeat(auto-fit, minmax(124px, 1fr))`, gap `16px 20px`.
+- 목록 줄은 `padding: 20px 0` + 위쪽 1px 선. 표 위주가 아니라 **줄 위주**입니다.
+- Border radius: **badge 3px · control(버튼·입력·chip) 4px · 면은 0px.** 카드는 모서리를
+  굴리지 않고 배경색으로만 뜹니다. Nothing rounder.
+- Elevation 없음. 그림자를 쓰지 않고 1px 선과 배경 밝기로만 나눕니다. 시트만 예외로
+  `rgba(8,6,4,.55)` 덮개를 깝니다.
+- Left rail 232px fixed, full height, `position: sticky`. 캔버스 왼쪽 목록은 236px.
+- 상단 bar 없음. 화면 제목이 본문 맨 위에 그대로 섭니다.
+- 진행률은 별도 막대가 아니라 **카드 바탕이 `fill`로 차오르는 것**으로 말합니다.
 
 ---
 
@@ -157,20 +210,22 @@ These were explicit client requirements. Violating them fails review.
 
 **Never:**
 - colored vertical bars on the left edge of alerts or cards
-- large red / yellow / blue / green tinted panels
+- large tinted panels (색면으로 등급을 매기지 않습니다)
 - cards nested inside cards
-- border radius above ~6px
+- border radius above 4px (면은 0px)
 - gradients, glows, glassmorphism, neon
 - purple "AI" branding, sparkle icons, decorative AI symbols
 - large empty hero areas
 - charts that don't inform a decision
+- 강조색을 두 개 이상 쓰기 — amber 하나입니다
 
 **Always:**
-- neutral white / light-grey surfaces, thin consistent borders
-- section-based layout, compact tables, aligned form grids
+- 어두운 단색 면(`page` / `rail` / `panel` / `sheet`), 1px 선으로만 구분
+- section-based layout, 줄 위주 목록, aligned form grids
 - restrained status badges, icons paired with text
 - clear primary vs. secondary action
 - dense but readable hierarchy
+- 값이 없으면 `0`이 아니라 `-` — 모르는 것을 지어내지 않습니다
 
 ### Alert and error design — three levels, no exceptions
 
@@ -190,26 +245,36 @@ Icons are inline SVG, 1.25–1.4 stroke width, `currentColor`-ish semantic hex. 
 
 ## Application Shell
 
-### Left rail (216px, `#0B2545`)
+### Left rail (232px, `rail`)
 
-Logo block → nav groups → user footer (`margin-top: auto`).
+제목 블록 → `DATASETS` 목록 → 동작 두 개(`margin-top: auto`) → GPU 게이지.
 
-Groups, in order: **개요** · `TRAINING` (학습 개요 / 새 실험 / 설정 검토 / 라이브 모니터) · `EXPERIMENTS` (실험 목록 / 실험 상세) · `EVALUATION` (평가 개요 / 실험 비교 / 지표 상세 / 임계값 튜닝) · `PREDICTIONS` (예측 검사기 / 실패 갤러리) · `SUBMISSIONS` (제출 관리 / 모델 리포트) · **설정**
+**왼쪽에 세우는 것은 화면 이름이 아니라 dataset입니다.** 이 도구에서 사람이 실제로
+갈아 끼우는 것이 화면이 아니라 데이터이기 때문입니다. 화면 사이 이동은 본문 안의
+링크가 합니다 (`캔버스에서 견주기 →`, `모니터 →`, `← 목록`).
 
-- Group label: 10px/600 mono, `letter-spacing: .09em`, `#5C7290`.
-- Item: 12.5px Pretendard, `#A9BAD0` idle → `#fff` on hover with `rgba(255,255,255,.05)`.
-- **Active item: `rgba(255,255,255,.09)` background only — no left accent bar.**
-- 라이브 모니터 shows a 6px teal dot with `pulse 1.6s infinite` while a run is active.
-- Footer: avatar + name, then a teal dot + `wandb · pill-det 연결됨`.
+- 제목: `알약 객체 탐지` 14px/600 Pretendard, 그 아래 `Training` 11.5px Mono `text-muted`.
+- Group label `DATASETS`: 11px/500 Mono, `letter-spacing: .1em`, `text-muted`.
+- 목록 줄: 이름(12.5px Mono) + 기록 수(오른쪽 정렬), 그 아래 설명 12px Pretendard.
+- **고른 줄: `fill` 배경 + 왼쪽 2px `accent` 막대.**
+- 그 dataset에 도는 학습이 있으면 개수 옆에 6px accent dot + `pulse 1.6s infinite`.
+- 동작: `dataset 준비`(전처리 시트) · `설정`(설정 시트). 12.5px, 13px 선 아이콘.
+- GPU 게이지: 이름 → `6.0 / 8.0 GB`(20px Mono) → 6px 막대 → `사용률 63%`.
+  값을 못 읽으면 0%를 그리지 않고 이유를 적습니다. 빈 막대는 "놀고 있다"로 읽힙니다.
 
-### Top context bar (sticky)
+### 상단 bar 없음
 
-3px `#0D8B84` strip, then a `#FBFCFE` bar with 1px bottom border containing:
+화면 제목(dataset 이름)이 본문 맨 위에 27px Mono로 그대로 서고, 그 오른쪽에 `새 실험`
+primary button이 붙습니다. 그 아래 한 줄이 통계(`기록 12건 · 최고 Kaggle … · 최저 val
+loss …`), 그 아래가 배지 + 문장 한 줄로 **이 목록을 어디까지 믿을 수 있는지**를 말합니다
+(`이 컴퓨터` / `팀 공유`). 이 줄은 사라지지 않습니다 — *"모든 차트는 실험과 dataset
+버전으로 되짚을 수 있어야 한다"* 는 규칙의 자리입니다.
 
-**Left** — page title, 1px×15px divider, then always-visible context badges: `dataset v4.2` (teal tint) · `12 classes · 4,000 imgs` (neutral) · `exp-014 · yolo11m-mosaic-v3 · best.pt` (blue tint, truncates).
-These three badges are the structural implementation of the rule *"every chart must be traceable to an experiment and a dataset version."* They never disappear.
+### 오른쪽 시트 (520px, `sheet`)
 
-**Right** — 쉬운 설명 toggle · `⌘K` hint · `+ 새 실험` primary button.
+`새 실험` · `설정` · `dataset 준비`는 화면을 갈아 끼우지 않고 오른쪽에서 덮습니다.
+뒤에 있던 목록이 그대로 남아 "무엇을 보다가 이걸 열었는지"를 잃지 않습니다.
+제목 + `×` → 내용 → `margin-top: auto` footer 버튼.
 
 ---
 

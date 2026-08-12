@@ -313,11 +313,11 @@ function EvaluateProgressView({
           style={{
             height: 6,
             borderRadius: radius.control,
-            background: color.borderInner,
+            background: color.borderRow,
             overflow: 'hidden',
           }}
         >
-          <div style={{ width: `${percent}%`, height: '100%', background: color.primary }} />
+          <div style={{ width: `${percent}%`, height: '100%', background: color.accent }} />
         </div>
       )}
 
@@ -403,7 +403,7 @@ function WeakClasses({ jobId }: { jobId: string }) {
           padding: 0,
           cursor: 'pointer',
           font: `600 12.5px/1 ${font.sans}`,
-          color: color.tealDark,
+          color: color.accent,
         }}
       >
         {open ? '▾' : '▸'} 약한 class 보기
@@ -472,7 +472,7 @@ function ClassTable({ title, rows }: { title: string; rows: PerClassRow[] }) {
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.category_id} style={{ borderTop: `1px solid ${color.borderInner}` }}>
+              <tr key={row.category_id} style={{ borderTop: `1px solid ${color.borderRow}` }}>
                 <td style={{ ...cell, font: `400 12px/1.4 ${font.sans}` }}>{row.name}</td>
                 <td style={cell}>{metricText(row.ap)}</td>
                 <td style={cell}>{metricText(row.ap50)}</td>
@@ -554,7 +554,7 @@ function EvaluationResult({
             }
             value={metricText(metrics[item.key])}
             compact
-            valueColor={item.key === 'mAP50' ? color.tealDark : undefined}
+            valueColor={item.key === 'mAP50' ? color.accent : undefined}
             note={metrics[item.key] === null ? '이 기준으로는 계산하지 않았습니다' : item.note}
           />
         ))}
@@ -565,7 +565,7 @@ function EvaluationResult({
           display: 'flex',
           gap: 18,
           flexWrap: 'wrap',
-          borderTop: `1px solid ${color.borderInner}`,
+          borderTop: `1px solid ${color.borderRow}`,
           paddingTop: 10,
         }}
       >
@@ -591,7 +591,7 @@ function EvaluationResult({
       {otherArtifacts.length > 0 && (
         <div
           style={{
-            borderTop: `1px solid ${color.borderInner}`,
+            borderTop: `1px solid ${color.borderRow}`,
             paddingTop: 10,
             display: 'flex',
             flexDirection: 'column',

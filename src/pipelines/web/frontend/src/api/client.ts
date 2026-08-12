@@ -1,4 +1,5 @@
 import type {
+  AppSettings,
   CreatedConfig,
   DataSource,
   DataVerification,
@@ -144,6 +145,11 @@ export const api = {
     }),
 
   teamConfig: () => request<TeamConfig>('/api/team/config'),
+
+  settings: () => request<AppSettings>('/api/settings'),
+
+  saveSettings: (body: AppSettings) =>
+    request<AppSettings>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
   resumeJob: (jobId: string, epochs?: number | null, accessToken?: string | null) =>
     request<ResumeResult>(`/api/train/jobs/${jobId}/resume`, {

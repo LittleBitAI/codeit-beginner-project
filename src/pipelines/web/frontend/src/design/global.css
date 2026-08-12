@@ -1,10 +1,11 @@
-/* 색과 글꼴 값은 tokens.ts가 :root에 주입한 CSS 변수만 씁니다(단일 출처). */
+/* 색과 글꼴 값은 tokens.ts가 :root에 주입한 CSS 변수만 씁니다(단일 출처).
+   테마를 바꾸면 그 변수만 갈립니다 — 이 파일은 그대로입니다. */
 
 html,
 body {
   margin: 0;
   padding: 0;
-  background: var(--color-surface-page);
+  background: var(--color-page);
 }
 
 body {
@@ -18,7 +19,7 @@ body {
 }
 
 a {
-  color: var(--color-primary);
+  color: var(--color-accent);
   text-decoration: none;
 }
 
@@ -33,38 +34,60 @@ button:disabled {
 
 /* 누를 수 있는 것인지는 마우스를 올렸을 때 드러나야 합니다.
    화면 코드가 배경색을 inline style로 직접 쓰기 때문에 배경을 덮어쓰는 대신
-   밝기를 낮춥니다. inline style은 stylesheet를 이기지만 filter는 건드리지 않습니다. */
+   밝기를 바꿉니다. inline style은 stylesheet를 이기지만 filter는 건드리지 않습니다.
+   어두운 판에서는 밝기를 낮추면 사라지므로 방향이 서로 반대입니다. */
 button:not(:disabled):hover,
 a:hover {
-  filter: brightness(0.96);
+  filter: brightness(1.14);
 }
 
 button:not(:disabled):active {
-  filter: brightness(0.9);
+  filter: brightness(0.92);
+}
+
+[data-theme='light'] button:not(:disabled):hover,
+[data-theme='light'] a:hover {
+  filter: brightness(0.94);
+}
+
+[data-theme='light'] button:not(:disabled):active {
+  filter: brightness(0.88);
 }
 
 /* 키보드로만 쓰는 사람에게 지금 어디에 있는지 보여 줍니다. 마우스 클릭에는 뜨지 않습니다. */
 :focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-accent);
   outline-offset: 1px;
 }
 
-/* 눌러서 여는 표 행. 배경을 비워 둔 행에만 얹히므로 선택된 행의 색은 그대로 남습니다.
-   이름이 data-row가 아닌 것은 비교표가 그 이름을 이미 다른 뜻으로 쓰고 있어서입니다. */
+/* 눌러서 여는 목록 줄. 배경을 비워 둔 줄에만 얹히므로 고른 줄의 색은 그대로 남습니다. */
 [data-row-hover]:hover {
-  background: var(--color-surface-hover);
-}
-
-/* 왼쪽 메뉴는 어두운 바탕이라 밝기를 낮추면 오히려 안 보입니다. 흰색을 얹습니다. */
-nav a:hover {
-  background: rgba(255, 255, 255, 0.07);
-  filter: none;
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
 }
 
 input,
 select,
 textarea {
   font-family: inherit;
+  color: var(--color-text);
+  background: var(--color-page);
+  border: 1px solid var(--color-border);
+}
+
+/* 브라우저 기본 체크박스가 테마와 따로 놀지 않게 합니다. */
+input[type='checkbox'],
+input[type='radio'] {
+  accent-color: var(--color-accent);
+}
+
+/* 목록 상자를 펼쳤을 때 항목까지 같은 판으로 둡니다. */
+option {
+  background: var(--color-panel);
+  color: var(--color-text);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 30%, transparent);
 }
 
 ::-webkit-scrollbar {
@@ -73,7 +96,7 @@ textarea {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--color-scrollbar);
+  background: var(--color-fill);
   border-radius: 5px;
 }
 
@@ -98,5 +121,5 @@ textarea {
 /* 추정값은 측정값과 시각적으로 구분합니다: 기울임 + ~ 접두 + 점선 밑줄 */
 .estimated {
   font-style: italic;
-  border-bottom: 1px dotted #c9d3e0;
+  border-bottom: 1px dotted var(--color-accent-line);
 }
