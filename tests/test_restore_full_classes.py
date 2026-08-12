@@ -167,11 +167,73 @@ def test_stops_when_the_product_code_is_missing(tmp_path: Path) -> None:
         restore(root, tmp_path / "out")
 
 
-def test_refuses_to_overwrite_an_existing_output(tmp_path: Path) -> None:
-    """이전 실행의 결과를 말없이 지우지 않습니다."""
+def test_stops_when_only_the_authoritative_code_is_missing(tmp_path: Path) -> None:
+    """`drug_N`으로 슬쩍 대신하지 않습니다.
+
+    권위값은 `dl_mapping_code`입니다. 그것이 없을 때 다른 필드로 넘어가면 두 값이
+    어긋나는 문서에서 엉뚱한 알약의 label이 조용히 붙습니다.
+    """
+
+    root = tmp_path / "in"
+    document = _document(
+        "shot.png", "K-000573", category_id=OTHER_CATEGORY_ID, dl_name="게보린정 300mg/PTP"
+    )
+    del document["images"][0]["dl_mapping_code"]
+    _write(root, "K-000573", "K-000573", document)
+
+    with pytest.raises(RestoreError, match="dl_mapping_code"):
+        restore(root, tmp_path / "out")
+
+
+def test_stops_when_the_two_codes_disagree(tmp_path: Path) -> None:
+    """두 필드가 다르면 어느 쪽이 맞는지 알 수 없으므로 멈춥니다."""
+
+    root = tmp_path / "in"
+    document = _document(
+        "shot.png", "K-000573", category_id=OTHER_CATEGORY_ID, dl_name="게보린정 300mg/PTP"
+    )
+    document["images"][0]["drug_N"] = "K-009999"
+    _write(root, "K-000573", "K-000573", document)
+
+    with pytest.raises(RestoreError, match="drug_N"):
+        restore(root, tmp_path / "out")
+
+
+def test_writes_nothing_when_a_later_document_fails(tmp_path: Path) -> None:
+    """뒤쪽에서 멈춰도 앞쪽 결과가 남지 않습니다.
+
+    반쯤 만들어진 출력이 남으면 그 자리로 dataset을 만들었을 때 일부 알약만 복원된
+    상태가 되고, class 수만 보고는 알아채지 못합니다.
+    """
+
+    root = _source(tmp_path / "in")
+    broken = _document("shot.png", "K-009999", category_id=1234, dl_name="다른 약")
+    _write(root, "K-002483-000573", "K-009999", broken)
+    output = tmp_path / "out"
+
+    with pytest.raises(RestoreError):
+        restore(root, output)
+
+    assert not list(output.rglob("*.json"))
+
+
+def test_refuses_when_the_output_place_is_not_empty(tmp_path: Path) -> None:
+    """이전 실행의 결과를 말없이 지우거나 위에 덧쓰지 않습니다.
+
+    덧쓰기만 하면 이번에 안 나온 파일이 남아 옛 label이 섞입니다. 지우는 것은 사람이
+    결정할 일이라, 비어 있지 않으면 아무것도 하지 않습니다.
+    """
 
     root = _source(tmp_path / "in")
     restore(root, tmp_path / "out")
 
     with pytest.raises(RestoreError, match="이미"):
         restore(root, tmp_path / "out")
+
+    # report만 남아 있어도 마찬가지입니다. 그 파일도 이 도구가 쓰는 자리입니다.
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "restore_report.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RestoreError, match="이미"):
+        restore(root, other)
