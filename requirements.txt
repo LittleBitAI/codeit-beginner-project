@@ -17,10 +17,18 @@ httpx==0.28.1
 # 못하고, DINO의 MultiScaleDeformableAttention과 Cascade R-CNN의 RoIAlign이 모두
 # import 단계에서 멈춥니다.
 #
-# 지금 wheel이 있는 것은 이 두 platform뿐입니다. 그 밖에서는 mmcv가 설치되지 않고,
-# MMDetection backend를 고른 순간에 설치 안내 오류가 납니다.
-mmcv @ https://github.com/MiroPsota/torch_packages_builder/releases/download/mmcv-2.2.0%2Ba8073c7/mmcv-2.2.0%2Ba8073c7pt2.12.0cu126-cp311-cp311-linux_x86_64.whl#sha256=2ce1bf3a4e3dd2e6b98ed7cd1306de29af4a19cc95fd0da46663ee7bd13a8534 ; sys_platform == "linux"
-mmcv @ https://github.com/MiroPsota/torch_packages_builder/releases/download/mmcv-2.2.0%2Ba8073c7/mmcv-2.2.0%2Ba8073c7pt2.12.0cu126-cp311-cp311-win_amd64.whl#sha256=f6d3b7892c8fd8c6b35303c6114debd543b5a5767d3be7c9b147173de52fb5a7 ; sys_platform == "win32"
+# wheel 이름의 `cp311`은 Python 3.11 전용이라는 뜻이라 3.12에서는 pip이 "지원하지
+# 않는 wheel"이라며 거부합니다. 로컬과 CI는 3.11이지만 **Colab은 3.12**이고
+# `verify_onboarding.py`의 COLAB_PYTHON_VERSIONS가 그 둘을 모두 허용합니다. 그래서
+# Python version마다 줄을 따로 둡니다. 한쪽만 두면 문서가 지원한다고 적어 둔 환경에서
+# 설치가 깨집니다.
+#
+# 지금 wheel이 있는 것은 이 두 platform과 두 version뿐입니다. 그 밖에서는 mmcv가
+# 설치되지 않고, MMDetection backend를 고른 순간에 설치 안내 오류가 납니다.
+mmcv @ https://github.com/MiroPsota/torch_packages_builder/releases/download/mmcv-2.2.0%2Ba8073c7/mmcv-2.2.0%2Ba8073c7pt2.12.0cu126-cp311-cp311-linux_x86_64.whl#sha256=2ce1bf3a4e3dd2e6b98ed7cd1306de29af4a19cc95fd0da46663ee7bd13a8534 ; sys_platform == "linux" and python_version == "3.11"
+mmcv @ https://github.com/MiroPsota/torch_packages_builder/releases/download/mmcv-2.2.0%2Ba8073c7/mmcv-2.2.0%2Ba8073c7pt2.12.0cu126-cp312-cp312-linux_x86_64.whl#sha256=8850de3b40a32df7d74b53887fc9c564a63d2ff579a31bd5200585ff017fb0b9 ; sys_platform == "linux" and python_version == "3.12"
+mmcv @ https://github.com/MiroPsota/torch_packages_builder/releases/download/mmcv-2.2.0%2Ba8073c7/mmcv-2.2.0%2Ba8073c7pt2.12.0cu126-cp311-cp311-win_amd64.whl#sha256=f6d3b7892c8fd8c6b35303c6114debd543b5a5767d3be7c9b147173de52fb5a7 ; sys_platform == "win32" and python_version == "3.11"
+mmcv @ https://github.com/MiroPsota/torch_packages_builder/releases/download/mmcv-2.2.0%2Ba8073c7/mmcv-2.2.0%2Ba8073c7pt2.12.0cu126-cp312-cp312-win_amd64.whl#sha256=670a606a6fafaed848865d67ce3b0bc185126a9feec96f2c3c4468c423390f79 ; sys_platform == "win32" and python_version == "3.12"
 # mmdet 3.3.0은 mmcv 2.2.0 미만을 요구하지만 2024-01 이후 새 release가 없고, 위
 # 조합이 유일하게 설치 가능한 wheel입니다. mmcv 2.2.0에는 2.1.0 대비 breaking
 # change가 없어 각 pipeline이 그 버전 하나에만 상한을 통과시킵니다.
