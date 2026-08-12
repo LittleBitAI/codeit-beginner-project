@@ -1,7 +1,7 @@
 # Web multi-experiment E2E 시나리오
 
 이 시나리오는 같은 dataset으로 설정을 달리한 학습 두 건이 Web에 저장되고, 서버를
-다시 띄운 뒤에도 실험 비교 화면까지 도달하는지 확인합니다.
+다시 띄운 뒤에도 견주기 캔버스까지 도달하는지 확인합니다.
 
 ## 검증하는 흐름
 
@@ -11,8 +11,8 @@
 4. 메모리의 `JobManager`를 새 instance로 바꿔 디스크 record 재로딩을 재현합니다.
 5. `/api/train/experiments`가 두 실험, 같은 dataset identity, 서로 다른 설정과 loss를
    반환하는지 확인합니다.
-6. Frontend 전체 `App`을 `/compare`에서 열고 최근 두 실험을 선택해 같은 dataset 안내와
-   비교표가 표시되는지 확인합니다.
+6. Frontend 전체 `App`을 `/canvas`에서 열고 왼쪽 목록에서 두 실행을 눌러 겹친 뒤,
+   같은 dataset 안내와 비교표가 표시되는지 확인합니다.
 
 Fixture는
 `src/pipelines/web/frontend/src/test/fixtures/multiExperiment.json` 하나를 backend와
