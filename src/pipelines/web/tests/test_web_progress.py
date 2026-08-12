@@ -109,18 +109,26 @@ def test_an_epoch_number_past_the_plan_is_not_believed(event):
     assert result["percent"] == pytest.approx(8.3)
 
 
-def test_seeded_epochs_outside_the_new_plan_are_dropped_when_the_run_starts():
-    """이어서 하며 목표를 줄이면 앞선 실행이 계획 밖까지 돌았을 수 있습니다."""
+def test_borrowed_epochs_wait_until_training_says_where_it_resumed():
+    """앞선 기록의 마지막 epoch가 실제 재개 지점보다 앞설 수 있습니다.
+
+    어느 checkpoint가 남아 있는지는 train만 압니다. 그때까지 보여 주면 없는 epoch를
+    끝난 것으로 세고, 그 사이에 학습이 죽으면 그 곡선이 기록에 그대로 남습니다.
+    """
 
     state = ProgressState()
     seed_epochs(state, [{"epoch": number, "validation_loss": 0.6} for number in range(1, 16)])
-    consume_line(state, line("run_started", run_id="web-1", epochs=12))
+    consume_line(state, line("run_started", run_id="web-1", epochs=50))
+
+    assert snapshot(state)["epochs"] == []
+    assert snapshot(state)["completed_epochs"] == 0
+
+    consume_line(state, line("epoch_started", epoch=11, epochs=50))
 
     result = snapshot(state)
 
-    assert max(state.epochs_by_number) == 12
-    assert result["completed_epochs"] == 12
-    assert result["percent"] == 100.0
+    assert [entry["epoch"] for entry in result["epochs"]] == list(range(1, 11))
+    assert result["completed_epochs"] == 10
 
 
 def test_a_foreign_line_cannot_raise_the_plan_and_smuggle_its_epoch_in():
@@ -150,7 +158,7 @@ def test_a_completed_count_past_the_plan_is_not_believed():
     assert snapshot(state)["completed_epochs"] == 1
 
 
-def test_seeded_epochs_are_dropped_wherever_this_run_turns_out_to_be():
+def test_borrowed_epochs_follow_wherever_this_run_turns_out_to_be():
     """재개 지점은 `epoch_started`가 아니라 이 실행이 지나간 자리로 정합니다.
 
     `epoch_started`를 놓치고 batch 위치부터 와도 다시 도는 epoch가 끝난 것으로

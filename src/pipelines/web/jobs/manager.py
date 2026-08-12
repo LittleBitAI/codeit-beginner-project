@@ -93,27 +93,6 @@ def _lost_runtime_message() -> str:
     )
 
 
-def _up_to_last_checkpoint(record: JobRecord) -> list[dict[str, Any]]:
-    """이 기록의 epoch 중 checkpoint로 남아 있는 데까지만 돌려줍니다.
-
-    train은 `epoch % checkpoint_every == 0`일 때 저장합니다(마지막 epoch는 주기와
-    무관하지만, 끝까지 간 학습은 이어서 할 대상이 아닙니다). 그래서 15 epoch까지
-    돌고 끊긴 주기 5짜리 학습은 10에서 다시 출발합니다.
-    """
-
-    entries = [
-        entry
-        for entry in (record.progress.get("epochs") or [])
-        if isinstance(entry, dict) and isinstance(entry.get("epoch"), int)
-    ]
-    every = record.settings.get("checkpoint_every")
-    if not isinstance(every, int) or isinstance(every, bool) or every < 1:
-        return entries
-    last = max((entry["epoch"] for entry in entries), default=0)
-    cutoff = last - (last % every)
-    return [entry for entry in entries if entry["epoch"] <= cutoff]
-
-
 class JobManager:
     """이 서버가 실행한 학습 job들의 유일한 소유자."""
 
@@ -615,15 +594,14 @@ class JobManager:
         (예: 다른 Colab runtime에서 돈 학습, 또는 사람이 그 기록을 지운 경우)
         지어내지 않고 그냥 둡니다.
 
-        train은 epoch마다 완료를 알리지만 checkpoint는 `checkpoint_every`마다
-        저장하므로, 기록의 마지막 epoch가 이어서 학습이 실제로 출발하는 자리보다
-        앞설 수 있습니다. 같은 주기로 미리 잘라 냅니다. train이 첫 `epoch_started`를
-        보내기 전에도 화면이 없는 epoch를 보여 주면 안 되기 때문입니다.
+        옮겨 온 epoch는 train이 어디서 이어붙는지 말해 줄 때까지 화면에 나오지
+        않습니다. 기록의 마지막 epoch가 실제 재개 지점보다 앞설 수 있는데, 어느
+        checkpoint가 남아 있는지는 train만 알기 때문입니다.
         """
 
         record = self._records.get(job_id) if job_id else None
         if record is not None:
-            seed_epochs(state, _up_to_last_checkpoint(record))
+            seed_epochs(state, record.progress.get("epochs"))
 
     def _spawn(self, record: JobRecord, config_id: str) -> JobRecord:
         """자리를 잡은 기록으로 실제 process를 띄웁니다. gate 밖에서 합니다."""

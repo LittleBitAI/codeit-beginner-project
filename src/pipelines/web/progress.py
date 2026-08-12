@@ -82,9 +82,9 @@ class ProgressState:
         # epoch 번호가 중복되거나 역순으로 와도 안전하도록 dict에 담습니다.
         self.epochs_by_number: dict[int, dict[str, Any]] = {}
         self.malformed_lines = 0
-        # 앞선 실행에서 옮겨 온 epoch 번호입니다. 이 실행이 그 자리를 다시 지나가면
-        # 지웁니다. 이 실행이 직접 끝낸 epoch는 여기 들어오지 않습니다.
-        self.seeded_epochs: set[int] = set()
+        # 앞선 실행에서 옮겨 왔지만 아직 화면에 내보내지 않은 epoch입니다. 이 실행이
+        # 몇 번째를 지나는지 알게 되면 그 앞까지만 `epochs_by_number`로 옮깁니다.
+        self.seeded_epochs: dict[int, dict[str, Any]] = {}
         # 지금 지나고 있는 epoch 안의 batch 위치입니다. epoch 경계에서 지웁니다.
         self.step: dict[str, Any] | None = None
         # log 줄 없이 상태만 바뀌었다는 표시입니다. `take_quiet_change`가 읽고 지웁니다.
@@ -162,10 +162,6 @@ def _apply_run_started(state: ProgressState, event: dict[str, Any]) -> dict[str,
     state.architecture = _text(event.get("architecture")) or state.architecture
     state.device = _text(event.get("device")) or state.device
     state.epochs = _positive_int(event.get("epochs")) or state.epochs
-    if state.epochs is not None:
-        # 이어서 학습하며 목표를 줄였을 수 있습니다. 계획 밖으로 나간 앞선 epoch를
-        # 그대로 두면 15/12처럼 100%를 넘겨 그립니다.
-        _drop_seeded_from(state, state.epochs + 1)
     state.train_images = _non_negative_int(event.get("train_images"))
     state.validation_images = _non_negative_int(event.get("validation_images"))
     state.class_count = _non_negative_int(event.get("class_count"))
@@ -207,20 +203,21 @@ def _event_epoch(state: ProgressState, event: dict[str, Any]) -> int | None:
     return epoch
 
 
-def _drop_seeded_from(state: ProgressState, epoch: int) -> None:
-    """이 실행이 `epoch`을 지나고 있다면 그 뒤의 **옮겨 온** epoch를 지웁니다.
+def _merge_seeded(state: ProgressState, epoch: int) -> None:
+    """이 실행이 `epoch`을 지나고 있음을 알았을 때 그 앞의 옮겨 온 epoch를 붙입니다.
 
-    앞선 실행은 checkpoint보다 뒤까지 돌았을 수 있습니다. train은 epoch마다 완료를
-    알리지만 checkpoint는 `checkpoint_every`마다 저장하기 때문입니다. 그 epoch는
-    다시 도는 중이므로 끝난 것으로 두면 진행률이 실제보다 앞섭니다.
-
-    이 실행이 스스로 끝낸 epoch는 목록에 없으므로 지워지지 않습니다. 그래서 어떤
-    event가 먼저 오든 같은 결과가 됩니다.
+    이제야 실제 재개 지점을 압니다. `epoch`부터는 이 실행이 다시 도는 자리이므로,
+    앞선 실행이 거기까지 갔더라도 끝난 것으로 두면 진행률이 실제보다 앞섭니다.
+    한 번 붙이고 나면 들고 있던 것은 비웁니다. 어떤 event가 먼저 오든 같은 결과가
+    되고, 이 실행이 이미 기록한 epoch를 나중에 덮어쓰지도 않습니다.
     """
 
-    for number in [key for key in state.seeded_epochs if key >= epoch]:
-        state.seeded_epochs.discard(number)
-        state.epochs_by_number.pop(number, None)
+    if not state.seeded_epochs:
+        return
+    for number, record in state.seeded_epochs.items():
+        if number < epoch and number not in state.epochs_by_number:
+            state.epochs_by_number[number] = record
+    state.seeded_epochs = {}
 
 
 def _apply_epoch_started(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:
@@ -229,7 +226,7 @@ def _apply_epoch_started(state: ProgressState, event: dict[str, Any]) -> dict[st
     if epoch is None:
         state.malformed_lines += 1
         return None
-    _drop_seeded_from(state, epoch)
+    _merge_seeded(state, epoch)
     state.current_epoch = epoch
     # 새 epoch은 batch 0부터 다시 셉니다.
     state.step = None
@@ -265,7 +262,7 @@ def _apply_step_progress(state: ProgressState, event: dict[str, Any]) -> dict[st
         return None
 
     # epoch_started를 놓쳤어도 몇 번째 epoch인지는 알 수 있습니다.
-    _drop_seeded_from(state, epoch)
+    _merge_seeded(state, epoch)
     state.current_epoch = epoch
 
     state.step = {
@@ -295,12 +292,18 @@ def _epoch_record(epoch: int, event: dict[str, Any]) -> dict[str, Any]:
 
 
 def seed_epochs(state: ProgressState, entries: Any) -> None:
-    """앞선 실행이 이미 끝낸 epoch를 진행 상태에 미리 채웁니다.
+    """앞선 실행이 이미 끝낸 epoch를 옆에 들고 있다가 이어붙일 준비를 합니다.
 
     이어서 학습한 실행은 checkpoint에서 출발하므로 그전 epoch가 진행 log로 오지
-    않습니다. 채우지 않으면 손실 그래프가 이어붙인 지점에서 시작해, 앞의 곡선이
+    않습니다. 들고 있지 않으면 손실 그래프가 이어붙인 지점에서 시작해, 앞의 곡선이
     사라진 것처럼 보입니다. 저장돼 있던 기록이라 key가 빠져 있을 수 있으므로 지금
     계약의 모양으로 다시 맞춥니다.
+
+    **바로 화면에 내보내지는 않습니다.** 앞선 기록의 마지막 epoch가 실제 재개
+    지점보다 앞설 수 있습니다. train은 epoch마다 완료를 알리지만 checkpoint는
+    `checkpoint_every`마다, 그리고 마지막 epoch에 저장하므로 어느 것이 남아 있는지는
+    train만 압니다. 이 실행이 몇 번째 epoch를 지나는지 알게 되는 순간
+    `_merge_seeded`가 그 앞까지만 이어붙입니다.
     """
 
     if not isinstance(entries, list):
@@ -315,8 +318,7 @@ def seed_epochs(state: ProgressState, entries: Any) -> None:
         # 앞선 실행의 epoch 시간은 버립니다. 다른 기계에서 돌았을 수 있어, 남은 시간을
         # 그 속도로 추정하면 이번 실행과 무관한 숫자가 나옵니다.
         record["epoch_seconds"] = None
-        state.epochs_by_number[epoch] = record
-        state.seeded_epochs.add(epoch)
+        state.seeded_epochs[epoch] = record
 
 
 def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:
@@ -326,8 +328,8 @@ def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[
         state.malformed_lines += 1
         return None
 
-    # 이 실행이 이 자리를 지나갔으므로 뒤에 남은 옮겨 온 epoch는 다시 도는 것입니다.
-    _drop_seeded_from(state, epoch)
+    # 이 실행이 이 자리를 지나갔으므로 앞선 실행의 epoch도 여기까지만 이어붙입니다.
+    _merge_seeded(state, epoch)
     record = _epoch_record(epoch, event)
     # 같은 epoch이 다시 오면 나중 값으로 덮어씁니다.
     state.epochs_by_number[epoch] = record

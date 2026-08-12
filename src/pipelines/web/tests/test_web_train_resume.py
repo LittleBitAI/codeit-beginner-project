@@ -448,14 +448,14 @@ def test_resumed_run_keeps_the_loss_curve_of_the_run_it_continues(
     assert started.progress["completed_epochs"] == 11
 
 
-def test_epochs_past_the_checkpoint_are_dropped_before_training_even_starts(
+def test_epochs_past_the_checkpoint_are_dropped_when_training_says_where_it_resumed(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):
     """checkpoint는 `checkpoint_every`마다 저장되지만 완료는 epoch마다 알려 옵니다.
 
     그래서 앞선 기록에는 checkpoint보다 뒤의 epoch가 남아 있을 수 있습니다. 그대로
     두면 다시 도는 epoch를 이미 끝난 것으로 세어, 진행률이 실제보다 앞섭니다.
-    train이 model을 만드는 동안에도 화면에 보이므로 미리 잘라 냅니다.
+    어느 checkpoint가 남아 있는지는 train만 알므로, 말해 줄 때까지 기다립니다.
     """
 
     from src.pipelines.web.jobs import runner
@@ -463,17 +463,19 @@ def test_epochs_past_the_checkpoint_are_dropped_before_training_even_starts(
     record = _interrupted_job(
         client, manager, monkeypatch, fake_process_factory, data_inputs
     )
-    # 10 epoch마다 저장했으므로 15까지 돌았어도 남아 있는 checkpoint는 10입니다.
-    record.settings = {**record.settings, "checkpoint_every": 10}
     record.progress = {
         "available": True,
         "epochs": [{"epoch": number, "validation_loss": 0.6} for number in range(1, 16)],
     }
-    # 첫 epoch event가 오기 전에도 계획만 알려 준 상태에서 이미 맞아야 합니다.
-    line = json.dumps(
-        {"schema": "train.progress/1", "event": "run_started", "run_id": "r", "epochs": 50}
+    # 15까지 돌았지만 남아 있는 checkpoint는 10이라 train은 11부터 다시 시작합니다.
+    lines = "".join(
+        json.dumps(event) + "\n"
+        for event in (
+            {"schema": "train.progress/1", "event": "run_started", "run_id": "r", "epochs": 50},
+            {"schema": "train.progress/1", "event": "epoch_started", "epoch": 11, "epochs": 50},
+        )
     )
-    monkeypatch.setattr(runner, "spawn", lambda *a, **k: fake_process_factory(stderr=line + "\n"))
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: fake_process_factory(stderr=lines))
 
     response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 50})
 
