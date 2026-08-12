@@ -50,14 +50,19 @@ def test_직접_부른_저장은_잘못된_값을_막는다():
 
 
 def test_고르지_않았으면_자동_평가_thread를_띄우지_않는다(client):
+    """할 일이 없는 thread를 띄워 두지 않습니다.
+
+    깨어 있는 thread가 남으면 서버가 사는 내내 아무 일도 안 하면서 자리를
+    차지하고, 나중에 설정을 저장할 때 어차피 다시 띄웁니다.
+    """
+
     from src.pipelines.web.jobs import get_manager
 
     manager = get_manager()
     manager._evaluation_pending.append("없는-job")
     manager.wake_evaluation()
 
-    # 줄에 있어도 설정이 비어 있으면 아무것도 시작하지 않습니다.
-    assert client.get("/api/settings").json()["evaluation_mode"] is None
+    assert manager._evaluation_thread is None
 
 
 def test_줄이_비어_있으면_thread를_아예_만들지_않는다(client):
@@ -68,6 +73,41 @@ def test_줄이_비어_있으면_thread를_아예_만들지_않는다(client):
     manager.wake_evaluation()
 
     assert manager._evaluation_thread is None
+
+
+def test_직렬이면_평가가_도는_동안_학습을_시작하지_않는다(client, valid_payload):
+    """직렬을 고른 이유가 이것입니다 — 8GB에서 겹치면 둘 다 잃습니다.
+
+    평가를 시작할 때만 학습을 확인하고 반대쪽을 비워 두면, 평가가 도는 사이에
+    대기열의 다음 학습이나 사람이 누른 시작이 그대로 들어와 약속이 깨집니다.
+    """
+
+    from src.pipelines.web import evaluation
+    from src.pipelines.web.errors import JobConflictError
+    from src.pipelines.web.jobs import get_manager
+
+    client.put("/api/settings", json={"evaluation_mode": "serial"})
+    created = client.post("/api/train/configs", json=valid_payload).json()
+    # 평가가 도는 중이라고 표시합니다.
+    evaluation.get_evaluation_runner()._state = {"status": "running", "job_id": "다른-학습"}
+
+    with pytest.raises(JobConflictError):
+        get_manager().start(created["config_id"])
+
+
+def test_병렬이면_평가가_돌아도_학습을_막지_않는다(client, valid_payload, monkeypatch, fake_process_factory):
+    from src.pipelines.web import evaluation
+    from src.pipelines.web.jobs import runner
+    from src.pipelines.web.jobs import get_manager
+
+    client.put("/api/settings", json={"evaluation_mode": "parallel"})
+    created = client.post("/api/train/configs", json=valid_payload).json()
+    evaluation.get_evaluation_runner()._state = {"status": "running", "job_id": "다른-학습"}
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: fake_process_factory())
+
+    record = get_manager().start(created["config_id"])
+
+    assert record.job_id
 
 
 def test_시작하지_못한_학습은_줄_맨_앞으로_되돌린다(client):

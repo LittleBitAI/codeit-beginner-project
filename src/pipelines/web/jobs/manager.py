@@ -337,9 +337,15 @@ class JobManager:
         """평가할 것이 생겼다고 알립니다. thread가 없으면 여기서 띄웁니다.
 
         학습이 끝날 때마다, 그리고 설정이 바뀔 때마다 불립니다. 실제로 무엇을 언제
-        돌릴지는 thread가 정합니다. 줄이 비어 있으면 아무 일도 하지 않습니다.
+        돌릴지는 thread가 정합니다. 줄이 비어 있거나 사람이 평가 방식을 아직 고르지
+        않았으면 thread 자체를 띄우지 않습니다 — 할 일이 없는데 깨어 있는 thread를
+        두면, 나중에 설정을 저장할 때 이 함수가 다시 불려 그때 띄우면 됩니다.
         """
 
+        from .. import settings as web_settings
+
+        if web_settings.evaluation_mode() is None:
+            return
         with self._lock:
             if not self._evaluation_pending:
                 return
@@ -411,6 +417,14 @@ class JobManager:
                     break
                 if not self._start_one_evaluation(runner_, _Conflict):
                     break
+            # 직렬에서는 평가가 도는 동안 대기열이 멈춰 서 있었습니다. 다 끝났으니
+            # 다시 밀어 줍니다. 여기서 깨우지 않으면 밤새 돌리려던 대기열이 첫
+            # 평가에서 멈춘 채 아침을 맞습니다.
+            try:
+                self._start_next()
+            except Exception:
+                # background thread에는 오류를 응답할 caller가 없습니다.
+                pass
 
     def _start_one_evaluation(self, runner_: Any, conflict: type[Exception]) -> bool:
         """줄에서 하나를 꺼내 평가를 시작하고 끝날 때까지 기다립니다.
@@ -444,9 +458,37 @@ class JobManager:
 
     # ------------------------------------------------------------------ 실행
 
+    def _refuse_while_evaluating(self) -> None:
+        """직렬로 두었으면 평가가 도는 동안 학습을 시작하지 않습니다.
+
+        직렬을 고른 이유가 바로 이것입니다 — 8GB 카드에서 학습과 평가가 겹치면 둘
+        다 out of memory로 잃습니다. 평가를 시작할 때만 학습을 확인하고 반대쪽을
+        비워 두면, 평가가 도는 사이에 대기열의 다음 학습이나 사람이 누른 시작이
+        그대로 들어와 약속이 깨집니다.
+
+        ponytail: 확인과 시작 사이에 아주 좁은 틈이 남습니다. 그 틈을 없애려면 팀
+        기록 생성(network 호출)까지 평가 lock을 쥔 채로 지나야 하는데, 그동안 평가
+        상태 조회가 통째로 막힙니다. 반대쪽에도 같은 확인이 있어 둘이 동시에
+        빠져나갈 창이 아주 짧습니다. 더 좁혀야 하면 GPU 자리 하나를 두 작업이
+        나눠 갖는 별도의 잠금을 둡니다.
+        """
+
+        from .. import settings as web_settings
+        from ..evaluation import get_evaluation_runner
+
+        if web_settings.evaluation_mode() != "serial":
+            return
+        if get_evaluation_runner().status().get("status") != STATUS_RUNNING:
+            return
+        raise JobConflictError(
+            "평가가 실행 중입니다. 평가 실행을 '직렬'로 두었으므로 평가가 끝난 뒤에"
+            " 시작할 수 있습니다. 설정에서 '학습과 함께'로 바꾸면 겹쳐서 돌릴 수 있습니다."
+        )
+
     def start(self, config_id: str, *, access_token: str | None = None) -> JobRecord:
         """저장된 설정으로 학습을 시작합니다. 이미 실행 중이면 거부합니다."""
 
+        self._refuse_while_evaluating()
         self.load()
         config = read_runtime_config(config_id)
         settings = dict(config.get("train") or {})
