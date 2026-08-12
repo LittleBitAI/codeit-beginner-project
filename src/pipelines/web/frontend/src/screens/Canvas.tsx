@@ -422,11 +422,19 @@ export function Canvas({
   datasetKey,
   records,
   loading,
+  onScoreSaved,
 }: {
   datasetKey: string | null;
   /** 왼쪽에서 고른 dataset의 기록만 넘어옵니다. */
   records: RunRecord[];
   loading: boolean;
+  /**
+   * Kaggle 점수를 적은 뒤 기록 목록도 다시 읽게 합니다.
+   *
+   * 이 화면만 새로 읽으면 목록의 점수와 '제출 완료' 필터는 다음 polling(60초)까지
+   * 옛 값으로 남습니다. 방금 적은 점수가 목록에서 `-`로 보이면 저장이 안 된 줄 압니다.
+   */
+  onScoreSaved: () => void;
 }) {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -736,7 +744,10 @@ export function Canvas({
               ) : compared.length === 1 ? (
                 <SingleView
                   item={compared[0] as ExperimentSummary}
-                  onSaved={() => setReloadKey((value) => value + 1)}
+                  onSaved={() => {
+                    setReloadKey((value) => value + 1);
+                    onScoreSaved();
+                  }}
                 />
               ) : (
                 <div style={{ paddingTop: 26, borderTop: `1px solid ${color.border}` }}>

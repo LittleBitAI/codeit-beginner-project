@@ -129,10 +129,15 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function show() {
+function show(onScoreSaved = () => {}) {
   return render(
     <MemoryRouter initialEntries={['/canvas?run=retina-a7f3']}>
-      <Canvas datasetKey="v5" records={[record()]} loading={false} />
+      <Canvas
+        datasetKey="v5"
+        records={[record()]}
+        loading={false}
+        onScoreSaved={onScoreSaved}
+      />
     </MemoryRouter>,
   );
 }
@@ -169,6 +174,19 @@ describe('Canvas Kaggle 점수', () => {
     // 이미 있는 값을 고치는 것이므로 서버에 덮어쓰기를 명시합니다.
     await waitFor(() => expect(puts).toHaveLength(1));
     expect(puts[0]?.body).toEqual({ score: 0.61, overwrite: true });
+  });
+
+  it('저장하면 기록 목록도 다시 읽게 한다', async () => {
+    // 이 화면만 새로 읽으면 목록의 점수와 제출 완료 필터가 60초 동안 옛 값입니다.
+    const onScoreSaved = vi.fn();
+    show(onScoreSaved);
+
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Kaggle 점수' }), {
+      target: { value: '0.6123' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '저장' }));
+
+    await waitFor(() => expect(onScoreSaved).toHaveBeenCalled());
   });
 
   it('숫자가 아니면 보내지 않는다', async () => {

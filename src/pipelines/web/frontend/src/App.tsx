@@ -158,6 +158,7 @@ function Shell() {
               datasetKey={datasetKey}
               records={shownRecords}
               loading={experiments.loading}
+              onScoreSaved={experiments.refresh}
             />
           }
         />

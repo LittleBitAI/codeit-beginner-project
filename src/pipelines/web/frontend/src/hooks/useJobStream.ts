@@ -29,6 +29,14 @@ export function useJobStream(jobId: string | undefined): JobStream {
   const cursor = useRef(0);
   const inFlight = useRef(false);
   const mounted = useRef(true);
+  /**
+   * 지금 보고 있는 job. 응답을 반영하기 전에 이것과 같은지 확인합니다.
+   *
+   * 확인하지 않으면 job을 옮긴 뒤 늦게 도착한 이전 응답이 화면을 옛 job으로
+   * 되돌려 놓습니다. 주소는 B인데 화면과 삭제 버튼은 A를 가리키게 되어, 지우면
+   * 엉뚱한 기록이 사라집니다.
+   */
+  const watching = useRef(jobId);
 
   const reset = useCallback(() => {
     cursor.current = 0;
@@ -43,7 +51,7 @@ export function useJobStream(jobId: string | undefined): JobStream {
     try {
       const record = await api.getJob(jobId);
       const page = await api.logs(jobId, cursor.current);
-      if (!mounted.current) return;
+      if (!mounted.current || watching.current !== jobId) return;
       setJob(record);
       if (page.lines.length > 0) {
         cursor.current = page.next;
@@ -52,11 +60,13 @@ export function useJobStream(jobId: string | undefined): JobStream {
       setError(null);
       setStreaming(record.status === 'running' || record.status === 'queued');
     } catch (caught) {
-      if (!mounted.current) return;
+      if (!mounted.current || watching.current !== jobId) return;
       setError(caught instanceof Error ? caught.message : '알 수 없는 오류가 발생했습니다.');
       setStreaming(false);
     } finally {
-      inFlight.current = false;
+      // 지금 보고 있는 job의 요청일 때만 잠금을 풉니다. 옮긴 뒤 늦게 끝난 이전
+      // 요청이 새 job의 잠금을 풀어 버리면 요청이 겹칩니다.
+      if (watching.current === jobId) inFlight.current = false;
     }
   }, [jobId]);
 
@@ -68,6 +78,10 @@ export function useJobStream(jobId: string | undefined): JobStream {
   }, []);
 
   useEffect(() => {
+    // 보는 대상을 먼저 바꿉니다. 이전 job의 응답은 이 시점부터 버려지고, 아직
+    // 끝나지 않은 그 요청 때문에 새 job의 첫 조회를 거르지도 않습니다.
+    watching.current = jobId;
+    inFlight.current = false;
     reset();
     if (!jobId) return;
     void tick();
