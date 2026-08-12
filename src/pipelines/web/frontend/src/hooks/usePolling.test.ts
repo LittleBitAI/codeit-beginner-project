@@ -49,6 +49,37 @@ describe('usePolling', () => {
     });
   });
 
+  it('도는 중에 부른 refresh를 버리지 않고 끝난 뒤 한 번 더 돈다', async () => {
+    // 버리면 방금 바꾼 값이 화면에 안 옵니다. 진행 중이던 응답은 바꾸기 전
+    // 상태라, 그것으로 끝내면 다음 주기까지 옛 값이 남습니다.
+    const releases: ((value: string) => void)[] = [];
+    const fetcher = vi.fn(
+      () => new Promise<string>((resolve) => releases.push(resolve)),
+    );
+
+    const { result } = renderHook(() => usePolling(fetcher, 0));
+    await act(async () => {});
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // 첫 요청이 아직 도는 중에 refresh를 부릅니다.
+    await act(async () => {
+      result.current.refresh();
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      releases[0]?.('낡은 값');
+    });
+
+    // 첫 요청이 끝나자마자 미뤄 둔 요청이 나갑니다.
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      releases[1]?.('새 값');
+    });
+    expect(result.current.data).toBe('새 값');
+  });
+
   it('enabled가 false면 아무것도 부르지 않는다', async () => {
     const fetcher = vi.fn().mockResolvedValue('ok');
 

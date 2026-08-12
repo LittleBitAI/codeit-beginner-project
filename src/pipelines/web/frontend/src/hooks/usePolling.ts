@@ -22,23 +22,40 @@ export function usePolling<T>(
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(enabled);
   const inFlight = useRef(false);
+  /**
+   * 도는 중에 들어온 `refresh()` 요청. 끝나면 한 번 더 돕니다.
+   *
+   * 그냥 버리면 방금 바꾼 값이 화면에 안 옵니다. 진행 중이던 응답은 바꾸기 **전**
+   * 상태라, 그것을 넣고 끝내면 다음 주기(최대 60초)까지 옛 값이 남습니다. 실제로
+   * Kaggle 점수를 저장해도 목록이 `-`인 채로 있었습니다.
+   */
+  const again = useRef(false);
   const mounted = useRef(true);
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
   const run = useCallback(async () => {
-    if (inFlight.current) return;
+    if (inFlight.current) {
+      again.current = true;
+      return;
+    }
     inFlight.current = true;
     try {
-      const result = await fetcherRef.current();
-      if (!mounted.current) return;
-      setData(result);
-      setError(null);
-    } catch (caught) {
-      if (!mounted.current) return;
-      setError(caught instanceof Error ? caught.message : '알 수 없는 오류가 발생했습니다.');
+      do {
+        again.current = false;
+        try {
+          const result = await fetcherRef.current();
+          if (!mounted.current) return;
+          setData(result);
+          setError(null);
+        } catch (caught) {
+          if (!mounted.current) return;
+          setError(caught instanceof Error ? caught.message : '알 수 없는 오류가 발생했습니다.');
+        }
+      } while (again.current);
     } finally {
       inFlight.current = false;
+      again.current = false;
       if (mounted.current) setLoading(false);
     }
   }, []);
