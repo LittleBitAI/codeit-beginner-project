@@ -25,6 +25,7 @@ import {
 import { color, font, type } from '../design/tokens';
 import { useElapsedSeconds } from '../hooks/useElapsedSeconds';
 import { duration, loss, startedAt } from '../lib/format';
+import { epochsDone, progressRatio } from '../lib/progress';
 import {
   FILTER_LABEL,
   SORT_LABEL,
@@ -63,9 +64,9 @@ function LiveCard({ job, onOpen }: { job: JobRecord; onOpen: () => void }) {
   const progress = job.progress;
   const latest = progress.epochs[progress.epochs.length - 1] ?? null;
   const best = progress.best ?? null;
-  const done = progress.completed_epochs ?? progress.current_epoch ?? 0;
+  const done = epochsDone(progress);
   const total = progress.total_epochs;
-  const ratio = progress.percent ?? (total ? done / total : null);
+  const ratio = progressRatio(progress);
 
   // 좋아진 폭입니다. 첫 epoch과 지금 best의 차이라 "얼마나 내려왔는지"가 됩니다.
   const first = progress.epochs.find((item) => item.validation_loss !== null)?.validation_loss ?? null;
@@ -229,7 +230,7 @@ function rowFromTeamRun(run: TeamRun): RunningRow {
 
 function rowFromJob(job: JobRecord): RunningRow {
   const progress = job.progress;
-  const current = progress.completed_epochs ?? progress.current_epoch ?? null;
+  const current = progress.current_epoch ?? progress.completed_epochs ?? null;
   return {
     runId: job.run_id,
     who: '나 (이 컴퓨터)',
