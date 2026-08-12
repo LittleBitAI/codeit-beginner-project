@@ -78,7 +78,18 @@ describe('디자인 토큰', () => {
       expect(contrast(shade.onAccent, shade.accent)).toBeGreaterThanOrEqual(4.5);
       // 보조 글자는 원본 디자인 값 그대로(두 판 모두 약 4.3:1)라 큰 글자 기준을 씁니다.
       expect(contrast(shade.textMuted, shade.page)).toBeGreaterThanOrEqual(3);
+      // 강조색 위에 흰색을 박아 두면 어두운 판에서 2.1:1이 됩니다. onAccent를 씁니다.
+      expect(contrast('#FFFFFF', shade.accent)).toBeGreaterThanOrEqual(
+        theme === 'light' ? 4.5 : 0,
+      );
     }
+  });
+
+  it('강조색 위에는 흰색을 박아 쓰지 않는다', () => {
+    // 어두운 판의 amber 위 흰 글자는 2.1:1이라 읽히지 않습니다. 실제로 dataset 준비
+    // 화면의 선택된 비율 버튼이 그랬습니다.
+    expect(contrast('#FFFFFF', palette.dark.accent)).toBeLessThan(4.5);
+    expect(contrast(palette.dark.onAccent, palette.dark.accent)).toBeGreaterThanOrEqual(4.5);
   });
 
   it('숫자를 다루는 타입은 mono 글꼴을 쓴다', () => {

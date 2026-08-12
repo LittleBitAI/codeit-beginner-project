@@ -382,6 +382,12 @@ class JobManager:
         1.8GB 더 쓰기 때문에, 8GB 카드에서 학습과 겹치면 둘 다 out of memory로
         잃습니다. ``parallel``이면 곧바로 시작합니다.
 
+        기록을 꺼내는 것부터 시작까지 EvaluationRunner의 lock을 쥡니다. `/evaluate`
+        route가 같은 이유로 그렇게 합니다 — 놓고 있으면 그 틈에 DELETE가 성공하고,
+        이미 지워진 record로 시작한 평가가 끝나면서 사람이 지운 기록을 다시 저장해
+        되살립니다. lock은 언제나 **runner 먼저, manager 나중** 순서로 잡습니다.
+        DELETE도 그 순서라 서로 엇갈리지 않습니다.
+
         ponytail: 평가가 끝났는지는 5초마다 상태를 물어봅니다. 평가 하나가 몇 분
         걸리므로 이 정도 지연은 보이지 않습니다. 더 촘촘해야 하면 EvaluationRunner에
         완료 callback을 답니다.
@@ -403,24 +409,38 @@ class JobManager:
                     break
                 if mode == "serial" and self.active_job() is not None:
                     break
-                record = self._next_unevaluated()
-                if record is None:
+                if not self._start_one_evaluation(runner_, _Conflict):
                     break
-                try:
-                    runner_.start(record, {})
-                except _Conflict:
-                    # 사람이 화면에서 먼저 눌렀습니다. 꺼낸 것을 되돌리고, 그 평가가
-                    # 끝나기를 기다렸다 다시 집습니다. 되돌리지 않으면 이 학습은
-                    # 영영 자동 평가되지 않습니다.
-                    self._requeue_evaluation(record.job_id)
-                except Exception:
-                    # 평가 하나가 시작조차 못 했다고 server를 죽이지 않습니다.
-                    # 되돌리지 않는 것은 같은 이유로 계속 실패하며 도는 것을 막기
-                    # 위해서입니다. 사람이 화면에서 다시 누를 수 있습니다.
-                    break
-                # 한 번에 하나만 돌 수 있으므로 끝날 때까지 기다렸다 다음을 집습니다.
-                while runner_.status().get("status") == "running":
-                    time.sleep(5)
+
+    def _start_one_evaluation(self, runner_: Any, conflict: type[Exception]) -> bool:
+        """줄에서 하나를 꺼내 평가를 시작하고 끝날 때까지 기다립니다.
+
+        더 볼 것이 있으면 True입니다. 시작할 것이 없거나 더 봐서는 안 되는 상태면
+        False를 돌려 바깥 반복을 멈춥니다.
+        """
+
+        with runner_.locked():
+            record = self._next_unevaluated()
+            if record is None:
+                return False
+            try:
+                runner_.start(record, {})
+            except conflict:
+                # 사람이 화면에서 먼저 눌렀습니다. 꺼낸 것을 되돌리고, 그 평가가
+                # 끝나기를 기다렸다 다시 집습니다. 되돌리지 않으면 이 학습은
+                # 영영 자동 평가되지 않습니다.
+                self._requeue_evaluation(record.job_id)
+            except Exception:
+                # 평가 하나가 시작조차 못 했다고 server를 죽이지 않습니다.
+                # 되돌리지 않는 것은 같은 이유로 계속 실패하며 도는 것을 막기
+                # 위해서입니다. 사람이 화면에서 다시 누를 수 있습니다.
+                return False
+        # 한 번에 하나만 돌 수 있으므로 끝날 때까지 기다렸다 다음을 집습니다.
+        # lock은 여기서 이미 놓았습니다 — 쥔 채로 기다리면 사람이 화면에서 누른
+        # 평가와 기록 삭제가 평가가 끝날 때까지 통째로 막힙니다.
+        while runner_.status().get("status") == "running":
+            time.sleep(5)
+        return True
 
     # ------------------------------------------------------------------ 실행
 

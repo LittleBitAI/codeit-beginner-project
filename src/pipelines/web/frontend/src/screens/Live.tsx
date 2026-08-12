@@ -10,7 +10,7 @@ import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, ApiError } from '../api/client';
-import type { GpuStatus, JobListing, QueueState } from '../api/types';
+import type { GpuStatus, JobListing, JobRecord, QueueState } from '../api/types';
 import { EvaluatePanel } from '../components/EvaluatePanel';
 import { ChartHead, LossChart } from '../components/LossChart';
 import { LossBreakdown } from '../components/LossBreakdown';
@@ -35,12 +35,106 @@ import { usePolling } from '../hooks/usePolling';
 import { duration, loss, megabytes, percent } from '../lib/format';
 import { useTeam } from '../team/TeamContext';
 
+/**
+ * 기록을 지우기 전 확인입니다.
+ *
+ * 무엇이 사라지고 무엇이 남는지를 나란히 적습니다. "정말 지울까요?"만 묻는 창은
+ * 학습 결과까지 날아가는 줄 알게 만들거나, 반대로 날아가는 줄 모르고 누르게 합니다.
+ */
+function DeleteRecordDialog({
+  job,
+  onClose,
+  onDeleted,
+}: {
+  job: JobRecord;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function remove() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteJob(job.job_id);
+      onDeleted();
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : '기록을 지우지 못했습니다.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <div
+        onClick={onClose}
+        style={{ position: 'fixed', inset: 0, background: 'rgba(8,6,4,.55)', zIndex: 65 }}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${job.run_id} 기록 삭제`}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') onClose();
+        }}
+        style={{
+          position: 'fixed',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          zIndex: 70,
+          width: 'min(460px, calc(100vw - 40px))',
+          background: color.sheet,
+          border: `1px solid ${color.border}`,
+          borderRadius: 4,
+          padding: '20px 22px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 14,
+        }}
+      >
+        <span style={{ ...type.subTitle, color: color.text, overflowWrap: 'anywhere' }}>
+          {job.run_id} 기록을 지울까요?
+        </span>
+        <span style={{ ...type.bodySmall, color: color.textBody }}>
+          <b style={{ color: color.danger }}>지웁니다</b> — 이 GUI가 들고 있는 실행 기록과 로그.
+        </span>
+        <span style={{ ...type.bodySmall, color: color.textBody }}>
+          <b style={{ color: color.ok }}>그대로 둡니다</b> — 학습 결과 폴더와 checkpoint, registry에
+          등록된 실험, 팀에 공유된 기록, 이 학습이 쓴 설정 파일.
+        </span>
+        <span style={{ ...type.note, color: color.textMuted }}>
+          되돌릴 수 없습니다. 목록에서만 사라지고 학습 자체는 남습니다.
+        </span>
+        {error && (
+          <AlertRow level="error" title="지우지 못했습니다">
+            {error}
+          </AlertRow>
+        )}
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <Button kind="ghost" onClick={onClose} disabled={busy}>
+            취소
+          </Button>
+          <Button kind="danger" onClick={() => void remove()} disabled={busy}>
+            {busy ? '지우는 중…' : '지웁니다'}
+          </Button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 export function Live({
   listing,
   onNewExperiment,
+  onJobsChanged,
 }: {
   listing: JobListing | null;
   onNewExperiment: () => void;
+  /** 기록을 지운 뒤 목록을 다시 읽게 합니다. */
+  onJobsChanged: () => void;
 }) {
   const navigate = useNavigate();
   const team = useTeam();
@@ -55,6 +149,8 @@ export function Live({
   const [resuming, setResuming] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [resumed, setResumed] = useState<string | null>(null);
+  // 지우기 전에 무엇이 사라지고 무엇이 남는지 보여 줍니다.
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   if (!jobId) {
     return (
@@ -450,13 +546,28 @@ export function Live({
           </div>
         ))}
 
-        <div style={{ marginTop: 22 }}>
+        <div style={{ marginTop: 22, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <Button kind="secondary" disabled={!active || cancelling} onClick={() => void cancel()}>
             {cancelling ? '중지 요청 중…' : '학습 중지'}
+          </Button>
+          {/* 도는 학습은 backend도 거절하지만, 누를 수 없는 편이 낫습니다. */}
+          <Button kind="danger" disabled={active} onClick={() => setConfirmDelete(true)}>
+            기록 지우기
           </Button>
         </div>
       </div>
 
+      {confirmDelete && (
+        <DeleteRecordDialog
+          job={job}
+          onClose={() => setConfirmDelete(false)}
+          onDeleted={() => {
+            setConfirmDelete(false);
+            onJobsChanged();
+            navigate('/');
+          }}
+        />
+      )}
     </div>
   );
 }

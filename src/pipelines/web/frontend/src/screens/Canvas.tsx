@@ -9,7 +9,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import type {
   CapabilityValueSource,
   EpochRecord,
@@ -25,6 +25,7 @@ import {
   MetricGrid,
   MicroLabel,
   StatusBadge,
+  controlStyle,
 } from '../components/primitives';
 import { color, font, seriesColor, type } from '../design/tokens';
 import { datasetRelationship } from '../lib/experiments';
@@ -271,8 +272,85 @@ function CompareTable({ experiments }: { experiments: ExperimentSummary[] }) {
   );
 }
 
+/**
+ * Kaggle 점수를 사람이 적는 칸.
+ *
+ * 이 값은 자동으로 채워지지 않습니다. 제출하고 점수를 받은 사람이 직접 옮겨 적어야
+ * 하고, 그래야 '제출 완료'로 셉니다. **이미 적힌 값은 잠가 둡니다** — 표를 지나가다
+ * 누른 저장이 기록을 갈아치우면 그 값이 무엇이었는지 아무도 모릅니다.
+ */
+function KaggleScoreField({ item, onSaved }: { item: ExperimentSummary; onSaved: () => void }) {
+  const recorded = item.metrics.kaggle_score ?? null;
+  const [editing, setEditing] = useState(recorded === null);
+  const [text, setText] = useState(recorded === null ? '' : String(recorded));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    const value = Number(text.trim());
+    if (text.trim() === '' || !Number.isFinite(value)) {
+      setError('숫자를 적어 주세요.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      // 이미 적힌 값을 고치는 경우에만 덮어쓰기를 요청합니다. 서버는 그 말이 없는
+      // 요청으로는 기록된 점수를 바꾸지 않습니다.
+      await api.saveKaggleScore(item.run_id, value, recorded !== null);
+      setEditing(false);
+      onSaved();
+    } catch (caught) {
+      setError(caught instanceof ApiError ? caught.message : '점수를 저장하지 못했습니다.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ ...type.fieldLabel, color: color.textMuted, marginBottom: 12 }}>KAGGLE</div>
+      {editing ? (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <input
+            value={text}
+            inputMode="decimal"
+            placeholder="0.6123"
+            aria-label="Kaggle 점수"
+            onChange={(event) => setText(event.target.value)}
+            style={{ ...controlStyle, width: 140 }}
+          />
+          <Button kind="primary" disabled={busy} onClick={() => void save()}>
+            {busy ? '저장 중…' : '저장'}
+          </Button>
+          {recorded !== null && (
+            <LinkAction
+              tone="muted"
+              onClick={() => {
+                setText(String(recorded));
+                setError(null);
+                setEditing(false);
+              }}
+            >
+              취소
+            </LinkAction>
+          )}
+        </div>
+      ) : (
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 14, flexWrap: 'wrap' }}>
+          <span style={{ ...type.kpiLarge, color: color.accent }}>{metric(recorded)}</span>
+          <LinkAction onClick={() => setEditing(true)}>고치기</LinkAction>
+        </div>
+      )}
+      {error && (
+        <div style={{ ...type.note, color: color.danger, marginTop: 8 }}>{error}</div>
+      )}
+    </div>
+  );
+}
+
 /** 하나만 골랐을 때. 큰 숫자 둘과 나머지 지표를 펼칩니다. */
-function SingleView({ item }: { item: ExperimentSummary }) {
+function SingleView({ item, onSaved }: { item: ExperimentSummary; onSaved: () => void }) {
   return (
     <div style={{ paddingTop: 26, borderTop: `1px solid ${color.border}` }}>
       <div
@@ -305,17 +383,7 @@ function SingleView({ item }: { item: ExperimentSummary }) {
           borderBottom: `1px solid ${color.border}`,
         }}
       >
-        <div>
-          <div style={{ ...type.fieldLabel, color: color.textMuted, marginBottom: 12 }}>KAGGLE</div>
-          <div
-            style={{
-              ...type.kpiLarge,
-              color: item.metrics.kaggle_score == null ? color.textFaint : color.accent,
-            }}
-          >
-            {metric(item.metrics.kaggle_score)}
-          </div>
-        </div>
+        <KaggleScoreField item={item} onSaved={onSaved} />
         <div>
           <div style={{ ...type.fieldLabel, color: color.textMuted, marginBottom: 12 }}>
             BEST VAL LOSS
@@ -386,6 +454,8 @@ export function Canvas({
    * 버립니다. 비교가 polling 주기보다 오래 걸리면 표가 영원히 채워지지 않습니다.
    */
   const pickedKey = picked.join('\n');
+  // Kaggle 점수를 적고 나면 그 값을 다시 읽어야 화면에 반영됩니다.
+  const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
     const runIds = pickedKey ? pickedKey.split('\n') : [];
@@ -425,7 +495,7 @@ export function Canvas({
     return () => {
       active = false;
     };
-  }, [pickedKey]);
+  }, [pickedKey, reloadKey]);
 
   function toggle(runId: string) {
     const next = picked.includes(runId)
@@ -664,7 +734,10 @@ export function Canvas({
               {compared.length === 0 ? (
                 <EmptyState message="고른 실행의 기록을 불러오고 있습니다." />
               ) : compared.length === 1 ? (
-                <SingleView item={compared[0] as ExperimentSummary} />
+                <SingleView
+                  item={compared[0] as ExperimentSummary}
+                  onSaved={() => setReloadKey((value) => value + 1)}
+                />
               ) : (
                 <div style={{ paddingTop: 26, borderTop: `1px solid ${color.border}` }}>
                   <div

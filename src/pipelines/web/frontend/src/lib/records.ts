@@ -160,7 +160,16 @@ export function mergeRecords(
   const byRunId = new Map<string, RunRecord>();
   for (const item of experiments) byRunId.set(item.run_id, fromExperiment(item));
 
+  /**
+   * 같은 `run_id`의 job이 여럿일 수 있습니다. 설정과 seed가 같으면 이름도 같게
+   * 지어지는데, 그것이 곧 "같은 실험을 또 돌렸다"는 신호입니다. `/jobs`는 최신순
+   * 이므로 **먼저 만난 것이 최신**이고, 뒤에 오는 옛 실행이 그것을 덮으면 안 됩니다.
+   */
+  const merged = new Set<string>();
+
   for (const job of jobs) {
+    if (merged.has(job.run_id)) continue;
+    merged.add(job.run_id);
     const local = fromJob(job);
     const registered = byRunId.get(job.run_id);
     if (!registered) {

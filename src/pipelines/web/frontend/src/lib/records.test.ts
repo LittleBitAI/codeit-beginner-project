@@ -129,6 +129,21 @@ describe('mergeRecords', () => {
     expect(record?.metrics.map).toBe(0.49);
   });
 
+  it('같은 run_id의 job이 여럿이면 최신 것이 이긴다', () => {
+    // 설정과 seed가 같으면 이름도 같게 지어진다. `/jobs`는 최신순이라 앞이 최신이다.
+    const records = mergeRecords(
+      [],
+      [
+        job({ job_id: 'new', status: 'failed', status_label: '실패', finished_at: '2026-01-03T00:00:00Z' }),
+        job({ job_id: 'old', status: 'succeeded', status_label: '완료', finished_at: '2026-01-01T00:00:00Z' }),
+      ],
+    );
+
+    expect(records).toHaveLength(1);
+    expect(records[0]?.jobId).toBe('new');
+    expect(records[0]?.status).toBe('failed');
+  });
+
   it('dataset을 알 수 없는 기록도 버리지 않는다', () => {
     const [record] = mergeRecords([], [job({ data_inputs: {} })]);
 

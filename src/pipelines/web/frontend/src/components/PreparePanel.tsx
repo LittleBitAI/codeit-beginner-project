@@ -105,7 +105,9 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
                     flex: 1,
                     padding: '8px 0',
                     font: `600 12.5px/1 ${font.mono}`,
-                    color: active ? '#fff' : color.textBody,
+                    // 강조색 위에 얹는 글자는 판마다 다릅니다. 흰색을 박아 두면
+                    // 어두운 판에서 #FFF on #E0A96D가 되어 대비가 2.1:1입니다.
+                    color: active ? color.onAccent : color.textBody,
                     background: active ? color.accent : color.panel,
                     border: 'none',
                     borderRight:

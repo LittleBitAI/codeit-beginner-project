@@ -161,10 +161,18 @@ function Shell() {
             />
           }
         />
-        <Route path="/monitor" element={<Live listing={listing.data} onNewExperiment={() => setSheet('new')} />} />
+        <Route path="/monitor" element={<Live
+              listing={listing.data}
+              onNewExperiment={() => setSheet('new')}
+              onJobsChanged={refreshJobs}
+            />} />
         <Route
           path="/monitor/:jobId"
-          element={<Live listing={listing.data} onNewExperiment={() => setSheet('new')} />}
+          element={<Live
+              listing={listing.data}
+              onNewExperiment={() => setSheet('new')}
+              onJobsChanged={refreshJobs}
+            />}
         />
         {/* 없어진 주소(`/team` 같은)를 눌러도 빈 화면에 갇히지 않습니다. */}
         <Route path="*" element={<Navigate to="/" replace />} />
