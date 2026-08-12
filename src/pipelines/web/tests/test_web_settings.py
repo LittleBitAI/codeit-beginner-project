@@ -68,3 +68,18 @@ def test_줄이_비어_있으면_thread를_아예_만들지_않는다(client):
     manager.wake_evaluation()
 
     assert manager._evaluation_thread is None
+
+
+def test_시작하지_못한_학습은_줄_맨_앞으로_되돌린다(client):
+    """사람이 화면에서 평가를 먼저 눌렀을 때의 경로입니다.
+
+    되돌리지 않으면 꺼낸 순간 사라져서 그 학습은 영영 자동 평가되지 않습니다.
+    """
+
+    from src.pipelines.web.jobs import get_manager
+
+    manager = get_manager()
+    manager._evaluation_pending[:] = ["b"]
+    manager._requeue_evaluation("a")
+
+    assert manager._evaluation_pending == ["a", "b"]

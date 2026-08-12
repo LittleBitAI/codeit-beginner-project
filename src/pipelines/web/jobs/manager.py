@@ -361,9 +361,19 @@ class JobManager:
         with self._lock:
             while self._evaluation_pending:
                 record = self._records.get(self._evaluation_pending.pop(0))
-                if record is not None and record.status == STATUS_SUCCEEDED and not record.evaluation:
+                if (
+                    record is not None
+                    and record.status == STATUS_SUCCEEDED
+                    and not record.evaluation
+                ):
                     return record
         return None
+
+    def _requeue_evaluation(self, job_id: str) -> None:
+        """꺼냈지만 시작하지 못한 학습을 줄 맨 앞에 되돌립니다."""
+
+        with self._lock:
+            self._evaluation_pending.insert(0, job_id)
 
     def _evaluation_loop(self) -> None:
         """학습이 끝나면 평가를 이어 돕니다.
@@ -399,10 +409,14 @@ class JobManager:
                 try:
                     runner_.start(record, {})
                 except _Conflict:
-                    # 사람이 화면에서 먼저 눌렀습니다. 그것이 끝나면 다시 봅니다.
-                    pass
+                    # 사람이 화면에서 먼저 눌렀습니다. 꺼낸 것을 되돌리고, 그 평가가
+                    # 끝나기를 기다렸다 다시 집습니다. 되돌리지 않으면 이 학습은
+                    # 영영 자동 평가되지 않습니다.
+                    self._requeue_evaluation(record.job_id)
                 except Exception:
                     # 평가 하나가 시작조차 못 했다고 server를 죽이지 않습니다.
+                    # 되돌리지 않는 것은 같은 이유로 계속 실패하며 도는 것을 막기
+                    # 위해서입니다. 사람이 화면에서 다시 누를 수 있습니다.
                     break
                 # 한 번에 하나만 돌 수 있으므로 끝날 때까지 기다렸다 다음을 집습니다.
                 while runner_.status().get("status") == "running":
