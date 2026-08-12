@@ -448,13 +448,14 @@ def test_resumed_run_keeps_the_loss_curve_of_the_run_it_continues(
     assert started.progress["completed_epochs"] == 11
 
 
-def test_epochs_past_the_checkpoint_are_dropped_when_training_says_where_it_resumed(
+def test_epochs_past_the_checkpoint_are_dropped_before_training_even_starts(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):
     """checkpoint는 `checkpoint_every`마다 저장되지만 완료는 epoch마다 알려 옵니다.
 
     그래서 앞선 기록에는 checkpoint보다 뒤의 epoch가 남아 있을 수 있습니다. 그대로
     두면 다시 도는 epoch를 이미 끝난 것으로 세어, 진행률이 실제보다 앞섭니다.
+    train이 model을 만드는 동안에도 화면에 보이므로 미리 잘라 냅니다.
     """
 
     from src.pipelines.web.jobs import runner
@@ -462,17 +463,19 @@ def test_epochs_past_the_checkpoint_are_dropped_when_training_says_where_it_resu
     record = _interrupted_job(
         client, manager, monkeypatch, fake_process_factory, data_inputs
     )
+    # 10 epoch마다 저장했으므로 15까지 돌았어도 남아 있는 checkpoint는 10입니다.
+    record.settings = {**record.settings, "checkpoint_every": 10}
     record.progress = {
         "available": True,
-        "epochs": [{"epoch": number, "validation_loss": 0.6} for number in range(1, 8)],
+        "epochs": [{"epoch": number, "validation_loss": 0.6} for number in range(1, 16)],
     }
-    # checkpoint는 5 epoch까지라 train은 6부터 다시 시작합니다.
+    # 첫 epoch event가 오기 전에도 계획만 알려 준 상태에서 이미 맞아야 합니다.
     line = json.dumps(
-        {"schema": "train.progress/1", "event": "epoch_started", "epoch": 6, "epochs": 12}
+        {"schema": "train.progress/1", "event": "run_started", "run_id": "r", "epochs": 50}
     )
     monkeypatch.setattr(runner, "spawn", lambda *a, **k: fake_process_factory(stderr=line + "\n"))
 
-    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 12})
+    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 50})
 
     assert response.status_code == 201, response.text
     started = manager.get(response.json()["started"]["job_id"])
@@ -480,8 +483,8 @@ def test_epochs_past_the_checkpoint_are_dropped_when_training_says_where_it_resu
     while manager._active_job_id is not None and time.monotonic() < deadline:
         time.sleep(0.02)
 
-    assert [entry["epoch"] for entry in started.progress["epochs"]] == [1, 2, 3, 4, 5]
-    assert started.progress["completed_epochs"] == 5
+    assert [entry["epoch"] for entry in started.progress["epochs"]] == list(range(1, 11))
+    assert started.progress["completed_epochs"] == 10
 
 
 def test_a_queued_resume_still_finds_its_curve_after_the_run_id_is_reused(
