@@ -402,24 +402,6 @@ def test_resume_route_reports_team_sync_auth_failure_and_keeps_the_request(
     assert manager.queue_entries()[0]["run_id"] != record.run_id
 
 
-def test_resumed_from_run_id_reads_both_paths_this_screen_builds(monkeypatch):
-    """경로 모양이 바뀌면 이어서 한 실행이 앞선 곡선을 조용히 잃습니다."""
-
-    from src.pipelines.web.jobs.manager import _resumed_from_run_id
-
-    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "team-bucket")
-    local = {"train": _settings(run_id="web-run")}
-    remote = {
-        "train": _settings(run_id="web-run", output_prefix="experiments/completed"),
-        "storage": {"backend": "s3"},
-    }
-
-    assert _resumed_from_run_id(resume_checkpoint_uri(local)) == "web-run"
-    assert _resumed_from_run_id(resume_checkpoint_uri(remote)) == "web-run"
-    # 사람이 직접 적어 넣은 경로는 앞선 실행의 이름을 알 수 없습니다.
-    assert _resumed_from_run_id("artifacts/hand-written/last_checkpoint.pt") is None
-
-
 def test_resumed_run_keeps_the_loss_curve_of_the_run_it_continues(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):
@@ -464,6 +446,78 @@ def test_resumed_run_keeps_the_loss_curve_of_the_run_it_continues(
 
     assert [entry["epoch"] for entry in started.progress["epochs"]] == list(range(1, 12))
     assert started.progress["completed_epochs"] == 11
+
+
+def test_epochs_past_the_checkpoint_are_dropped_when_training_says_where_it_resumed(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """checkpoint는 `checkpoint_every`마다 저장되지만 완료는 epoch마다 알려 옵니다.
+
+    그래서 앞선 기록에는 checkpoint보다 뒤의 epoch가 남아 있을 수 있습니다. 그대로
+    두면 다시 도는 epoch를 이미 끝난 것으로 세어, 진행률이 실제보다 앞섭니다.
+    """
+
+    from src.pipelines.web.jobs import runner
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.progress = {
+        "available": True,
+        "epochs": [{"epoch": number, "validation_loss": 0.6} for number in range(1, 8)],
+    }
+    # checkpoint는 5 epoch까지라 train은 6부터 다시 시작합니다.
+    line = json.dumps(
+        {"schema": "train.progress/1", "event": "epoch_started", "epoch": 6, "epochs": 12}
+    )
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: fake_process_factory(stderr=line + "\n"))
+
+    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 12})
+
+    assert response.status_code == 201, response.text
+    started = manager.get(response.json()["started"]["job_id"])
+    deadline = time.monotonic() + 10
+    while manager._active_job_id is not None and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert [entry["epoch"] for entry in started.progress["epochs"]] == [1, 2, 3, 4, 5]
+    assert started.progress["completed_epochs"] == 5
+
+
+def test_a_queued_resume_still_finds_its_curve_after_the_run_id_is_reused(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """앞선 실행을 이름이 아니라 job id로 찾습니다.
+
+    이름으로 찾으면 같은 이름을 가진 다른 기록의 곡선이 붙을 수 있고, 대기열에
+    줄을 선 항목은 나중에 시작할 때 그 출처를 잃습니다.
+    """
+
+    from src.pipelines.web.jobs import runner
+    from src.pipelines.web.jobs.model import JobRecord
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.progress = {"available": True, "epochs": [{"epoch": 1, "validation_loss": 0.6}]}
+    # 같은 이름을 가진 남의 기록이 먼저 들어 있어도 헷갈리면 안 됩니다.
+    twin = JobRecord(job_id="twin", config_id="twin", run_id=record.run_id)
+    twin.progress = {"available": True, "epochs": [{"epoch": 9, "validation_loss": 9.9}]}
+    manager._records = {"twin": twin, **manager._records}
+    line = json.dumps(
+        {"schema": "train.progress/1", "event": "epoch_started", "epoch": 2, "epochs": 12}
+    )
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: fake_process_factory(stderr=line + "\n"))
+
+    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 12})
+
+    assert response.status_code == 201, response.text
+    started = manager.get(response.json()["started"]["job_id"])
+    deadline = time.monotonic() + 10
+    while manager._active_job_id is not None and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert [entry["epoch"] for entry in started.progress["epochs"]] == [1]
 
 
 def test_a_run_started_from_scratch_gets_no_borrowed_epochs(

@@ -59,6 +59,7 @@ class ProgressState:
         "reported_completed_epochs",
         "run_id",
         "saw_progress",
+        "seeded",
         "step",
         "stopped_early",
         "suppressed_lines",
@@ -81,6 +82,8 @@ class ProgressState:
         # epoch 번호가 중복되거나 역순으로 와도 안전하도록 dict에 담습니다.
         self.epochs_by_number: dict[int, dict[str, Any]] = {}
         self.malformed_lines = 0
+        # 앞선 실행에서 옮겨 온 epoch가 아직 다듬어지지 않았다는 표시입니다.
+        self.seeded = False
         # 지금 지나고 있는 epoch 안의 batch 위치입니다. epoch 경계에서 지웁니다.
         self.step: dict[str, Any] | None = None
         # log 줄 없이 상태만 바뀌었다는 표시입니다. `take_quiet_change`가 읽고 지웁니다.
@@ -182,6 +185,13 @@ def _apply_epoch_started(state: ProgressState, event: dict[str, Any]) -> dict[st
     if epoch is None:
         state.malformed_lines += 1
         return None
+    if state.seeded:
+        # 이제야 실제 재개 지점을 압니다. 앞선 실행이 checkpoint보다 뒤까지 돌았다면
+        # (train은 epoch마다 완료를 알리지만 checkpoint는 `checkpoint_every`마다
+        # 저장합니다) 그 epoch는 다시 도는 것이므로 끝난 것으로 두면 안 됩니다.
+        state.seeded = False
+        for number in [key for key in state.epochs_by_number if key >= epoch]:
+            del state.epochs_by_number[number]
     state.current_epoch = epoch
     # 새 epoch은 batch 0부터 다시 셉니다.
     state.step = None
@@ -201,17 +211,20 @@ def _apply_step_progress(state: ProgressState, event: dict[str, Any]) -> dict[st
     if total_epochs is not None:
         state.epochs = total_epochs
     epoch = _positive_int(event.get("epoch"))
-    if epoch is not None:
-        # epoch_started를 놓쳤어도 몇 번째 epoch인지는 알 수 있습니다.
-        state.current_epoch = epoch
 
     phase = _text(event.get("phase"))
     step = _positive_int(event.get("step"))
     total_steps = _positive_int(event.get("total_steps"))
     if phase not in STEP_PHASES or step is None or total_steps is None or step > total_steps:
         # 위치를 지어내느니 batch 표시를 접습니다. epoch 진행률은 그대로 남습니다.
+        # 믿을 수 없는 event이므로 여기 적힌 epoch 번호도 쓰지 않습니다 — 진행률이
+        # 그 번호에서 나오므로, 한 줄이 깨지면 100%를 넘겨 그립니다.
         state.malformed_lines += 1
         return None
+
+    if epoch is not None:
+        # epoch_started를 놓쳤어도 몇 번째 epoch인지는 알 수 있습니다.
+        state.current_epoch = epoch
 
     state.step = {
         "phase": phase,
@@ -254,8 +267,14 @@ def seed_epochs(state: ProgressState, entries: Any) -> None:
         if not isinstance(entry, dict):
             continue
         epoch = _positive_int(entry.get("epoch"))
-        if epoch is not None:
-            state.epochs_by_number[epoch] = _epoch_record(epoch, entry)
+        if epoch is None:
+            continue
+        record = _epoch_record(epoch, entry)
+        # 앞선 실행의 epoch 시간은 버립니다. 다른 기계에서 돌았을 수 있어, 남은 시간을
+        # 그 속도로 추정하면 이번 실행과 무관한 숫자가 나옵니다.
+        record["epoch_seconds"] = None
+        state.epochs_by_number[epoch] = record
+    state.seeded = True
 
 
 def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:

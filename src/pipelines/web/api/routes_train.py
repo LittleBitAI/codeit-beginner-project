@@ -423,7 +423,12 @@ def resume_job(
         epochs=payload.epochs,
     )
     config_id = write_runtime_config(config)
-    started = manager.enqueue(config_id, access_token=_bearer_token(authorization))
+    started = manager.enqueue(
+        config_id,
+        access_token=_bearer_token(authorization),
+        # 앞선 실행의 손실 곡선을 이어 그리려면 어느 job에서 왔는지 알아야 합니다.
+        resumed_from_job_id=record.job_id,
+    )
     return {
         "config_id": config_id,
         "run_id": config["train"]["run_id"],

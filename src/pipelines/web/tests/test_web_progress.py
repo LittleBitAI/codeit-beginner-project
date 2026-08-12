@@ -77,6 +77,21 @@ def test_parses_epoch_completed():
     assert result["percent"] == 10.0
 
 
+def test_a_broken_step_event_cannot_push_the_epoch_count_past_the_plan():
+    """잘못된 step event는 batch 표시만 접습니다. 진행률까지 흔들면 안 됩니다."""
+
+    state = feed(
+        line("epoch_completed", epoch=1, epochs=12, validation_loss=0.5),
+        line("step_progress", epoch=99, epochs=12, phase="bad", step=3, total_steps=10),
+    )
+
+    result = snapshot(state)
+
+    assert result["current_epoch"] == 1
+    assert result["completed_epochs"] == 1
+    assert result["percent"] == pytest.approx(8.3)
+
+
 def test_resumed_run_counts_epoch_numbers_not_received_events():
     """이어서 학습한 실행은 앞선 epoch가 이 stream에 없습니다.
 
