@@ -218,6 +218,7 @@ function rowFromTeamRun(run: TeamRun): RunningRow {
   const counted = epochsDone({
     current_epoch: num(progress.current_epoch),
     completed_epochs: num(progress.completed_epochs) ?? undefined,
+    total_epochs: num(progress.total_epochs),
   } as Progress);
   const current = num(progress.current_epoch) === null && num(progress.completed_epochs) === null
     ? null

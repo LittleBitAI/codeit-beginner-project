@@ -109,6 +109,47 @@ def test_an_epoch_number_past_the_plan_is_not_believed(event):
     assert result["percent"] == pytest.approx(8.3)
 
 
+def test_seeded_epochs_outside_the_new_plan_are_dropped_when_the_run_starts():
+    """이어서 하며 목표를 줄이면 앞선 실행이 계획 밖까지 돌았을 수 있습니다."""
+
+    state = ProgressState()
+    seed_epochs(state, [{"epoch": number, "validation_loss": 0.6} for number in range(1, 16)])
+    consume_line(state, line("run_started", run_id="web-1", epochs=12))
+
+    result = snapshot(state)
+
+    assert max(state.epochs_by_number) == 12
+    assert result["completed_epochs"] == 12
+    assert result["percent"] == 100.0
+
+
+def test_a_foreign_line_cannot_raise_the_plan_and_smuggle_its_epoch_in():
+    """계획을 정하는 것은 `run_started`입니다. 나머지는 그것을 되풀이할 뿐입니다."""
+
+    state = feed(
+        line("run_started", run_id="web-1", epochs=12),
+        line("epoch_completed", epoch=99, epochs=100, validation_loss=-999.0),
+    )
+
+    result = snapshot(state)
+
+    assert result["total_epochs"] == 12
+    assert result["epochs"] == []
+    assert result["best"] is None
+
+
+def test_a_completed_count_past_the_plan_is_not_believed():
+    """train이 계획보다 많이 돌았다고 말해도 그대로 그리면 100%를 넘습니다."""
+
+    state = feed(
+        line("run_started", run_id="web-1", epochs=12),
+        line("epoch_completed", epoch=1, epochs=12, validation_loss=0.5),
+        line("training_completed", planned_epochs=12, completed_epochs=99),
+    )
+
+    assert snapshot(state)["completed_epochs"] == 1
+
+
 def test_seeded_epochs_are_dropped_wherever_this_run_turns_out_to_be():
     """재개 지점은 `epoch_started`가 아니라 이 실행이 지나간 자리로 정합니다.
 

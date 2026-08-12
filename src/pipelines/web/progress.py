@@ -162,6 +162,10 @@ def _apply_run_started(state: ProgressState, event: dict[str, Any]) -> dict[str,
     state.architecture = _text(event.get("architecture")) or state.architecture
     state.device = _text(event.get("device")) or state.device
     state.epochs = _positive_int(event.get("epochs")) or state.epochs
+    if state.epochs is not None:
+        # 이어서 학습하며 목표를 줄였을 수 있습니다. 계획 밖으로 나간 앞선 epoch를
+        # 그대로 두면 15/12처럼 100%를 넘겨 그립니다.
+        _drop_seeded_from(state, state.epochs + 1)
     state.train_images = _non_negative_int(event.get("train_images"))
     state.validation_images = _non_negative_int(event.get("validation_images"))
     state.class_count = _non_negative_int(event.get("class_count"))
@@ -176,6 +180,18 @@ def _apply_run_started(state: ProgressState, event: dict[str, Any]) -> dict[str,
     if state.class_count is not None:
         pieces.append(f"클래스 {state.class_count}개")
     return _log(" · ".join(pieces), level="info")
+
+
+def _learn_plan(state: ProgressState, event: dict[str, Any]) -> None:
+    """계획 epoch를 아직 모를 때만 event에서 받아 둡니다.
+
+    계획을 정하는 것은 `run_started`입니다. 나머지 event가 실어 오는 값은 그것을
+    되풀이한 것뿐이라, 여기서 덮어쓰게 두면 섞여 들어온 한 줄이 계획을 바꿔
+    자기 자신을 계획 안의 epoch로 만들어 버립니다.
+    """
+
+    if state.epochs is None:
+        state.epochs = _positive_int(event.get("epochs"))
 
 
 def _event_epoch(state: ProgressState, event: dict[str, Any]) -> int | None:
@@ -208,9 +224,7 @@ def _drop_seeded_from(state: ProgressState, epoch: int) -> None:
 
 
 def _apply_epoch_started(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:
-    total = _positive_int(event.get("epochs"))
-    if total is not None:
-        state.epochs = total
+    _learn_plan(state, event)
     epoch = _event_epoch(state, event)
     if epoch is None:
         state.malformed_lines += 1
@@ -231,25 +245,28 @@ def _apply_step_progress(state: ProgressState, event: dict[str, Any]) -> dict[st
     줍니다. 대신 화면이 갱신되도록 `quiet_change`를 세워 둡니다.
     """
 
-    total_epochs = _positive_int(event.get("epochs"))
-    if total_epochs is not None:
-        state.epochs = total_epochs
+    _learn_plan(state, event)
     epoch = _event_epoch(state, event)
 
     phase = _text(event.get("phase"))
     step = _positive_int(event.get("step"))
     total_steps = _positive_int(event.get("total_steps"))
-    if phase not in STEP_PHASES or step is None or total_steps is None or step > total_steps:
+    if (
+        epoch is None
+        or phase not in STEP_PHASES
+        or step is None
+        or total_steps is None
+        or step > total_steps
+    ):
         # 위치를 지어내느니 batch 표시를 접습니다. epoch 진행률은 그대로 남습니다.
         # 믿을 수 없는 event이므로 여기 적힌 epoch 번호도 쓰지 않습니다 — 진행률이
         # 그 번호에서 나오므로, 한 줄이 깨지면 100%를 넘겨 그립니다.
         state.malformed_lines += 1
         return None
 
-    if epoch is not None:
-        # epoch_started를 놓쳤어도 몇 번째 epoch인지는 알 수 있습니다.
-        _drop_seeded_from(state, epoch)
-        state.current_epoch = epoch
+    # epoch_started를 놓쳤어도 몇 번째 epoch인지는 알 수 있습니다.
+    _drop_seeded_from(state, epoch)
+    state.current_epoch = epoch
 
     state.step = {
         "phase": phase,
@@ -303,9 +320,7 @@ def seed_epochs(state: ProgressState, entries: Any) -> None:
 
 
 def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:
-    total = _positive_int(event.get("epochs"))
-    if total is not None:
-        state.epochs = total
+    _learn_plan(state, event)
     epoch = _event_epoch(state, event)
     if epoch is None:
         state.malformed_lines += 1
@@ -342,7 +357,13 @@ def _apply_training_completed(state: ProgressState, event: dict[str, Any]) -> di
     if planned is not None and state.epochs is None:
         # run_started를 놓쳤을 때만 씁니다. 계획 epoch는 원래 그 event가 알려 줍니다.
         state.epochs = planned
-    state.reported_completed_epochs = _positive_int(event.get("completed_epochs"))
+    reported = _positive_int(event.get("completed_epochs"))
+    if reported is not None and state.epochs is not None and reported > state.epochs:
+        # 계획보다 많이 돌 수는 없습니다. 믿으면 100%를 넘겨 그리므로, 받은 event를
+        # 세는 쪽으로 돌아갑니다.
+        reported = None
+        state.malformed_lines += 1
+    state.reported_completed_epochs = reported
     stopped_early = event.get("stopped_early")
     state.stopped_early = stopped_early if isinstance(stopped_early, bool) else None
 
