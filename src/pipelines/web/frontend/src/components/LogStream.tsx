@@ -25,7 +25,7 @@ export function LogStream({
     <div style={{ display: 'flex', flexDirection: 'column' }}>
       <div
         style={{
-          background: color.navy,
+          background: color.panel,
           padding: '11px 13px',
           height,
           overflow: 'auto',
@@ -49,11 +49,11 @@ export function LogStream({
       <div
         style={{
           padding: '6px 13px',
-          borderTop: `1px solid ${color.borderInner}`,
+          borderTop: `1px solid ${color.borderRow}`,
           display: 'flex',
           alignItems: 'center',
           gap: 6,
-          background: color.surfaceAlt,
+          background: color.sheet,
         }}
       >
         <span
@@ -62,7 +62,7 @@ export function LogStream({
             width: 6,
             height: 6,
             borderRadius: '50%',
-            background: streaming ? color.teal : color.textFaint,
+            background: streaming ? color.accent : color.textFaint,
             flex: 'none',
           }}
         />

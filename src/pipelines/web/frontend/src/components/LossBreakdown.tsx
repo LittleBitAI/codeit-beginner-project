@@ -24,7 +24,7 @@ export function LossBreakdown({ epochs }: { epochs: EpochRecord[] }) {
   return (
     <Panel title={`손실 분해 · epoch ${latest.epoch}`}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <div style={{ display: 'flex', gap: 10, ...type.tableHead, color: color.textMuted }}>
+        <div style={{ display: 'flex', gap: 10, ...type.metricLabel, color: color.textMuted }}>
           <span style={{ flex: '1 1 auto', minWidth: 0 }}>NAME</span>
           <span style={{ width: 66, textAlign: 'right' }}>TRAIN</span>
           <span style={{ width: 66, textAlign: 'right' }}>VAL</span>

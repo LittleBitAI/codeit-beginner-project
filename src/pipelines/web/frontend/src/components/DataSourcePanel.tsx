@@ -205,7 +205,7 @@ function SelectedSummary({ source }: { source: DataSource }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <IconCheck size={13} color={color.green} />
+        <IconCheck size={13} color={color.ok} />
         <span
           style={{
             font: `500 12.5px/1.4 ${font.mono}`,
@@ -218,8 +218,8 @@ function SelectedSummary({ source }: { source: DataSource }) {
         <span
           style={{
             font: `600 11px/1.3 ${font.mono}`,
-            color: color.tealDark,
-            background: color.tealTint,
+            color: color.accent,
+            background: color.fill,
             borderRadius: radius.badge,
             padding: '4px 6px',
           }}
@@ -246,7 +246,7 @@ function MatchTable({ source, heading }: { source: DataSource; heading: string |
       )}
       <div
         style={{
-          border: `1px solid ${color.borderInner}`,
+          border: `1px solid ${color.borderRow}`,
           borderRadius: 5,
           overflow: 'hidden',
         }}
@@ -262,7 +262,7 @@ function MatchTable({ source, heading }: { source: DataSource; heading: string |
                 gap: 10,
                 padding: '7px 12px',
                 borderTop: index === 0 ? undefined : `1px solid ${color.borderRow}`,
-                background: entry ? color.surface : color.surfaceAlt,
+                background: entry ? color.panel : color.sheet,
                 alignItems: 'center',
               }}
             >
@@ -275,14 +275,14 @@ function MatchTable({ source, heading }: { source: DataSource; heading: string |
                   alignItems: 'center',
                   gap: 6,
                   font: `400 12px/1.4 ${font.mono}`,
-                  color: entry ? color.text : color.red,
+                  color: entry ? color.text : color.danger,
                   overflowWrap: 'anywhere',
                 }}
               >
                 {entry ? (
-                  <IconCheck size={11} color={color.green} />
+                  <IconCheck size={11} color={color.ok} />
                 ) : (
-                  <IconError size={11} color={color.red} />
+                  <IconError size={11} color={color.danger} />
                 )}
                 {entry ? entry.name : '찾지 못했습니다'}
               </span>
@@ -298,11 +298,11 @@ function MatchTable({ source, heading }: { source: DataSource; heading: string |
             gap: 6,
             alignItems: 'flex-start',
             font: `400 12px/1.5 ${font.sans}`,
-            color: color.amber,
+            color: color.warn,
           }}
         >
           <span style={{ marginTop: 2 }}>
-            <IconWarning size={11} color={color.amber} />
+            <IconWarning size={11} color={color.warn} />
           </span>
           {problem}
         </span>

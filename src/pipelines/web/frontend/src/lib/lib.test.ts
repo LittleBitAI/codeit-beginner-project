@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { color, radius, type } from '../design/tokens';
+import { color, palette, radius, type } from '../design/tokens';
 import { describeRun, diffAgainstDefaults } from './describeRun';
 import { toPayload, messageFor } from './draftPayload';
 import { duration, loss, megabytes, percent } from './format';
@@ -31,6 +31,20 @@ const FIELDS: FieldSpec[] = [
   { name: 'run_id', type: 'string', label: '실행 이름', hint: '' },
 ];
 
+/** WCAG 상대 휘도. 두 색이 얼마나 갈라져 보이는지 재는 데 씁니다. */
+function luminance(hex: string): number {
+  const channels = [1, 3, 5].map((start) => {
+    const value = parseInt(hex.slice(start, start + 2), 16) / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  }) as [number, number, number];
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+function contrast(front: string, back: string): number {
+  const [bright, dim] = [luminance(front), luminance(back)].sort((a, b) => b - a) as [number, number];
+  return (bright + 0.05) / (dim + 0.05);
+}
+
 describe('디자인 토큰', () => {
   it('반경이 6px를 넘지 않는다', () => {
     // 디자인 하드 제약: badge 3~4, control 4, panel 5~6. 더 둥근 값은 금지입니다.
@@ -39,15 +53,37 @@ describe('디자인 토큰', () => {
     }
   });
 
-  it('모든 색이 6자리 hex이다', () => {
+  it('화면 코드가 쓰는 색은 CSS 변수 참조다', () => {
+    // hex를 직접 돌려주면 테마를 바꿀 때 350군데를 다시 그려야 합니다.
     for (const value of Object.values(color)) {
+      expect(value).toMatch(/^var\(--color-[a-z-]+\)$/);
+    }
+  });
+
+  it('두 판이 같은 색 이름을 모두 채운다', () => {
+    // 한쪽에만 있는 이름이 생기면 그 테마에서 그 자리가 통째로 비어 보입니다.
+    expect(Object.keys(palette.light).sort()).toEqual(Object.keys(palette.dark).sort());
+    for (const value of [...Object.values(palette.dark), ...Object.values(palette.light)]) {
       expect(value).toMatch(/^#[0-9A-F]{6}$/i);
+    }
+  });
+
+  it('두 판 모두 글자가 읽히는 대비를 지킨다', () => {
+    // 밝은 판에서 amber를 그대로 쓰면 1.9:1이라 글자가 안 보입니다. 색을 바꿀 때
+    // 이 선을 넘지 않았는지 여기서 걸립니다.
+    for (const theme of ['dark', 'light'] as const) {
+      const shade = palette[theme];
+      expect(contrast(shade.text, shade.page)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(shade.accent, shade.page)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(shade.onAccent, shade.accent)).toBeGreaterThanOrEqual(4.5);
+      // 보조 글자는 원본 디자인 값 그대로(두 판 모두 약 4.3:1)라 큰 글자 기준을 씁니다.
+      expect(contrast(shade.textMuted, shade.page)).toBeGreaterThanOrEqual(3);
     }
   });
 
   it('숫자를 다루는 타입은 mono 글꼴을 쓴다', () => {
     // 소수점 정렬이 실행 간 비교의 전제라 숫자는 예외 없이 mono입니다.
-    for (const key of ['tableCell', 'kpiLarge', 'kpiCompact', 'logLine', 'code'] as const) {
+    for (const key of ['tableCell', 'kpiLarge', 'kpiSmall', 'logLine', 'code'] as const) {
       expect(type[key].font).toContain('IBM Plex Mono');
     }
   });

@@ -63,7 +63,7 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
   return (
     <div
       style={{
-        borderTop: `1px solid ${color.borderInner}`,
+        borderTop: `1px solid ${color.borderRow}`,
         paddingTop: 14,
         display: 'flex',
         flexDirection: 'column',
@@ -88,7 +88,7 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
           <div
             style={{
               display: 'flex',
-              border: `1px solid ${color.borderControl}`,
+              border: `1px solid ${color.border}`,
               borderRadius: radius.control,
               overflow: 'hidden',
             }}
@@ -106,10 +106,10 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
                     padding: '8px 0',
                     font: `600 12.5px/1 ${font.mono}`,
                     color: active ? '#fff' : color.textBody,
-                    background: active ? color.primary : color.surface,
+                    background: active ? color.accent : color.panel,
                     border: 'none',
                     borderRight:
-                      index === ratios.length - 1 ? undefined : `1px solid ${color.borderInner}`,
+                      index === ratios.length - 1 ? undefined : `1px solid ${color.borderRow}`,
                     opacity: running ? 0.6 : 1,
                   }}
                 >
@@ -235,8 +235,8 @@ function StorageChoice({
                 textAlign: 'left',
                 padding: '8px 11px',
                 borderRadius: radius.control,
-                border: `1px solid ${active ? color.primary : color.borderControl}`,
-                background: active ? color.primaryTint : color.surface,
+                border: `1px solid ${active ? color.accent : color.border}`,
+                background: active ? color.fill : color.panel,
                 opacity: option.usable ? 1 : 0.5,
                 display: 'flex',
                 flexDirection: 'column',
@@ -247,7 +247,7 @@ function StorageChoice({
               <span
                 style={{
                   font: `600 12.5px/1 ${font.sans}`,
-                  color: active ? color.primaryHover : color.textStrong,
+                  color: active ? color.accent : color.textStrong,
                 }}
               >
                 {option.label}
@@ -266,7 +266,7 @@ function StorageChoice({
         })}
       </div>
       {storage.forced_backend && (
-        <span style={{ font: `400 11.5px/1.5 ${font.sans}`, color: color.amber }}>
+        <span style={{ font: `400 11.5px/1.5 ${font.sans}`, color: color.warn }}>
           환경 변수 PILL_STORAGE_BACKEND={storage.forced_backend} 가 설정돼 있어 여기 선택보다
           우선합니다.
         </span>
@@ -329,11 +329,11 @@ function PreparationProgressView({
           style={{
             height: 6,
             borderRadius: radius.control,
-            background: color.borderInner,
+            background: color.borderRow,
             overflow: 'hidden',
           }}
         >
-          <div style={{ width: `${percent}%`, height: '100%', background: color.primary }} />
+          <div style={{ width: `${percent}%`, height: '100%', background: color.accent }} />
         </div>
       )}
 
