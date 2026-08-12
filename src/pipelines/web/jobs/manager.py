@@ -112,6 +112,10 @@ class JobManager:
         # 멈춘 대기열은 앞 학습이 끝나도 다음을 시작하지 않습니다. 사람이 중지를
         # 눌렀는데 곧바로 다음 학습이 뜨면 멈춘 것이 아니기 때문입니다.
         self._queue_paused = True
+        # GPU 자리를 잡는 문. 학습 시작과 자동 평가 시작이 이 문을 함께 씁니다.
+        # 직렬에서 둘이 서로를 못 보고 동시에 출발하면 8GB 카드에서 둘 다 out of
+        # memory로 잃습니다. 잠금 순서는 언제나 gate → evaluation runner → manager.
+        self._gpu_gate = threading.Lock()
         # 학습이 끝날 때마다 깨어나 평가를 이어 도는 thread. 처음 필요할 때 만듭니다.
         self._evaluation_wakeup = threading.Event()
         self._evaluation_thread: threading.Thread | None = None
@@ -413,9 +417,7 @@ class JobManager:
                 # 않습니다. 서버를 올렸다는 이유만으로 GPU가 몇 시간씩 돌면 안 됩니다.
                 if mode is None:
                     break
-                if mode == "serial" and self.active_job() is not None:
-                    break
-                if not self._start_one_evaluation(runner_, _Conflict):
+                if not self._start_one_evaluation(runner_, _Conflict, serial=mode == "serial"):
                     break
             # 직렬에서는 평가가 도는 동안 대기열이 멈춰 서 있었습니다. 다 끝났으니
             # 다시 밀어 줍니다. 여기서 깨우지 않으면 밤새 돌리려던 대기열이 첫
@@ -426,14 +428,22 @@ class JobManager:
                 # background thread에는 오류를 응답할 caller가 없습니다.
                 pass
 
-    def _start_one_evaluation(self, runner_: Any, conflict: type[Exception]) -> bool:
+    def _start_one_evaluation(
+        self, runner_: Any, conflict: type[Exception], *, serial: bool
+    ) -> bool:
         """줄에서 하나를 꺼내 평가를 시작하고 끝날 때까지 기다립니다.
 
         더 볼 것이 있으면 True입니다. 시작할 것이 없거나 더 봐서는 안 되는 상태면
         False를 돌려 바깥 반복을 멈춥니다.
+
+        **도는 학습이 있는지 확인하는 것과 평가를 시작하는 것을 같은 문 안에서**
+        합니다. 갈라 두면 학습 시작 쪽과 서로를 못 보고 둘 다 출발해, 직렬로 두었는데
+        8GB 카드에서 둘 다 out of memory로 잃습니다. 잠금 순서는 gate → runner.
         """
 
-        with runner_.locked():
+        with self._gpu_gate, runner_.locked():
+            if serial and self.active_job() is not None:
+                return False
             record = self._next_unevaluated()
             if record is None:
                 return False
@@ -466,11 +476,9 @@ class JobManager:
         비워 두면, 평가가 도는 사이에 대기열의 다음 학습이나 사람이 누른 시작이
         그대로 들어와 약속이 깨집니다.
 
-        ponytail: 확인과 시작 사이에 아주 좁은 틈이 남습니다. 그 틈을 없애려면 팀
-        기록 생성(network 호출)까지 평가 lock을 쥔 채로 지나야 하는데, 그동안 평가
-        상태 조회가 통째로 막힙니다. 반대쪽에도 같은 확인이 있어 둘이 동시에
-        빠져나갈 창이 아주 짧습니다. 더 좁혀야 하면 GPU 자리 하나를 두 작업이
-        나눠 갖는 별도의 잠금을 둡니다.
+        **`_gpu_gate`를 쥔 채로 불러야 합니다.** 확인과 시작이 갈라져 있으면 두
+        thread가 각자 "상대는 없다"를 보고 둘 다 진행합니다. 좁은 틈이라고 두었더니
+        그 틈이 곧 둘 다 out of memory로 잃는 경로였습니다.
         """
 
         from .. import settings as web_settings
@@ -487,6 +495,15 @@ class JobManager:
 
     def start(self, config_id: str, *, access_token: str | None = None) -> JobRecord:
         """저장된 설정으로 학습을 시작합니다. 이미 실행 중이면 거부합니다."""
+
+        # GPU 자리를 잡는 구간 전체를 한 번에 하나만 지나갑니다. 자동 평가도 같은
+        # 문을 지나므로, 둘이 서로를 못 보고 동시에 출발하는 일이 없습니다.
+        with self._gpu_gate:
+            record = self._start_locked(config_id, access_token)
+        return self._spawn(record, config_id)
+
+    def _start_locked(self, config_id: str, access_token: str | None) -> JobRecord:
+        """`_gpu_gate`를 쥔 채로만 부릅니다. 기록을 만들고 자리를 잡습니다."""
 
         self._refuse_while_evaluating()
         self.load()
@@ -529,13 +546,18 @@ class JobManager:
             self._stdout_chunks = []
             record.progress = snapshot(self._progress)
             team_sync.get_team_sync().enqueue_update(record)
+        return record
 
+    def _spawn(self, record: JobRecord, config_id: str) -> JobRecord:
+        """자리를 잡은 기록으로 실제 process를 띄웁니다. gate 밖에서 합니다."""
+
+        job_id = record.job_id
         store.save_record(record)
         thread = threading.Thread(
             target=self._run, args=(job_id, config_id), name=f"train-job-{job_id[:8]}", daemon=True
         )
         thread.start()
-        if cloud_run_id:
+        if record.cloud_run_id:
             threading.Thread(
                 target=self._heartbeat,
                 args=(job_id,),

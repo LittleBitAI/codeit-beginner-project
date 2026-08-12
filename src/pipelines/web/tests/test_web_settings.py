@@ -95,6 +95,49 @@ def test_직렬이면_평가가_도는_동안_학습을_시작하지_않는다(c
         get_manager().start(created["config_id"])
 
 
+def test_확인과_시작이_한_문_안에서_일어난다(client, valid_payload, monkeypatch, fake_process_factory):
+    """확인만 하고 문을 놓으면 두 thread가 서로를 못 보고 둘 다 출발합니다.
+
+    학습이 "평가 없음"을 확인한 뒤 자리를 잡기 전에 평가가 끼어들 수 있으면,
+    직렬로 두었는데도 둘이 겹쳐 돌아 8GB 카드에서 둘 다 잃습니다. 그래서 확인부터
+    자리 잡기까지가 같은 잠금 안에 있어야 합니다.
+    """
+
+    import threading
+
+    from src.pipelines.web import evaluation
+    from src.pipelines.web.jobs import runner
+    from src.pipelines.web.jobs import get_manager
+
+    client.put("/api/settings", json={"evaluation_mode": "serial"})
+    created = client.post("/api/train/configs", json=valid_payload).json()
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: fake_process_factory())
+    manager = get_manager()
+
+    # 학습이 문을 쥐고 있는 동안 평가가 자리를 잡으려 하면 기다려야 합니다.
+    grabbed = threading.Event()
+    entered = threading.Event()
+
+    def hold() -> None:
+        with manager._gpu_gate:
+            grabbed.set()
+            entered.wait(timeout=2)
+
+    holder = threading.Thread(target=hold, daemon=True)
+    holder.start()
+    assert grabbed.wait(timeout=2)
+
+    # 문이 잡혀 있으니 평가 자리 잡기는 들어가지 못합니다.
+    assert manager._gpu_gate.acquire(blocking=False) is False
+
+    entered.set()
+    holder.join(timeout=2)
+
+    # 문이 풀리면 평소대로 시작합니다.
+    evaluation.get_evaluation_runner()._state = {"status": "idle", "job_id": None}
+    assert manager.start(created["config_id"]).job_id
+
+
 def test_병렬이면_평가가_돌아도_학습을_막지_않는다(client, valid_payload, monkeypatch, fake_process_factory):
     from src.pipelines.web import evaluation
     from src.pipelines.web.jobs import runner
