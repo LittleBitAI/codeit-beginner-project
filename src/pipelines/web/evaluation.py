@@ -531,6 +531,37 @@ class EvaluationRunner:
         config: dict[str, Any],
         progress_state: EvaluateProgressState,
     ) -> None:
+        try:
+            self._run_once(record, config, progress_state)
+        finally:
+            self._release_gpu()
+
+    def _release_gpu(self) -> None:
+        """평가가 끝났으니 GPU를 기다리던 대기열을 밀어 줍니다.
+
+        평가 실행을 '직렬'로 두면 평가가 도는 동안 대기열의 다음 학습이 거절됩니다.
+        누군가 다시 밀어 주지 않으면, 평가가 끝나 GPU가 비어도 대기열은 멈춘 표시도
+        없이 그대로 남습니다. 밤새 돌리려던 학습이 첫 평가에서 서 버립니다.
+
+        사람이 화면에서 누른 평가도 여기를 지납니다. 자동 평가 thread만 대기열을
+        밀면 수동 평가로 시작한 경우가 통째로 빠집니다.
+        """
+
+        try:
+            from .jobs import get_manager
+
+            get_manager()._start_next()
+        except Exception:
+            # background thread에는 오류를 응답할 caller가 없습니다. 대기열은
+            # 시작에 실패하면 스스로 멈추므로 사람이 화면에서 다시 돌릴 수 있습니다.
+            pass
+
+    def _run_once(
+        self,
+        record: JobRecord,
+        config: dict[str, Any],
+        progress_state: EvaluateProgressState,
+    ) -> None:
         from .jobs.model import utc_now_text
 
         try:

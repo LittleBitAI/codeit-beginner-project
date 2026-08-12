@@ -95,47 +95,94 @@ def test_직렬이면_평가가_도는_동안_학습을_시작하지_않는다(c
         get_manager().start(created["config_id"])
 
 
-def test_확인과_시작이_한_문_안에서_일어난다(client, valid_payload, monkeypatch, fake_process_factory):
-    """확인만 하고 문을 놓으면 두 thread가 서로를 못 보고 둘 다 출발합니다.
+def test_학습과_평가가_동시에_출발해도_직렬에서는_하나만_이긴다(
+    client, valid_payload, monkeypatch, fake_process_factory
+):
+    """두 시작 경로를 실제로 맞붙여 봅니다.
 
-    학습이 "평가 없음"을 확인한 뒤 자리를 잡기 전에 평가가 끼어들 수 있으면,
-    직렬로 두었는데도 둘이 겹쳐 돌아 8GB 카드에서 둘 다 잃습니다. 그래서 확인부터
-    자리 잡기까지가 같은 잠금 안에 있어야 합니다.
+    잠금 하나를 non-blocking으로 못 잡는지만 보는 테스트는, 어느 한쪽에서 문을
+    빼 버려도 그대로 통과합니다. production의 `start()`와 `_start_one_evaluation()`을
+    동시에 출발시켜 **둘 중 하나만** 자리를 잡는지를 봐야 회귀를 잡습니다.
     """
 
     import threading
 
     from src.pipelines.web import evaluation
-    from src.pipelines.web.jobs import runner
-    from src.pipelines.web.jobs import get_manager
+    from src.pipelines.web.errors import JobConflictError
+    from src.pipelines.web.jobs import get_manager, runner
+    from src.pipelines.web.jobs import manager as manager_module
 
     client.put("/api/settings", json={"evaluation_mode": "serial"})
     created = client.post("/api/train/configs", json=valid_payload).json()
     monkeypatch.setattr(runner, "spawn", lambda *a, **k: fake_process_factory())
+
     manager = get_manager()
+    evaluation_runner = evaluation.get_evaluation_runner()
 
-    # 학습이 문을 쥐고 있는 동안 평가가 자리를 잡으려 하면 기다려야 합니다.
-    grabbed = threading.Event()
-    entered = threading.Event()
+    # 평가할 것이 하나 있는 것처럼 꾸밉니다. 실제 subprocess는 띄우지 않고
+    # 상태만 running으로 바꿉니다 — 여기서 보려는 것은 자리 다툼입니다.
+    finished = client.post("/api/train/configs", json=valid_payload).json()
+    done = manager.start(finished["config_id"])
+    manager._records[done.job_id].status = "succeeded"
+    manager._active_job_id = None
+    manager._evaluation_pending.append(done.job_id)
 
-    def hold() -> None:
-        with manager._gpu_gate:
-            grabbed.set()
-            entered.wait(timeout=2)
+    started_evaluation = threading.Event()
 
-    holder = threading.Thread(target=hold, daemon=True)
-    holder.start()
-    assert grabbed.wait(timeout=2)
+    def fake_start(record, options):  # noqa: ANN001, ARG001
+        with evaluation_runner._lock:
+            evaluation_runner._state = {"status": "running", "job_id": record.job_id}
+        started_evaluation.set()
+        return evaluation_runner.status()
 
-    # 문이 잡혀 있으니 평가 자리 잡기는 들어가지 못합니다.
-    assert manager._gpu_gate.acquire(blocking=False) is False
+    monkeypatch.setattr(evaluation_runner, "start", fake_start)
 
-    entered.set()
-    holder.join(timeout=2)
+    # 학습이 "평가 없음"을 확인한 **직후** 멈춰 세웁니다. 여기가 위험한 창입니다.
+    # 이 사이에 평가가 자리를 잡아 버리면 둘이 겹칩니다.
+    checked = threading.Event()
+    resume = threading.Event()
+    real_read = manager_module.read_runtime_config
 
-    # 문이 풀리면 평소대로 시작합니다.
-    evaluation.get_evaluation_runner()._state = {"status": "idle", "job_id": None}
-    assert manager.start(created["config_id"]).job_id
+    def blocking_read(config_id: str):  # noqa: ANN202
+        checked.set()
+        resume.wait(timeout=5)
+        return real_read(config_id)
+
+    monkeypatch.setattr(manager_module, "read_runtime_config", blocking_read)
+
+    outcome: dict[str, object] = {}
+
+    def begin_training() -> None:
+        try:
+            outcome["train"] = manager.start(created["config_id"]).job_id
+        except JobConflictError as error:
+            outcome["train"] = error
+
+    trainer = threading.Thread(target=begin_training, daemon=True)
+    trainer.start()
+    assert checked.wait(timeout=5), "학습이 평가 확인 지점에 닿지 못했습니다"
+
+    # 창이 열린 그 순간 평가가 끼어들려 합니다. 문이 있으면 학습이 자리를 잡을
+    # 때까지 기다리고, 없으면 그대로 통과해 둘이 겹칩니다.
+    evaluator = threading.Thread(
+        target=lambda: manager._start_one_evaluation(
+            evaluation_runner, JobConflictError, serial=True
+        ),
+        daemon=True,
+    )
+    evaluator.start()
+    # 평가가 끼어들 시간을 충분히 줍니다. 문이 있으면 여기서 막혀 있습니다.
+    started_evaluation.wait(timeout=0.5)
+
+    resume.set()
+    trainer.join(timeout=10)
+    evaluator.join(timeout=10)
+
+    trained = not isinstance(outcome.get("train"), JobConflictError)
+    evaluated = started_evaluation.is_set()
+    # 둘 다 자리를 잡으면 8GB 카드에서 둘 다 out of memory로 잃습니다.
+    assert not (trained and evaluated), "학습과 평가가 동시에 GPU를 잡았습니다"
+    assert trained or evaluated, "둘 다 시작하지 못했습니다"
 
 
 def test_병렬이면_평가가_돌아도_학습을_막지_않는다(client, valid_payload, monkeypatch, fake_process_factory):
