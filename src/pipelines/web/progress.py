@@ -178,6 +178,19 @@ def _apply_run_started(state: ProgressState, event: dict[str, Any]) -> dict[str,
     return _log(" · ".join(pieces), level="info")
 
 
+def _event_epoch(state: ProgressState, event: dict[str, Any]) -> int | None:
+    """event에 적힌 epoch 번호. 없거나 계획을 넘으면 `None`입니다.
+
+    계획보다 큰 번호를 그대로 받으면 진행률과 손실 곡선이 그 줄 하나를 따라갑니다.
+    끊긴 줄이나 섞여 들어온 다른 실행의 log가 화면을 100% 너머로 밀어냈습니다.
+    """
+
+    epoch = _positive_int(event.get("epoch"))
+    if epoch is None or (state.epochs is not None and epoch > state.epochs):
+        return None
+    return epoch
+
+
 def _drop_seeded_from(state: ProgressState, epoch: int) -> None:
     """이 실행이 `epoch`을 지나고 있다면 그 뒤의 **옮겨 온** epoch를 지웁니다.
 
@@ -195,10 +208,10 @@ def _drop_seeded_from(state: ProgressState, epoch: int) -> None:
 
 
 def _apply_epoch_started(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:
-    epoch = _positive_int(event.get("epoch"))
     total = _positive_int(event.get("epochs"))
     if total is not None:
         state.epochs = total
+    epoch = _event_epoch(state, event)
     if epoch is None:
         state.malformed_lines += 1
         return None
@@ -221,7 +234,7 @@ def _apply_step_progress(state: ProgressState, event: dict[str, Any]) -> dict[st
     total_epochs = _positive_int(event.get("epochs"))
     if total_epochs is not None:
         state.epochs = total_epochs
-    epoch = _positive_int(event.get("epoch"))
+    epoch = _event_epoch(state, event)
 
     phase = _text(event.get("phase"))
     step = _positive_int(event.get("step"))
@@ -290,19 +303,19 @@ def seed_epochs(state: ProgressState, entries: Any) -> None:
 
 
 def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:
-    epoch = _positive_int(event.get("epoch"))
     total = _positive_int(event.get("epochs"))
     if total is not None:
         state.epochs = total
+    epoch = _event_epoch(state, event)
     if epoch is None:
         state.malformed_lines += 1
         return None
 
+    # 이 실행이 이 자리를 지나갔으므로 뒤에 남은 옮겨 온 epoch는 다시 도는 것입니다.
+    _drop_seeded_from(state, epoch)
     record = _epoch_record(epoch, event)
     # 같은 epoch이 다시 오면 나중 값으로 덮어씁니다.
     state.epochs_by_number[epoch] = record
-    # 이제 이 실행이 직접 끝낸 epoch입니다. 옮겨 온 것으로 두면 나중에 지워집니다.
-    state.seeded_epochs.discard(epoch)
     state.current_epoch = epoch
     # 끝난 epoch의 batch 위치가 남아 있으면 아직 도는 것처럼 읽힙니다.
     state.step = None
@@ -491,9 +504,6 @@ def snapshot(state: ProgressState) -> dict[str, Any]:
             (state.current_epoch or 1) - 1,
         )
     total = state.epochs
-    if total:
-        # 깨진 event 한 줄에 적힌 epoch 번호가 계획보다 크면 진행률이 100%를 넘습니다.
-        completed = min(completed, total)
     best = None
     scored = [record for record in ordered if record["validation_loss"] is not None]
     if scored:

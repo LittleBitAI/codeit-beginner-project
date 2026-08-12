@@ -13,7 +13,9 @@ export function epochsDone(progress: Progress): number {
   const completed = progress.completed_epochs ?? 0;
   const running = progress.current_epoch ?? 0;
   // 지금 도는 epoch은 아직 끝나지 않았으므로 하나 앞까지가 끝난 수입니다.
-  return Math.max(completed, running > 0 ? running - 1 : 0);
+  const done = Math.max(completed, running > 0 ? running - 1 : 0);
+  // 깨진 log 한 줄이 남긴 계획 밖 번호를 그대로 "98 / 12"로 보여 주지 않습니다.
+  return Math.min(done, progress.total_epochs ?? done);
 }
 
 /**

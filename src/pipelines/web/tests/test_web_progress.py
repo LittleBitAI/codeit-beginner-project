@@ -92,16 +92,21 @@ def test_a_broken_step_event_cannot_push_the_epoch_count_past_the_plan():
     assert result["percent"] == pytest.approx(8.3)
 
 
-@pytest.mark.parametrize("event", ["epoch_started", "epoch_completed"])
-def test_an_epoch_number_past_the_plan_cannot_push_progress_over_100(event):
+@pytest.mark.parametrize("event", ["epoch_started", "epoch_completed", "step_progress"])
+def test_an_epoch_number_past_the_plan_is_not_believed(event):
     """계획보다 큰 epoch 번호가 적힌 줄 하나로 816%를 그리면 안 됩니다."""
 
-    state = feed(line(event, epoch=99, epochs=12))
+    state = feed(
+        line("epoch_completed", epoch=1, epochs=12, validation_loss=0.5),
+        line(event, epoch=99, epochs=12, phase="train", step=1, total_steps=9),
+    )
 
     result = snapshot(state)
 
-    assert result["completed_epochs"] == 12
-    assert result["percent"] == 100.0
+    assert result["current_epoch"] == 1
+    assert result["completed_epochs"] == 1
+    assert [entry["epoch"] for entry in result["epochs"]] == [1]
+    assert result["percent"] == pytest.approx(8.3)
 
 
 def test_seeded_epochs_are_dropped_wherever_this_run_turns_out_to_be():
@@ -121,6 +126,17 @@ def test_seeded_epochs_are_dropped_wherever_this_run_turns_out_to_be():
     consume_line(state, line("epoch_started", epoch=6, epochs=12))
 
     assert sorted(state.epochs_by_number) == [1, 2, 3, 4, 5, 6]
+
+
+def test_a_completed_epoch_alone_also_drops_the_stale_epochs_behind_it():
+    """`epoch_started`를 놓쳐도 다시 도는 epoch가 끝난 것으로 남으면 안 됩니다."""
+
+    state = ProgressState()
+    seed_epochs(state, [{"epoch": number, "validation_loss": 0.6} for number in range(1, 8)])
+    consume_line(state, line("epoch_completed", epoch=6, epochs=12, validation_loss=0.4))
+
+    assert sorted(state.epochs_by_number) == [1, 2, 3, 4, 5, 6]
+    assert snapshot(state)["completed_epochs"] == 6
 
 
 def test_borrowed_epoch_times_do_not_estimate_this_run():
