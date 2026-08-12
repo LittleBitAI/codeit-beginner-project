@@ -34,9 +34,17 @@ export function usePolling<T>(
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
-  const run = useCallback(async () => {
+  /**
+   * `queueWhenBusy`는 **사람이 누른 refresh**에만 켭니다.
+   *
+   * 주기가 부른 것까지 쌓으면, 한 요청이 주기보다 오래 걸릴 때 tick마다 다음
+   * 요청이 예약되어 쉬는 틈이 사라집니다. 실험 목록처럼 수십 초 걸리는 조회에서는
+   * backend를 쉬지 않고 두드리고 loading도 끝나지 않습니다. 주기가 부른 것은
+   * 지금처럼 그냥 건너뜁니다 — 다음 tick이 곧 옵니다.
+   */
+  const run = useCallback(async (queueWhenBusy: boolean) => {
     if (inFlight.current) {
-      again.current = true;
+      if (queueWhenBusy) again.current = true;
       return;
     }
     inFlight.current = true;
@@ -72,11 +80,16 @@ export function usePolling<T>(
       setLoading(false);
       return;
     }
-    void run();
+    void run(false);
     if (intervalMs <= 0) return;
-    const timer = window.setInterval(() => void run(), intervalMs);
+    const timer = window.setInterval(() => void run(false), intervalMs);
     return () => window.clearInterval(timer);
   }, [enabled, intervalMs, run]);
 
-  return { data, error, loading, refresh: run };
+  // 화면이 값을 바꾼 직후 부르는 길입니다. 도는 중이면 미뤄 두었다가 한 번 더 돕니다.
+  const refresh = useCallback(() => {
+    void run(true);
+  }, [run]);
+
+  return { data, error, loading, refresh };
 }

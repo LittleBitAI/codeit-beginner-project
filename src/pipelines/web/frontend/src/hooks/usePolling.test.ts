@@ -80,6 +80,39 @@ describe('usePolling', () => {
     expect(result.current.data).toBe('새 값');
   });
 
+  it('요청이 주기보다 오래 걸려도 주기가 다음 요청을 예약하지는 않는다', async () => {
+    // 예약하면 tick마다 다음 요청이 쌓여 쉬는 틈이 사라집니다. 실험 목록처럼 수십
+    // 초 걸리는 조회에서 backend를 쉬지 않고 두드리게 됩니다.
+    const releases: ((value: string) => void)[] = [];
+    const fetcher = vi.fn(
+      () => new Promise<string>((resolve) => releases.push(resolve)),
+    );
+
+    renderHook(() => usePolling(fetcher, 100));
+    await act(async () => {});
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(500); // 요청이 도는 동안 tick이 여러 번 지나갑니다
+    });
+
+    await act(async () => {
+      releases[0]?.('첫 응답');
+    });
+
+    // 끝나자마자 이어 붙지 않습니다. 다음 tick을 기다립니다.
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(100);
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      releases[1]?.('두 번째 응답');
+    });
+  });
+
   it('enabled가 false면 아무것도 부르지 않는다', async () => {
     const fetcher = vi.fn().mockResolvedValue('ok');
 

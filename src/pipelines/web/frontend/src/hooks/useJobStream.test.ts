@@ -14,6 +14,13 @@ import { useJobStream } from './useJobStream';
 const gates = new Map<string, () => void>();
 /** A의 응답을 붙잡을지. 두 번째 A는 곧바로 답하게 두려고 끕니다. */
 let holdA = true;
+/**
+ * 같은 A라도 몇 번째 요청인지 응답에 새깁니다.
+ *
+ * 두 A가 똑같은 값을 돌려주면 첫 A의 낡은 응답을 잘못 적용해도 관찰값이 같아
+ * 테스트가 통과합니다. 그러면 회귀를 막지 못하는 테스트가 됩니다.
+ */
+let aRequests = 0;
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -22,11 +29,11 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
-function jobBody(jobId: string) {
+function jobBody(jobId: string, mark = '') {
   return {
     job_id: jobId,
     config_id: 'cfg',
-    run_id: `run-${jobId}`,
+    run_id: `run-${jobId}${mark}`,
     status: 'succeeded',
     status_label: '완료',
     created_at: '2026-01-01T00:00:00Z',
@@ -56,6 +63,7 @@ function jobBody(jobId: string) {
 beforeEach(() => {
   gates.clear();
   holdA = true;
+  aRequests = 0;
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
@@ -63,11 +71,14 @@ beforeEach(() => {
       const match = /\/api\/train\/jobs\/([^/?]+)/.exec(path);
       const jobId = match?.[1] ?? '';
       if (path.includes('/logs')) return jsonResponse({ lines: [], next: 0, complete: true });
-      // A는 붙잡아 둡니다. 테스트가 풀어 줄 때까지 응답하지 않습니다.
-      if (jobId === 'A' && holdA) {
+      if (jobId !== 'A') return jsonResponse(jobBody(jobId));
+      // 몇 번째 A인지 응답에 새깁니다. 어느 응답이 화면에 남았는지 구별하려는 것입니다.
+      const mark = `-${(aRequests += 1)}`;
+      // 첫 A는 붙잡아 둡니다. 테스트가 풀어 줄 때까지 응답하지 않습니다.
+      if (holdA) {
         await new Promise<void>((resolve) => gates.set('A', resolve));
       }
-      return jsonResponse(jobBody(jobId));
+      return jsonResponse(jobBody('A', mark));
     }),
   );
 });
@@ -94,12 +105,13 @@ describe('useJobStream', () => {
     // 다시 A로. 이번 A는 붙잡지 않고 곧바로 응답합니다.
     holdA = false;
     rerender({ id: 'A' });
-    await waitFor(() => expect(result.current.job?.run_id).toBe('run-A'));
+    // 두 번째 A의 응답에는 -2가 새겨져 있습니다.
+    await waitFor(() => expect(result.current.job?.run_id).toBe('run-A-2'));
 
-    // 이제 첫 A를 풀어 줍니다. 같은 이름이지만 지난 세대라 버려야 합니다.
+    // 이제 첫 A(-1)를 풀어 줍니다. 같은 이름이지만 지난 세대라 버려야 합니다.
     firstA?.();
     await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(result.current.job?.job_id).toBe('A');
+    expect(result.current.job?.run_id).toBe('run-A-2');
     expect(result.current.error).toBeNull();
   });
 
