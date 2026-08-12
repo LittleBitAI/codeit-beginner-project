@@ -77,6 +77,23 @@ def test_parses_epoch_completed():
     assert result["percent"] == 10.0
 
 
+def test_resumed_run_counts_epoch_numbers_not_received_events():
+    """이어서 학습한 실행은 앞선 epoch가 이 stream에 없습니다.
+
+    받은 event 수로 세면 로그는 `epoch 11/12`라고 찍는데 화면만 0/12에서 다시
+    시작한 것처럼 보입니다.
+    """
+
+    state = feed(line("epoch_started", run_id="web-1", epoch=11, epochs=12))
+    assert snapshot(state)["completed_epochs"] == 10
+
+    consume_line(state, line("epoch_completed", epoch=11, epochs=12, epoch_seconds=9.0))
+    result = snapshot(state)
+
+    assert result["completed_epochs"] == 11
+    assert result["percent"] == pytest.approx(91.7)
+
+
 def test_learning_rate_is_kept_when_train_reports_it_and_stays_none_when_it_does_not():
     """schedule을 쓰지 않는 실행과 이 계약 이전의 옛 실행은 값이 없습니다.
 
@@ -202,7 +219,7 @@ def test_broken_step_progress_is_ignored_without_losing_the_run(broken):
 
     result = snapshot(state)
     assert result["step"] is None
-    assert result["completed_epochs"] == 1
+    assert result["completed_epochs"] == 2
     assert result["malformed_lines"] == 1
 
 

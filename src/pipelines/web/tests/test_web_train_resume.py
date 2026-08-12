@@ -7,6 +7,7 @@ import할 수 없으므로 검증 규칙은 여기에 복제하고, 이어서 �
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timezone
 
@@ -399,6 +400,99 @@ def test_resume_route_reports_team_sync_auth_failure_and_keeps_the_request(
     assert manager.queue_paused() is True
     assert len(manager.queue_entries()) == 1
     assert manager.queue_entries()[0]["run_id"] != record.run_id
+
+
+def test_resumed_from_run_id_reads_both_paths_this_screen_builds(monkeypatch):
+    """경로 모양이 바뀌면 이어서 한 실행이 앞선 곡선을 조용히 잃습니다."""
+
+    from src.pipelines.web.jobs.manager import _resumed_from_run_id
+
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "team-bucket")
+    local = {"train": _settings(run_id="web-run")}
+    remote = {
+        "train": _settings(run_id="web-run", output_prefix="experiments/completed"),
+        "storage": {"backend": "s3"},
+    }
+
+    assert _resumed_from_run_id(resume_checkpoint_uri(local)) == "web-run"
+    assert _resumed_from_run_id(resume_checkpoint_uri(remote)) == "web-run"
+    # 사람이 직접 적어 넣은 경로는 앞선 실행의 이름을 알 수 없습니다.
+    assert _resumed_from_run_id("artifacts/hand-written/last_checkpoint.pt") is None
+
+
+def test_resumed_run_keeps_the_loss_curve_of_the_run_it_continues(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """앞선 epoch는 checkpoint 안에만 있고 진행 log로는 오지 않습니다.
+
+    채우지 않으면 11 epoch부터 이어서 한 실행의 손실 그래프가 11에서 시작해, 그전
+    곡선이 사라진 것처럼 보입니다.
+    """
+
+    from src.pipelines.web.jobs import runner
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.progress = {
+        "available": True,
+        "epochs": [
+            {"epoch": number, "train_loss": 0.5, "validation_loss": 0.6}
+            for number in range(1, 11)
+        ],
+    }
+    line = json.dumps(
+        {
+            "schema": "train.progress/1",
+            "event": "epoch_completed",
+            "epoch": 11,
+            "epochs": 12,
+            "train_loss": 0.3,
+            "validation_loss": 0.4,
+        }
+    )
+    # 진행 event는 stderr로 옵니다. stdout은 마지막 결과 JSON 문서 하나입니다.
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: fake_process_factory(stderr=line + "\n"))
+
+    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 12})
+
+    assert response.status_code == 201, response.text
+    started = manager.get(response.json()["started"]["job_id"])
+    deadline = time.monotonic() + 10
+    while manager._active_job_id is not None and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert [entry["epoch"] for entry in started.progress["epochs"]] == list(range(1, 12))
+    assert started.progress["completed_epochs"] == 11
+
+
+def test_a_run_started_from_scratch_gets_no_borrowed_epochs(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """이어서 하지 않는 실행에 남의 곡선을 붙이면 안 됩니다."""
+
+    from src.pipelines.web.jobs import runner
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.progress = {"available": True, "epochs": [{"epoch": 1, "train_loss": 0.5}]}
+    created = client.post(
+        "/api/train/configs",
+        json={"train": {"run_id": "fresh-run", "epochs": 3}, "inputs": {"data": data_inputs}},
+    )
+    line = json.dumps(
+        {"schema": "train.progress/1", "event": "epoch_completed", "epoch": 1, "epochs": 3}
+    )
+    # 진행 event는 stderr로 옵니다. stdout은 마지막 결과 JSON 문서 하나입니다.
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: fake_process_factory(stderr=line + "\n"))
+
+    started = manager.start(created.json()["config_id"])
+    deadline = time.monotonic() + 10
+    while manager._active_job_id is not None and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert [entry["epoch"] for entry in started.progress["epochs"]] == [1]
 
 
 def test_resume_route_refuses_a_job_that_is_not_interrupted(

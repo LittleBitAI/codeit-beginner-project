@@ -14,15 +14,26 @@ import json
 import subprocess
 import threading
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
 from ..errors import JobConflictError, JobNotFoundError
 from ..masking import sanitize_line
 from ..paths import REPOSITORY_ROOT
-from ..progress import ProgressState, consume_line, snapshot, take_quiet_change
-from ..train_config import config_relative_path, read_runtime_config
+from ..progress import (
+    ProgressState,
+    consume_line,
+    seed_epochs,
+    snapshot,
+    take_quiet_change,
+)
+from ..train_config import (
+    RUNNING_PREFIX,
+    WORKING_DIRECTORY_SUFFIX,
+    config_relative_path,
+    read_runtime_config,
+)
 from .. import state_sync, team_sync
 from . import runner, store
 from .model import (
@@ -85,6 +96,27 @@ def _lost_runtime_message() -> str:
         "이 학습을 시작한 런타임이 사라졌습니다. 그 process는 남아 있지 않습니다."
         " epoch마다 저장한 checkpoint가 S3에 있으므로 거기서 이어서 학습할 수 있습니다."
     )
+
+
+def _resumed_from_run_id(resume_from: Any) -> str | None:
+    """이어서 학습할 checkpoint 경로에서 앞선 실행의 이름을 꺼냅니다.
+
+    `train_config.resume_checkpoint_uri`가 만든 두 가지 형태를 읽습니다. 로컬은
+    `.<run_id>.partial/`, S3는 `<run_id>/running/`입니다. 사람이 직접 적어 넣은 다른
+    경로는 이름을 알 수 없으므로 `None`입니다.
+    """
+
+    if not isinstance(resume_from, str) or not resume_from.strip():
+        return None
+    parts = PurePosixPath(resume_from.strip()).parts
+    if len(parts) < 2:
+        return None
+    directory = parts[-2]
+    if directory.startswith(".") and directory.endswith(WORKING_DIRECTORY_SUFFIX):
+        return directory[1 : -len(WORKING_DIRECTORY_SUFFIX)] or None
+    if directory == RUNNING_PREFIX and len(parts) >= 3:
+        return parts[-3] or None
+    return None
 
 
 class JobManager:
@@ -542,11 +574,29 @@ class JobManager:
             self._active_job_id = job_id
             self._cancel_requested = False
             self._progress = ProgressState()
+            self._seed_resumed_epochs(self._progress, settings)
             self._sequence = 0
             self._stdout_chunks = []
             record.progress = snapshot(self._progress)
             team_sync.get_team_sync().enqueue_update(record)
         return record
+
+    def _seed_resumed_epochs(self, state: ProgressState, settings: dict[str, Any]) -> None:
+        """이어서 학습한 실행의 손실 그래프에 앞선 실행의 epoch를 미리 채웁니다.
+
+        `_lock`을 쥔 채로 부릅니다. 앞선 epoch는 checkpoint 안에만 있고 진행 log로는
+        오지 않으므로, 채우지 않으면 11 epoch부터 이어서 한 실행의 그래프가 11에서
+        시작해 그전 곡선이 사라진 것처럼 보입니다. 앞선 기록이 이 PC에 없으면
+        (예: 다른 Colab runtime에서 돈 학습) 지어내지 않고 그냥 둡니다.
+        """
+
+        run_id = _resumed_from_run_id(settings.get("resume_from"))
+        if run_id is None:
+            return
+        for record in self._records.values():
+            if record.run_id == run_id:
+                seed_epochs(state, record.progress.get("epochs"))
+                return
 
     def _spawn(self, record: JobRecord, config_id: str) -> JobRecord:
         """자리를 잡은 기록으로 실제 process를 띄웁니다. gate 밖에서 합니다."""

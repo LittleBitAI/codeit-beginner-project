@@ -15,7 +15,13 @@ from typing import Any
 from .masking import sanitize_line
 
 
-__all__ = ["ProgressState", "consume_line", "snapshot", "take_quiet_change"]
+__all__ = [
+    "ProgressState",
+    "consume_line",
+    "seed_epochs",
+    "snapshot",
+    "take_quiet_change",
+]
 
 
 SCHEMA_PREFIX = "train.progress/"
@@ -217,16 +223,10 @@ def _apply_step_progress(state: ProgressState, event: dict[str, Any]) -> dict[st
     return None
 
 
-def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:
-    epoch = _positive_int(event.get("epoch"))
-    total = _positive_int(event.get("epochs"))
-    if total is not None:
-        state.epochs = total
-    if epoch is None:
-        state.malformed_lines += 1
-        return None
+def _epoch_record(epoch: int, event: dict[str, Any]) -> dict[str, Any]:
+    """끝난 epoch 하나를 화면이 그릴 수 있는 모양으로 만듭니다."""
 
-    record = {
+    return {
         "epoch": epoch,
         "train_loss": _finite_number(event.get("train_loss")),
         "validation_loss": _finite_number(event.get("validation_loss")),
@@ -237,6 +237,37 @@ def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[
         # schedule을 쓰지 않는 실행과 이 계약 이전의 옛 실행은 None입니다.
         "learning_rate": _finite_number(event.get("learning_rate")),
     }
+
+
+def seed_epochs(state: ProgressState, entries: Any) -> None:
+    """앞선 실행이 이미 끝낸 epoch를 진행 상태에 미리 채웁니다.
+
+    이어서 학습한 실행은 checkpoint에서 출발하므로 그전 epoch가 진행 log로 오지
+    않습니다. 채우지 않으면 손실 그래프가 이어붙인 지점에서 시작해, 앞의 곡선이
+    사라진 것처럼 보입니다. 저장돼 있던 기록이라 key가 빠져 있을 수 있으므로 지금
+    계약의 모양으로 다시 맞춥니다.
+    """
+
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        epoch = _positive_int(entry.get("epoch"))
+        if epoch is not None:
+            state.epochs_by_number[epoch] = _epoch_record(epoch, entry)
+
+
+def _apply_epoch_completed(state: ProgressState, event: dict[str, Any]) -> dict[str, Any] | None:
+    epoch = _positive_int(event.get("epoch"))
+    total = _positive_int(event.get("epochs"))
+    if total is not None:
+        state.epochs = total
+    if epoch is None:
+        state.malformed_lines += 1
+        return None
+
+    record = _epoch_record(epoch, event)
     # 같은 epoch이 다시 오면 나중 값으로 덮어씁니다.
     state.epochs_by_number[epoch] = record
     state.current_epoch = epoch
@@ -417,10 +448,15 @@ def snapshot(state: ProgressState) -> dict[str, Any]:
         }
 
     ordered = [state.epochs_by_number[key] for key in sorted(state.epochs_by_number)]
-    # train이 알려 준 실제 수행 횟수를 우선합니다. 없으면 받은 event 수로 셉니다.
+    # train이 알려 준 실제 수행 횟수를 우선합니다. 없으면 지금까지 본 epoch **번호**로
+    # 셉니다. 개수로 세면 11 epoch부터 이어서 학습한 실행이 로그에는 `epoch 11/12`라고
+    # 뜨는데 화면은 0/12에서 다시 시작한 것처럼 보입니다.
     completed = state.reported_completed_epochs
     if completed is None:
-        completed = len(ordered)
+        completed = max(
+            max(state.epochs_by_number, default=0),
+            (state.current_epoch or 1) - 1,
+        )
     total = state.epochs
     best = None
     scored = [record for record in ordered if record["validation_loss"] is not None]
