@@ -46,6 +46,15 @@ describe('datasetLabel', () => {
     expect(datasetLabel({})).toBeNull();
     expect(datasetLabel(null)).toBeNull();
   });
+
+  it('manifest가 아닌 파일을 가리키면 담고 있던 폴더 이름을 데이터셋으로 삼지 않는다', () => {
+    // 값 대신 field 이름이 적힌 옛 기록. 예전에는 `data`가 데이터셋으로 잡혔습니다.
+    expect(datasetLabel({ train_manifest_uri: 'artifacts/data/train_manifest_uri.json' })).toBeNull();
+    // pytest 임시 폴더가 남긴 기록. 예전에는 `fixtures`가 데이터셋으로 잡혔습니다.
+    expect(
+      datasetLabel({ train_manifest_uri: 'artifacts/pytest-main/test_run0/fixtures/train.json' }),
+    ).toBeNull();
+  });
 });
 
 describe('specLine', () => {

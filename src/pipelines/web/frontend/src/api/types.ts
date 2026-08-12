@@ -145,6 +145,16 @@ export interface JobRecord {
   sync_revision?: number;
 }
 
+/**
+ * 사람이 한 번 정해 두고 계속 쓰는 값.
+ *
+ * `evaluation_mode`가 `null`이면 아직 고른 적이 없다는 뜻이고, 그동안 서버는 자동
+ * 평가를 하지 않습니다. 서버를 올렸다는 이유만으로 GPU가 도는 일은 없어야 합니다.
+ */
+export interface AppSettings {
+  evaluation_mode: 'parallel' | 'serial' | null;
+}
+
 export interface TeamConfig {
   enabled: boolean;
   team_id: string | null;
