@@ -112,6 +112,12 @@ class JobManager:
         # 멈춘 대기열은 앞 학습이 끝나도 다음을 시작하지 않습니다. 사람이 중지를
         # 눌렀는데 곧바로 다음 학습이 뜨면 멈춘 것이 아니기 때문입니다.
         self._queue_paused = True
+        # 학습이 끝날 때마다 깨어나 평가를 이어 도는 thread. 처음 필요할 때 만듭니다.
+        self._evaluation_wakeup = threading.Event()
+        self._evaluation_thread: threading.Thread | None = None
+        # **이 서버가 방금 끝낸** 학습만 자동 평가합니다. 디스크에 남은 옛 성공 기록을
+        # 훑으면, 서버를 다시 켤 때마다 몇 십 건이 줄줄이 GPU를 잡습니다.
+        self._evaluation_pending: list[str] = []
 
     # ------------------------------------------------------------------ 조회
 
@@ -324,6 +330,83 @@ class JobManager:
                     self._queue_paused = True
                     self._save_queue()
                 raise
+
+    # -------------------------------------------------------------- 자동 평가
+
+    def wake_evaluation(self) -> None:
+        """평가할 것이 생겼다고 알립니다. thread가 없으면 여기서 띄웁니다.
+
+        학습이 끝날 때마다, 그리고 설정이 바뀔 때마다 불립니다. 실제로 무엇을 언제
+        돌릴지는 thread가 정합니다. 줄이 비어 있으면 아무 일도 하지 않습니다.
+        """
+
+        with self._lock:
+            if not self._evaluation_pending:
+                return
+            if self._evaluation_thread is None or not self._evaluation_thread.is_alive():
+                self._evaluation_thread = threading.Thread(
+                    target=self._evaluation_loop, name="auto-evaluate", daemon=True
+                )
+                self._evaluation_thread.start()
+        self._evaluation_wakeup.set()
+
+    def _next_unevaluated(self) -> JobRecord | None:
+        """줄 서 있는 것 중 아직 평가하지 않은 첫 학습입니다.
+
+        평가를 이미 한 번 돌린 기록은 건너뜁니다. 실패한 평가도 다시 집지 않습니다 —
+        같은 이유로 계속 실패할 텐데 그때마다 GPU를 잡으면 대기열이 통째로 막힙니다.
+        사람이 화면에서 다시 누를 수 있습니다.
+        """
+
+        with self._lock:
+            while self._evaluation_pending:
+                record = self._records.get(self._evaluation_pending.pop(0))
+                if record is not None and record.status == STATUS_SUCCEEDED and not record.evaluation:
+                    return record
+        return None
+
+    def _evaluation_loop(self) -> None:
+        """학습이 끝나면 평가를 이어 돕니다.
+
+        ``serial``이면 도는 학습이 하나도 없을 때까지 기다립니다. 평가가 VRAM을 약
+        1.8GB 더 쓰기 때문에, 8GB 카드에서 학습과 겹치면 둘 다 out of memory로
+        잃습니다. ``parallel``이면 곧바로 시작합니다.
+
+        ponytail: 평가가 끝났는지는 5초마다 상태를 물어봅니다. 평가 하나가 몇 분
+        걸리므로 이 정도 지연은 보이지 않습니다. 더 촘촘해야 하면 EvaluationRunner에
+        완료 callback을 답니다.
+        """
+
+        from .. import settings as web_settings
+        from ..errors import JobConflictError as _Conflict
+        from ..evaluation import get_evaluation_runner
+
+        runner_ = get_evaluation_runner()
+        while True:
+            self._evaluation_wakeup.wait()
+            self._evaluation_wakeup.clear()
+            while True:
+                mode = web_settings.evaluation_mode()
+                # 설정 화면에서 한 번 고르기 전까지는 자동으로 아무것도 돌리지
+                # 않습니다. 서버를 올렸다는 이유만으로 GPU가 몇 시간씩 돌면 안 됩니다.
+                if mode is None:
+                    break
+                if mode == "serial" and self.active_job() is not None:
+                    break
+                record = self._next_unevaluated()
+                if record is None:
+                    break
+                try:
+                    runner_.start(record, {})
+                except _Conflict:
+                    # 사람이 화면에서 먼저 눌렀습니다. 그것이 끝나면 다시 봅니다.
+                    pass
+                except Exception:
+                    # 평가 하나가 시작조차 못 했다고 server를 죽이지 않습니다.
+                    break
+                # 한 번에 하나만 돌 수 있으므로 끝날 때까지 기다렸다 다음을 집습니다.
+                while runner_.status().get("status") == "running":
+                    time.sleep(5)
 
     # ------------------------------------------------------------------ 실행
 
@@ -539,6 +622,12 @@ class JobManager:
                     # background thread에는 오류를 응답할 caller가 없습니다. _start_next가
                     # 항목을 복원하고 queue를 멈췄으므로 사람이 상태를 보고 재개할 수 있습니다.
                     pass
+            # 성공한 학습만 평가할 것이 있습니다. 취소·실패에는 쓸 checkpoint가 없습니다.
+            with self._lock:
+                finished = self._records.get(job_id)
+                if finished is not None and finished.status == STATUS_SUCCEEDED:
+                    self._evaluation_pending.append(job_id)
+            self.wake_evaluation()
 
     # ------------------------------------------------------------------ 종료
 
