@@ -135,23 +135,28 @@ def run_with(storage: FakeStorage, config: dict) -> dict:
 # --- 픽셀 측정 -------------------------------------------------------------
 
 
-def test_foreground_fraction_measures_the_area_the_objects_cover():
+def test_measure_image_reports_the_area_the_objects_cover_and_both_colours():
     """물체가 차지한 넓이의 비율이라, 원과 넓이가 맞아야 합니다."""
 
     with Image.open(io.BytesIO(draw_image([18, 18]))) as image:
-        fraction = eda.foreground_fraction(image, downscale=2)
+        measured = eda.measure_image(image, downscale=2)
 
     expected = 2 * 3.14159 * 18**2 / (IMAGE_SIZE[0] * IMAGE_SIZE[1])
-    assert 0.8 * expected < fraction < 1.3 * expected
+    assert 0.8 * expected < measured["foreground_fraction"] < 1.3 * expected
+    assert all(abs(value - 230) < 5 for value in measured["background_color"])
+    assert all(value < 90 for value in measured["foreground_color"])
 
 
-def test_foreground_fraction_does_not_assume_which_side_is_the_background():
+def test_measure_image_does_not_assume_which_side_is_the_background():
     """알약이 배경보다 밝은 판이 오면 전경과 배경이 통째로 뒤집힙니다."""
 
     image = Image.new("RGB", IMAGE_SIZE, (20, 20, 20))
     ImageDraw.Draw(image).ellipse((40, 40, 76, 76), fill=(240, 240, 240))
 
-    assert 0.0 < eda.foreground_fraction(image, downscale=2) < 0.2
+    measured = eda.measure_image(image, downscale=2)
+
+    assert 0.0 < measured["foreground_fraction"] < 0.2
+    assert all(value < 30 for value in measured["background_color"])
 
 
 # --- 리포트 ---------------------------------------------------------------
@@ -247,6 +252,25 @@ def test_a_size_comparison_is_withheld_when_the_ruler_fails_on_train():
     assert size["test_over_train"] is None
     # 잰 값 자체는 남습니다. 못 믿는 것은 두 값을 견준 결론뿐입니다.
     assert size["test_foreground_fraction"]["count"] == 1
+
+
+def test_report_compares_the_backdrop_and_lighting_on_both_sides():
+    """물체 크기가 같아도 촬영 부스가 다르면 model이 보는 그림이 다릅니다."""
+
+    storage = build_storage()
+    # test만 붉은 배경으로 찍힌 판을 흉내 냅니다.
+    image = Image.new("RGB", IMAGE_SIZE, (220, 60, 60))
+    ImageDraw.Draw(image).ellipse((40, 40, 76, 76), fill=(30, 30, 30))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    storage.blobs["raw/test_images/1.png"] = buffer.getvalue()
+
+    result = run_with(storage, config_for(storage))
+    appearance = storage.json[result["artifacts"]["eda_report_uri"]]["appearance"]
+
+    assert appearance["train_background_color"][0] == pytest.approx(230, abs=5)
+    assert appearance["test_background_color"][1] == pytest.approx(60, abs=10)
+    assert appearance["background_color_distance"] > 100
 
 
 def test_report_says_what_it_read_and_never_reads_test_annotations():

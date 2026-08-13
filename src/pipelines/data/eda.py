@@ -28,7 +28,7 @@ from .errors import EdaError
 from .progress import ProgressEmitter
 
 
-__all__ = ["eda_requested", "foreground_fraction", "run_eda"]
+__all__ = ["eda_requested", "measure_image", "run_eda"]
 
 
 #: 리포트를 넣는 폴더 이름입니다. 전처리 결과 옆에 두어야 화면이 찾아갑니다.
@@ -131,8 +131,10 @@ def _closed(mask: np.ndarray, *, radius: int = CLOSING_RADIUS) -> np.ndarray:
     return grown
 
 
-def foreground_fraction(image: Image.Image, *, downscale: int = DOWNSCALE) -> float:
-    """이미지에서 물체가 차지하는 넓이의 비율입니다. 0과 1 사이입니다.
+def measure_image(image: Image.Image, *, downscale: int = DOWNSCALE) -> dict[str, Any]:
+    """사진 한 장에서 물체가 차지하는 넓이와 배경·물체의 색을 잽니다.
+
+    `foreground_fraction`은 물체가 덮은 넓이의 비율(0~1)입니다.
 
     annotation을 쓰지 않으므로 정답이 없는 test 이미지에도 그대로 씁니다.
 
@@ -145,6 +147,9 @@ def foreground_fraction(image: Image.Image, *, downscale: int = DOWNSCALE) -> fl
     밝기가 아니라 **배경과 색이 얼마나 다른지**로 가릅니다. 밝기로 가르면 흰 알약이
     밝은 촬영 부스와 같은 값이 되어 통째로 사라집니다. 배경색은 가장자리 픽셀에서
     얻습니다 — 알약이 액자 밖까지 나가지는 않으므로 거기는 늘 배경입니다.
+
+    색도 함께 돌려줍니다. 촬영 부스나 조명이 판마다 다르면 물체 크기가 같아도 model이
+    보는 그림이 달라지는데, 크기만 재고 있으면 그 차이를 통째로 놓칩니다.
     """
 
     scale = max(1, int(downscale))
@@ -153,9 +158,20 @@ def foreground_fraction(image: Image.Image, *, downscale: int = DOWNSCALE) -> fl
         (max(1, width // scale), max(1, height // scale)), Image.BILINEAR
     )
     pixels = np.asarray(small, dtype=np.float32)
+    border = np.concatenate(
+        [pixels[0, :, :], pixels[-1, :, :], pixels[:, 0, :], pixels[:, -1, :]]
+    )
     distance = _background_distance(pixels)
     mask = _closed(distance > _otsu_threshold(distance))
-    return float(mask.mean())
+    return {
+        "foreground_fraction": float(mask.mean()),
+        "background_color": [round(float(value), 2) for value in np.median(border, axis=0)],
+        "foreground_color": (
+            [round(float(value), 2) for value in pixels[mask].mean(axis=0)]
+            if mask.any()
+            else None
+        ),
+    }
 
 
 def _background_distance(values: np.ndarray) -> np.ndarray:
@@ -176,10 +192,10 @@ def _measure_images(
     *,
     stage: str,
     on_progress: Any | None = None,
-) -> list[float]:
+) -> list[dict[str, Any]]:
     """이미지를 한 장씩 받아 재고 곧바로 지웁니다. 원본을 남기지 않습니다."""
 
-    measured: list[float] = []
+    measured: list[dict[str, Any]] = []
     for done, location in enumerate(locations, start=1):
         with tempfile.TemporaryDirectory(prefix="eda-") as scratch:
             local = Path(scratch) / posixpath.basename(location.replace("\\", "/"))
@@ -187,7 +203,7 @@ def _measure_images(
                 storage.download_file(location, local)
                 with Image.open(local) as opened:
                     opened.load()
-                    measured.append(foreground_fraction(opened))
+                    measured.append(measure_image(opened))
             except (StorageError, OSError, UnidentifiedImageError) as error:
                 raise EdaError(
                     f"EDA로 이미지를 여는 데 실패했습니다: {posixpath.basename(location)}"
@@ -361,14 +377,48 @@ def _combination_section(
     }
 
 
+def _appearance_section(
+    train_measured: Sequence[Mapping[str, Any]],
+    test_measured: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """촬영 부스와 조명이 양쪽에서 같은지 봅니다.
+
+    물체 크기가 같아도 배경색이나 조명이 다르면 model이 보는 그림은 다릅니다.
+    크기만 재고 있으면 그 차이를 통째로 놓칩니다.
+    """
+
+    def average(rows: Sequence[Mapping[str, Any]], key: str) -> list[float] | None:
+        values = [row[key] for row in rows if row.get(key) is not None]
+        if not values:
+            return None
+        return [round(float(np.median([value[index] for value in values])), 2) for index in range(3)]
+
+    section = {
+        "train_background_color": average(train_measured, "background_color"),
+        "test_background_color": average(test_measured, "background_color"),
+        "train_foreground_color": average(train_measured, "foreground_color"),
+        "test_foreground_color": average(test_measured, "foreground_color"),
+    }
+    for what in ("background", "foreground"):
+        left = section[f"train_{what}_color"]
+        right = section[f"test_{what}_color"]
+        # 0~441 척도의 RGB 거리입니다. 눈에 띄는 색 차이는 보통 20을 넘습니다.
+        section[f"{what}_color_distance"] = (
+            round(float(np.linalg.norm(np.array(left) - np.array(right))), 2)
+            if left and right
+            else None
+        )
+    return section
+
+
 def _size_section(
-    storage: Storage,
     train: Mapping[str, Any],
     validation: Mapping[str, Any],
-    test: Mapping[str, Any] | None,
+    train_images: Sequence[Mapping[str, Any]],
+    train_measured: Sequence[Mapping[str, Any]],
+    test_measured: Sequence[Mapping[str, Any]],
     *,
-    sample: int,
-    on_progress: Any | None,
+    has_test: bool,
 ) -> dict[str, Any]:
     """물체가 얼마나 크게 찍혔는지를 정답과 픽셀 양쪽에서 잽니다.
 
@@ -404,16 +454,10 @@ def _size_section(
         ),
     }
 
-    train_images = _sample(_images(train), sample)
-    train_measured = _measure_images(
-        storage,
-        [str(image["file_name"]) for image in train_images],
-        stage="train_pixels",
-        on_progress=on_progress,
-    )
+    fractions = [row["foreground_fraction"] for row in train_measured]
     paired = [
         (measured, train_truth[image["id"]])
-        for image, measured in zip(train_images, train_measured)
+        for image, measured in zip(train_images, fractions)
         if image["id"] in train_truth and train_truth[image["id"]] > 0
     ]
     # 1.0이면 픽셀로 잰 전경이 정답 사각형이 덮는 넓이와 같다는 뜻입니다. 알약은
@@ -431,26 +475,21 @@ def _size_section(
         "limits": [low, high],
         "trustworthy": trustworthy,
     }
-    section["train_foreground_fraction"] = _distribution(train_measured)
+    section["train_foreground_fraction"] = _distribution(fractions)
 
-    if test is None:
+    if not has_test:
         section["test_foreground_fraction"] = None
         section["test_over_train"] = None
         return section
 
-    test_measured = _measure_images(
-        storage,
-        [str(image["file_name"]) for image in _images(test)],
-        stage="test_pixels",
-        on_progress=on_progress,
-    )
-    section["test_foreground_fraction"] = _distribution(test_measured)
-    if not (trustworthy and train_measured and test_measured):
+    test_fractions = [row["foreground_fraction"] for row in test_measured]
+    section["test_foreground_fraction"] = _distribution(test_fractions)
+    if not (trustworthy and fractions and test_fractions):
         # 자를 못 믿는데 비율만 적어 두면 그 숫자만 인용됩니다.
         section["test_over_train"] = None
         return section
 
-    area_ratio = statistics.median(test_measured) / statistics.median(train_measured)
+    area_ratio = statistics.median(test_fractions) / statistics.median(fractions)
     section["test_over_train"] = {
         # 같은 픽셀 방법으로 잰 값끼리의 비율이라 재는 방법의 차이가 지워집니다.
         "area_ratio": round(area_ratio, 4),
@@ -554,7 +593,26 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
         loaded = storage.read_json(test_uri.strip())
         test = loaded if isinstance(loaded, Mapping) else None
 
+    # 이미지는 한 번만 열고 크기와 색을 함께 잽니다. 다시 열면 시간이 두 배입니다.
     on_progress = progress.read_progress
+    train_images = _sample(_images(train), sample)
+    train_measured = _measure_images(
+        storage,
+        [str(image["file_name"]) for image in train_images],
+        stage="train_pixels",
+        on_progress=on_progress,
+    )
+    test_measured = (
+        _measure_images(
+            storage,
+            [str(image["file_name"]) for image in _images(test)],
+            stage="test_pixels",
+            on_progress=on_progress,
+        )
+        if test is not None
+        else []
+    )
+
     report = {
         "schema_version": SCHEMA_VERSION,
         "dataset_directory": posixpath.dirname(train_uri.replace("\\", "/")),
@@ -562,8 +620,14 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
         "classes": _class_section(train, validation, class_map),
         "combinations": _combination_section(train, validation),
         "object_size": _size_section(
-            storage, train, validation, test, sample=sample, on_progress=on_progress
+            train,
+            validation,
+            train_images,
+            train_measured,
+            test_measured,
+            has_test=test is not None,
         ),
+        "appearance": _appearance_section(train_measured, test_measured),
         # 무엇을 읽었는지 남깁니다. 대회 test 이미지는 픽셀만 읽고 annotation은
         # 읽지 않으며, 여기서 잰 값은 학습이나 전처리 결정에 들어가지 않습니다.
         "sources": {
@@ -579,6 +643,7 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
 
     size = report["object_size"]
     ratio = (size.get("test_over_train") or {}).get("length_ratio")
+    appearance = report["appearance"]
     # 받은 dataset artifact를 그대로 다시 공개합니다. EDA는 아무것도 바꾸지 않지만,
     # main_pipeline은 성공한 data stage가 그 URI들을 냈는지 확인하므로 빼면 멈춥니다.
     artifacts = {
@@ -596,6 +661,7 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
             "imbalance_ratio": report["classes"]["imbalance_ratio"],
             "groups_in_both_splits": report["combinations"]["groups_in_both_splits"],
             "test_over_train_length_ratio": ratio,
+            "background_color_distance": appearance["background_color_distance"],
         },
         "message": f"EDA 리포트를 만들었습니다: {report_uri}",
     }

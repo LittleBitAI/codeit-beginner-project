@@ -49,9 +49,11 @@ With `overwrite == false`, an exact legacy set of four artifacts is the backfill
 
 `data.eda == true` reads the artifacts named in `config["inputs"]["data"]` and writes `eda/report.json` beside the train manifest, returned as `eda_report_uri`. `overwrite` guards it like any other output. `data.eda_image_sample` (default 200) caps how many train images are opened; every test image is opened.
 
-**It measures, it does not judge.** Numbers only, so the frontend draws the charts and no plotting dependency enters this repository. Sections: `shape` (objects per image, images repeating a class), `classes` (per-class image counts, imbalance ratio, classes missing from a split), `combinations` (groups, images per group, capture conditions, groups in both splits), `object_size`.
+**It measures, it does not judge.** Numbers only, so the frontend draws the charts and no plotting dependency enters this repository. Sections: `shape` (objects per image, images repeating a class), `classes` (per-class image counts, imbalance ratio, classes missing from a split), `combinations` (groups, images per group, capture conditions, groups in both splits), `object_size`, `appearance` (backdrop and object colour on both sides, and the RGB distance between them — same-sized objects under a different lamp are a different picture to a model).
 
-`object_size` exists because a conclusion drawn from a model's own predictions cannot explain that model. Ground-truth boxes give train and validation sizes; test has no labels, so `foreground_fraction()` measures from pixels alone: distance from the background colour taken at the border (brightness alone loses white pills, and the backdrop is not always the darker side), Otsu on that distance, a closing to fill imprints, then the share of the frame it covers.
+Images open once and `measure_image()` returns size and colour together; reopening them doubles the slowest part of the run.
+
+`object_size` exists because a conclusion drawn from a model's own predictions cannot explain that model. Ground-truth boxes give train and validation sizes; test has no labels, so the pixels alone are measured: distance from the background colour taken at the border (brightness alone loses white pills, and the backdrop is not always the darker side), Otsu on that distance, a closing to fill imprints, then the share of the frame it covers.
 
 **It deliberately does not count objects.** Counting needs connected components, and every pill drags a shadow and a reflected rim that break off across a thin gap, so one pill becomes two or three. Five principled variants put the object count between 0.53× and 1.30× of the labels and moved the size answer by half. Area share needs no such decision and is stable.
 
