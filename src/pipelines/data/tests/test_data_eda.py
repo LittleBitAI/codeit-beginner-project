@@ -413,10 +413,12 @@ def test_an_unusable_manifest_image_returns_an_error_not_a_crash(image):
         {"image_id": [], "category_id": 1, "bbox": [0, 0, 1, 1]},
         {"image_id": 1, "category_id": [], "bbox": [0, 0, 1, 1]},
         {"category_id": 1, "bbox": [0, 0, 1, 1]},
+        # 숫자와 섞이면 class 번호를 정렬할 수 없습니다.
+        {"image_id": 1, "category_id": "1", "bbox": [0, 0, 1, 1]},
     ],
 )
 def test_an_unusable_manifest_annotation_returns_an_error_not_a_crash(annotation):
-    """image_id는 묶음의 열쇠, category_id는 집합의 원소라 해시할 수 있어야 합니다."""
+    """image_id는 묶음의 열쇠, category_id는 정렬까지 하는 번호입니다."""
 
     storage = build_storage()
     root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"

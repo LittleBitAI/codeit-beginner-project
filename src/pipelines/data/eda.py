@@ -313,19 +313,23 @@ def _capture_condition(file_name: str) -> str:
 def _annotations_by_image(manifest: Mapping[str, Any]) -> dict[Any, list[Mapping[str, Any]]]:
     """annotation을 이미지별로 묶습니다. 쓸 수 없는 값이면 여기서 거절합니다.
 
-    `image_id`는 묶음의 열쇠, `category_id`는 class 집합의 원소라 둘 다 해시할 수
-    있어야 합니다. `[]`가 들어오면 `TypeError`가 `run()` 경계 밖으로 나갑니다.
+    `image_id`는 묶음의 열쇠라 해시할 수 있어야 합니다. `category_id`는 번호로
+    정렬까지 하므로 **정수만** 받습니다. 숫자와 문자열이 섞이면 정렬에서
+    `TypeError`가 나는데, 그것을 여기서 통일해 주면 어느 쪽이 옳은 번호인지 우리가
+    정하는 셈이 됩니다. 손상된 manifest는 고쳐서 다시 만들어야 합니다.
     """
 
     grouped: defaultdict[Any, list[Mapping[str, Any]]] = defaultdict(list)
     for annotation in manifest.get("annotations") or []:
         if not isinstance(annotation, Mapping):
             continue
-        for key in ("image_id", "category_id"):
-            value = annotation.get(key)
-            if not isinstance(value, (int, str)) or isinstance(value, bool):
-                raise EdaError(f"manifest의 annotation {key}가 숫자나 문자열이 아닙니다.")
-        grouped[annotation["image_id"]].append(annotation)
+        image_id = annotation.get("image_id")
+        if not isinstance(image_id, (int, str)) or isinstance(image_id, bool):
+            raise EdaError("manifest의 annotation image_id가 숫자나 문자열이 아닙니다.")
+        category_id = annotation.get("category_id")
+        if not isinstance(category_id, int) or isinstance(category_id, bool):
+            raise EdaError("manifest의 annotation category_id가 정수가 아닙니다.")
+        grouped[image_id].append(annotation)
     return dict(grouped)
 
 
