@@ -14,6 +14,7 @@ from __future__ import annotations
 import posixpath
 import statistics
 import tempfile
+from math import isfinite
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -25,6 +26,7 @@ from PIL import Image, UnidentifiedImageError
 from src.common import Storage, StorageError, create_storage
 
 from .errors import EdaError
+from .preparation import REPOSITORY_ROOT
 from .progress import ProgressEmitter
 
 
@@ -57,6 +59,50 @@ DEFAULT_IMAGE_SAMPLE = 200
 
 #: 파일명에서 조합 이름을 끊는 구분자입니다. `split.py`의 group 규칙과 같습니다.
 GROUP_KEY_DELIMITER = "_"
+
+
+def _is_remote(location: str) -> bool:
+    return "://" in location
+
+
+def _artifact_location(uri: str) -> str:
+    """저장소가 실제로 열 수 있는 위치로 바꿉니다.
+
+    artifact URI는 저장소 root 기준(`artifacts/datasets/...`)인데 `LocalStorage`는
+    자기 root(보통 `artifacts/`) 기준으로 풉니다. 그대로 넘기면 `artifacts/artifacts/…`를
+    찾습니다. S3 URI는 손대지 않습니다.
+    """
+
+    text = str(uri).strip()
+    if _is_remote(text):
+        return text
+    path = Path(text)
+    resolved = path if path.is_absolute() else (REPOSITORY_ROOT / path)
+    resolved = resolved.resolve()
+    try:
+        resolved.relative_to(REPOSITORY_ROOT)
+    except ValueError as error:
+        raise EdaError(f"저장소 밖을 가리키는 artifact 경로입니다: {path.name}") from error
+    return str(resolved)
+
+
+def _image_location(manifest_uri: str, file_name: str) -> str:
+    """manifest에 적힌 이미지 위치를 실제로 열 수 있는 위치로 바꿉니다.
+
+    `file_name`은 **manifest 폴더 기준**입니다(`../../raw/v1/train_images/a.png`).
+    manifest는 `processed/` 아래, 이미지는 `raw/` 아래라 그대로 넘기면 엉뚱한 곳을
+    가리킵니다. 이미 완전한 URI면 그대로 씁니다.
+    """
+
+    name = str(file_name).strip()
+    if _is_remote(name):
+        return name
+    if _is_remote(manifest_uri):
+        scheme, _, rest = manifest_uri.partition("://")
+        joined = posixpath.normpath(posixpath.join(posixpath.dirname(rest), name))
+        return f"{scheme}://{joined}"
+    base = Path(_artifact_location(manifest_uri)).parent
+    return _artifact_location(str(base / name))
 
 
 def eda_requested(config: Any) -> bool:
@@ -223,9 +269,12 @@ def _distribution(values: Sequence[float]) -> dict[str, Any] | None:
     사실과 정반대가 됩니다.
     """
 
-    if not values:
+    # NaN과 Infinity는 표준 JSON이 아니라 리포트를 저장할 때 통째로 깨뜨립니다.
+    ordered = sorted(
+        float(value) for value in values if isinstance(value, (int, float)) and isfinite(value)
+    )
+    if not ordered:
         return None
-    ordered = sorted(float(value) for value in values)
     pick = lambda fraction: ordered[int(fraction * (len(ordered) - 1))]  # noqa: E731
     return {
         "count": len(ordered),
@@ -318,14 +367,15 @@ def _class_section(
 
     train_counts = image_counts(train)
     validation_counts = image_counts(validation)
+    names = _class_names(class_map)
     categories = sorted(
-        {int(key) for key in class_map} | set(train_counts) | set(validation_counts),
+        set(names) | set(train_counts) | set(validation_counts),
         key=lambda value: (-train_counts.get(value, 0), value),
     )
     per_class = [
         {
             "category_id": category,
-            "name": class_map.get(str(category)),
+            "name": names.get(category),
             "train_images": train_counts.get(category, 0),
             "validation_images": validation_counts.get(category, 0),
         }
@@ -347,6 +397,25 @@ def _class_section(
         ],
         "per_class": per_class,
     }
+
+
+def _class_names(class_map: Mapping[str, Any]) -> dict[int, str | None]:
+    """class map을 `{번호: 이름}`으로 읽습니다.
+
+    저장소에는 두 모양이 다 있습니다. 지금 것은 `{"250": "이름"}`(번호 → 이름)이고,
+    예전 것은 `{"pill": 1}`(이름 → 번호)입니다. 한 모양만 가정하고 `int()`를 부르면
+    다른 모양에서 `ValueError`가 `run()` 밖으로 나갑니다.
+    """
+
+    names: dict[int, str | None] = {}
+    for key, value in class_map.items():
+        if isinstance(value, int) and not isinstance(value, bool):
+            names[value] = str(key)
+            continue
+        text = str(key).strip()
+        if text.lstrip("-").isdigit():
+            names[int(text)] = str(value) if value is not None else None
+    return names
 
 
 def _combination_section(
@@ -500,9 +569,14 @@ def _size_section(
 
 def _box_area(annotation: Mapping[str, Any]) -> float | None:
     box = annotation.get("bbox")
-    if isinstance(box, Sequence) and len(box) == 4:
-        return float(box[2]) * float(box[3])
-    return None
+    if not isinstance(box, Sequence) or len(box) != 4:
+        return None
+    try:
+        area = float(box[2]) * float(box[3])
+    except (TypeError, ValueError):
+        return None
+    # 손상된 manifest의 무한대가 분포를 통째로 NaN으로 만듭니다.
+    return area if isfinite(area) else None
 
 
 # --- 실행 -----------------------------------------------------------------
@@ -560,7 +634,11 @@ def run_eda(config: dict, *, progress: ProgressEmitter | None = None) -> dict:
     except EdaError as error:
         return _error_result(str(error))
     except StorageError as error:
-        return _error_result(f"EDA 중 저장소 접근에 실패했습니다: {error}")
+        # 원문에는 사용자 이름이 든 절대 경로가 들어 있습니다. type만 남깁니다.
+        return _error_result(
+            f"EDA 중 저장소 접근에 실패했습니다({type(error).__name__}). "
+            "고른 dataset의 artifact가 그 자리에 있는지 확인하세요."
+        )
 
 
 def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
@@ -571,16 +649,17 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
     overwrite = _overwrite(config)
 
     storage = create_storage(config if isinstance(config, Mapping) else {})
+    # artifact URI는 저장소 root 기준이고 storage는 자기 root 기준으로 풉니다.
     report_uri = _report_uri(train_uri)
-    if not overwrite and storage.exists(report_uri):
+    if not overwrite and storage.exists(_artifact_location(report_uri)):
         raise EdaError(
             "이미 EDA 리포트가 있습니다. 다시 만들려면 data.overwrite를 켜세요: "
             f"{posixpath.basename(report_uri)}"
         )
 
-    train = storage.read_json(train_uri)
-    validation = storage.read_json(validation_uri)
-    class_map = storage.read_json(class_map_uri)
+    train = storage.read_json(_artifact_location(train_uri))
+    validation = storage.read_json(_artifact_location(validation_uri))
+    class_map = storage.read_json(_artifact_location(class_map_uri))
     if not isinstance(train, Mapping) or not isinstance(validation, Mapping):
         raise EdaError("manifest를 읽었지만 JSON 객체가 아닙니다.")
     if not isinstance(class_map, Mapping):
@@ -590,7 +669,7 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
     test_uri = (inputs.get("data") or {}).get("test_manifest_uri")
     test = None
     if isinstance(test_uri, str) and test_uri.strip():
-        loaded = storage.read_json(test_uri.strip())
+        loaded = storage.read_json(_artifact_location(test_uri.strip()))
         test = loaded if isinstance(loaded, Mapping) else None
 
     # 이미지는 한 번만 열고 크기와 색을 함께 잽니다. 다시 열면 시간이 두 배입니다.
@@ -598,14 +677,17 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
     train_images = _sample(_images(train), sample)
     train_measured = _measure_images(
         storage,
-        [str(image["file_name"]) for image in train_images],
+        [_image_location(train_uri, image["file_name"]) for image in train_images],
         stage="train_pixels",
         on_progress=on_progress,
     )
     test_measured = (
         _measure_images(
             storage,
-            [str(image["file_name"]) for image in _images(test)],
+            [
+                _image_location(str(test_uri), image["file_name"])
+                for image in _images(test)
+            ],
             stage="test_pixels",
             on_progress=on_progress,
         )
@@ -635,11 +717,17 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
             "validation_manifest_uri": validation_uri,
             "class_map_uri": class_map_uri,
             "test_manifest_uri": test_uri if test is not None else None,
-            "test_annotations_read": False,
+            # manifest 파일 자체는 통째로 읽습니다. 거짓말하지 않으려고, 거기에
+            # annotation이 몇 개 들어 있었는지와 그것을 **쓰지 않았다**는 사실을
+            # 따로 적습니다. 이 리포트 어디에도 test annotation에서 나온 값은 없습니다.
+            "test_annotations_in_manifest": (
+                len(test.get("annotations") or []) if test is not None else None
+            ),
+            "test_annotations_used": False,
             "train_image_sample": sample,
         },
     }
-    storage.write_json(report_uri, report, overwrite=overwrite)
+    storage.write_json(_artifact_location(report_uri), report, overwrite=overwrite)
 
     size = report["object_size"]
     ratio = (size.get("test_over_train") or {}).get("length_ratio")

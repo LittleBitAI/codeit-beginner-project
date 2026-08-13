@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -17,9 +20,11 @@ from PIL import Image, ImageDraw
 from src.common import validate_pipeline_result
 from src.pipelines.data import eda, run
 from src.pipelines.data.errors import EdaError
+from src.pipelines.data.preparation import REPOSITORY_ROOT
 
 
 IMAGE_SIZE = (160, 200)
+BUCKET = "s3://test-bucket"
 
 
 # --- 대역 -----------------------------------------------------------------
@@ -70,13 +75,17 @@ def manifest(images: list[dict], annotations: list[dict]) -> dict:
 
 
 def build_storage(*, radii: int = 18, test_radii: int | None = None) -> FakeStorage:
-    """train 2장·validation 1장·test 1장짜리 최소 dataset을 만듭니다."""
+    """train 2장·validation 1장·test 1장짜리 최소 dataset을 만듭니다.
+
+    실제 팀 dataset과 같게 S3 URI를 씁니다. local backend 경로는 `LocalStorage`를
+    직접 쓰는 test가 따로 지납니다.
+    """
 
     storage = FakeStorage()
-    root = "datasets/processed/v9-seed42-8020-group"
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
     train_images, train_annotations = [], []
     for index, group in enumerate(("K-1-2", "K-3-4"), start=1):
-        location = f"raw/train_images/{group}_0_2_0_2_70_000_200.png"
+        location = f"{BUCKET}/raw/train_images/{group}_0_2_0_2_70_000_200.png"
         storage.blobs[location] = draw_image([radii, radii])
         train_images.append({"id": index, "file_name": location, "width": 160, "height": 200})
         for slot, category in enumerate((1, 2), start=1):
@@ -88,7 +97,7 @@ def build_storage(*, radii: int = 18, test_radii: int | None = None) -> FakeStor
                     "bbox": [10.0, 10.0, radii * 2.0, radii * 2.0],
                 }
             )
-    validation_location = "raw/train_images/K-5-6_0_2_0_2_90_000_200.png"
+    validation_location = f"{BUCKET}/raw/train_images/K-5-6_0_2_0_2_90_000_200.png"
     storage.blobs[validation_location] = draw_image([radii, radii])
     validation_images = [
         {"id": 9, "file_name": validation_location, "width": 160, "height": 200}
@@ -97,7 +106,7 @@ def build_storage(*, radii: int = 18, test_radii: int | None = None) -> FakeStor
         {"id": 91, "image_id": 9, "category_id": 1, "bbox": [10.0, 10.0, 30.0, 30.0]},
         {"id": 92, "image_id": 9, "category_id": 2, "bbox": [50.0, 10.0, 30.0, 30.0]},
     ]
-    test_location = "raw/test_images/1.png"
+    test_location = f"{BUCKET}/raw/test_images/1.png"
     storage.blobs[test_location] = draw_image([test_radii if test_radii else radii] * 2)
 
     storage.json[f"{root}/train_manifest.json"] = manifest(train_images, train_annotations)
@@ -112,7 +121,7 @@ def build_storage(*, radii: int = 18, test_radii: int | None = None) -> FakeStor
 
 
 def config_for(storage: FakeStorage, **data: Any) -> dict:
-    root = "datasets/processed/v9-seed42-8020-group"
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
     return {
         "data": {"eda": True, **data},
         "inputs": {
@@ -206,10 +215,10 @@ def test_report_flags_a_group_that_lands_in_both_splits():
     """조합 하나가 양쪽에 걸치면 검증 점수가 부풀어 오릅니다."""
 
     storage = build_storage()
-    root = "datasets/processed/v9-seed42-8020-group"
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
     leaked = dict(storage.json[f"{root}/validation_manifest.json"])
     leaked["images"] = [
-        {**leaked["images"][0], "file_name": "raw/train_images/K-1-2_0_2_0_2_90_000_200.png"}
+        {**leaked["images"][0], "file_name": f"{BUCKET}/raw/train_images/K-1-2_0_2_0_2_90_000_200.png"}
     ]
     storage.json[f"{root}/validation_manifest.json"] = leaked
 
@@ -239,7 +248,7 @@ def test_a_size_comparison_is_withheld_when_the_ruler_fails_on_train():
     """정답을 못 맞히는 자로 잰 비율을 적어 두면 그 숫자만 인용됩니다."""
 
     storage = build_storage()
-    root = "datasets/processed/v9-seed42-8020-group"
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
     # 정답 bbox를 이미지 전체로 부풀리면 픽셀 측정과 크게 어긋납니다.
     manifest_json = storage.json[f"{root}/train_manifest.json"]
     for annotation in manifest_json["annotations"]:
@@ -263,7 +272,7 @@ def test_report_compares_the_backdrop_and_lighting_on_both_sides():
     ImageDraw.Draw(image).ellipse((40, 40, 76, 76), fill=(30, 30, 30))
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
-    storage.blobs["raw/test_images/1.png"] = buffer.getvalue()
+    storage.blobs[f"{BUCKET}/raw/test_images/1.png"] = buffer.getvalue()
 
     result = run_with(storage, config_for(storage))
     appearance = storage.json[result["artifacts"]["eda_report_uri"]]["appearance"]
@@ -271,6 +280,126 @@ def test_report_compares_the_backdrop_and_lighting_on_both_sides():
     assert appearance["train_background_color"][0] == pytest.approx(230, abs=5)
     assert appearance["test_background_color"][1] == pytest.approx(60, abs=10)
     assert appearance["background_color_distance"] > 100
+
+
+@pytest.fixture
+def local_root():
+    """저장소 안에 임시 local storage root를 만듭니다.
+
+    저장소 밖에 두면 저장소 기준 상대 URI를 만들 수 없어, 이 test가 검증하려는
+    상황 자체를 만들 수 없습니다.
+    """
+
+    parent = REPOSITORY_ROOT / "artifacts"
+    parent.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="data-eda-test-", dir=parent))
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_real_local_dataset_is_read_through_its_own_paths(local_root):
+    """대역이 아니라 진짜 LocalStorage로 한 번은 지나가 봐야 합니다.
+
+    artifact URI는 저장소 root 기준이고, manifest의 이미지 경로는 manifest 폴더
+    기준입니다. 둘 중 하나만 잘못 풀어도 화면에서 고른 dataset이 열리지 않습니다.
+    """
+
+    root = local_root
+    processed = root / "datasets" / "processed" / "v9"
+    raw = root / "datasets" / "raw" / "v9" / "train_images"
+    processed.mkdir(parents=True)
+    raw.mkdir(parents=True)
+    (raw / "K-1-2_0_2_0_2_70_000_200.png").write_bytes(draw_image([18, 18]))
+
+    images = [
+        {
+            # manifest 폴더 기준 상대 경로. 준비 경로가 이렇게 적습니다.
+            "file_name": "../../raw/v9/train_images/K-1-2_0_2_0_2_70_000_200.png",
+            "id": 1,
+            "width": 160,
+            "height": 200,
+        }
+    ]
+    annotations = [
+        {"id": 1, "image_id": 1, "category_id": 1, "bbox": [10.0, 10.0, 36.0, 36.0]}
+    ]
+    for name in ("train_manifest.json", "validation_manifest.json"):
+        (processed / name).write_text(
+            json.dumps(manifest(images, annotations)), encoding="utf-8"
+        )
+    (processed / "class_map.json").write_text(json.dumps({"1": "pill_a"}), encoding="utf-8")
+
+    prefix = f"{root.relative_to(REPOSITORY_ROOT).as_posix()}/datasets/processed/v9"
+    result = run(
+        {
+            "storage": {"backend": "local", "local": {"root": str(root)}},
+            "data": {"eda": True, "eda_image_sample": 1},
+            "inputs": {
+                "data": {
+                    "train_manifest_uri": f"{prefix}/train_manifest.json",
+                    "validation_manifest_uri": f"{prefix}/validation_manifest.json",
+                    "class_map_uri": f"{prefix}/class_map.json",
+                    "dataset_summary_uri": f"{prefix}/dataset_summary.json",
+                }
+            },
+        }
+    )
+
+    assert result["status"] == "ok", result["message"]
+    written = json.loads((processed / "eda" / "report.json").read_text(encoding="utf-8"))
+    assert written["object_size"]["train_foreground_fraction"]["count"] == 1
+    # 화면과 registry가 받는 값은 저장소 root 기준이어야 합니다.
+    assert result["artifacts"]["eda_report_uri"] == f"{prefix}/eda/report.json"
+
+
+def test_a_legacy_class_map_does_not_escape_the_run_boundary():
+    """저장소가 지원하는 {"이름": 번호} 모양에서 int()가 터지면 안 됩니다."""
+
+    storage = build_storage()
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
+    storage.json[f"{root}/class_map.json"] = {"pill_a": 1, "pill_b": 2}
+
+    result = run_with(storage, config_for(storage))
+
+    assert result["status"] == "ok", result["message"]
+    classes = storage.json[result["artifacts"]["eda_report_uri"]]["classes"]
+    assert classes["class_count"] == 2
+    assert {row["name"] for row in classes["per_class"]} == {"pill_a", "pill_b"}
+
+
+def test_a_broken_number_in_the_manifest_does_not_break_the_report():
+    """NaN과 Infinity는 표준 JSON이 아니라 저장할 때 통째로 깨집니다."""
+
+    storage = build_storage()
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
+    broken = storage.json[f"{root}/train_manifest.json"]
+    broken["annotations"][0]["bbox"] = [0.0, 0.0, float("inf"), 1.0]
+
+    result = run_with(storage, config_for(storage))
+
+    assert result["status"] == "ok", result["message"]
+    # write_json이 allow_nan=False로 검증하므로, 여기까지 왔으면 유한한 값뿐입니다.
+    assert storage.json[result["artifacts"]["eda_report_uri"]]["object_size"]
+
+
+def test_a_storage_failure_message_carries_no_absolute_path():
+    """오류 message는 그대로 화면에 나갑니다. 사용자 이름이 실리면 안 됩니다."""
+
+    from src.common import StorageError
+
+    storage = build_storage()
+
+    def explode(location):
+        raise StorageError(f"C:\\Users\\someone\\{location} 을 열지 못했습니다")
+
+    storage.read_json = explode
+    result = run_with(storage, config_for(storage))
+
+    assert result["status"] == "error"
+    assert "Users" not in result["message"]
+    assert "StorageError" in result["message"]
 
 
 def test_report_says_what_it_read_and_never_reads_test_annotations():
@@ -281,7 +410,8 @@ def test_report_says_what_it_read_and_never_reads_test_annotations():
     result = run_with(storage, config_for(storage))
     sources = storage.json[result["artifacts"]["eda_report_uri"]]["sources"]
 
-    assert sources["test_annotations_read"] is False
+    assert sources["test_annotations_used"] is False
+    assert sources["test_annotations_in_manifest"] == 0
     assert sources["test_manifest_uri"].endswith("test_manifest.json")
     assert any("test_images" in location for location in storage.downloaded)
 
@@ -339,7 +469,7 @@ def test_a_non_boolean_eda_flag_is_rejected(value):
 def test_eda_off_keeps_the_existing_integration_path():
     """켜지 않은 실행은 지금까지와 완전히 같게 동작해야 합니다."""
 
-    root = "datasets/processed/v9-seed42-8020-group"
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
     config = {
         "inputs": {
             "data": {
