@@ -407,6 +407,26 @@ def test_an_unusable_manifest_image_returns_an_error_not_a_crash(image):
     assert "manifest" in result["message"]
 
 
+def test_an_annotation_pointing_at_a_missing_image_is_refused_not_counted_as_zero():
+    """붙을 이미지가 없으면 "물체 0개"로 집계되고 실행은 성공으로 끝납니다.
+
+    화면에는 틀린 숫자가 뜹니다. 믿을 수 있는 숫자가 이 리포트의 존재 이유입니다.
+    """
+
+    storage = build_storage()
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
+    broken = storage.json[f"{root}/train_manifest.json"]
+    broken["annotations"][0] = {**broken["annotations"][0], "image_id": 999}
+
+    result = run_with(storage, config_for(storage))
+
+    validate_pipeline_result(result, pipeline_name="data")
+    assert result["status"] == "error"
+    assert "999" in result["message"]
+    # 이미지를 여는 데 몇 분이 걸립니다. 그 전에 거절해야 합니다.
+    assert storage.downloaded == []
+
+
 @pytest.mark.parametrize(
     "annotation",
     [

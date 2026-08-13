@@ -30,7 +30,7 @@ from .preparation import REPOSITORY_ROOT
 from .progress import ProgressEmitter
 
 
-__all__ = ["eda_requested", "measure_image", "run_eda"]
+__all__ = ["check_manifest", "eda_requested", "measure_image", "run_eda"]
 
 
 #: 리포트를 넣는 폴더 이름입니다. 전처리 결과 옆에 두어야 화면이 찾아갑니다.
@@ -331,6 +331,26 @@ def _annotations_by_image(manifest: Mapping[str, Any]) -> dict[Any, list[Mapping
             raise EdaError("manifest의 annotation category_id가 정수가 아닙니다.")
         grouped[image_id].append(annotation)
     return dict(grouped)
+
+
+def check_manifest(manifest: Mapping[str, Any], label: str) -> None:
+    """리포트를 만들기 전에 manifest가 앞뒤가 맞는지 확인합니다.
+
+    annotation이 없는 image를 가리키면 그 annotation은 어느 이미지에도 붙지 않아
+    "물체 0개"로 집계됩니다. 실행은 성공으로 끝나고 화면에는 틀린 숫자가 뜹니다.
+    믿을 수 있는 숫자를 내는 것이 이 리포트의 존재 이유이므로, 조용히 세는 대신
+    거절합니다.
+    """
+
+    known = {image["id"] for image in _images(manifest)}
+    dangling = sorted(
+        {str(key) for key in _annotations_by_image(manifest) if key not in known}
+    )
+    if dangling:
+        raise EdaError(
+            f"{label} manifest의 annotation이 없는 image를 가리킵니다"
+            f"(image_id {', '.join(dangling[:3])}). 전처리 결과가 온전한지 확인하세요."
+        )
 
 
 def _images(manifest: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -707,6 +727,12 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
     if isinstance(test_uri, str) and test_uri.strip():
         loaded = storage.read_json(_artifact_location(test_uri.strip()))
         test = loaded if isinstance(loaded, Mapping) else None
+
+    # 이미지를 열기 전에 확인합니다. 몇 분 걸린 뒤에 거절하면 그 시간이 버려집니다.
+    check_manifest(train, "학습")
+    check_manifest(validation, "검증")
+    if test is not None:
+        check_manifest(test, "test")
 
     # 이미지는 한 번만 열고 크기와 색을 함께 잽니다. 다시 열면 시간이 두 배입니다.
     on_progress = progress.read_progress
