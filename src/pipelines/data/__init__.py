@@ -1,11 +1,13 @@
 """Data pipeline의 artifact를 만들거나 기존 artifact를 다음 pipeline에 연결합니다.
 
-실행 경로는 세 가지입니다.
+실행 경로는 네 가지입니다.
 
 1. `execution.mode == "dummy"`: 기존 dummy 결과를 그대로 반환합니다.
 2. `data.prepare == true`: 원본에서 artifact 5개를 만들거나, 이전 버전의 기존
    artifact 4개가 모두 있으면 누락된 test manifest만 보충합니다(`preparation.py`).
-3. 그 외: `config["inputs"]["data"]`에 사전 제공된 URI 4개를 검증해 공개합니다.
+3. `data.eda == true`: 이미 만든 artifact를 model 없이 뜯어보고 EDA 리포트 하나를
+   남깁니다(`eda.py`). 새 artifact를 만들지도, 기존 artifact를 고치지도 않습니다.
+4. 그 외: `config["inputs"]["data"]`에 사전 제공된 URI 4개를 검증해 공개합니다.
 """
 
 from __future__ import annotations
@@ -13,7 +15,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from .errors import DatasetPreparationError
+from .eda import eda_requested, run_eda
+from .errors import DataError, DatasetPreparationError
 from .preparation import (
     preparation_error_result,
     preparation_requested,
@@ -99,6 +102,17 @@ def run(config: dict) -> dict:
         return preparation_error_result(str(error), config)
     if requested:
         return run_preparation(config)
+
+    try:
+        if eda_requested(config):
+            return run_eda(config)
+    except DataError as error:
+        return {
+            "status": "error",
+            "artifacts": {},
+            "summary": {"pipeline": "data", "mode": "eda"},
+            "message": str(error),
+        }
 
     artifacts = _validated_artifacts(config)
     if artifacts is None:
