@@ -5,7 +5,7 @@
  * 결과와도 무관해서, "학습이 이상한가"와 "데이터가 다른가"를 갈라 말할 수 있습니다.
  */
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 
 import { api, ApiError } from '../api/client';
 import type { EdaDistribution, EdaReport, EdaState } from '../api/types';
@@ -45,7 +45,9 @@ const rgb = (value: number[] | null | undefined) =>
 
 function ReportView({ report }: { report: EdaReport }) {
   const size = report.object_size;
-  const ratio = size.test_over_train;
+  // 자를 못 믿으면 비율이 남아 있어도 그리지 않습니다. 단서를 달아 그리면 앞의
+  // 숫자만 읽힙니다.
+  const ratio = size.calibration?.trustworthy ? size.test_over_train : null;
   return (
     <div>
       <Section title="모양">
@@ -132,10 +134,8 @@ export function EdaSheet({ onClose }: { onClose: () => void }) {
   const running = state?.status === 'running';
   const progress = state?.progress;
 
-  // 끝나는 순간 한 번 더 읽어 리포트를 받아 옵니다.
-  useEffect(() => {
-    if (state?.status === 'succeeded' && !state.report) status.refresh();
-  }, [state, status]);
+  // 폴링이 이미 상태를 다시 읽습니다. 여기서 또 부르면 리포트를 못 읽는 실행에서
+  // effect가 매번 다시 돌아 요청이 끝없이 나갑니다.
 
   async function start(overwrite: boolean) {
     setStarting(true);
@@ -201,7 +201,9 @@ export function EdaSheet({ onClose }: { onClose: () => void }) {
         <ReportView report={state.report} />
       ) : (
         <div style={{ ...type.body, color: color.textMuted }}>
-          아직 리포트가 없습니다. 위에서 실행하세요.
+          {state?.stale
+            ? '다른 dataset을 분석한 결과라 보여 주지 않습니다. 지금 고른 dataset으로 다시 실행하세요.'
+            : '아직 리포트가 없습니다. 위에서 실행하세요.'}
         </div>
       )}
     </Sheet>

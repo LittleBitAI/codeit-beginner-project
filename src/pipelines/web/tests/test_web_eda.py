@@ -6,13 +6,15 @@ runner가 들고 있는 상태만 확인합니다.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+from typing import Any
 
 import pytest
 
 from src.pipelines.web import datasets
-from src.pipelines.web.data_jobs import EdaRunner
+from src.pipelines.web.data_jobs import EdaRunner, PreparationRunner
 from src.pipelines.web.errors import JobConflictError, WebValidationError
 from src.pipelines.web.train_config import DATA_ARTIFACT_KEYS
 
@@ -88,7 +90,7 @@ def test_a_finished_run_carries_the_report_itself(monkeypatch, selected):
     """URI만 주면 화면이 그 파일을 또 받아 와야 합니다."""
 
     monkeypatch.setattr(
-        datasets, "prepare_dataset", lambda config, on_progress_line=None: eda_result()
+        datasets, "prepare_dataset", lambda config, on_progress_line=None, mode="prepare": eda_result()
     )
     monkeypatch.setattr(datasets, "read_eda_report", lambda uri: dict(REPORT))
     runner = EdaRunner()
@@ -101,9 +103,76 @@ def test_a_finished_run_carries_the_report_itself(monkeypatch, selected):
     assert state["artifacts"]["eda_report_uri"].endswith("eda/report.json")
 
 
+def test_a_successful_eda_is_not_mistaken_for_an_unsupported_pipeline(monkeypatch, selected):
+    """준비와 같은 함수를 쓰므로, 그 함수가 "prepare"만 정상으로 보면 안 됩니다.
+
+    이걸 놓치면 모든 정상 EDA 실행이 "기능 미지원" 실패로 뒤집힙니다.
+    """
+
+    captured: dict[str, Any] = {}
+
+    def fake_run_process(process, on_progress_line, timeout):
+        return (json.dumps({"status": "ok", "artifacts": {}, "summary": {"mode": "eda"}, "message": "완료"}), "", 0)
+
+    monkeypatch.setattr(datasets.runner, "spawn", lambda *a, **k: object())
+    monkeypatch.setattr(datasets, "_run_prepare_process", fake_run_process)
+    monkeypatch.setattr(datasets, "_now_text", lambda: "2026-01-01T00:00:00Z")
+    captured["result"] = datasets.prepare_dataset({"data": {"eda": True}}, mode="eda")
+
+    assert captured["result"]["ok"] is True
+    assert captured["result"]["supported"] is True
+
+
+def test_a_report_from_another_dataset_is_not_shown_as_this_one(monkeypatch, selected):
+    """dataset을 바꾸면 앞선 결과가 새 dataset의 숫자처럼 보이면 안 됩니다."""
+
+    monkeypatch.setattr(
+        datasets, "prepare_dataset", lambda config, on_progress_line=None, mode="prepare": eda_result()
+    )
+    monkeypatch.setattr(datasets, "read_eda_report", lambda uri: dict(REPORT))
+    runner = EdaRunner()
+    runner.start({})
+    assert wait_until_done(runner)["report"] == REPORT
+
+    monkeypatch.setattr(
+        datasets, "load_selection", lambda: {"directory": "artifacts/other", "data": {}}
+    )
+
+    state = runner.status()
+
+    assert state["stale"] is True
+    assert state["report"] is None
+
+
+def test_prepare_and_eda_do_not_run_at_the_same_time(monkeypatch, selected):
+    """둘 다 같은 전처리 폴더를 건드립니다. 겹치면 읽는 중에 파일이 바뀝니다."""
+
+    release = threading.Event()
+    monkeypatch.setattr(
+        datasets,
+        "prepare_dataset",
+        lambda config, on_progress_line=None, mode="prepare": (release.wait(5), eda_result())[1],
+    )
+    monkeypatch.setattr(
+        datasets,
+        "build_prepare_config",
+        lambda *a, **k: {"data": {"seed": 42, "overwrite": False}, "storage": {"backend": "local"}},
+    )
+    eda = EdaRunner()
+    preparation = PreparationRunner()
+    eda.start({})
+
+    try:
+        with pytest.raises(JobConflictError):
+            preparation.start({"split_ratio": "8:2"})
+    finally:
+        release.set()
+    wait_until_done(eda)
+
+
 def test_a_failed_run_carries_no_report(monkeypatch, selected):
     monkeypatch.setattr(
-        datasets, "prepare_dataset", lambda config, on_progress_line=None: eda_result(ok=False)
+        datasets, "prepare_dataset", lambda config, on_progress_line=None, mode="prepare": eda_result(ok=False)
     )
     runner = EdaRunner()
 
@@ -130,7 +199,7 @@ def test_a_second_run_is_refused_while_one_is_going(monkeypatch, selected):
     monkeypatch.setattr(
         datasets,
         "prepare_dataset",
-        lambda config, on_progress_line=None: (release.wait(5), eda_result())[1],
+        lambda config, on_progress_line=None, mode="prepare": (release.wait(5), eda_result())[1],
     )
     runner = EdaRunner()
     runner.start({})
@@ -148,7 +217,7 @@ def test_a_second_run_is_refused_while_one_is_going(monkeypatch, selected):
 
 def test_the_eda_route_starts_idle_and_starts_a_run(client, monkeypatch, selected):
     monkeypatch.setattr(
-        datasets, "prepare_dataset", lambda config, on_progress_line=None: eda_result()
+        datasets, "prepare_dataset", lambda config, on_progress_line=None, mode="prepare": eda_result()
     )
     monkeypatch.setattr(datasets, "read_eda_report", lambda uri: dict(REPORT))
 

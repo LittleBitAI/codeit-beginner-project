@@ -24,6 +24,11 @@ STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 
 
+#: 준비와 EDA가 동시에 같은 data pipeline을 돌리지 못하게 막는 문입니다. 둘 다
+#: 같은 전처리 폴더를 건드리므로, 겹치면 한쪽이 읽는 manifest를 다른 쪽이 바꿉니다.
+_DATA_STAGE_GATE = threading.Lock()
+
+
 class PreparationRunner:
     """준비 실행 한 건의 상태를 들고 있습니다."""
 
@@ -69,6 +74,32 @@ class PreparationRunner:
         """실행 하나를 띄웁니다. 같은 runner에서 둘이 동시에 돌지 않습니다."""
 
         progress_state = DataProgressState()
+        # 자기 자신이 돌고 있는 경우를 먼저 봅니다. 그래야 "지금 무엇이 돌고 있는지"를
+        # 정확히 말해 줄 수 있습니다.
+        with self._lock:
+            if self._state.get("status") == STATUS_RUNNING:
+                raise JobConflictError(busy)
+        # 문을 여기서 잡고 thread가 끝날 때 놓습니다. 준비와 EDA가 같은 폴더를
+        # 동시에 건드리면, 한쪽이 읽는 manifest를 다른 쪽이 갈아 끼웁니다.
+        if not _DATA_STAGE_GATE.acquire(blocking=False):
+            raise JobConflictError(
+                "다른 데이터 작업이 실행 중입니다. 끝난 뒤 다시 시도해 주세요."
+            )
+        try:
+            return self._start_thread(config, progress_state, busy=busy, name=name, state=state)
+        except BaseException:
+            _DATA_STAGE_GATE.release()
+            raise
+
+    def _start_thread(
+        self,
+        config: dict[str, Any],
+        progress_state: DataProgressState,
+        *,
+        busy: str,
+        name: str,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
         with self._lock:
             if self._state.get("status") == STATUS_RUNNING:
                 raise JobConflictError(busy)
@@ -101,10 +132,22 @@ class PreparationRunner:
         with self._lock:
             self._state["progress"] = snapshot(progress_state)
 
+    #: 이 실행이 끝났을 때 data pipeline이 돌려줘야 하는 `summary.mode`입니다.
+    mode = "prepare"
+
     def _run(self, config: dict[str, Any], progress_state: DataProgressState) -> None:
         try:
+            self._run_locked(config, progress_state)
+        finally:
+            # 실패하든 성공하든 다음 작업이 들어올 수 있어야 합니다.
+            _DATA_STAGE_GATE.release()
+
+    def _run_locked(self, config: dict[str, Any], progress_state: DataProgressState) -> None:
+        try:
             result = datasets.prepare_dataset(
-                config, on_progress_line=lambda line: self._consume(progress_state, line)
+                config,
+                on_progress_line=lambda line: self._consume(progress_state, line),
+                mode=self.mode,
             )
         except Exception as error:  # 준비 실패가 서버를 죽이면 안 됩니다.
             with self._lock:
@@ -151,6 +194,8 @@ class EdaRunner(PreparationRunner):
     한 runner를 같이 쓰면 화면 한쪽의 진행률이 다른 쪽 것으로 바뀝니다.
     """
 
+    mode = "eda"
+
     def start(self, request: dict[str, Any]) -> dict[str, Any]:
         selection = datasets.load_selection()
         if not selection or not selection.get("data"):
@@ -180,6 +225,24 @@ class EdaRunner(PreparationRunner):
 
         uri = result["artifacts"].get("eda_report_uri") if result["ok"] else None
         return {"report": datasets.read_eda_report(uri) if uri else None}
+
+    def status(self) -> dict[str, Any]:
+        """지금 고른 dataset의 결과일 때만 리포트를 내줍니다.
+
+        dataset을 바꾸고 EDA를 열면 앞선 dataset의 숫자가 새 dataset의 결과처럼
+        보입니다. 어느 폴더를 분석한 것인지 상태에 적어 두고 여기서 대조합니다.
+        """
+
+        state = super().status()
+        if state.get("status") == STATUS_IDLE:
+            return state
+        selection = datasets.load_selection() or {}
+        if state.get("directory") and state["directory"] != selection.get("directory"):
+            state["stale"] = True
+            state["report"] = None
+        else:
+            state["stale"] = False
+        return state
 
 
 _RUNNER: PreparationRunner | None = None

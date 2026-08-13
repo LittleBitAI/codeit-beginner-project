@@ -106,6 +106,37 @@ describe('EDA 시트', () => {
     expect(screen.getByText(/구간 밖/)).toBeTruthy();
   });
 
+  it('자를 못 믿으면 비율이 남아 있어도 그리지 않는다', async () => {
+    // 손상되거나 옛 schema인 report가 둘을 동시에 들고 올 수 있습니다.
+    const broken = report();
+    broken.object_size.calibration.trustworthy = false;
+    stubFetch({ status: 'succeeded', report: broken });
+
+    render(<EdaSheet onClose={() => {}} />);
+
+    expect(await screen.findByText('재지 못했습니다')).toBeTruthy();
+    expect(screen.queryByText(/변 길이 0.959배/)).toBeNull();
+  });
+
+  it('다른 dataset의 결과는 이 dataset의 숫자처럼 보여 주지 않는다', async () => {
+    stubFetch({ status: 'succeeded', stale: true, report: null });
+
+    render(<EdaSheet onClose={() => {}} />);
+
+    expect(await screen.findByText(/다른 dataset을 분석한 결과/)).toBeTruthy();
+  });
+
+  it('리포트를 못 읽어도 요청을 되풀이하지 않는다', async () => {
+    const calls = stubFetch({ status: 'succeeded', report: null, stale: false });
+
+    render(<EdaSheet onClose={() => {}} />);
+    await screen.findByText(/아직 리포트가 없습니다/);
+    const first = calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(calls.length).toBe(first);
+  });
+
   it('실행 버튼이 표본 수를 실어 보낸다', async () => {
     const calls = stubFetch({ status: 'idle' });
 

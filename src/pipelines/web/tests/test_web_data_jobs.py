@@ -44,7 +44,7 @@ def test_idle_before_anything_runs(runner):
 
 
 def test_successful_preparation_is_selected_automatically(runner, monkeypatch):
-    monkeypatch.setattr(datasets, "prepare_dataset", lambda config, on_progress_line=None: prepared())
+    monkeypatch.setattr(datasets, "prepare_dataset", lambda config, on_progress_line=None, mode="prepare": prepared())
 
     runner.start({"split_ratio": "8:2"})
     state = wait_until_done(runner)
@@ -63,7 +63,7 @@ def test_successful_preparation_keeps_test_manifest_for_later_submission(runner,
     result = prepared()
     result["artifacts"]["test_manifest_uri"] = "artifacts/p/test_manifest.json"
     result["summary"].update(test_manifest_images=842, test_images_used=0)
-    monkeypatch.setattr(datasets, "prepare_dataset", lambda config, on_progress_line=None: result)
+    monkeypatch.setattr(datasets, "prepare_dataset", lambda config, on_progress_line=None, mode="prepare": result)
 
     runner.start({"split_ratio": "8:2"})
     state = wait_until_done(runner)
@@ -75,7 +75,7 @@ def test_successful_preparation_keeps_test_manifest_for_later_submission(runner,
 
 
 def test_failed_preparation_does_not_change_the_selection(runner, monkeypatch):
-    monkeypatch.setattr(datasets, "prepare_dataset", lambda config, on_progress_line=None: prepared(ok=False))
+    monkeypatch.setattr(datasets, "prepare_dataset", lambda config, on_progress_line=None, mode="prepare": prepared(ok=False))
 
     runner.start({"split_ratio": "9:1"})
     state = wait_until_done(runner)
@@ -87,7 +87,7 @@ def test_failed_preparation_does_not_change_the_selection(runner, monkeypatch):
 
 def test_unsupported_pipeline_is_reported_honestly(runner, monkeypatch):
     monkeypatch.setattr(
-        datasets, "prepare_dataset", lambda config, on_progress_line=None: prepared(ok=False, supported=False)
+        datasets, "prepare_dataset", lambda config, on_progress_line=None, mode="prepare": prepared(ok=False, supported=False)
     )
 
     runner.start({"split_ratio": "8:2"})
@@ -100,7 +100,7 @@ def test_unsupported_pipeline_is_reported_honestly(runner, monkeypatch):
 def test_second_start_is_rejected_while_running(runner, monkeypatch):
     release = threading.Event()
 
-    def slow(config, on_progress_line=None):
+    def slow(config, on_progress_line=None, mode="prepare"):
         release.wait(5)
         return prepared()
 
@@ -117,7 +117,7 @@ def test_second_start_is_rejected_while_running(runner, monkeypatch):
 
 def test_bad_request_is_rejected_before_starting_a_thread(runner, monkeypatch):
     called = []
-    monkeypatch.setattr(datasets, "prepare_dataset", lambda config, on_progress_line=None: called.append(config))
+    monkeypatch.setattr(datasets, "prepare_dataset", lambda config, on_progress_line=None, mode="prepare": called.append(config))
 
     with pytest.raises(WebValidationError):
         runner.start({"split_ratio": "7:3"})
@@ -127,7 +127,7 @@ def test_bad_request_is_rejected_before_starting_a_thread(runner, monkeypatch):
 
 
 def test_unexpected_error_does_not_leave_it_running(runner, monkeypatch):
-    def explode(config, on_progress_line=None):
+    def explode(config, on_progress_line=None, mode="prepare"):
         raise RuntimeError("예기치 못한 오류")
 
     monkeypatch.setattr(datasets, "prepare_dataset", explode)
@@ -153,7 +153,7 @@ def test_running_state_starts_with_no_progress_instead_of_a_fake_one(runner, mon
 
     release = threading.Event()
 
-    def slow(config, on_progress_line=None):
+    def slow(config, on_progress_line=None, mode="prepare"):
         release.wait(5)
         return prepared()
 
@@ -169,7 +169,7 @@ def test_running_state_starts_with_no_progress_instead_of_a_fake_one(runner, mon
 def test_stderr_progress_lines_reach_the_status(runner, monkeypatch):
     release = threading.Event()
 
-    def emitting(config, on_progress_line=None):
+    def emitting(config, on_progress_line=None, mode="prepare"):
         on_progress_line(progress_line("sources_listed", train_images=1842, annotations=1842,
                                        test_images=842))
         on_progress_line(progress_line("read_progress", stage="annotations", done=400, total=1842))
@@ -197,7 +197,7 @@ def test_stderr_progress_lines_reach_the_status(runner, monkeypatch):
 
 
 def test_progress_survives_after_the_run_finishes(runner, monkeypatch):
-    def emitting(config, on_progress_line=None):
+    def emitting(config, on_progress_line=None, mode="prepare"):
         on_progress_line(progress_line("prepare_completed", train_images=1473,
                                        validation_images=369, category_count=73))
         return prepared()
@@ -213,7 +213,7 @@ def test_progress_survives_after_the_run_finishes(runner, monkeypatch):
 def test_existing_keys_are_untouched_by_the_progress_block(runner, monkeypatch):
     """기존 key는 하나도 바꾸거나 없애지 않고 더하기만 합니다."""
 
-    monkeypatch.setattr(datasets, "prepare_dataset", lambda config, on_progress_line=None: prepared())
+    monkeypatch.setattr(datasets, "prepare_dataset", lambda config, on_progress_line=None, mode="prepare": prepared())
 
     runner.start({"split_ratio": "8:2"})
     state = wait_until_done(runner)
@@ -228,7 +228,7 @@ def test_existing_keys_are_untouched_by_the_progress_block(runner, monkeypatch):
 
 
 def test_start_is_allowed_again_after_finishing(runner, monkeypatch):
-    monkeypatch.setattr(datasets, "prepare_dataset", lambda config, on_progress_line=None: prepared())
+    monkeypatch.setattr(datasets, "prepare_dataset", lambda config, on_progress_line=None, mode="prepare": prepared())
 
     runner.start({"split_ratio": "8:2"})
     wait_until_done(runner)

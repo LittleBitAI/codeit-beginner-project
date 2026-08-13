@@ -696,6 +696,8 @@ export interface EdaState {
   summary?: Record<string, unknown>;
   progress?: PreparationProgress;
   report?: EdaReport | null;
+  /** 지금 고른 dataset이 아닌 다른 폴더의 결과인지. 그러면 report는 비어 옵니다. */
+  stale?: boolean;
 }
 
 export interface EdaResponse {

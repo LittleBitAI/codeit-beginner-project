@@ -853,15 +853,17 @@ def build_prepare_config(
     }
 
 
-def _unsupported_result(result: dict[str, Any]) -> bool:
-    """설치된 data pipeline이 준비 기능을 갖고 있지 않은 경우입니다.
+def _unsupported_result(result: dict[str, Any], expected: str = "prepare") -> bool:
+    """설치된 data pipeline이 요청한 기능을 갖고 있지 않은 경우입니다.
 
-    준비를 요청했는데 응답의 ``summary.mode``가 ``"prepare"``가 아니면, 그 pipeline은
-    ``data.prepare``를 아예 모르고 기존 pass-through 경로로 떨어진 것입니다.
+    요청한 일의 이름이 응답의 ``summary.mode``로 돌아오지 않으면, 그 pipeline은
+    그 설정을 아예 모르고 기존 pass-through 경로로 떨어진 것입니다. 기대하는
+    이름을 받는 이유는, ``"prepare"``로 못 박으면 정상으로 끝난 다른 일까지
+    "지원하지 않음"으로 뒤집기 때문입니다.
     """
 
     summary = result.get("summary")
-    return not (isinstance(summary, Mapping) and summary.get("mode") == "prepare")
+    return not (isinstance(summary, Mapping) and summary.get("mode") == expected)
 
 
 def _drain_pipe(pipe: Any, sink: Any) -> None:
@@ -933,9 +935,12 @@ def _run_prepare_process(
 
 
 def prepare_dataset(
-    config: dict[str, Any], on_progress_line: Any = None
+    config: dict[str, Any], on_progress_line: Any = None, *, mode: str = "prepare"
 ) -> dict[str, Any]:
     """실제 data pipeline을 불러 원본에서 필수 4개와 test manifest를 만듭니다.
+
+    ``mode``는 이 실행이 끝났을 때 `summary.mode`로 돌아와야 하는 이름입니다.
+    EDA처럼 같은 stage를 쓰지만 하는 일이 다른 실행은 자기 이름을 넘깁니다.
 
     ``run_stage``(``subprocess.run(capture_output=True)``)를 쓰면 자식 출력이 끝날
     때까지 pipe에 갇혀서 8분 가까이 아무것도 볼 수 없습니다. 그래서 직접 띄우고
@@ -975,7 +980,8 @@ def prepare_dataset(
                 "message": f"data pipeline 결과를 해석하지 못했습니다. {detail}".strip()}
 
     stage_summary = _unwrap_stage(result.get("summary"))
-    if _unsupported_result({"summary": stage_summary}):
+    if _unsupported_result({"summary": stage_summary}, mode):
+        what = "원본에서 데이터를 준비하는" if mode == "prepare" else "dataset을 분석하는"
         return {
             "ok": False,
             "supported": False,
@@ -983,8 +989,8 @@ def prepare_dataset(
             "artifacts": {},
             "summary": stage_summary,
             "message": (
-                "설치된 data pipeline이 아직 원본에서 데이터를 준비하는 기능을 "
-                "지원하지 않습니다. 준비 기능이 들어간 뒤 다시 시도해 주세요."
+                f"설치된 data pipeline이 아직 {what} 기능을 "
+                "지원하지 않습니다. 그 기능이 들어간 뒤 다시 시도해 주세요."
             ),
         }
 
