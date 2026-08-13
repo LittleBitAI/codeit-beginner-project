@@ -33,6 +33,7 @@ import { color, font, type } from '../design/tokens';
 import { useJobStream } from '../hooks/useJobStream';
 import { usePolling } from '../hooks/usePolling';
 import { duration, loss, megabytes, percent } from '../lib/format';
+import { epochsDone, progressRatio } from '../lib/progress';
 import { useTeam } from '../team/TeamContext';
 
 /**
@@ -186,13 +187,8 @@ export function Live({
   const epochs = progress.epochs ?? [];
   const last = epochs.length > 0 ? epochs[epochs.length - 1] : undefined;
   const best = progress.best ?? null;
-  const done = progress.completed_epochs ?? progress.current_epoch ?? 0;
-  const ratio =
-    progress.percent !== null && progress.percent !== undefined
-      ? progress.percent / 100
-      : progress.total_epochs
-        ? done / progress.total_epochs
-        : null;
+  const done = epochsDone(progress);
+  const ratio = progressRatio(progress);
   const first = epochs.find((item) => item.validation_loss !== null)?.validation_loss ?? null;
   const delta = first !== null && best ? first - best.validation_loss : null;
   const failedAfterCompletedEpoch =

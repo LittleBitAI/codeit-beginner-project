@@ -9,7 +9,7 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import type { JobRecord, QueueState, RegistryScope, TeamRun } from '../api/types';
+import type { JobRecord, Progress, QueueState, RegistryScope, TeamRun } from '../api/types';
 import {
   AlertRow,
   Badge,
@@ -25,6 +25,7 @@ import {
 import { color, font, type } from '../design/tokens';
 import { useElapsedSeconds } from '../hooks/useElapsedSeconds';
 import { duration, loss, startedAt } from '../lib/format';
+import { epochsDone, progressRatio } from '../lib/progress';
 import {
   FILTER_LABEL,
   SORT_LABEL,
@@ -63,9 +64,9 @@ function LiveCard({ job, onOpen }: { job: JobRecord; onOpen: () => void }) {
   const progress = job.progress;
   const latest = progress.epochs[progress.epochs.length - 1] ?? null;
   const best = progress.best ?? null;
-  const done = progress.completed_epochs ?? progress.current_epoch ?? 0;
+  const done = epochsDone(progress);
   const total = progress.total_epochs;
-  const ratio = progress.percent ?? (total ? done / total : null);
+  const ratio = progressRatio(progress);
 
   // 좋아진 폭입니다. 첫 epoch과 지금 best의 차이라 "얼마나 내려왔는지"가 됩니다.
   const first = progress.epochs.find((item) => item.validation_loss !== null)?.validation_loss ?? null;
@@ -213,7 +214,15 @@ interface RunningRow {
 
 function rowFromTeamRun(run: TeamRun): RunningRow {
   const progress = (run.progress ?? {}) as Record<string, unknown>;
-  const current = num(progress.current_epoch) ?? num(progress.completed_epochs);
+  // 내 학습 줄과 같은 규칙으로 셉니다. 한 표 안에서 다르게 세면 안 됩니다.
+  const counted = epochsDone({
+    current_epoch: num(progress.current_epoch),
+    completed_epochs: num(progress.completed_epochs) ?? undefined,
+    total_epochs: num(progress.total_epochs),
+  } as Progress);
+  const current = num(progress.current_epoch) === null && num(progress.completed_epochs) === null
+    ? null
+    : counted;
   const total = num(progress.total_epochs);
   const best = (progress.best ?? null) as { validation_loss?: unknown } | null;
   return {
@@ -229,7 +238,7 @@ function rowFromTeamRun(run: TeamRun): RunningRow {
 
 function rowFromJob(job: JobRecord): RunningRow {
   const progress = job.progress;
-  const current = progress.completed_epochs ?? progress.current_epoch ?? null;
+  const current = progress.available ? epochsDone(progress) : null;
   return {
     runId: job.run_id,
     who: '나 (이 컴퓨터)',
@@ -721,7 +730,7 @@ function QueueTab({
                 </button>
               </div>
               <div style={{ ...type.monoSpec, color: color.textMuted, paddingLeft: 15 }}>
-                epoch {liveJob.progress.completed_epochs ?? liveJob.progress.current_epoch ?? 0} /{' '}
+                epoch {epochsDone(liveJob.progress)} /{' '}
                 {liveJob.progress.total_epochs ?? '?'} · 남은 시간{' '}
                 {liveJob.progress.eta_seconds === null
                   ? '알 수 없음'

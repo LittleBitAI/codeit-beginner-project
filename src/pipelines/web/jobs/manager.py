@@ -21,7 +21,13 @@ from uuid import uuid4
 from ..errors import JobConflictError, JobNotFoundError
 from ..masking import sanitize_line
 from ..paths import REPOSITORY_ROOT
-from ..progress import ProgressState, consume_line, snapshot, take_quiet_change
+from ..progress import (
+    ProgressState,
+    consume_line,
+    seed_epochs,
+    snapshot,
+    take_quiet_change,
+)
 from ..train_config import config_relative_path, read_runtime_config
 from .. import state_sync, team_sync
 from . import runner, store
@@ -204,10 +210,20 @@ class JobManager:
 
         store.save_queue({"entries": [dict(item) for item in self._queue]})
 
-    def enqueue(self, config_id: str, *, access_token: str | None = None) -> JobRecord | None:
+    def enqueue(
+        self,
+        config_id: str,
+        *,
+        access_token: str | None = None,
+        resumed_from_job_id: str | None = None,
+    ) -> JobRecord | None:
         """설정 하나를 대기열에 넣습니다. 비어 있으면 곧바로 시작합니다.
 
         시작한 경우에만 `JobRecord`를 돌려줍니다. 뒤에 줄을 선 경우는 `None`입니다.
+
+        `resumed_from_job_id`는 이어서 학습할 때 앞선 job의 id입니다. 항목과 함께
+        저장해 두므로, 다른 학습 뒤에 줄을 서 있다가 나중에 시작해도 앞선 손실
+        곡선을 잃지 않습니다.
         """
 
         self.load()
@@ -222,6 +238,11 @@ class JobManager:
                     "config_id": config_id,
                     "run_id": run_id,
                     "queued_at": utc_now_text(),
+                    **(
+                        {"resumed_from_job_id": resumed_from_job_id}
+                        if resumed_from_job_id
+                        else {}
+                    ),
                 }
             )
             if access_token:
@@ -314,7 +335,11 @@ class JobManager:
                 access_token = self._queue_access_tokens.pop(entry["entry_id"], None)
                 self._save_queue()
             try:
-                return self.start(entry["config_id"], access_token=access_token)
+                return self.start(
+                    entry["config_id"],
+                    access_token=access_token,
+                    resumed_from_job_id=entry.get("resumed_from_job_id"),
+                )
             except JobConflictError:
                 # 그 사이 다른 학습이 시작됐습니다. 이 항목을 되돌리고 물러납니다.
                 with self._lock:
@@ -493,16 +518,27 @@ class JobManager:
             " 시작할 수 있습니다. 설정에서 '학습과 함께'로 바꾸면 겹쳐서 돌릴 수 있습니다."
         )
 
-    def start(self, config_id: str, *, access_token: str | None = None) -> JobRecord:
+    def start(
+        self,
+        config_id: str,
+        *,
+        access_token: str | None = None,
+        resumed_from_job_id: str | None = None,
+    ) -> JobRecord:
         """저장된 설정으로 학습을 시작합니다. 이미 실행 중이면 거부합니다."""
 
         # GPU 자리를 잡는 구간 전체를 한 번에 하나만 지나갑니다. 자동 평가도 같은
         # 문을 지나므로, 둘이 서로를 못 보고 동시에 출발하는 일이 없습니다.
         with self._gpu_gate:
-            record = self._start_locked(config_id, access_token)
+            record = self._start_locked(config_id, access_token, resumed_from_job_id)
         return self._spawn(record, config_id)
 
-    def _start_locked(self, config_id: str, access_token: str | None) -> JobRecord:
+    def _start_locked(
+        self,
+        config_id: str,
+        access_token: str | None,
+        resumed_from_job_id: str | None = None,
+    ) -> JobRecord:
         """`_gpu_gate`를 쥔 채로만 부릅니다. 기록을 만들고 자리를 잡습니다."""
 
         self._refuse_while_evaluating()
@@ -542,11 +578,30 @@ class JobManager:
             self._active_job_id = job_id
             self._cancel_requested = False
             self._progress = ProgressState()
+            self._seed_resumed_epochs(self._progress, resumed_from_job_id)
             self._sequence = 0
             self._stdout_chunks = []
             record.progress = snapshot(self._progress)
             team_sync.get_team_sync().enqueue_update(record)
         return record
+
+    def _seed_resumed_epochs(self, state: ProgressState, job_id: str | None) -> None:
+        """이어서 학습한 실행의 손실 그래프에 앞선 실행의 epoch를 미리 채웁니다.
+
+        `_lock`을 쥔 채로 부릅니다. 앞선 epoch는 checkpoint 안에만 있고 진행 log로는
+        오지 않으므로, 채우지 않으면 11 epoch부터 이어서 한 실행의 그래프가 11에서
+        시작해 그전 곡선이 사라진 것처럼 보입니다. 앞선 기록이 이 PC에 없으면
+        (예: 다른 Colab runtime에서 돈 학습, 또는 사람이 그 기록을 지운 경우)
+        지어내지 않고 그냥 둡니다.
+
+        옮겨 온 epoch는 train이 어디서 이어붙는지 말해 줄 때까지 화면에 나오지
+        않습니다. 기록의 마지막 epoch가 실제 재개 지점보다 앞설 수 있는데, 어느
+        checkpoint가 남아 있는지는 train만 알기 때문입니다.
+        """
+
+        record = self._records.get(job_id) if job_id else None
+        if record is not None:
+            seed_epochs(state, record.progress.get("epochs"))
 
     def _spawn(self, record: JobRecord, config_id: str) -> JobRecord:
         """자리를 잡은 기록으로 실제 process를 띄웁니다. gate 밖에서 합니다."""

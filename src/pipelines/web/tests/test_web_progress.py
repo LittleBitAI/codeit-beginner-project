@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from src.pipelines.web.progress import ProgressState, consume_line, snapshot
+from src.pipelines.web.progress import ProgressState, consume_line, seed_epochs, snapshot
 
 
 def line(event: str, **fields) -> str:
@@ -75,6 +75,147 @@ def test_parses_epoch_completed():
     assert result["epochs"][0]["train_loss"] == 0.4312
     assert result["best"] == {"epoch": 1, "validation_loss": 0.5109}
     assert result["percent"] == 10.0
+
+
+def test_a_broken_step_event_cannot_push_the_epoch_count_past_the_plan():
+    """잘못된 step event는 batch 표시만 접습니다. 진행률까지 흔들면 안 됩니다."""
+
+    state = feed(
+        line("epoch_completed", epoch=1, epochs=12, validation_loss=0.5),
+        line("step_progress", epoch=99, epochs=12, phase="bad", step=3, total_steps=10),
+    )
+
+    result = snapshot(state)
+
+    assert result["current_epoch"] == 1
+    assert result["completed_epochs"] == 1
+    assert result["percent"] == pytest.approx(8.3)
+
+
+@pytest.mark.parametrize("event", ["epoch_started", "epoch_completed", "step_progress"])
+def test_an_epoch_number_past_the_plan_is_not_believed(event):
+    """계획보다 큰 epoch 번호가 적힌 줄 하나로 816%를 그리면 안 됩니다."""
+
+    state = feed(
+        line("epoch_completed", epoch=1, epochs=12, validation_loss=0.5),
+        line(event, epoch=99, epochs=12, phase="train", step=1, total_steps=9),
+    )
+
+    result = snapshot(state)
+
+    assert result["current_epoch"] == 1
+    assert result["completed_epochs"] == 1
+    assert [entry["epoch"] for entry in result["epochs"]] == [1]
+    assert result["percent"] == pytest.approx(8.3)
+
+
+def test_borrowed_epochs_wait_until_training_says_where_it_resumed():
+    """앞선 기록의 마지막 epoch가 실제 재개 지점보다 앞설 수 있습니다.
+
+    어느 checkpoint가 남아 있는지는 train만 압니다. 그때까지 보여 주면 없는 epoch를
+    끝난 것으로 세고, 그 사이에 학습이 죽으면 그 곡선이 기록에 그대로 남습니다.
+    """
+
+    state = ProgressState()
+    seed_epochs(state, [{"epoch": number, "validation_loss": 0.6} for number in range(1, 16)])
+    consume_line(state, line("run_started", run_id="web-1", epochs=50))
+
+    assert snapshot(state)["epochs"] == []
+    assert snapshot(state)["completed_epochs"] == 0
+
+    consume_line(state, line("epoch_started", epoch=11, epochs=50))
+
+    result = snapshot(state)
+
+    assert [entry["epoch"] for entry in result["epochs"]] == list(range(1, 11))
+    assert result["completed_epochs"] == 10
+
+
+def test_a_foreign_line_cannot_raise_the_plan_and_smuggle_its_epoch_in():
+    """계획을 정하는 것은 `run_started`입니다. 나머지는 그것을 되풀이할 뿐입니다."""
+
+    state = feed(
+        line("run_started", run_id="web-1", epochs=12),
+        line("epoch_completed", epoch=99, epochs=100, validation_loss=-999.0),
+    )
+
+    result = snapshot(state)
+
+    assert result["total_epochs"] == 12
+    assert result["epochs"] == []
+    assert result["best"] is None
+
+
+def test_a_completed_count_past_the_plan_is_not_believed():
+    """train이 계획보다 많이 돌았다고 말해도 그대로 그리면 100%를 넘습니다."""
+
+    state = feed(
+        line("run_started", run_id="web-1", epochs=12),
+        line("epoch_completed", epoch=1, epochs=12, validation_loss=0.5),
+        line("training_completed", planned_epochs=12, completed_epochs=99),
+    )
+
+    assert snapshot(state)["completed_epochs"] == 1
+
+
+def test_borrowed_epochs_follow_wherever_this_run_turns_out_to_be():
+    """재개 지점은 `epoch_started`가 아니라 이 실행이 지나간 자리로 정합니다.
+
+    `epoch_started`를 놓치고 batch 위치부터 와도 다시 도는 epoch가 끝난 것으로
+    남으면 안 되고, 이 실행이 이미 끝낸 epoch는 어떤 순서로 와도 지워지면 안 됩니다.
+    """
+
+    state = ProgressState()
+    seed_epochs(state, [{"epoch": number, "validation_loss": 0.6} for number in range(1, 8)])
+    consume_line(state, line("step_progress", epoch=6, epochs=12, phase="train", step=1, total_steps=9))
+
+    assert sorted(state.epochs_by_number) == [1, 2, 3, 4, 5]
+
+    consume_line(state, line("epoch_completed", epoch=6, epochs=12, validation_loss=0.4))
+    consume_line(state, line("epoch_started", epoch=6, epochs=12))
+
+    assert sorted(state.epochs_by_number) == [1, 2, 3, 4, 5, 6]
+
+
+def test_a_completed_epoch_alone_also_drops_the_stale_epochs_behind_it():
+    """`epoch_started`를 놓쳐도 다시 도는 epoch가 끝난 것으로 남으면 안 됩니다."""
+
+    state = ProgressState()
+    seed_epochs(state, [{"epoch": number, "validation_loss": 0.6} for number in range(1, 8)])
+    consume_line(state, line("epoch_completed", epoch=6, epochs=12, validation_loss=0.4))
+
+    assert sorted(state.epochs_by_number) == [1, 2, 3, 4, 5, 6]
+    assert snapshot(state)["completed_epochs"] == 6
+
+
+def test_borrowed_epoch_times_do_not_estimate_this_run():
+    """앞선 실행이 다른 기계에서 돌았으면 그 속도로 남은 시간을 말할 수 없습니다."""
+
+    state = ProgressState()
+    seed_epochs(
+        state,
+        [{"epoch": number, "epoch_seconds": 600.0} for number in range(1, 8)],
+    )
+    consume_line(state, line("epoch_started", epoch=8, epochs=12))
+
+    assert snapshot(state)["eta_seconds"] is None
+
+
+def test_resumed_run_counts_epoch_numbers_not_received_events():
+    """이어서 학습한 실행은 앞선 epoch가 이 stream에 없습니다.
+
+    받은 event 수로 세면 로그는 `epoch 11/12`라고 찍는데 화면만 0/12에서 다시
+    시작한 것처럼 보입니다.
+    """
+
+    state = feed(line("epoch_started", run_id="web-1", epoch=11, epochs=12))
+    assert snapshot(state)["completed_epochs"] == 10
+
+    consume_line(state, line("epoch_completed", epoch=11, epochs=12, epoch_seconds=9.0))
+    result = snapshot(state)
+
+    assert result["completed_epochs"] == 11
+    assert result["percent"] == pytest.approx(91.7)
 
 
 def test_learning_rate_is_kept_when_train_reports_it_and_stays_none_when_it_does_not():
@@ -202,7 +343,7 @@ def test_broken_step_progress_is_ignored_without_losing_the_run(broken):
 
     result = snapshot(state)
     assert result["step"] is None
-    assert result["completed_epochs"] == 1
+    assert result["completed_epochs"] == 2
     assert result["malformed_lines"] == 1
 
 
