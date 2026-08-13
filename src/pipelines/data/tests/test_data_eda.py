@@ -446,6 +446,36 @@ def test_test_annotations_never_decide_whether_the_run_succeeds():
     assert sources["test_annotations_used"] is False
 
 
+@pytest.mark.parametrize("entry", ["not an object", 7, None])
+def test_a_non_object_entry_is_refused_instead_of_silently_dropped(entry):
+    """버리면 이미지·annotation 수와 class 통계가 조용히 작아집니다."""
+
+    storage = build_storage()
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
+    train = storage.json[f"{root}/train_manifest.json"]
+    train["images"] = [*train["images"], entry]
+
+    result = run_with(storage, config_for(storage))
+
+    assert result["status"] == "error"
+    assert "객체가 아닙니다" in result["message"]
+
+
+def test_a_test_manifest_without_an_annotation_array_still_runs():
+    """test는 image 목록만 씁니다. 셀 수 없으면 모른다고 적을 뿐입니다."""
+
+    storage = build_storage()
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
+    storage.json[f"{root}/test_manifest.json"]["annotations"] = 1
+
+    result = run_with(storage, config_for(storage))
+
+    assert result["status"] == "ok", result["message"]
+    sources = storage.json[result["artifacts"]["eda_report_uri"]]["sources"]
+    assert sources["test_annotations_in_manifest"] is None
+    assert sources["test_annotations_used"] is False
+
+
 @pytest.mark.parametrize("broken", [{"images": 1, "annotations": []}, {"images": [], "annotations": 1}])
 def test_a_document_that_is_not_a_manifest_returns_an_error_not_a_crash(broken):
     """config를 손으로 쓰면 어떤 문서든 manifest 자리에 올 수 있습니다."""

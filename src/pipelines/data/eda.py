@@ -322,7 +322,9 @@ def _annotations_by_image(manifest: Mapping[str, Any]) -> dict[Any, list[Mapping
     grouped: defaultdict[Any, list[Mapping[str, Any]]] = defaultdict(list)
     for annotation in manifest.get("annotations") or []:
         if not isinstance(annotation, Mapping):
-            continue
+            # 조용히 건너뛰면 annotation 수와 class 통계가 실제보다 작게 나오고
+            # 실행은 성공으로 끝납니다. 틀린 숫자를 내느니 거절합니다.
+            raise EdaError("manifest의 annotation 항목이 객체가 아닙니다.")
         image_id = annotation.get("image_id")
         if not isinstance(image_id, (int, str)) or isinstance(image_id, bool):
             raise EdaError("manifest의 annotation image_id가 숫자나 문자열이 아닙니다.")
@@ -369,8 +371,11 @@ def _images(manifest: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     `KeyError`가 `run()` 경계 밖으로 나갑니다.
     """
 
-    images = [image for image in (manifest.get("images") or []) if isinstance(image, Mapping)]
+    images = list(manifest.get("images") or [])
     for image in images:
+        if not isinstance(image, Mapping):
+            # annotation과 같은 이유입니다. 버리면 이미지 수가 조용히 줄어듭니다.
+            raise EdaError("manifest의 image 항목이 객체가 아닙니다.")
         # 있기만 하면 되는 것이 아니라 쓸 수 있는 값이어야 합니다. `id: []`는
         # 묶음의 열쇠로 쓸 수 없고, `width: "bad"`는 넓이 계산에서 터집니다.
         if not isinstance(image.get("id"), (int, str)) or isinstance(image.get("id"), bool):
@@ -808,8 +813,12 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
             # manifest 파일 자체는 통째로 읽습니다. 거짓말하지 않으려고, 거기에
             # annotation이 몇 개 들어 있었는지와 그것을 **쓰지 않았다**는 사실을
             # 따로 적습니다. 이 리포트 어디에도 test annotation에서 나온 값은 없습니다.
+            # 배열이 아니면 개수를 셀 수 없습니다. test는 image 목록만 쓰므로
+            # 그것 때문에 실행을 막지는 않고, 모른다고 적습니다.
             "test_annotations_in_manifest": (
-                len(test.get("annotations") or []) if test is not None else None
+                len(test["annotations"])
+                if test is not None and isinstance(test.get("annotations"), list)
+                else None
             ),
             "test_annotations_used": False,
             "train_image_sample": sample,
