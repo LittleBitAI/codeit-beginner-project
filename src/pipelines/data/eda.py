@@ -328,11 +328,18 @@ def _images(manifest: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 
     images = [image for image in (manifest.get("images") or []) if isinstance(image, Mapping)]
     for image in images:
-        if image.get("id") is None or not str(image.get("file_name") or "").strip():
-            raise EdaError(
-                "manifest의 image 항목에 id나 file_name이 없습니다. 전처리 결과가 "
-                "온전한지 확인하세요."
-            )
+        # 있기만 하면 되는 것이 아니라 쓸 수 있는 값이어야 합니다. `id: []`는
+        # 묶음의 열쇠로 쓸 수 없고, `width: "bad"`는 넓이 계산에서 터집니다.
+        if not isinstance(image.get("id"), (int, str)) or isinstance(image.get("id"), bool):
+            raise EdaError("manifest의 image id가 숫자나 문자열이 아닙니다.")
+        if not str(image.get("file_name") or "").strip():
+            raise EdaError("manifest의 image 항목에 file_name이 없습니다.")
+        for key in ("width", "height"):
+            value = image.get(key)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, (int, float))
+            ):
+                raise EdaError(f"manifest의 image {key}가 숫자가 아닙니다.")
     return images
 
 

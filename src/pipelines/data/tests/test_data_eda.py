@@ -384,18 +384,27 @@ def test_a_broken_number_in_the_manifest_does_not_break_the_report():
     assert storage.json[result["artifacts"]["eda_report_uri"]]["object_size"]
 
 
-def test_a_manifest_missing_image_fields_returns_an_error_not_a_crash():
-    """화면의 문서 분류는 배열 두 개만 봅니다. 안이 빈 manifest도 고를 수 있습니다."""
+@pytest.mark.parametrize(
+    "image",
+    [
+        {},
+        {"id": [], "file_name": "a.png"},
+        {"id": 1, "file_name": "  "},
+        {"id": 1, "file_name": "a.png", "width": "bad", "height": 200},
+    ],
+)
+def test_an_unusable_manifest_image_returns_an_error_not_a_crash(image):
+    """화면의 문서 분류는 배열 두 개만 봅니다. 안이 망가진 manifest도 고를 수 있습니다."""
 
     storage = build_storage()
     root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
-    storage.json[f"{root}/train_manifest.json"] = manifest([{}], [])
+    storage.json[f"{root}/train_manifest.json"] = manifest([image], [])
 
     result = run_with(storage, config_for(storage))
 
     validate_pipeline_result(result, pipeline_name="data")
     assert result["status"] == "error"
-    assert "file_name" in result["message"]
+    assert "manifest" in result["message"]
 
 
 def test_a_storage_failure_message_carries_no_absolute_path():
