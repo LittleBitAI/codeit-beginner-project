@@ -49,10 +49,12 @@ from .train_config import DATA_ARTIFACT_KEYS, OPTIONAL_DATA_ARTIFACT_KEYS
 
 __all__ = [
     "build_data_config",
+    "build_eda_config",
     "classify_document",
     "clear_selection",
     "inspect_directory",
     "load_selection",
+    "read_eda_report",
     "save_selection",
     "verify_with_pipeline",
 ]
@@ -645,6 +647,45 @@ def build_data_config(data_inputs: dict[str, str]) -> dict[str, Any]:
         "storage": storage,
         "inputs": {"data": dict(data_inputs)},
     }
+
+
+def build_eda_config(
+    data_inputs: dict[str, str], *, image_sample: int = 200, overwrite: bool = False
+) -> dict[str, Any]:
+    """``--only data``로 고른 dataset의 EDA 리포트를 만들게 하는 config입니다.
+
+    준비와 같은 stage를 쓰지만 하는 일이 다릅니다. 여기서는 artifact를 만들지 않고
+    이미 있는 것을 읽어 리포트 하나만 남깁니다.
+    """
+
+    if isinstance(image_sample, bool) or not isinstance(image_sample, int) or image_sample < 1:
+        raise WebValidationError(
+            [FieldError("image_sample", "1 이상의 정수여야 합니다.")]
+        )
+    if not isinstance(overwrite, bool):
+        raise WebValidationError([FieldError("overwrite", "true 또는 false여야 합니다.")])
+
+    config = build_data_config(data_inputs)
+    config["data"] = {"eda": True, "eda_image_sample": image_sample, "overwrite": overwrite}
+    return config
+
+
+def read_eda_report(uri: str) -> dict[str, Any] | None:
+    """만들어 둔 EDA 리포트를 읽습니다. 없으면 ``None``입니다."""
+
+    from src.common import StorageError, create_storage
+
+    backend = "s3" if uri.lower().startswith("s3://") else "local"
+    storage_config = (
+        {"backend": "s3", "s3": {"prefix": ""}}
+        if backend == "s3"
+        else {"backend": "local", "local": {"root": "artifacts"}}
+    )
+    try:
+        document = create_storage({"storage": storage_config}).read_json(uri)
+    except (StorageError, ValueError, OSError):
+        return None
+    return document if isinstance(document, dict) else None
 
 
 def verify_with_pipeline(data_inputs: dict[str, str]) -> dict[str, Any]:

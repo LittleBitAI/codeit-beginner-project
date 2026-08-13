@@ -19,6 +19,7 @@ import { datasetLabel } from './lib/runSpec';
 import { Canvas } from './screens/Canvas';
 import { Live } from './screens/Live';
 import { NewExperimentSheet } from './screens/NewExperimentSheet';
+import { EdaSheet } from './screens/EdaSheet';
 import { PrepareSheet } from './screens/PrepareSheet';
 import { Runs } from './screens/Runs';
 import { SettingsSheet } from './screens/SettingsSheet';
@@ -39,7 +40,7 @@ export function App() {
   );
 }
 
-type SheetKey = 'new' | 'settings' | 'prepare' | null;
+type SheetKey = 'new' | 'settings' | 'prepare' | 'eda' | null;
 
 function Shell() {
   // 목록은 3초마다, 설정 정의와 전처리 선택은 필요할 때만 읽습니다.
@@ -120,6 +121,7 @@ function Shell() {
       gpu={gpu.data}
       running={runningDataset}
       onOpenPrepare={() => setSheet('prepare')}
+      onOpenEda={() => setSheet('eda')}
       onOpenSettings={() => setSheet('settings')}
     >
       <Routes>
@@ -199,6 +201,7 @@ function Shell() {
           onSaved={settings.refresh}
         />
       )}
+      {sheet === 'eda' && <EdaSheet onClose={() => setSheet(null)} />}
       {sheet === 'prepare' && (
         <PrepareSheet
           source={selected}

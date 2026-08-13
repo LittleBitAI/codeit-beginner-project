@@ -111,6 +111,24 @@ def preparation_runner(isolated_repo, monkeypatch):
         time.sleep(0.02)
 
 
+@pytest.fixture(autouse=True)
+def eda_runner(isolated_repo, monkeypatch):
+    """EDA도 background thread에서 돌므로 test마다 새로 두고 정리합니다.
+
+    route를 부르는 test가 직접 요청하지 않아도 상태가 넘어가지 않도록 autouse입니다.
+    """
+
+    from src.pipelines.web import data_jobs
+
+    fresh = data_jobs.EdaRunner()
+    monkeypatch.setattr(data_jobs, "_EDA_RUNNER", fresh)
+    yield fresh
+
+    deadline = time.monotonic() + 10
+    while fresh.status().get("status") == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
 @pytest.fixture
 def evaluation_runner(isolated_repo, monkeypatch):
     """평가도 background thread에서 돌므로 test마다 새로 두고 정리합니다."""

@@ -61,6 +61,14 @@ function IconSettings() {
   );
 }
 
+function IconEda() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style={iconBox}>
+      <path d="M2 13.5V9M6 13.5V4M10 13.5V6.5M14 13.5V2" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
 function RailAction({ icon, children, onClick }: { icon: ReactNode; children: ReactNode; onClick: () => void }) {
   return (
     <button
@@ -145,6 +153,7 @@ export function AppShell({
   gpu,
   running,
   onOpenPrepare,
+  onOpenEda,
   onOpenSettings,
 }: {
   children: ReactNode;
@@ -155,6 +164,7 @@ export function AppShell({
   /** 지금 도는 학습이 있는지. 목록의 해당 dataset 옆에 점을 답니다. */
   running: string | null;
   onOpenPrepare: () => void;
+  onOpenEda: () => void;
   onOpenSettings: () => void;
 }) {
   return (
@@ -283,6 +293,11 @@ export function AppShell({
         >
           <RailAction icon={<IconDataset />} onClick={onOpenPrepare}>
             dataset 준비
+          </RailAction>
+          {/* 고른 dataset을 model 없이 뜯어봅니다. 준비 바로 아래에 두는 것은
+              "만들고 → 살펴본다"가 한 가지 일의 순서이기 때문입니다. */}
+          <RailAction icon={<IconEda />} onClick={onOpenEda}>
+            EDA
           </RailAction>
           <RailAction icon={<IconSettings />} onClick={onOpenSettings}>
             설정
