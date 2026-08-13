@@ -49,10 +49,12 @@ from .train_config import DATA_ARTIFACT_KEYS, OPTIONAL_DATA_ARTIFACT_KEYS
 
 __all__ = [
     "build_data_config",
+    "build_eda_config",
     "classify_document",
     "clear_selection",
     "inspect_directory",
     "load_selection",
+    "read_eda_report",
     "save_selection",
     "verify_with_pipeline",
 ]
@@ -647,6 +649,55 @@ def build_data_config(data_inputs: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def build_eda_config(
+    data_inputs: dict[str, str], *, image_sample: int = 200, overwrite: bool = False
+) -> dict[str, Any]:
+    """``--only data``로 고른 dataset의 EDA 리포트를 만들게 하는 config입니다.
+
+    준비와 같은 stage를 쓰지만 하는 일이 다릅니다. 여기서는 artifact를 만들지 않고
+    이미 있는 것을 읽어 리포트 하나만 남깁니다.
+    """
+
+    if isinstance(image_sample, bool) or not isinstance(image_sample, int) or image_sample < 1:
+        raise WebValidationError(
+            [FieldError("image_sample", "1 이상의 정수여야 합니다.")]
+        )
+    if not isinstance(overwrite, bool):
+        raise WebValidationError([FieldError("overwrite", "true 또는 false여야 합니다.")])
+
+    config = build_data_config(data_inputs)
+    config["data"] = {"eda": True, "eda_image_sample": image_sample, "overwrite": overwrite}
+    if config["storage"]["backend"] == "local":
+        # artifact URI는 저장소 root 기준입니다. root를 `artifacts`로 두면 저장소
+        # 안이지만 `artifacts/` 밖에 있는 전처리 폴더를 root 이탈로 거절합니다.
+        config["storage"]["local"] = {"root": str(repository_root())}
+    return config
+
+
+def read_eda_report(uri: str) -> dict[str, Any] | None:
+    """만들어 둔 EDA 리포트를 읽습니다. 없으면 ``None``입니다."""
+
+    from src.common import StorageError, create_storage
+
+    if uri.lower().startswith("s3://"):
+        storage_config: dict[str, Any] = {"backend": "s3", "s3": {"prefix": ""}}
+        location = uri
+    else:
+        # local artifact URI는 **저장소 root 기준**입니다. root를 `artifacts`로 두면
+        # `artifacts/artifacts/…`를 찾고, 저장소 안이지만 `artifacts/` 밖에 있는
+        # 전처리 폴더는 아예 읽지 못합니다.
+        storage_config = {"backend": "local", "local": {"root": str(repository_root())}}
+        try:
+            location = str(resolve_within_repo(uri, label="EDA 리포트"))
+        except WebPathError:
+            return None
+    try:
+        document = create_storage({"storage": storage_config}).read_json(location)
+    except (StorageError, ValueError, OSError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
 def verify_with_pipeline(data_inputs: dict[str, str]) -> dict[str, Any]:
     """실제 data pipeline을 공개 CLI로 불러 계약이 성립하는지 확인합니다.
 
@@ -812,15 +863,17 @@ def build_prepare_config(
     }
 
 
-def _unsupported_result(result: dict[str, Any]) -> bool:
-    """설치된 data pipeline이 준비 기능을 갖고 있지 않은 경우입니다.
+def _unsupported_result(result: dict[str, Any], expected: str = "prepare") -> bool:
+    """설치된 data pipeline이 요청한 기능을 갖고 있지 않은 경우입니다.
 
-    준비를 요청했는데 응답의 ``summary.mode``가 ``"prepare"``가 아니면, 그 pipeline은
-    ``data.prepare``를 아예 모르고 기존 pass-through 경로로 떨어진 것입니다.
+    요청한 일의 이름이 응답의 ``summary.mode``로 돌아오지 않으면, 그 pipeline은
+    그 설정을 아예 모르고 기존 pass-through 경로로 떨어진 것입니다. 기대하는
+    이름을 받는 이유는, ``"prepare"``로 못 박으면 정상으로 끝난 다른 일까지
+    "지원하지 않음"으로 뒤집기 때문입니다.
     """
 
     summary = result.get("summary")
-    return not (isinstance(summary, Mapping) and summary.get("mode") == "prepare")
+    return not (isinstance(summary, Mapping) and summary.get("mode") == expected)
 
 
 def _drain_pipe(pipe: Any, sink: Any) -> None:
@@ -892,9 +945,12 @@ def _run_prepare_process(
 
 
 def prepare_dataset(
-    config: dict[str, Any], on_progress_line: Any = None
+    config: dict[str, Any], on_progress_line: Any = None, *, mode: str = "prepare"
 ) -> dict[str, Any]:
     """실제 data pipeline을 불러 원본에서 필수 4개와 test manifest를 만듭니다.
+
+    ``mode``는 이 실행이 끝났을 때 `summary.mode`로 돌아와야 하는 이름입니다.
+    EDA처럼 같은 stage를 쓰지만 하는 일이 다른 실행은 자기 이름을 넘깁니다.
 
     ``run_stage``(``subprocess.run(capture_output=True)``)를 쓰면 자식 출력이 끝날
     때까지 pipe에 갇혀서 8분 가까이 아무것도 볼 수 없습니다. 그래서 직접 띄우고
@@ -934,7 +990,8 @@ def prepare_dataset(
                 "message": f"data pipeline 결과를 해석하지 못했습니다. {detail}".strip()}
 
     stage_summary = _unwrap_stage(result.get("summary"))
-    if _unsupported_result({"summary": stage_summary}):
+    if _unsupported_result({"summary": stage_summary}, mode):
+        what = "원본에서 데이터를 준비하는" if mode == "prepare" else "dataset을 분석하는"
         return {
             "ok": False,
             "supported": False,
@@ -942,8 +999,8 @@ def prepare_dataset(
             "artifacts": {},
             "summary": stage_summary,
             "message": (
-                "설치된 data pipeline이 아직 원본에서 데이터를 준비하는 기능을 "
-                "지원하지 않습니다. 준비 기능이 들어간 뒤 다시 시도해 주세요."
+                f"설치된 data pipeline이 아직 {what} 기능을 "
+                "지원하지 않습니다. 그 기능이 들어간 뒤 다시 시도해 주세요."
             ),
         }
 

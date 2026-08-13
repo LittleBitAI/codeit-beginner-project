@@ -15,6 +15,7 @@ import type {
   JobListing,
   JobRecord,
   LogPage,
+  EdaResponse,
   PreparationResponse,
   RegistrationState,
   RuntimeConfig,
@@ -218,6 +219,12 @@ export const api = {
     request<{ source: null }>('/api/data/source', { method: 'DELETE' }),
 
   prepareStatus: () => request<PreparationResponse>('/api/data/prepare'),
+
+  // EDA는 이미지를 전부 열어야 해서 오래 걸립니다. 시작만 시키고 상태를 물어봅니다.
+  edaStatus: () => request<EdaResponse>('/api/data/eda'),
+
+  startEda: (body: { image_sample?: number; overwrite?: boolean }) =>
+    request<EdaResponse>('/api/data/eda', { method: 'POST', body: JSON.stringify(body) }),
 
   startPreparation: (body: {
     split_ratio: string;

@@ -12,7 +12,7 @@ from fastapi import APIRouter, Body
 from pydantic import BaseModel, Field
 
 from .. import datasets
-from ..data_jobs import get_preparation_runner
+from ..data_jobs import get_eda_runner, get_preparation_runner
 from ..errors import FieldError, WebValidationError
 from ..train_config import normalize_data_inputs
 
@@ -92,6 +92,31 @@ def start_prepare(payload: PrepareRequest = Body(...)) -> dict[str, Any]:
         "storage": datasets.storage_environment(),
         "preparation": runner.start(payload.model_dump()),
     }
+
+
+class EdaRequest(BaseModel):
+    """EDA를 돌릴 때 쓰는 설정. 대상은 지금 고른 전처리 dataset입니다."""
+
+    image_sample: int = Field(default=200, ge=1, le=5000)
+    overwrite: bool = Field(default=False)
+
+
+@router.get("/eda")
+def eda_status() -> dict[str, Any]:
+    """지금 돌고 있거나 마지막으로 끝난 EDA의 상태와 리포트입니다."""
+
+    return {"eda": get_eda_runner().status()}
+
+
+@router.post("/eda", status_code=202)
+def start_eda(payload: EdaRequest = Body(...)) -> dict[str, Any]:
+    """고른 dataset을 model 없이 뜯어보도록 data pipeline을 부릅니다.
+
+    이미지를 전부 열어야 해서 오래 걸리므로 시작만 시키고 바로 응답합니다. 상태와
+    결과는 ``GET /api/data/eda``로 확인합니다.
+    """
+
+    return {"eda": get_eda_runner().start(payload.model_dump())}
 
 
 class VerifyRequest(BaseModel):

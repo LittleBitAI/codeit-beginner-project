@@ -614,6 +614,96 @@ export interface StorageEnvironment {
   default_backend: string;
 }
 
+/** 다섯 숫자로 줄인 분포. 잰 값이 없으면 절 자체가 null입니다. */
+export interface EdaDistribution {
+  count: number;
+  min: number;
+  p10: number;
+  median: number;
+  p90: number;
+  max: number;
+}
+
+/**
+ * data pipeline이 model 없이 잰 dataset 리포트.
+ *
+ * 화면이 그림을 그리고 pipeline은 숫자만 냅니다. 재지 못한 값은 0이 아니라 null이라,
+ * "0이었다"와 "재지 못했다"가 섞이지 않습니다.
+ */
+export interface EdaReport {
+  schema_version: string;
+  dataset_directory: string;
+  shape: Record<string, {
+    images: number;
+    annotations: number;
+    objects_per_image: Record<string, number>;
+    images_with_a_repeated_class: number;
+  }>;
+  classes: {
+    class_count: number;
+    train_images_per_class: EdaDistribution | null;
+    imbalance_ratio: number | null;
+    classes_missing_from_train: number[];
+    classes_missing_from_validation: number[];
+    per_class: {
+      category_id: number;
+      name: string | null;
+      train_images: number;
+      validation_images: number;
+    }[];
+  };
+  combinations: {
+    train: { groups: number; images_per_group: EdaDistribution | null };
+    validation: { groups: number; images_per_group: EdaDistribution | null };
+    groups_in_both_splits: number;
+    leaked_group_sample: string[];
+    capture_conditions: Record<string, number>;
+  };
+  object_size: {
+    train_annotation_fraction: EdaDistribution | null;
+    validation_annotation_fraction: EdaDistribution | null;
+    /** 픽셀로 잰 자가 정답을 얼마나 맞히는지. 못 믿으면 비교를 내주지 않습니다. */
+    calibration: {
+      images: number;
+      measured_over_annotation: number | null;
+      limits: [number, number];
+      trustworthy: boolean;
+    };
+    train_foreground_fraction: EdaDistribution | null;
+    test_foreground_fraction: EdaDistribution | null;
+    test_over_train: { area_ratio: number; length_ratio: number } | null;
+  };
+  appearance: {
+    train_background_color: number[] | null;
+    test_background_color: number[] | null;
+    train_foreground_color: number[] | null;
+    test_foreground_color: number[] | null;
+    background_color_distance: number | null;
+    foreground_color_distance: number | null;
+  };
+  sources: Record<string, unknown>;
+}
+
+export interface EdaState {
+  status: 'idle' | 'running' | 'succeeded' | 'failed';
+  directory?: string;
+  image_sample?: number;
+  overwrite?: boolean;
+  started_at?: string | null;
+  finished_at?: string | null;
+  message?: string;
+  artifacts?: Record<string, string>;
+  summary?: Record<string, unknown>;
+  progress?: PreparationProgress;
+  report?: EdaReport | null;
+  /** 지금 고른 dataset이 아닌 다른 폴더의 결과인지. 그러면 report는 비어 옵니다. */
+  stale?: boolean;
+}
+
+export interface EdaResponse {
+  eda: EdaState;
+}
+
 export interface PreparationResponse {
   split_ratios: string[];
   backends: string[];
