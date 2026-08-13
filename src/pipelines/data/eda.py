@@ -311,10 +311,21 @@ def _capture_condition(file_name: str) -> str:
 
 
 def _annotations_by_image(manifest: Mapping[str, Any]) -> dict[Any, list[Mapping[str, Any]]]:
+    """annotation을 이미지별로 묶습니다. 쓸 수 없는 값이면 여기서 거절합니다.
+
+    `image_id`는 묶음의 열쇠, `category_id`는 class 집합의 원소라 둘 다 해시할 수
+    있어야 합니다. `[]`가 들어오면 `TypeError`가 `run()` 경계 밖으로 나갑니다.
+    """
+
     grouped: defaultdict[Any, list[Mapping[str, Any]]] = defaultdict(list)
     for annotation in manifest.get("annotations") or []:
-        if isinstance(annotation, Mapping):
-            grouped[annotation.get("image_id")].append(annotation)
+        if not isinstance(annotation, Mapping):
+            continue
+        for key in ("image_id", "category_id"):
+            value = annotation.get(key)
+            if not isinstance(value, (int, str)) or isinstance(value, bool):
+                raise EdaError(f"manifest의 annotation {key}가 숫자나 문자열이 아닙니다.")
+        grouped[annotation["image_id"]].append(annotation)
     return dict(grouped)
 
 

@@ -407,6 +407,29 @@ def test_an_unusable_manifest_image_returns_an_error_not_a_crash(image):
     assert "manifest" in result["message"]
 
 
+@pytest.mark.parametrize(
+    "annotation",
+    [
+        {"image_id": [], "category_id": 1, "bbox": [0, 0, 1, 1]},
+        {"image_id": 1, "category_id": [], "bbox": [0, 0, 1, 1]},
+        {"category_id": 1, "bbox": [0, 0, 1, 1]},
+    ],
+)
+def test_an_unusable_manifest_annotation_returns_an_error_not_a_crash(annotation):
+    """image_id는 묶음의 열쇠, category_id는 집합의 원소라 해시할 수 있어야 합니다."""
+
+    storage = build_storage()
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
+    existing = storage.json[f"{root}/train_manifest.json"]["images"][:1]
+    storage.json[f"{root}/train_manifest.json"] = manifest(existing, [annotation])
+
+    result = run_with(storage, config_for(storage))
+
+    validate_pipeline_result(result, pipeline_name="data")
+    assert result["status"] == "error"
+    assert "annotation" in result["message"]
+
+
 def test_a_storage_failure_message_carries_no_absolute_path():
     """오류 message는 그대로 화면에 나갑니다. 사용자 이름이 실리면 안 됩니다."""
 
