@@ -675,14 +675,20 @@ def read_eda_report(uri: str) -> dict[str, Any] | None:
 
     from src.common import StorageError, create_storage
 
-    backend = "s3" if uri.lower().startswith("s3://") else "local"
-    storage_config = (
-        {"backend": "s3", "s3": {"prefix": ""}}
-        if backend == "s3"
-        else {"backend": "local", "local": {"root": "artifacts"}}
-    )
+    if uri.lower().startswith("s3://"):
+        storage_config: dict[str, Any] = {"backend": "s3", "s3": {"prefix": ""}}
+        location = uri
+    else:
+        # local artifact URI는 **저장소 root 기준**입니다. root를 `artifacts`로 두면
+        # `artifacts/artifacts/…`를 찾고, 저장소 안이지만 `artifacts/` 밖에 있는
+        # 전처리 폴더는 아예 읽지 못합니다.
+        storage_config = {"backend": "local", "local": {"root": str(repository_root())}}
+        try:
+            location = str(resolve_within_repo(uri, label="EDA 리포트"))
+        except WebPathError:
+            return None
     try:
-        document = create_storage({"storage": storage_config}).read_json(uri)
+        document = create_storage({"storage": storage_config}).read_json(location)
     except (StorageError, ValueError, OSError):
         return None
     return document if isinstance(document, dict) else None

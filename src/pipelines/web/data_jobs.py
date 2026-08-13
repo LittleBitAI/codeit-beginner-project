@@ -213,6 +213,9 @@ class EdaRunner(PreparationRunner):
             name="data-eda",
             state={
                 "directory": selection.get("directory"),
+                # 폴더 이름만 보면, 같은 자리에 원본을 다시 준비한 뒤에도 옛 리포트가
+                # 최신 결과처럼 남습니다. 고른 시각까지 함께 붙들어 둡니다.
+                "selected_at": selection.get("selected_at"),
                 "image_sample": config["data"]["eda_image_sample"],
                 "overwrite": config["data"]["overwrite"],
                 "message": "dataset을 읽어 리포트를 만들고 있습니다.",
@@ -237,11 +240,11 @@ class EdaRunner(PreparationRunner):
         if state.get("status") == STATUS_IDLE:
             return state
         selection = datasets.load_selection() or {}
-        if state.get("directory") and state["directory"] != selection.get("directory"):
-            state["stale"] = True
+        analysed = (state.get("directory"), state.get("selected_at"))
+        current = (selection.get("directory"), selection.get("selected_at"))
+        state["stale"] = bool(analysed[0]) and analysed != current
+        if state["stale"]:
             state["report"] = None
-        else:
-            state["stale"] = False
         return state
 
 

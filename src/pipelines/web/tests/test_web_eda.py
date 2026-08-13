@@ -56,7 +56,9 @@ def selected(monkeypatch):
 
     data = {key: f"artifacts/p/{key}.json" for key in DATA_ARTIFACT_KEYS}
     monkeypatch.setattr(
-        datasets, "load_selection", lambda: {"directory": "artifacts/p", "data": data}
+        datasets,
+        "load_selection",
+        lambda: {"directory": "artifacts/p", "selected_at": "2026-01-01T00:00:00Z", "data": data},
     )
     return data
 
@@ -144,6 +146,32 @@ def test_a_report_from_another_dataset_is_not_shown_as_this_one(monkeypatch, sel
     assert state["report"] is None
 
 
+def test_a_report_from_before_the_dataset_was_rebuilt_is_not_shown(monkeypatch, selected):
+    """같은 폴더에 원본을 다시 준비하면 안의 내용이 바뀝니다.
+
+    폴더 이름만 대조하면 옛 숫자가 최신 결과처럼 남습니다.
+    """
+
+    monkeypatch.setattr(
+        datasets, "prepare_dataset", lambda config, on_progress_line=None, mode="prepare": eda_result()
+    )
+    monkeypatch.setattr(datasets, "read_eda_report", lambda uri: dict(REPORT))
+    runner = EdaRunner()
+    runner.start({})
+    wait_until_done(runner)
+
+    monkeypatch.setattr(
+        datasets,
+        "load_selection",
+        lambda: {"directory": "artifacts/p", "selected_at": "2026-02-02T00:00:00Z", "data": {}},
+    )
+
+    state = runner.status()
+
+    assert state["stale"] is True
+    assert state["report"] is None
+
+
 def test_prepare_and_eda_do_not_run_at_the_same_time(monkeypatch, selected):
     """둘 다 같은 전처리 폴더를 건드립니다. 겹치면 읽는 중에 파일이 바뀝니다."""
 
@@ -210,6 +238,25 @@ def test_a_second_run_is_refused_while_one_is_going(monkeypatch, selected):
     finally:
         release.set()
     wait_until_done(runner)
+
+
+def test_a_local_report_is_read_through_the_repository_root(isolated_repo):
+    """local artifact URI는 저장소 root 기준입니다.
+
+    storage root를 `artifacts`로 두면 `artifacts/artifacts/…`를 찾고, 저장소 안이지만
+    `artifacts/` 밖에 있는 전처리 폴더는 아예 읽지 못합니다.
+    """
+
+    from src.pipelines.web.paths import repository_root
+
+    target = repository_root() / "datasets" / "processed" / "v9" / "eda"
+    target.mkdir(parents=True)
+    (target / "report.json").write_text(json.dumps(REPORT), encoding="utf-8")
+
+    assert datasets.read_eda_report("datasets/processed/v9/eda/report.json") == REPORT
+    assert datasets.read_eda_report("datasets/processed/v9/eda/missing.json") is None
+    # 저장소 밖은 읽지 않습니다.
+    assert datasets.read_eda_report("../outside.json") is None
 
 
 # --- route ----------------------------------------------------------------
