@@ -75,6 +75,11 @@ def test_the_config_asks_data_to_do_eda_and_nothing_else(selected):
     assert "prepare" not in config["data"]
     assert config["inputs"]["data"] == selected
     assert config["execution"]["mode"] == "real"
+    # local artifact URI는 저장소 root 기준입니다. root를 artifacts로 두면 저장소
+    # 안이지만 artifacts/ 밖에 있는 전처리 폴더를 root 이탈로 거절합니다.
+    from src.pipelines.web.paths import repository_root
+
+    assert config["storage"]["local"]["root"] == str(repository_root())
 
 
 @pytest.mark.parametrize("bad", (0, -1, "40", True))

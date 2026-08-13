@@ -667,6 +667,10 @@ def build_eda_config(
 
     config = build_data_config(data_inputs)
     config["data"] = {"eda": True, "eda_image_sample": image_sample, "overwrite": overwrite}
+    if config["storage"]["backend"] == "local":
+        # artifact URI는 저장소 root 기준입니다. root를 `artifacts`로 두면 저장소
+        # 안이지만 `artifacts/` 밖에 있는 전처리 폴더를 root 이탈로 거절합니다.
+        config["storage"]["local"] = {"root": str(repository_root())}
     return config
 
 

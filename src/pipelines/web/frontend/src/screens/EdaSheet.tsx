@@ -178,7 +178,10 @@ export function EdaSheet({ onClose }: { onClose: () => void }) {
         <Button onClick={() => start(false)} disabled={running || starting}>
           {running ? '분석 중…' : 'EDA 실행'}
         </Button>
-        {state?.report && (
+        {/* 한 번이라도 돌린 뒤에는 늘 보입니다. 리포트가 가려진 상태에서도 이 버튼이
+            필요합니다 — 일반 실행은 덮어쓰지 않으므로, 남아 있는 옛 리포트 때문에
+            실패하고 화면에서 빠져나갈 길이 없어집니다. */}
+        {state && state.status !== 'idle' && (
           <Button kind="ghost" onClick={() => start(true)} disabled={running || starting}>
             다시 분석
           </Button>
