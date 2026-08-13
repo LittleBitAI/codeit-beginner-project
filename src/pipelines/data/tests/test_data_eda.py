@@ -427,6 +427,39 @@ def test_an_annotation_pointing_at_a_missing_image_is_refused_not_counted_as_zer
     assert storage.downloaded == []
 
 
+def test_test_annotations_never_decide_whether_the_run_succeeds():
+    """대회 규칙이자 리포트가 스스로 적는 약속입니다.
+
+    확인에 쓰기만 해도 그 값이 실행의 성패를 가르므로, 쓰지 않았다는 말이 거짓이 됩니다.
+    """
+
+    storage = build_storage()
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
+    test_manifest = storage.json[f"{root}/test_manifest.json"]
+    # 학습 manifest였다면 거절당했을 annotation입니다.
+    test_manifest["annotations"] = [{"image_id": 999, "category_id": [], "bbox": "bad"}]
+
+    result = run_with(storage, config_for(storage))
+
+    assert result["status"] == "ok", result["message"]
+    sources = storage.json[result["artifacts"]["eda_report_uri"]]["sources"]
+    assert sources["test_annotations_used"] is False
+
+
+def test_duplicate_image_ids_are_refused_instead_of_counted_twice():
+    """같은 id의 image가 둘이면 그 annotation이 두 번 세어집니다."""
+
+    storage = build_storage()
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
+    train = storage.json[f"{root}/train_manifest.json"]
+    train["images"] = [train["images"][0], {**train["images"][1], "id": train["images"][0]["id"]}]
+
+    result = run_with(storage, config_for(storage))
+
+    assert result["status"] == "error"
+    assert "같은 id" in result["message"]
+
+
 @pytest.mark.parametrize(
     "annotation",
     [

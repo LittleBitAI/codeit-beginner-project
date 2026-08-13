@@ -342,7 +342,15 @@ def check_manifest(manifest: Mapping[str, Any], label: str) -> None:
     거절합니다.
     """
 
-    known = {image["id"] for image in _images(manifest)}
+    images = _images(manifest)
+    known = {image["id"] for image in images}
+    if len(known) != len(images):
+        # 같은 id의 image가 둘이면 그 annotation이 두 번 세어집니다. 검증은 통과하고
+        # 이미지 수, class 빈도, 물체 크기가 조용히 부풀어 오릅니다.
+        raise EdaError(
+            f"{label} manifest에 같은 id를 가진 image가 둘 이상 있습니다. "
+            "전처리 결과가 온전한지 확인하세요."
+        )
     dangling = sorted(
         {str(key) for key in _annotations_by_image(manifest) if key not in known}
     )
@@ -732,7 +740,10 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
     check_manifest(train, "학습")
     check_manifest(validation, "검증")
     if test is not None:
-        check_manifest(test, "test")
+        # test는 **image 목록만** 봅니다. annotation을 확인에 쓰면 그 값이 실행의
+        # 성패를 가르게 되고, 그것은 "대회 test annotation을 쓰지 않는다"는 규칙과
+        # 리포트가 적는 `test_annotations_used: false`를 함께 어깁니다.
+        _images(test)
 
     # 이미지는 한 번만 열고 크기와 색을 함께 잽니다. 다시 열면 시간이 두 배입니다.
     on_progress = progress.read_progress
