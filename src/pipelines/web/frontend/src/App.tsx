@@ -72,16 +72,29 @@ function Shell() {
   );
   const groups = useMemo(() => groupByDataset(records), [records]);
 
-  const datasets: DatasetOption[] = useMemo(
-    () =>
-      groups.map((group) => ({
-        key: group.key,
-        short: group.key,
-        sub: `${group.count}건의 기록`,
-        count: group.count,
-      })),
-    [groups],
-  );
+  // 전처리는 끝났지만 아직 학습한 적 없는 dataset도 목록에 둡니다. 기록에서만
+  // 목록을 만들면 방금 만든 판이 보이지 않아, 그것으로 학습하려면 어디로 가야 할지
+  // 알 수 없습니다. 준비된 판이 다 보여야 다음에 무엇을 돌릴지 고를 수 있습니다.
+  const prepared = usePolling(() => api.listDatasets(), 0);
+
+  const datasets: DatasetOption[] = useMemo(() => {
+    const withRecords = groups.map((group) => ({
+      key: group.key,
+      short: group.key,
+      sub: `${group.count}건의 기록`,
+      count: group.count,
+    }));
+    const known = new Set(withRecords.map((item) => item.key));
+    const untouched = (prepared.data?.datasets ?? [])
+      .filter((item) => item.complete && !known.has(item.name))
+      .map((item) => ({
+        key: item.name,
+        short: item.name,
+        sub: '기록 없음 · 학습 전',
+        count: 0,
+      }));
+    return [...withRecords, ...untouched];
+  }, [groups, prepared.data]);
 
   const datasetKey = pickedDataset ?? groups[0]?.key ?? null;
   const shownRecords = useMemo(

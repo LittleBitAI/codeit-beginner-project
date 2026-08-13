@@ -114,6 +114,23 @@ beforeEach(() => {
           devices: [],
         });
       }
+      if (path === '/api/data/datasets') {
+        return jsonResponse({
+          backend: 'local',
+          root: 'datasets/pill_detection/processed/',
+          datasets: [
+            {
+              name: 'e2e-prepared',
+              directory: 'datasets/pill_detection/processed/e2e-prepared/',
+              complete: true,
+              missing: [],
+              has_test_manifest: true,
+              has_eda_report: false,
+            },
+          ],
+          problems: [],
+        });
+      }
       throw new Error(`E2E fixture가 처리하지 않는 요청입니다: ${path}`);
     }),
   );
@@ -161,5 +178,20 @@ describe('Web multi-experiment E2E', () => {
     // 결과와 세팅이 한 표에 함께 있습니다. 탭으로 갈아 끼우지 않습니다.
     expect(screen.getAllByText('SGD (호환 기본값)')).toHaveLength(2);
     expect(screen.getByText(/data artifact URI 4개가 모두 같아/)).toBeInTheDocument();
+  });
+});
+
+describe('왼쪽 dataset 목록', () => {
+  it('전처리는 끝났지만 아직 학습하지 않은 판도 보여 준다', async () => {
+    // 기록에서만 목록을 만들면 방금 만든 판이 보이지 않아, 그것으로 학습하려면
+    // 어디로 가야 할지 알 수 없습니다.
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('e2e-prepared')).toBeInTheDocument();
+    expect(screen.getByText('기록 없음 · 학습 전')).toBeInTheDocument();
   });
 });

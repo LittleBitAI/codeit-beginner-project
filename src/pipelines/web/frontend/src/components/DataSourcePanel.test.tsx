@@ -146,6 +146,15 @@ describe('DataSourcePanel · 전처리 dataset 고르기', () => {
     await waitFor(() => expect(onSelected).toHaveBeenCalled());
   });
 
+  it('이미 고른 것이 있어도 목록이 보인다', async () => {
+    // 숨기면 판을 바꾸려면 "다른 폴더 고르기"를 먼저 눌러야 한다는 것을 아무도 모릅니다.
+    listDatasets.mockResolvedValue(listing([{ name: 'v5-seed42-8020-group-angle' }]));
+
+    render(<DataSourcePanel source={source} onSelected={vi.fn()} onPrepared={vi.fn()} />);
+
+    expect(await screen.findByText(/v5-seed42-8020-group-angle/)).toBeInTheDocument();
+  });
+
   it('필수 artifact가 없는 폴더는 고를 수 없다', async () => {
     listDatasets.mockResolvedValue(listing([{ name: 'v9-broken', complete: false }]));
 
