@@ -6,11 +6,12 @@ Read the repository root `CLAUDE.md` first. This file adds only what is specific
 
 Turns raw sources into five dataset artifacts, or validates four legacy URIs. It does not train, evaluate, or register.
 
-Three execution paths, chosen in `__init__.py`:
+Four execution paths, chosen in `__init__.py`:
 
 1. `execution.mode == "dummy"` — return the dummy result untouched.
 2. `data.prepare == true` — build five artifacts, or add a missing test manifest to an exact four-artifact legacy set (`preparation.py`).
-3. otherwise — validate the four URIs in `config["inputs"]["data"]` and republish them.
+3. `data.eda == true` — read an already-built dataset and write one report (`eda.py`). It creates no dataset artifact and edits none.
+4. otherwise — validate the four URIs in `config["inputs"]["data"]` and republish them.
 
 ## Boundaries
 
@@ -44,10 +45,22 @@ Because groups move whole, priorities are leakage, coverage, class distribution,
 
 With `overwrite == false`, an exact legacy set of four artifacts is the backfill case: only the missing test manifest is written. Any other partial set fails; an existing file is never replaced.
 
+## EDA Report
+
+`data.eda == true` reads the artifacts named in `config["inputs"]["data"]` and writes `eda/report.json` beside the train manifest, returned as `eda_report_uri`. `overwrite` guards it like any other output. `data.eda_image_sample` (default 200) caps how many train images are opened; every test image is opened.
+
+**It measures, it does not judge.** Numbers only, so the frontend draws the charts and no plotting dependency enters this repository. Sections: `shape` (objects per image, images repeating a class), `classes` (per-class image counts, imbalance ratio, classes missing from a split), `combinations` (groups, images per group, capture conditions, groups in both splits), `object_size`.
+
+`object_size` exists because a conclusion drawn from a model's own predictions cannot explain that model. Ground-truth boxes give train and validation sizes; test has no labels, so `foreground_fraction()` measures from pixels alone: distance from the background colour taken at the border (brightness alone loses white pills, and the backdrop is not always the darker side), Otsu on that distance, a closing to fill imprints, then the share of the frame it covers.
+
+**It deliberately does not count objects.** Counting needs connected components, and every pill drags a shadow and a reflected rim that break off across a thin gap, so one pill becomes two or three. Five principled variants put the object count between 0.53× and 1.30× of the labels and moved the size answer by half. Area share needs no such decision and is stable.
+
+Comparing a labelled area against a pixel area would still mix two rulers, so the same pixel method runs on train, and `calibration.measured_over_annotation` reports what it gets where labels exist. Outside `CALIBRATION_LIMITS` the report writes `test_over_train: null` — a ratio from a ruler that fails on train would be quoted as fact.
+
 ## Run and Test
 
 ```
-python -m src.main_pipeline --only data
+python -m src.main_pipeline --only data          # prepare, EDA, or republish
 python -m pytest src/pipelines/data/tests -q
 ```
 
@@ -55,7 +68,8 @@ Tests use a fake storage.
 
 ## Local Rules
 
-- **Leakage is the one unrecoverable mistake here.** Competition test images may be read only to build the test manifest; they never enter train/validation, and test annotations are never read. Never relax this so a run passes.
+- **Leakage is the one unrecoverable mistake here.** Competition test images may be read only to build the test manifest or to measure them for the EDA report; they never enter train/validation, and test annotations are never read. Never relax this so a run passes.
+- An EDA measurement of test images is a **report value, never an input.** It may not reach a split, a manifest, a preprocessing default, or any artifact this pipeline publishes. `report["sources"]` records what was read so the claim is checkable rather than promised.
 - `split_ratio` accepts only `SPLIT_RATIO_OPTIONS`. Adding one changes the output directory name and so the artifact layout — agree with the train and evaluate owners first.
 - Every category that can reach validation must appear in both splits, and one seed must reproduce one split. Never split a group to reach a category that cannot — that is leakage. It becomes train-only and is reported.
 - Never use `boto3` directly. Go through `src/common/storage.py`.
