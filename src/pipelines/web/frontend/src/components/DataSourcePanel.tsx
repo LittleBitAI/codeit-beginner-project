@@ -178,6 +178,18 @@ export function DataSourcePanel({
           로컬 폴더와 S3 위치를 모두 받고, 파일 이름이 달라도 내용을 보고 찾습니다.
         </span>
 
+        {/* 목록은 늘 보입니다. 고른 것이 있을 때 숨기면, 판을 바꾸려면 "다른 폴더
+            고르기"를 먼저 눌러야 한다는 것을 아무도 모릅니다. 판을 오가는 것이 이
+            화면의 주된 쓰임이라 그 한 번의 클릭이 기능을 통째로 가립니다. */}
+        <DatasetList
+          current={source?.directory ?? null}
+          busy={busy}
+          onPick={(dataset) => {
+            setDirectory(dataset.directory);
+            void select(dataset.directory);
+          }}
+        />
+
         {source && !editing ? (
           <>
             <SelectedSummary source={source} />
@@ -195,14 +207,6 @@ export function DataSourcePanel({
           </>
         ) : (
           <>
-            <DatasetList
-              current={source?.directory ?? null}
-              busy={busy}
-              onPick={(dataset) => {
-                setDirectory(dataset.directory);
-                void select(dataset.directory);
-              }}
-            />
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-start' }}>
               <input
                 value={directory}
