@@ -319,7 +319,21 @@ def _annotations_by_image(manifest: Mapping[str, Any]) -> dict[Any, list[Mapping
 
 
 def _images(manifest: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    return [image for image in (manifest.get("images") or []) if isinstance(image, Mapping)]
+    """manifest의 image 목록. 뒤에서 쓰는 key가 없으면 여기서 거절합니다.
+
+    화면의 문서 분류는 `images`와 `annotations`가 배열인지만 봅니다. 그래서 안이
+    비어 있는 manifest도 고를 수 있고, 그대로 두면 `image["file_name"]`에서
+    `KeyError`가 `run()` 경계 밖으로 나갑니다.
+    """
+
+    images = [image for image in (manifest.get("images") or []) if isinstance(image, Mapping)]
+    for image in images:
+        if image.get("id") is None or not str(image.get("file_name") or "").strip():
+            raise EdaError(
+                "manifest의 image 항목에 id나 file_name이 없습니다. 전처리 결과가 "
+                "온전한지 확인하세요."
+            )
+    return images
 
 
 # --- 리포트 절 -------------------------------------------------------------
