@@ -26,6 +26,17 @@ class DirectoryRequest(BaseModel):
     directory: str = Field(min_length=1, max_length=512)
 
 
+@router.get("/datasets")
+def list_datasets() -> dict[str, Any]:
+    """전처리 결과 폴더 목록입니다. 골라 쓰라고 보여 주기만 합니다.
+
+    경로를 손으로 붙여넣는 것 말고는 고를 방법이 없어서, 어떤 판이 있는지 알려면
+    저장소를 직접 뒤져야 했습니다.
+    """
+
+    return datasets.list_processed_datasets()
+
+
 @router.post("/inspect")
 def inspect(payload: DirectoryRequest = Body(...)) -> dict[str, Any]:
     """폴더를 살펴보기만 합니다. 고르지도, 저장하지도 않습니다."""

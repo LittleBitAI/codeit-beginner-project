@@ -1,13 +1,14 @@
 import { useState } from 'react';
 
 import { api } from '../api/client';
-import type { DataSource, DataVerification } from '../api/types';
+import type { DataSource, DataVerification, ProcessedDataset } from '../api/types';
 import { DATA_KEYS, OPTIONAL_DATA_KEYS } from '../lib/dataKeys';
 import { describeError } from '../lib/describeError';
 import { color, font, radius } from '../design/tokens';
 import { IconCheck, IconError, IconWarning } from './Icon';
 import { PreparePanel } from './PreparePanel';
-import { AlertRow, Button, Panel, controlStyle, invalidControlStyle } from './primitives';
+import { usePolling } from '../hooks/usePolling';
+import { AlertRow, Button, MicroLabel, Panel, controlStyle, invalidControlStyle } from './primitives';
 
 /**
  * 전처리 결과 폴더를 한 번 고르면 필수 artifact와 선택 test manifest를 찾아 기억합니다.
@@ -15,6 +16,69 @@ import { AlertRow, Button, Panel, controlStyle, invalidControlStyle } from './pr
  * 실험마다 경로 4개를 손으로 넣지 않도록, 데이터셋을 실험 단위가 아니라 프로젝트
  * 단위 설정으로 둡니다. 고르고 나면 새 실험 화면의 4칸이 자동으로 채워집니다.
  */
+/**
+ * 고를 수 있는 전처리 폴더를 눌러서 고릅니다.
+ *
+ * 목록이 없을 때는 경로를 손으로 붙여넣는 수밖에 없어서, 어떤 판이 있는지 알려면
+ * 저장소를 직접 뒤져야 했고 v3와 v5처럼 이름이 비슷한 판을 잘못 고르기 쉬웠습니다.
+ * 아래 입력칸은 그대로 둡니다 — 목록에 없는 위치도 여전히 고를 수 있어야 합니다.
+ */
+function DatasetList({
+  current,
+  busy,
+  onPick,
+}: {
+  current: string | null;
+  busy: boolean;
+  onPick: (dataset: ProcessedDataset) => void;
+}) {
+  const listing = usePolling(() => api.listDatasets(), 0);
+  const datasets = listing.data?.datasets ?? [];
+  if (!datasets.length) return null;
+
+  const same = (directory: string) =>
+    current !== null && current.replace(/\/$/, '') === directory.replace(/\/$/, '');
+
+  return (
+    <div>
+      <MicroLabel style={{ marginBottom: 8 }}>
+        {listing.data?.root ?? ''} 아래에서 찾은 폴더
+      </MicroLabel>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {datasets.map((dataset) => (
+          <button
+            key={dataset.directory}
+            type="button"
+            disabled={busy || !dataset.complete}
+            onClick={() => onPick(dataset)}
+            title={
+              dataset.complete
+                ? dataset.directory
+                : `필수 artifact가 없습니다: ${dataset.missing.join(', ')}`
+            }
+            style={{
+              font: `400 12px/1.5 ${font.mono}`,
+              padding: '6px 10px',
+              cursor: dataset.complete ? 'pointer' : 'not-allowed',
+              background: same(dataset.directory) ? color.accent : color.panel,
+              color: same(dataset.directory)
+                ? color.onAccent
+                : dataset.complete
+                  ? color.textStrong
+                  : color.textFaint,
+              border: `1px solid ${same(dataset.directory) ? color.accent : color.border}`,
+              borderRadius: radius.control,
+            }}
+          >
+            {dataset.name}
+            {dataset.has_eda_report && ' · EDA'}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function DataSourcePanel({
   source,
   onSelected,
@@ -32,25 +96,39 @@ export function DataSourcePanel({
   const [verification, setVerification] = useState<DataVerification | null>(null);
   const [verifying, setVerifying] = useState(false);
 
+  async function select(target: string) {
+    setBusy(true);
+    setError(null);
+    setVerification(null);
+    try {
+      const result = await api.setDataSource(target);
+      setPreview(null);
+      setDirectory('');
+      setEditing(false);
+      onSelected(result.source);
+    } catch (caught) {
+      setPreview(null);
+      setError(describeError(caught, '위치를 확인하지 못했습니다.'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function run(action: 'inspect' | 'select') {
     const target = directory.trim();
     if (!target) {
       setError('전처리 결과가 들어 있는 폴더 경로를 넣어 주세요.');
       return;
     }
+    if (action === 'select') {
+      await select(target);
+      return;
+    }
     setBusy(true);
     setError(null);
     setVerification(null);
     try {
-      if (action === 'inspect') {
-        setPreview(await api.inspectDirectory(target));
-      } else {
-        const result = await api.setDataSource(target);
-        setPreview(null);
-        setDirectory('');
-        setEditing(false);
-        onSelected(result.source);
-      }
+      setPreview(await api.inspectDirectory(target));
     } catch (caught) {
       setPreview(null);
       setError(describeError(caught, '위치를 확인하지 못했습니다.'));
@@ -117,6 +195,14 @@ export function DataSourcePanel({
           </>
         ) : (
           <>
+            <DatasetList
+              current={source?.directory ?? null}
+              busy={busy}
+              onPick={(dataset) => {
+                setDirectory(dataset.directory);
+                void select(dataset.directory);
+              }}
+            />
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-start' }}>
               <input
                 value={directory}
