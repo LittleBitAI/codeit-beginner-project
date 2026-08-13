@@ -704,6 +704,24 @@ export interface EdaResponse {
   eda: EdaState;
 }
 
+/** 고를 수 있는 전처리 폴더 하나. 파일을 열지 않고 이름과 유무만 봅니다. */
+export interface ProcessedDataset {
+  name: string;
+  directory: string;
+  /** 필수 artifact 4개가 다 있는지 */
+  complete: boolean;
+  missing: string[];
+  has_test_manifest: boolean;
+  has_eda_report: boolean;
+}
+
+export interface ProcessedDatasets {
+  backend: 'local' | 's3';
+  root: string | null;
+  datasets: ProcessedDataset[];
+  problems: string[];
+}
+
 export interface PreparationResponse {
   split_ratios: string[];
   backends: string[];

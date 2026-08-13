@@ -25,7 +25,7 @@ import re
 import subprocess
 import tempfile
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -53,6 +53,7 @@ __all__ = [
     "classify_document",
     "clear_selection",
     "inspect_directory",
+    "list_processed_datasets",
     "load_selection",
     "read_eda_report",
     "save_selection",
@@ -91,6 +92,20 @@ _LABELS = {
 }
 
 _ALL_DATA_ARTIFACT_KEYS = DATA_ARTIFACT_KEYS + OPTIONAL_DATA_ARTIFACT_KEYS
+
+# data pipeline이 전처리 결과를 두는 곳과 거기 쓰는 file 이름입니다. data를 import할
+# 수 없어 복제하지만, 틀리면 목록이 비어 보일 뿐 다른 기능은 영향받지 않습니다.
+# 값은 `src/pipelines/data/preparation.py`의 DEFAULT_PROCESSED_ROOT와
+# ARTIFACT_FILE_NAMES를 따릅니다.
+PROCESSED_ROOT = "datasets/pill_detection/processed/"
+ARTIFACT_FILE_NAMES = {
+    "train_manifest_uri": "train_manifest.json",
+    "validation_manifest_uri": "validation_manifest.json",
+    "class_map_uri": "class_map.json",
+    "dataset_summary_uri": "dataset_summary.json",
+}
+TEST_MANIFEST_FILE_NAME = "test_manifest.json"
+EDA_REPORT_FILE_NAME = "report.json"
 
 
 def _looks_like_class_map(document: Any) -> bool:
@@ -626,6 +641,104 @@ def clear_selection() -> None:
 # ------------------------------------------------- data pipeline으로 검증
 
 VERIFY_TIMEOUT_SECONDS = 120
+
+
+def list_processed_datasets() -> dict[str, Any]:
+    """전처리 결과 폴더 목록입니다. 읽기만 하고 아무것도 바꾸지 않습니다.
+
+    경로를 손으로 붙여넣는 것 말고는 dataset을 고를 방법이 없었습니다. 그래서 어떤
+    판이 있는지 알려면 저장소를 직접 뒤져야 했고, v3와 v5처럼 이름이 비슷한 판을
+    잘못 고르기 쉬웠습니다.
+
+    **파일을 열지 않습니다.** 목록 한 번으로 이름과 파일 유무만 봅니다. 폴더마다
+    JSON을 파싱하면 판이 늘어날수록 화면이 느려지고, 자세한 내용은 어차피 고른 뒤
+    ``inspect``가 보여 줍니다.
+    """
+
+    backend = resolve_backend("auto")
+    if backend != "s3":
+        return _local_processed_datasets()
+    # `resolve_backend`는 bucket이 설정됐을 때만 s3를 돌려주므로 여기서는 늘 있습니다.
+    root = f"s3://{storage_environment()['bucket']}/{PROCESSED_ROOT}"
+
+    from src.common import StorageError, create_storage
+
+    try:
+        storage = create_storage({"storage": {"backend": "s3", "s3": {"prefix": ""}}})
+        entries = [str(item) for item in storage.list(root)]
+    except StorageError as error:
+        return {
+            "backend": "s3",
+            "root": root,
+            "datasets": [],
+            "problems": [
+                f"S3 위치를 읽지 못했습니다({type(error).__name__}). "
+                "bucket 이름과 접근 권한을 확인해 주세요."
+            ],
+        }
+    return {
+        "backend": "s3",
+        "root": root,
+        "datasets": _group_by_dataset(entries, root),
+        "problems": [],
+    }
+
+
+def _local_processed_datasets() -> dict[str, Any]:
+    """local backend에서 전처리 폴더를 훑습니다."""
+
+    try:
+        root = resolve_within_repo(PROCESSED_ROOT, label="전처리 폴더")
+    except WebPathError:
+        return {"backend": "local", "root": None, "datasets": [], "problems": []}
+    if not root.is_dir():
+        return {"backend": "local", "root": PROCESSED_ROOT, "datasets": [], "problems": []}
+    # 하위 폴더까지 봅니다. EDA 리포트는 `<dataset>/eda/report.json`에 있어서,
+    # 한 단계만 보면 S3 목록과 결과가 달라집니다.
+    entries = [
+        to_repo_relative_posix(path)
+        for directory in sorted(root.iterdir())
+        if directory.is_dir()
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    ]
+    return {
+        "backend": "local",
+        "root": PROCESSED_ROOT,
+        "datasets": _group_by_dataset(entries, PROCESSED_ROOT),
+        "problems": [],
+    }
+
+
+def _group_by_dataset(entries: Sequence[str], root: str) -> list[dict[str, Any]]:
+    """파일 목록을 폴더별로 묶고, 필수 artifact가 다 있는지만 봅니다."""
+
+    prefix = root if root.endswith("/") else f"{root}/"
+    files: dict[str, set[str]] = {}
+    for entry in entries:
+        if not entry.startswith(prefix):
+            continue
+        parts = entry[len(prefix) :].split("/")
+        if len(parts) < 2:
+            continue
+        files.setdefault(parts[0], set()).add(parts[-1])
+
+    datasets = []
+    for name in sorted(files):
+        found = files[name]
+        missing = [key for key, value in ARTIFACT_FILE_NAMES.items() if value not in found]
+        datasets.append(
+            {
+                "name": name,
+                "directory": f"{prefix}{name}/",
+                "complete": not missing,
+                "missing": missing,
+                "has_test_manifest": TEST_MANIFEST_FILE_NAME in found,
+                # 리포트가 있으면 화면이 EDA를 다시 돌릴지 판단할 수 있습니다.
+                "has_eda_report": EDA_REPORT_FILE_NAME in found,
+            }
+        )
+    return datasets
 
 
 def build_data_config(data_inputs: dict[str, str]) -> dict[str, Any]:

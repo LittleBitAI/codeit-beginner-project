@@ -1,18 +1,21 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { DataSource } from '../api/types';
 
 const prepareStatus = vi.fn();
+const listDatasets = vi.fn();
+const setDataSource = vi.fn();
 
 vi.mock('../api/client', () => ({
   ApiError: class ApiError extends Error {},
   api: {
     prepareStatus: (...args: unknown[]) => prepareStatus(...args),
+    listDatasets: (...args: unknown[]) => listDatasets(...args),
+    setDataSource: (...args: unknown[]) => setDataSource(...args),
     startPreparation: vi.fn(),
     verifyDataSource: vi.fn(),
     inspectDirectory: vi.fn(),
-    setDataSource: vi.fn(),
   },
 }));
 
@@ -49,8 +52,28 @@ const source: DataSource = {
   examined: [],
 };
 
+function listing(names: { name: string; complete?: boolean }[] = []) {
+  return {
+    backend: 's3' as const,
+    root: 's3://bucket/datasets/pill_detection/processed/',
+    datasets: names.map(({ name, complete = true }) => ({
+      name,
+      directory: `s3://bucket/datasets/pill_detection/processed/${name}/`,
+      complete,
+      missing: complete ? [] : ['class_map_uri'],
+      has_test_manifest: complete,
+      has_eda_report: name.endsWith('angle'),
+    })),
+    problems: [],
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  listDatasets.mockResolvedValue(listing());
+  setDataSource.mockImplementation(async (directory: string) => ({
+    source: { ...source, directory },
+  }));
   prepareStatus.mockResolvedValue({
     split_ratios: ['8:2', '9:1'],
     backends: ['auto', 'local'],
@@ -102,5 +125,39 @@ describe('DataSourcePanel · test manifest', () => {
     expect(await screen.findByText('테스트 이미지')).toBeInTheDocument();
     expect(screen.getByText('842')).toBeInTheDocument();
     expect(screen.getByText('test 이미지 842장을 학습과 검증에 사용하지 않았습니다.')).toBeInTheDocument();
+  });
+});
+
+describe('DataSourcePanel · 전처리 dataset 고르기', () => {
+  it('있는 폴더를 눌러서 고른다', async () => {
+    listDatasets.mockResolvedValue(
+      listing([{ name: 'v5-seed42-8020-group' }, { name: 'v5-seed42-8020-group-angle' }]),
+    );
+    const onSelected = vi.fn();
+
+    render(<DataSourcePanel source={null} onSelected={onSelected} onPrepared={vi.fn()} />);
+    fireEvent.click(await screen.findByText(/v5-seed42-8020-group-angle/));
+
+    await waitFor(() =>
+      expect(setDataSource).toHaveBeenCalledWith(
+        's3://bucket/datasets/pill_detection/processed/v5-seed42-8020-group-angle/',
+      ),
+    );
+    await waitFor(() => expect(onSelected).toHaveBeenCalled());
+  });
+
+  it('필수 artifact가 없는 폴더는 고를 수 없다', async () => {
+    listDatasets.mockResolvedValue(listing([{ name: 'v9-broken', complete: false }]));
+
+    render(<DataSourcePanel source={null} onSelected={vi.fn()} onPrepared={vi.fn()} />);
+
+    expect(((await screen.findByText(/v9-broken/)) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('목록이 비어도 경로를 붙여넣는 길은 남는다', async () => {
+    render(<DataSourcePanel source={null} onSelected={vi.fn()} onPrepared={vi.fn()} />);
+
+    expect(await screen.findByPlaceholderText(/s3:\/\/bucket/)).toBeInTheDocument();
+    expect(screen.queryByText(/아래에서 찾은 폴더/)).toBeNull();
   });
 });

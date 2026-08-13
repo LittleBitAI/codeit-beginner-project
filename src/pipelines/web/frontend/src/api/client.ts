@@ -17,6 +17,7 @@ import type {
   LogPage,
   EdaResponse,
   PreparationResponse,
+  ProcessedDatasets,
   RegistrationState,
   RuntimeConfig,
   TeamConfig,
@@ -206,6 +207,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ directory }),
     }),
+
+  // 고를 수 있는 전처리 폴더 목록. 파일을 열지 않으므로 판이 늘어도 빠릅니다.
+  listDatasets: () => request<ProcessedDatasets>('/api/data/datasets'),
 
   getDataSource: () => request<{ source: DataSource | null }>('/api/data/source'),
 
