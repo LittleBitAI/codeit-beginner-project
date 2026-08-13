@@ -724,8 +724,18 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
     train = storage.read_json(_artifact_location(train_uri))
     validation = storage.read_json(_artifact_location(validation_uri))
     class_map = storage.read_json(_artifact_location(class_map_uri))
-    if not isinstance(train, Mapping) or not isinstance(validation, Mapping):
-        raise EdaError("manifest를 읽었지만 JSON 객체가 아닙니다.")
+    for document in (train, validation):
+        # 화면은 이 두 배열을 보고 manifest라고 판단하지만, config를 손으로 쓰면
+        # 어떤 문서든 올 수 있습니다. 배열이 아니면 순회에서 TypeError가 납니다.
+        if (
+            not isinstance(document, Mapping)
+            or not isinstance(document.get("images"), list)
+            or not isinstance(document.get("annotations"), list)
+        ):
+            raise EdaError(
+                "manifest에 images와 annotations 배열이 있어야 합니다. 고른 파일이 "
+                "전처리 manifest가 맞는지 확인하세요."
+            )
     if not isinstance(class_map, Mapping):
         raise EdaError("class map을 읽었지만 JSON 객체가 아닙니다.")
 
@@ -734,7 +744,12 @@ def _run_eda(config: dict, progress: ProgressEmitter) -> dict:
     test = None
     if isinstance(test_uri, str) and test_uri.strip():
         loaded = storage.read_json(_artifact_location(test_uri.strip()))
-        test = loaded if isinstance(loaded, Mapping) else None
+        # test는 image 목록만 씁니다. 그 배열이 없으면 없는 것으로 둡니다.
+        test = (
+            loaded
+            if isinstance(loaded, Mapping) and isinstance(loaded.get("images"), list)
+            else None
+        )
 
     # 이미지를 열기 전에 확인합니다. 몇 분 걸린 뒤에 거절하면 그 시간이 버려집니다.
     check_manifest(train, "학습")

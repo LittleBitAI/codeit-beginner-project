@@ -446,6 +446,21 @@ def test_test_annotations_never_decide_whether_the_run_succeeds():
     assert sources["test_annotations_used"] is False
 
 
+@pytest.mark.parametrize("broken", [{"images": 1, "annotations": []}, {"images": [], "annotations": 1}])
+def test_a_document_that_is_not_a_manifest_returns_an_error_not_a_crash(broken):
+    """config를 손으로 쓰면 어떤 문서든 manifest 자리에 올 수 있습니다."""
+
+    storage = build_storage()
+    root = f"{BUCKET}/datasets/processed/v9-seed42-8020-group"
+    storage.json[f"{root}/train_manifest.json"] = broken
+
+    result = run_with(storage, config_for(storage))
+
+    validate_pipeline_result(result, pipeline_name="data")
+    assert result["status"] == "error"
+    assert "manifest" in result["message"]
+
+
 def test_duplicate_image_ids_are_refused_instead_of_counted_twice():
     """같은 id의 image가 둘이면 그 annotation이 두 번 세어집니다."""
 
