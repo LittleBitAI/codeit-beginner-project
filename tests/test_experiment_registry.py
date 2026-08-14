@@ -393,6 +393,28 @@ def test_summary_read_refuses_a_name_that_points_outside_the_index(tmp_path, run
     assert "바깥" not in str(error.value)
 
 
+def test_summary_read_of_an_empty_prefix_stays_relative(tmp_path, monkeypatch):
+    """`index_prefix="/"`는 검증을 지나 **빈** prefix가 됩니다.
+
+    그때 경로 앞에 구분자를 붙이면 절대 경로가 됩니다. S3 writer는 그 실험을 bucket
+    root에 저장하고 목록도 찾아내는데, 조회만 "index 밖"으로 판정해 거부하게 됩니다.
+    저장소를 부르지 않고 어떤 key를 넘기는지만 봅니다 — S3는 여기서 띄울 수 없습니다.
+    """
+
+    asked = []
+
+    class FakeStorage:
+        def read_json(self, source):
+            asked.append(source)
+            return {"run_id": "exp-a", "summary_version": "2"}
+
+    monkeypatch.setattr(experiment_registry, "create_storage", lambda _config: FakeStorage())
+    config = local_config(tmp_path, index_prefix="/")
+
+    assert read_experiment_summary("exp-a", config)["run_id"] == "exp-a"
+    assert asked == ["exp-a.json"]
+
+
 @pytest.mark.parametrize("index_prefix", ["registry\\index", "."])
 def test_summary_read_follows_the_prefix_the_list_reads(tmp_path, index_prefix):
     """조회와 목록이 같은 index prefix를 봐야 합니다.

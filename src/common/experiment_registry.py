@@ -195,7 +195,9 @@ def read_experiment_summary(
         raise ExperimentRegistryError("run_id에는 제어문자를 쓸 수 없습니다.")
 
     prefix = _index_prefix(config)
-    location = f"{prefix}/{wanted}.json"
+    # `index_prefix="/"`는 검증을 지나 빈 prefix가 됩니다. 그때 앞에 구분자를 붙이면
+    # 절대 경로가 되어, S3에서 bucket root에 저장돼 목록에 잡히는 실험을 못 읽습니다.
+    location = f"{prefix}/{wanted}.json" if prefix else f"{wanted}.json"
     # `..`가 섞인 이름은 파일 시스템이 먼저 정규화합니다. 그 결과가 index 밖으로 나가면
     # 목록에 없는 파일을 읽게 되므로, 같은 규칙으로 미리 계산해 봅니다. Windows의
     # LocalStorage는 역슬래시도 구분자로 읽으므로 이름과 prefix 양쪽에서 함께 눕힙니다 —
