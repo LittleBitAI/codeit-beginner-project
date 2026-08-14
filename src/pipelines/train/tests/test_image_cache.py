@@ -620,6 +620,29 @@ def test_starting_a_run_keeps_only_the_dataset_it_uses(tmp_path):
         assert cache.namespace.is_dir()
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork는 POSIX에만 있습니다")
+def test_a_forked_worker_closing_its_copy_does_not_release_the_lease(tmp_path):
+    """worker가 끝나도 부모 run의 lease는 풀리지 않아야 합니다.
+
+    POSIX DataLoader는 fork로 worker를 만들고, worker는 부모가 열어 둔 lease fd를
+    복제해 갖습니다. worker가 끝나며 그 복제본을 닫을 때 잠금까지 풀린다면, 그 순간
+    시작한 다른 실행이 살아 있는 cache를 통째로 지웁니다.
+    """
+
+    lease = tmp_path / "run.lease"
+    with lease.open("a+b") as stream:
+        assert image_cache_module._lock_stream(stream, blocking=False)
+        child = os.fork()
+        if child == 0:  # worker: 물려받은 fd를 그대로 둔 채 끝납니다.
+            os._exit(0)
+        os.waitpid(child, 0)
+
+        assert not image_cache_module._lease_is_abandoned(lease)
+
+    # 대조군입니다. 주인이 놓으면 같은 검사가 버려진 것으로 읽어야 합니다.
+    assert image_cache_module._lease_is_abandoned(lease)
+
+
 def test_cleanup_enforces_size_limit_oldest_first(tmp_path):
     cache_root = tmp_path / "persistent"
     oldest = _inactive_namespace(cache_root, "oldest", used_at=100.0, size=8)
