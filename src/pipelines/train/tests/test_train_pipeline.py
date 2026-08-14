@@ -2131,6 +2131,63 @@ def test_pill_basic_color_augmentation_keeps_detection_target(monkeypatch):
     assert torch.equal(augmented_target["labels"], target["labels"])
 
 
+def test_pill_geometric_quarter_turn_moves_boxes_with_the_image(monkeypatch):
+    """90° 회전은 이미지의 가로와 세로를 맞바꿉니다. bbox도 같이 돌아야 합니다."""
+
+    # 회전 gate, 회전할 1/4바퀴 수, 좌우 뒤집기, 자르기, 색, 잡음 순서입니다.
+    draws = iter((0.0, 0.0, 1.0, 1.0, 1.0, 1.0))
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
+    image = torch.arange(3 * 4 * 6, dtype=torch.float32).reshape(3, 4, 6)
+    target = {
+        "boxes": torch.tensor([[1.0, 1.0, 4.0, 3.0]]),
+        "labels": torch.tensor([1]),
+    }
+    augmentation = DetectionAugmentation(
+        dict(pipeline.AUGMENTATION_PRESETS["pill_geometric"])
+    )
+
+    augmented_image, augmented_target = augmentation(image, target)
+
+    assert torch.equal(augmented_image, torch.rot90(image, 1, dims=(-2, -1)))
+    # (x, y)가 (y, width - x)로 갑니다. 여기서 width는 6입니다.
+    assert torch.equal(augmented_target["boxes"], torch.tensor([[1.0, 2.0, 3.0, 5.0]]))
+
+
+def test_pill_geometric_crop_drops_the_pills_it_would_cut(monkeypatch):
+    """잘린 알약은 각인이 함께 잘려 label과 맞지 않으므로 남기지 않습니다.
+
+    box만 지우고 labels나 area를 그대로 두면 알약과 이름이 한 칸씩 어긋난 채
+    학습합니다. 그래서 알약마다 하나씩인 값은 모두 같이 걸러야 합니다.
+    """
+
+    # 회전, 좌우 뒤집기, 자르기 gate, 자를 비율, 위쪽, 왼쪽, 색, 잡음 순서입니다.
+    draws = iter((1.0, 1.0, 0.0, 0.0, 0.5, 0.5, 1.0, 1.0))
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
+    image = torch.arange(3 * 20 * 20, dtype=torch.float32).reshape(3, 20, 20)
+    target = {
+        "boxes": torch.tensor([[3.0, 3.0, 7.0, 7.0], [1.0, 1.0, 5.0, 5.0]]),
+        "labels": torch.tensor([1, 2]),
+        "area": torch.tensor([16.0, 16.0]),
+        "iscrowd": torch.tensor([0, 0]),
+        "image_id": torch.tensor([9]),
+    }
+    augmentation = DetectionAugmentation(
+        dict(pipeline.AUGMENTATION_PRESETS["pill_geometric"])
+    )
+
+    augmented_image, augmented_target = augmentation(image, target)
+
+    # 0.85배로 잘라 17칸이 되고, 시작점은 위아래 모두 2입니다.
+    assert torch.equal(augmented_image, image[..., 2:19, 2:19])
+    # 첫 알약만 온전히 들어오고, 잘린 값만큼 좌표를 당깁니다.
+    assert torch.equal(augmented_target["boxes"], torch.tensor([[1.0, 1.0, 5.0, 5.0]]))
+    assert torch.equal(augmented_target["labels"], torch.tensor([1]))
+    assert torch.equal(augmented_target["area"], torch.tensor([16.0]))
+    assert torch.equal(augmented_target["iscrowd"], torch.tensor([0]))
+    # 알약마다 하나씩인 값이 아니므로 그대로 남아야 합니다.
+    assert torch.equal(augmented_target["image_id"], torch.tensor([9]))
+
+
 def test_faster_rcnn_cpu_forward_and_backward_smoke():
     torch.manual_seed(17)
     model = build_model(2, pretrained=False).cpu().train()

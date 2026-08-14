@@ -23,6 +23,28 @@ from .image_cache import ImageCacheSession
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 _INTEGER_TEXT = re.compile(r"[+-]?\d+")
+# 알약마다 하나씩 있는 값입니다. 알약을 빼면 이 값도 같이 빼야 알약과 이름이
+# 어긋나지 않습니다. `image_id`는 이미지마다 하나라 여기 없습니다.
+PER_OBJECT_TARGET_KEYS = ("boxes", "labels", "area", "iscrowd")
+
+
+def _rotate_boxes(
+    boxes: torch.Tensor, turns: int, *, height: int, width: int
+) -> torch.Tensor:
+    """``torch.rot90``이 이미지를 돌린 것과 같은 방향으로 bbox를 돌립니다.
+
+    좌표는 픽셀 번호가 아니라 경계값이라 ``width - x``로 뒤집습니다. 뒤집기가 쓰는
+    규칙과 같습니다.
+    """
+
+    left, top, right, bottom = boxes.unbind(dim=-1)
+    if turns == 1:
+        return torch.stack((top, width - right, bottom, width - left), dim=-1)
+    if turns == 2:
+        return torch.stack(
+            (width - right, height - bottom, width - left, height - top), dim=-1
+        )
+    return torch.stack((height - bottom, left, height - top, right), dim=-1)
 
 
 class DetectionAugmentation:
@@ -41,23 +63,130 @@ class DetectionAugmentation:
 
         augmented = image
         copied = {name: value.clone() for name, value in target.items()}
-        boxes = copied["boxes"]
-        height, width = augmented.shape[-2:]
-        if torch.rand(()).item() < self.settings["horizontal_flip_probability"]:
-            augmented = torch.flip(augmented, dims=(-1,))
+        augmented, copied = self._quarter_turn(augmented, copied)
+        augmented, copied = self._flip(augmented, copied)
+        augmented, copied = self._crop(augmented, copied)
+        if self._happens("color_probability"):
+            augmented = self._color(augmented)
+        if self._happens("noise_probability"):
+            augmented = self._noise(augmented)
+        return augmented, copied
+
+    def _amount(self, name: str) -> float:
+        """preset에 없는 설정은 0으로 읽습니다.
+
+        version 1 preset에는 version 2가 더한 key가 없습니다. 0으로 읽어 두면 옛
+        preset을 고치지 않아도 되고, 이미 남긴 checkpoint의 기록도 그대로입니다.
+        """
+
+        return float(self.settings.get(name, 0.0))
+
+    def _happens(self, name: str) -> bool:
+        """그 변환을 할지 정합니다. 확률이 0이면 무작위 수를 뽑지도 않습니다.
+
+        뽑지 않아야 `pill_basic`이 이 preset이 생기기 전과 똑같은 무작위 수열로
+        돕니다. 그러지 않으면 같은 seed로 다시 돌린 옛 실험이 재현되지 않습니다.
+        """
+
+        probability = self._amount(name)
+        return probability > 0.0 and torch.rand(()).item() < probability
+
+    def _quarter_turn(
+        self, image: torch.Tensor, target: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """이미지를 90°의 배수로 돌립니다.
+
+        90°의 배수는 픽셀을 옮겨 놓기만 해서 화질도 bbox도 그대로입니다. 임의 각도
+        회전은 쓰지 않습니다. 우리 annotation은 축에 나란한 bbox뿐이라, 비스듬히
+        돌린 알약에 다시 bbox를 씌우면 안이 배경으로 가득 차고, 그렇게 헐거워진
+        bbox는 IoU 0.75~0.95로 매기는 이 대회 점수를 그대로 깎습니다.
+        """
+
+        if not self._happens("quarter_turn_probability"):
+            return image, target
+        # 1, 2, 3 중 하나입니다. gate 확률 0.75와 합치면 네 방향이 모두 25%입니다.
+        turns = min(3, 1 + int(torch.rand(()).item() * 3))
+        height, width = image.shape[-2:]
+        boxes = target["boxes"]
+        if boxes.numel():
+            target["boxes"] = _rotate_boxes(boxes, turns, height=height, width=width)
+        return torch.rot90(image, turns, dims=(-2, -1)), target
+
+    def _flip(
+        self, image: torch.Tensor, target: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        boxes = target["boxes"]
+        height, width = image.shape[-2:]
+        if self._happens("horizontal_flip_probability"):
+            image = torch.flip(image, dims=(-1,))
             if boxes.numel():
                 left = width - boxes[:, 2].clone()
                 right = width - boxes[:, 0].clone()
                 boxes[:, 0], boxes[:, 2] = left, right
-        if torch.rand(()).item() < self.settings["vertical_flip_probability"]:
-            augmented = torch.flip(augmented, dims=(-2,))
+        if self._happens("vertical_flip_probability"):
+            image = torch.flip(image, dims=(-2,))
             if boxes.numel():
                 top = height - boxes[:, 3].clone()
                 bottom = height - boxes[:, 1].clone()
                 boxes[:, 1], boxes[:, 3] = top, bottom
-        if torch.rand(()).item() < self.settings["color_probability"]:
-            augmented = self._color(augmented)
-        return augmented, copied
+        return image, target
+
+    def _crop(
+        self, image: torch.Tensor, target: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """이미지 가장자리를 잘라 냅니다.
+
+        EDA가 잰 대회 test와 학습 데이터의 알약 크기 비율은 0.99라 확대가 필요해서가
+        아니라, 늘 같은 자리에 같은 크기로 놓인 사진을 통째로 외우지 못하게 하려고
+        씁니다. 가로세로 비율은 그대로 둡니다. 알약의 생김새 자체가 class 단서라
+        찌그러뜨리면 안 됩니다.
+
+        잘린 알약은 남기지 않고 통째로 버립니다. 알약을 가리는 것은 표면의 각인인데,
+        가장자리가 잘리면 각인도 함께 잘려 label과 맞지 않는 그림이 됩니다. 남는
+        알약이 하나도 없으면 아예 자르지 않습니다.
+        """
+
+        if not self._happens("crop_probability"):
+            return image, target
+        minimum = self._amount("crop_minimum_scale")
+        if not 0.0 < minimum < 1.0:
+            return image, target
+        height, width = image.shape[-2:]
+        scale = minimum + (1.0 - minimum) * torch.rand(()).item()
+        crop_height = max(1, min(height, round(height * scale)))
+        crop_width = max(1, min(width, round(width * scale)))
+        # 뽑은 값이 1.0이면 시작점이 한 칸 넘어가 crop이 그만큼 짧아집니다. 실제
+        # `torch.rand`는 1.0을 주지 않지만 test는 줍니다.
+        top = min(height - crop_height, int(torch.rand(()).item() * (height - crop_height + 1)))
+        left = min(width - crop_width, int(torch.rand(()).item() * (width - crop_width + 1)))
+        boxes = target["boxes"]
+        kept = (
+            (boxes[:, 0] >= left)
+            & (boxes[:, 1] >= top)
+            & (boxes[:, 2] <= left + crop_width)
+            & (boxes[:, 3] <= top + crop_height)
+        )
+        if not bool(kept.any()):
+            return image, target
+        cropped = dict(target)
+        for name in PER_OBJECT_TARGET_KEYS:
+            value = target.get(name)
+            if isinstance(value, torch.Tensor) and value.shape[:1] == boxes.shape[:1]:
+                cropped[name] = value[kept]
+        cropped["boxes"] = boxes[kept] - boxes.new_tensor([left, top, left, top])
+        return image[..., top : top + crop_height, left : left + crop_width], cropped
+
+    def _noise(self, image: torch.Tensor) -> torch.Tensor:
+        """센서 잡음 정도의 약한 잡음을 더합니다.
+
+        같은 조합을 세 각도로만 찍은 데이터라 한 장면을 그대로 외우기 쉽습니다.
+        더한 뒤에는 값을 [0, 1]로 되돌립니다. 뒤따르는 정규화가 그 범위를 전제합니다.
+        """
+
+        sigma = self._amount("noise_sigma")
+        if sigma <= 0.0:
+            return image
+        return (image + torch.randn_like(image) * sigma).clamp(0.0, 1.0)
 
     def _factor(self, amount: float) -> float:
         return 1.0 + (torch.rand(()).item() * 2.0 - 1.0) * amount
