@@ -12,6 +12,7 @@ runtime 결합이 생기지 않고, 어긋나는 순간 test가 시끄럽게 실
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -568,3 +569,28 @@ def test_mmdetection_refuses_combinations_that_do_not_fit_8gb(
 
     with pytest.raises(Exception, match=field):
         normalize_train_settings(_mmdetection_request(**{field: value}))
+
+
+def test_every_offered_field_has_a_place_on_the_new_experiment_form():
+    """서버가 주는 칸은 화면의 어느 표에든 자리가 있어야 합니다.
+
+    화면은 `TABS`에 적힌 이름만 그립니다. 그래서 서버가 새 칸을 내려보내도 그 배열에
+    없으면 **화면에 아예 나타나지 않고**, 사람은 그 값이 기본값으로 돈다는 것조차
+    모릅니다. 실제로 `checkpoint_every`가 그렇게 오래 감춰져 있었습니다.
+
+    train source를 읽는 위 test들과 같은 방식으로, 화면 source를 글자로만 읽습니다.
+    """
+
+    sheet = (
+        Path(__file__).resolve().parents[1]
+        / "frontend/src/screens/NewExperimentSheet.tsx"
+    ).read_text(encoding="utf-8")
+    start = sheet.index("const TABS")
+    quoted = set(re.findall(r"'([a-z_0-9]+)'", sheet[start : sheet.index("];", start)]))
+    # 표 자체의 key는 칸 이름이 아닙니다.
+    placed = quoted - {"basic", "hyper", "output"}
+
+    offered = {spec["name"] for spec in field_specs()}
+
+    assert offered - placed == set(), "화면에 자리가 없는 칸이 있습니다."
+    assert placed - offered == set(), "서버가 주지 않는 칸이 화면에 적혀 있습니다."
