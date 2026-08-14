@@ -14,6 +14,11 @@ import { Live } from './Live';
 
 let posted: string[] = [];
 let current: JobRecord | null = null;
+/** 서버가 답할 이어하기 가능 여부. 화면은 이 답만 보고 단추를 세웁니다. */
+let availability: { available: boolean; reason: string | null } = {
+  available: true,
+  reason: null,
+};
 
 function job(overrides: Partial<JobRecord> = {}): JobRecord {
   return {
@@ -48,22 +53,6 @@ function job(overrides: Partial<JobRecord> = {}): JobRecord {
   };
 }
 
-/** 첫 epoch을 마치기 전에 중지한 학습. 이어갈 checkpoint가 없습니다. */
-function stoppedEarly(): JobRecord {
-  return job({
-    progress: {
-      available: true,
-      reason: null,
-      message: null,
-      total_epochs: 15,
-      current_epoch: 1,
-      completed_epochs: 0,
-      eta_seconds: null,
-      epochs: [],
-    },
-  });
-}
-
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
@@ -74,6 +63,7 @@ function jsonResponse(body: unknown): Response {
 beforeEach(() => {
   posted = [];
   current = null;
+  availability = { available: true, reason: null };
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -95,6 +85,8 @@ beforeEach(() => {
       if (path.startsWith('/api/train/jobs/job-1/logs')) {
         return jsonResponse({ lines: [], next: 0, complete: true });
       }
+      // 이어갈 수 있는지는 서버가 답합니다. 화면은 그 답만 씁니다.
+      if (path === '/api/train/jobs/job-1/resume') return jsonResponse(availability);
       if (path === '/api/train/jobs/job-1') return jsonResponse(current ?? job());
       if (path === '/api/train/queue') return jsonResponse({ entries: [], paused: false });
       if (path === '/api/gpu/status') {
@@ -136,35 +128,20 @@ describe('Live 이어서 학습', () => {
     ).toBeInTheDocument();
   });
 
-  // checkpoint는 한 epoch마다가 아니라 checkpoint_every 주기로 저장됩니다. 화면이 그
-  // 주기를 무시하면 이어갈 수 있다고 해 놓고 서버가 409로 거절합니다.
-  it('checkpoint 주기를 채우지 못했으면 단추를 두지 않는다', async () => {
-    show(
-      job({
-        settings: { checkpoint_every: 5 },
-        progress: {
-          available: true,
-          reason: null,
-          message: null,
-          total_epochs: 15,
-          current_epoch: 4,
-          completed_epochs: 4,
-          eta_seconds: null,
-          epochs: [],
-        },
-      }),
-    );
+  // **마친 epoch 수로는 알 수 없는 경우입니다.** 이 학습은 epoch 7까지 마쳤지만
+  // checkpoint는 주기로만 저장되고, 이어온 실행이면 앞선 실행의 epoch까지 섞여 있습니다.
+  // 화면이 세면 단추를 세우고 서버는 거절합니다 — 그래서 서버 답만 봅니다.
+  it('서버가 이어갈 수 없다고 하면 단추를 두지 않고 그 이유를 적는다', async () => {
+    availability = {
+      available: false,
+      reason: '저장된 checkpoint가 없습니다. checkpoint 주기를 채우기 전에 끝난 학습입니다.',
+    };
+    show(job());
 
-    expect(await screen.findByText('학습을 중지했습니다')).toBeInTheDocument();
+    // 서버 답이 도착한 **뒤에** 재야 합니다. 먼저 재면 아직 안 온 답 때문에 단추가
+    // 없는 것을 보고 통과해 버립니다.
+    expect(await screen.findByText(/저장된 checkpoint가 없습니다/)).toBeInTheDocument();
+    expect(screen.getByText('학습을 중지했습니다')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '이어서 학습' })).toBeNull();
-    expect(screen.getByText(/5 epoch마다/)).toBeInTheDocument();
-  });
-
-  it('마친 epoch이 없으면 단추를 두지 않고 이유를 적는다', async () => {
-    show(stoppedEarly());
-
-    expect(await screen.findByText('학습을 중지했습니다')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '이어서 학습' })).toBeNull();
-    expect(screen.getByText(/저장된 checkpoint가 없습니다/)).toBeInTheDocument();
   });
 });

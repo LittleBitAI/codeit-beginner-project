@@ -153,6 +153,12 @@ export const api = {
   saveSettings: (body: AppSettings) =>
     request<AppSettings>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
+  /** 이 학습을 이어갈 수 있는지. 판단은 실제 저장소를 보는 서버가 합니다. */
+  resumeAvailability: (jobId: string) =>
+    request<{ available: boolean; reason: string | null }>(
+      `/api/train/jobs/${jobId}/resume`,
+    ),
+
   resumeJob: (jobId: string, epochs?: number | null, accessToken?: string | null) =>
     request<ResumeResult>(`/api/train/jobs/${jobId}/resume`, {
       method: 'POST',

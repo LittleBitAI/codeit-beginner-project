@@ -377,6 +377,40 @@ def start_evaluation(job_id: str, payload: EvaluateRequest = Body(...)) -> dict[
         return {"evaluation": runner.start(record, payload.model_dump())}
 
 
+RESUMABLE_STATUSES = {STATUS_INTERRUPTED, STATUS_FAILED, STATUS_CANCELLED}
+
+
+@router.get("/jobs/{job_id}/resume")
+def resume_availability(job_id: str) -> dict[str, Any]:
+    """이 학습을 이어갈 수 있는지 미리 알려 줍니다.
+
+    화면이 이어서 학습 단추를 세울지 정하는 데 씁니다. 화면이 완료한 epoch 수로 셈하면
+    "저장됐을 가능성"만 알 뿐입니다 — checkpoint는 `checkpoint_every` 주기로 저장되고,
+    이어온 실행에는 앞선 실행의 epoch까지 섞여 있습니다. 실제 저장소를 보는 쪽이
+    알려 줘야 단추와 서버의 답이 같아집니다.
+
+    끝나지 않은 학습은 저장소를 보지 않고 답합니다. 목록마다 부르면 job 수만큼 S3를
+    두드리게 되므로, 화면은 학습 하나를 열 때만 부릅니다.
+    """
+
+    record = get_manager().get(job_id)
+    if record.status not in RESUMABLE_STATUSES:
+        return {"available": False, "reason": "끝난 학습만 이어갈 수 있습니다."}
+    try:
+        exists = resume_checkpoint_exists(read_runtime_config(record.config_id))
+    except StorageError:
+        return {
+            "available": False,
+            "reason": "checkpoint를 확인하지 못했습니다. 저장소 설정과 권한을 확인하세요.",
+        }
+    if not exists:
+        return {
+            "available": False,
+            "reason": "저장된 checkpoint가 없습니다. checkpoint 주기를 채우기 전에 끝난 학습입니다.",
+        }
+    return {"available": True, "reason": None}
+
+
 class ResumeRequest(BaseModel):
     """이어서 학습 설정. 비워 두면 중단된 실행의 계획을 그대로 이어갑니다."""
 
@@ -404,7 +438,7 @@ def resume_job(
 
     manager = get_manager()
     record = manager.get(job_id)
-    if record.status not in {STATUS_INTERRUPTED, STATUS_FAILED, STATUS_CANCELLED}:
+    if record.status not in RESUMABLE_STATUSES:
         raise JobConflictError(
             "중단·중지됐거나 실패한 학습만 이어갈 수 있습니다."
         )

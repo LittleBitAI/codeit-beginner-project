@@ -6,7 +6,7 @@
  * 읽혀야 합니다.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, ApiError } from '../api/client';
@@ -150,6 +150,31 @@ export function Live({
   const [resuming, setResuming] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [resumed, setResumed] = useState<string | null>(null);
+  // 이어갈 수 있는지는 **서버가** 답합니다. 완료한 epoch 수로 셈하면 "저장됐을 가능성"만
+  // 알 뿐입니다 — checkpoint는 주기로 저장되고, 이어온 실행에는 앞선 실행의 epoch까지
+  // 섞여 있습니다. 그렇게 세면 화면은 단추를 세우는데 서버는 거절합니다.
+  const [resumeCheck, setResumeCheck] = useState<{
+    available: boolean;
+    reason: string | null;
+  } | null>(null);
+  const status = job?.status;
+
+  useEffect(() => {
+    setResumeCheck(null);
+    if (!jobId || !status) return;
+    // 끝난 학습을 열 때만 한 번 묻습니다. 목록마다 부르면 job 수만큼 저장소를 두드립니다.
+    if (status !== 'failed' && status !== 'cancelled' && status !== 'interrupted') return;
+    let live = true;
+    void api
+      .resumeAvailability(jobId)
+      .then((value) => {
+        if (live) setResumeCheck(value);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [jobId, status]);
   // 지우기 전에 무엇이 사라지고 무엇이 남는지 보여 줍니다.
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -195,13 +220,7 @@ export function Live({
   // 그 지점의 checkpoint가 남아 있습니다. 없으면 이어갈 것이 없으므로 단추를 두지
   // 않습니다 — 눌러 봐야 서버가 같은 이유로 거절합니다.
   const completedEpochs = Math.max(progress.completed_epochs ?? 0, epochs.length);
-  // checkpoint는 한 epoch마다가 아니라 `checkpoint_every` 주기로 저장됩니다. epoch을
-  // 마쳤다는 것만 보고 단추를 세우면, 화면은 이어갈 수 있다고 해 놓고 서버가 실제 파일을
-  // 찾지 못해 거절합니다. 두 쪽이 같은 기준을 봐야 합니다.
-  const checkpointEvery = Number(job.settings?.checkpoint_every ?? 1) || 1;
-  const savedCheckpoints = Math.floor(completedEpochs / checkpointEvery);
-  const resumable =
-    (job.status === 'failed' || job.status === 'cancelled') && savedCheckpoints > 0;
+  const resumable = resumeCheck?.available === true;
   const resumeButton = resumable ? (
     <Button onClick={() => void resume()} disabled={resuming}>
       {resuming ? '시작하는 중…' : '이어서 학습'}
@@ -415,8 +434,7 @@ export function Live({
         {job.status === 'failed' && (
           <AlertRow level="error" title="학습이 실패했습니다" action={resumeButton}>
             {job.message ?? '원인을 알 수 없습니다. 아래 로그를 확인해 주세요.'}
-            {resumable &&
-              ' 완료한 epoch가 있어 checkpoint가 저장소에 남아 있으면 새 실행 이름으로 이어갑니다.'}
+            {resumable && ' 저장된 checkpoint가 있어 새 실행 이름으로 이어갈 수 있습니다.'}
             {resumed && ` '${resumed}' 이름으로 대기열에 넣었습니다.`}
             {resumeError && ` ${resumeError}`}
           </AlertRow>
@@ -424,10 +442,8 @@ export function Live({
         {job.status === 'cancelled' && (
           <AlertRow level="warning" title="학습을 중지했습니다" action={resumeButton}>
             {resumable
-              ? `epoch ${completedEpochs}까지 마쳤습니다. 그 지점의 checkpoint가 남아 있으면 새 실행 이름으로 이어갑니다 — 남은 epoch이 아니라 원래 계획한 전체 epoch까지 돕니다.`
-              : completedEpochs === 0
-                ? '마친 epoch이 없어 저장된 checkpoint가 없습니다. 이어서 학습할 수 없고 처음부터 다시 돌려야 합니다.'
-                : `epoch ${completedEpochs}까지 마쳤지만 checkpoint는 ${checkpointEvery} epoch마다 저장되어 아직 남은 것이 없습니다. 이어서 학습할 수 없고 처음부터 다시 돌려야 합니다.`}
+              ? `epoch ${completedEpochs}까지 마쳤습니다. 그 지점의 checkpoint에서 새 실행 이름으로 이어갑니다 — 남은 epoch이 아니라 원래 계획한 전체 epoch까지 돕니다.`
+              : (resumeCheck?.reason ?? '이어갈 수 있는지 확인하고 있습니다.')}
             {job.orphan_note &&
               ` ${job.orphan_note} 정리는 train pipeline이 소유한 영역이라 이 화면에서 지우지 않습니다.`}
             {resumed && ` '${resumed}' 이름으로 대기열에 넣었습니다.`}

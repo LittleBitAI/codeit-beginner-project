@@ -322,6 +322,55 @@ def test_resume_route_queues_a_new_run_from_an_interrupted_job(
     assert body["resumed_from_job_id"] == record.job_id
 
 
+def test_resume_availability_reports_a_real_checkpoint(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """화면이 단추를 세울지 서버에 물어봅니다.
+
+    완료한 epoch 수로 셈하면 "저장됐을 가능성"만 알 뿐입니다. 이어온 실행처럼 앞선
+    실행의 epoch이 섞여 있으면 셈은 맞는데 이 실행의 checkpoint는 없습니다. 두 쪽이
+    같은 답을 보려면 실제 저장소를 본 쪽이 알려 줘야 합니다.
+    """
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+
+    response = client.get(f"/api/train/jobs/{record.job_id}/resume")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"available": True, "reason": None}
+
+
+def test_resume_availability_says_why_it_cannot_resume(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs, checkpoint=False
+    )
+    record.status = "cancelled"
+
+    body = client.get(f"/api/train/jobs/{record.job_id}/resume").json()
+
+    assert body["available"] is False
+    assert "checkpoint" in body["reason"]
+
+
+def test_resume_availability_refuses_a_run_that_has_not_finished(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """아직 끝나지 않은 학습은 저장소를 보지도 않고 답합니다."""
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.status = "succeeded"
+
+    body = client.get(f"/api/train/jobs/{record.job_id}/resume").json()
+
+    assert body["available"] is False
+
+
 def test_resume_route_refuses_an_interrupted_job_without_a_checkpoint(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):
