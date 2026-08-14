@@ -400,7 +400,7 @@ def test_explicit_adamw_run_records_effective_reproducibility_settings(local_con
     assert result["summary"]["augmentation"] == "pill_basic"
 
 
-def test_train_reads_exactly_the_setting_names_in_the_shared_contract():
+def test_train_reads_exactly_the_setting_names_in_the_shared_contract(monkeypatch):
     """GUI가 그 이름으로 값을 실어 보냅니다. 여기가 그것을 정말 읽는 쪽입니다.
 
     값이 같은지는 계약의 표들이 지키지만, 값을 담아 보내는 **이름**은 지금까지 아무도
@@ -412,22 +412,26 @@ def test_train_reads_exactly_the_setting_names_in_the_shared_contract():
     이름만** 바꿔도(``raw.get("resume_from")`` → ``raw.get("resume_uri")``) 목록은 그대로
     맞기 때문입니다. 그래서 보낸 값이 결과에 **그대로 들어왔는지**까지 봅니다.
 
-    optimizer마다 받는 칸이 다르므로(SGD의 momentum, AdamW의 beta) 두 번 나눠 읽고
-    합칩니다. ``resume``은 ``resume_from``을 보고 train이 만드는 값이라 뺍니다.
+    보내는 값은 **하나도 기본값과 같지 않아야** 합니다. 기본값을 보내면 lookup 이름을
+    바꿔도 fallback이 같은 값을 돌려주어 이 test가 그대로 통과합니다.
+
+    optimizer마다 받는 칸이 다르므로(SGD의 momentum, AdamW의 beta) 나눠 읽고 합칩니다.
+    ``input_size``와 절반 정밀도는 MMDetection model에서만 받고 그 조합은 CUDA를
+    요구하므로, 마지막 한 벌은 CUDA가 있는 척하고 읽습니다. ``resume``은
+    ``resume_from``을 보고 train이 만드는 값이라 뺍니다.
     """
 
+    defaults = train_contract.SETTING_DEFAULTS
     common = {
         "run_id": "train-keys",
-        "device": "cpu",
-        "epochs": 2,
-        "batch_size": 1,
-        "checkpoint_every": 1,
-        "seed": 1,
-        "pretrained": False,
-        "num_workers": 0,
-        "precision": "fp32",
-        "output_dir": "artifacts/experiments/completed",
-        "output_prefix": "experiments/completed",
+        "epochs": defaults["epochs"] + 2,
+        "checkpoint_every": defaults["checkpoint_every"] + 1,
+        "seed": defaults["seed"] + 1,
+        "pretrained": not defaults["pretrained"],
+        # CPU 기본값은 0입니다. 명시한 값은 그대로 쓰입니다.
+        "num_workers": 2,
+        "output_dir": f"{defaults['output_dir']}/nested",
+        "output_prefix": f"{defaults['output_prefix']}/nested",
         "learning_rate": 0.001,
         "weight_decay": 0.01,
         "augmentation": {"preset": "pill_basic"},
@@ -441,6 +445,8 @@ def test_train_reads_exactly_the_setting_names_in_the_shared_contract():
             **common,
             "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
             "optimizer": "AdamW",
+            "device": "cpu",
+            "batch_size": defaults["batch_size"] + 1,
             "beta1": 0.9,
             "beta2": 0.999,
             "epsilon": 1e-8,
@@ -449,9 +455,26 @@ def test_train_reads_exactly_the_setting_names_in_the_shared_contract():
             **common,
             "architecture": "retinanet_resnet50_fpn_v2",
             "optimizer": "SGD",
+            "device": "cpu",
+            "batch_size": defaults["batch_size"] + 1,
             "momentum": 0.9,
         },
+        {
+            # `input_size`와 절반 정밀도는 이 model에서만 받습니다. 그 조합은 CUDA와
+            # batch_size 1을 함께 요구하므로 나머지 값만 기본값과 다르게 보냅니다.
+            **common,
+            "architecture": train_contract.MMDETECTION_ARCHITECTURES[0],
+            "optimizer": "AdamW",
+            "device": "cuda",
+            "precision": "amp",
+            "batch_size": 1,
+            "input_size": train_contract.DEFAULT_INPUT_SIZE + 160,
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "epsilon": 1e-8,
+        },
     ]
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     read = [pipeline._settings({"train": dict(one)}) for one in sent]
 
     names = set().union(*(set(one) for one in read)) - {"resume"}
