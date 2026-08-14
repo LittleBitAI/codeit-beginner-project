@@ -37,6 +37,28 @@ function record(overrides: Partial<RunRecord> = {}): RunRecord {
   };
 }
 
+/** 결과를 남기지 못하고 끝난 기록. 검증 오차가 없다는 것이 판단 기준입니다. */
+function failedRecord(overrides: Partial<RunRecord> = {}): RunRecord {
+  return record({
+    runId: 'oom',
+    status: 'failed',
+    statusLabel: '실패',
+    registered: false,
+    evaluated: false,
+    metrics: { ...record().metrics, bestValidationLoss: null },
+    ...overrides,
+  });
+}
+
+function cancelledRecord(overrides: Partial<RunRecord> = {}): RunRecord {
+  return failedRecord({
+    runId: 'stopped',
+    status: 'cancelled',
+    statusLabel: '취소됨',
+    ...overrides,
+  });
+}
+
 function liveJob(): JobRecord {
   return {
     job_id: 'job-1',
@@ -148,6 +170,29 @@ describe('Runs', () => {
 
     const ids = screen.getAllByText(/^(no-score|scored)$/).map((node) => node.textContent);
     expect(ids[0]).toBe('scored');
+  });
+
+  // 35건 중 32건이 결과 없이 끝난 기록이라 볼 것 3건이 가운데 묻혀 있었습니다.
+  it('결과 없이 끝난 기록은 접어 두고 몇 건인지 말한다', () => {
+    show({ records: [record({ runId: 'good' }), failedRecord(), cancelledRecord()] });
+
+    expect(screen.getByText('good')).toBeInTheDocument();
+    expect(screen.queryByText('oom')).toBeNull();
+    expect(screen.getByText('2건 (실패 1 · 취소·중단 1)')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /결과 없이 끝남/ }));
+
+    expect(screen.getByText('oom')).toBeInTheDocument();
+  });
+
+  // 등록되지 않은 이유가 실패라면 배지 두 개가 같은 말을 두 번 합니다.
+  it('실패한 줄에는 미등록 배지를 겹쳐 붙이지 않는다', () => {
+    show({ records: [failedRecord()] });
+
+    fireEvent.click(screen.getByRole('button', { name: /결과 없이 끝남/ }));
+
+    expect(screen.getByText('실패')).toBeInTheDocument();
+    expect(screen.queryByText('미등록')).toBeNull();
   });
 
   it('대기열에서 빼기를 누르면 그 항목만 알려 준다', () => {

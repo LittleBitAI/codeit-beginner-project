@@ -251,6 +251,32 @@ export function matchesFilter(record: RunRecord, filter: RecordFilter): boolean 
   return !record.registered;
 }
 
+/**
+ * 목록에 그대로 세울 기록인지.
+ *
+ * 실패와 취소가 성공한 학습과 한 줄에 섞이면 눈으로 골라내야 합니다. 실제로 35건
+ * 중 32건이 결과 없이 끝난 기록이라 볼 것 3건이 가운데 묻혀 있었습니다.
+ *
+ * 중단(interrupted)은 접지 않습니다. epoch마다 저장한 checkpoint가 남아 있어 이어서
+ * 학습할 수 있으므로, 사람이 아직 판단할 것이 있는 기록입니다. 실패·취소여도 검증
+ * 오차가 남았으면 결과가 있는 것이므로 함께 세웁니다.
+ */
+export function hasResult(record: RunRecord): boolean {
+  if (record.status !== 'failed' && record.status !== 'cancelled') return true;
+  return record.metrics.bestValidationLoss !== null;
+}
+
+/** 접어 둔 구역의 머리글에 쓸 내역입니다. 몇 건을 감췄는지 항상 말해 줍니다. */
+export function countLabel(records: RunRecord[]): string {
+  const failed = records.filter((record) => record.status === 'failed').length;
+  const cancelled = records.length - failed;
+  const parts = [
+    failed > 0 ? `실패 ${failed}` : null,
+    cancelled > 0 ? `취소·중단 ${cancelled}` : null,
+  ].filter((part): part is string => part !== null);
+  return parts.length > 0 ? `${records.length}건 (${parts.join(' · ')})` : `${records.length}건`;
+}
+
 export type RecordSort = 'recent' | 'kaggle' | 'loss';
 
 export const SORT_LABEL: Record<RecordSort, string> = {

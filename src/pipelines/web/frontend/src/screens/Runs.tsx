@@ -29,6 +29,8 @@ import { epochsDone, progressRatio } from '../lib/progress';
 import {
   FILTER_LABEL,
   SORT_LABEL,
+  countLabel,
+  hasResult,
   isRunning,
   matchesFilter,
   sortRecords,
@@ -381,6 +383,20 @@ export function Runs({
   );
 
   /**
+   * 결과 없이 끝난 기록은 목록 맨 아래로 접습니다.
+   *
+   * 전체를 볼 때만 접습니다. 다른 표는 사람이 이미 좁혀 놓은 것이라, 그 안에서 또
+   * 접으면 "12건이라는데 아무것도 안 보인다"가 됩니다.
+   */
+  const folded = filter === 'all' ? shown.filter((record) => !hasResult(record)) : [];
+  const listed = folded.length > 0 ? shown.filter(hasResult) : shown;
+
+  const openRecord = (record: RunRecord) =>
+    record.jobId
+      ? navigate(`/monitor/${record.jobId}`)
+      : navigate(`/canvas?run=${encodeURIComponent(record.runId)}`);
+
+  /**
    * 지금 도는 학습. 팀이 공유한 것과 이 컴퓨터 것을 `run_id`로 합칩니다.
    *
    * 팀 기록이 켜져 있으면 내 학습도 거기 올라가므로 그대로 두면 같은 학습이 두 줄이
@@ -622,17 +638,12 @@ export function Runs({
                 }
               />
             ) : (
-              shown.map((record) => (
-                <RecordRow
-                  key={record.runId}
-                  record={record}
-                  onOpen={() =>
-                    record.jobId
-                      ? navigate(`/monitor/${record.jobId}`)
-                      : navigate(`/canvas?run=${encodeURIComponent(record.runId)}`)
-                  }
-                />
-              ))
+              <>
+                {listed.map((record) => (
+                  <RecordRow key={record.runId} record={record} onOpen={() => openRecord(record)} />
+                ))}
+                {folded.length > 0 && <FoldedRecords records={folded} onOpen={openRecord} />}
+              </>
             )}
           </>
         ) : (
@@ -801,6 +812,56 @@ function QueueTab({
   );
 }
 
+/* ------------------------------------------------- 결과 없이 끝난 기록 구역 */
+
+/**
+ * 결과 없이 끝난 기록을 접어 두는 구역입니다.
+ *
+ * 지우지 않고 접습니다. 왜 실패했는지는 로그를 봐야 알 수 있고, 그 로그로 가는
+ * 길이 이 줄뿐입니다. 대신 몇 건을 무슨 이유로 접었는지 머리글이 늘 말합니다 —
+ * 조용히 빼면 그만큼이 없는 줄 압니다.
+ */
+function FoldedRecords({
+  records,
+  onOpen,
+}: {
+  records: RunRecord[];
+  onOpen: (record: RunRecord) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div style={{ borderTop: `1px solid ${color.border}` }}>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 10,
+          width: '100%',
+          padding: '18px 0',
+          background: 'transparent',
+          border: 0,
+          textAlign: 'left',
+        }}
+      >
+        <span style={{ ...type.body, color: color.textMuted }}>
+          {open ? '▾' : '▸'} 결과 없이 끝남
+        </span>
+        <span style={{ font: `400 13px/1.4 ${font.mono}`, color: color.textFaint }}>
+          {countLabel(records)}
+        </span>
+      </button>
+      {open &&
+        records.map((record) => (
+          <RecordRow key={record.runId} record={record} onOpen={() => onOpen(record)} />
+        ))}
+    </div>
+  );
+}
+
 /* -------------------------------------------------------------- 기록 한 줄 */
 
 /** 기록 한 줄. 이름 → 식별자 → 설정 → 지표 순으로 내려갑니다. */
@@ -829,7 +890,9 @@ function RecordRow({ record, onOpen }: { record: RunRecord; onOpen: () => void }
         <span style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0 }}>
           <span style={{ ...type.listName, color: color.text, minWidth: 0 }}>{record.family}</span>
           {record.submitted && <Badge>제출</Badge>}
-          {!record.registered && !running && <Badge tone="muted">미등록</Badge>}
+          {/* 실패·취소한 줄에 미등록까지 붙이면 배지 둘이 같은 말을 합니다. 등록될
+              수 있었는데 아직 안 된 것, 곧 성공으로 끝난 학습에만 붙입니다. */}
+          {record.status === 'succeeded' && !record.registered && <Badge tone="muted">미등록</Badge>}
           {record.status === 'failed' && <Badge tone="danger">{record.statusLabel}</Badge>}
           {running && (
             <span style={{ display: 'flex', alignItems: 'center', gap: 7, flex: 'none' }}>

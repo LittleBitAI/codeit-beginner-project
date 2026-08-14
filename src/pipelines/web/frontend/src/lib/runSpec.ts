@@ -88,28 +88,3 @@ export function stagesOf(job: JobRecord): Stage[] {
   ];
 }
 
-/**
- * 목록에서 어느 구역에 둘지.
- *
- * 실패와 취소가 성공한 학습과 한 줄에 섞이면 눈으로 골라내야 합니다. 실제로 35건
- * 중 32건이 결과 없이 끝난 기록이라 3건이 가운데 묻혀 있었습니다.
- *
- * 중단(interrupted)은 위에 둡니다. epoch마다 저장한 checkpoint가 남아 있어 이어서
- * 학습할 수 있으므로, 사람이 아직 판단할 것이 있는 기록입니다. 실패·취소여도 검증
- * 오차가 기록에 남았으면 결과가 있는 것이므로 함께 올립니다.
- */
-export function hasResult(job: JobRecord): boolean {
-  if (job.status !== 'failed' && job.status !== 'cancelled') return true;
-  return typeof job.summary?.best_validation_loss === 'number';
-}
-
-/** 접어 둔 구역의 머리글에 쓸 내역입니다. 몇 건을 감췄는지 항상 말해 줍니다. */
-export function countLabel(jobs: JobRecord[]): string {
-  const failed = jobs.filter((job) => job.status === 'failed').length;
-  const cancelled = jobs.length - failed;
-  const parts = [
-    failed > 0 ? `실패 ${failed}` : null,
-    cancelled > 0 ? `취소·중단 ${cancelled}` : null,
-  ].filter((part): part is string => part !== null);
-  return parts.length > 0 ? `${jobs.length}건 (${parts.join(' · ')})` : `${jobs.length}건`;
-}
