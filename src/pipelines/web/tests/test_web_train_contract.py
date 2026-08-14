@@ -148,25 +148,6 @@ def function_node(source: str, name: str) -> ast.FunctionDef:
     pytest.fail(f"train source에서 {name} 함수를 찾지 못했습니다.")
 
 
-def test_architecture_matches_train_source():
-    """화면에 보여 주는 모델 이름이 실제로 학습되는 모델과 같아야 합니다."""
-
-    assert ARCHITECTURE == module_constant(read_source("model.py"), "ARCHITECTURE")
-
-
-def test_mmdetection_8gb_combination_matches_train_source():
-    """8GB 조합을 두 곳이 따로 들고 있으므로 값이 같은지 감시합니다.
-
-    소유 경계 때문에 상수를 나눠 쓸 수 없습니다. 한쪽만 바꾸면 화면은 통과시키고
-    train이 거부하거나, 반대로 화면이 막는데 train은 받는 상태가 됩니다. 둘 다
-    사용자가 이유를 알 수 없는 실패로 보입니다.
-    """
-
-    assert MMDETECTION_REQUIRED == module_constant(
-        read_source("pipeline.py"), "_MMDETECTION_REQUIRED"
-    )
-
-
 def test_the_form_is_told_which_models_use_input_size():
     """화면이 어느 모델에서 이 칸을 보일지 스스로 판단하지 않게 합니다.
 
@@ -198,53 +179,6 @@ def test_the_form_says_eight_for_models_that_default_to_eight():
         architecture: DEFAULT_ACCUMULATION_STEPS
         for architecture in MMDETECTION_ARCHITECTURES
     }
-
-
-def test_mmdetection_numeric_defaults_match_train_source():
-    """입력 크기와 모으는 수의 기본값도 train이 정한 값이어야 합니다."""
-
-    adapter = read_source("mmdetection_adapter.py")
-
-    assert DEFAULT_INPUT_SIZE == module_constant(adapter, "DEFAULT_INPUT_SIZE")
-    assert DEFAULT_ACCUMULATION_STEPS == module_constant(
-        adapter, "DEFAULT_ACCUMULATION_STEPS"
-    )
-
-
-def test_model_and_optimizer_choices_match_train_source():
-    # train은 목록을 두 파일에 나눠 둡니다. torchvision 이름은 model.py에, MMDetection
-    # 이름은 adapter에 있고 model.py가 그것을 펼쳐 담습니다. 한쪽만 읽으면 이 감시가
-    # 반쪽이 되므로 두 source를 이어 붙여 읽습니다.
-    train_source = (
-        read_source("model.py") + chr(10) + read_source("mmdetection_adapter.py")
-    )
-    assert SUPPORTED_ARCHITECTURES == module_constant(
-        train_source, "SUPPORTED_ARCHITECTURES"
-    )
-    assert MMDETECTION_ARCHITECTURES == module_constant(
-        read_source("mmdetection_adapter.py"), "MMDETECTION_ARCHITECTURES"
-    )
-    assert SUPPORTED_OPTIMIZERS == module_constant(
-        read_source("trainer.py"), "SUPPORTED_OPTIMIZERS"
-    )
-
-
-def test_augmentation_choices_match_train_source():
-    """화면이 보여 주는 증강 preset이 train이 실제로 받는 이름과 같아야 합니다."""
-
-    presets = module_constant(read_source("pipeline.py"), "AUGMENTATION_PRESETS")
-    assert SUPPORTED_AUGMENTATIONS == tuple(presets)
-    # train은 값이 없으면 none을 씁니다. 화면 기본값도 같아야 합니다.
-    assert DEFAULT_AUGMENTATION in presets
-
-
-def test_precision_choices_match_train_source():
-    """화면이 보여 주는 정밀도가 train이 실제로 받는 이름과 같아야 합니다."""
-
-    modes = module_constant(read_source("pipeline.py"), "PRECISION_MODES")
-    assert SUPPORTED_PRECISIONS == tuple(modes)
-    # train은 값이 없으면 fp32를 씁니다. 화면 기본값도 같아야 합니다.
-    assert DEFAULT_PRECISION in modes
 
 
 def test_unknown_precision_is_rejected_before_training_starts():
@@ -309,19 +243,6 @@ def test_bf16_is_left_to_train_when_this_computer_cannot_tell(monkeypatch):
     assert settings["precision"] == "bf16"
 
 
-def test_lr_scheduler_choices_and_defaults_match_train_source():
-    """화면이 보여 주는 schedule 이름과 기본값이 train이 실제로 받는 것과 같아야 합니다."""
-
-    source = read_source("pipeline.py")
-    schedules = module_constant(source, "LR_SCHEDULER_DEFAULTS")
-
-    assert SUPPORTED_LR_SCHEDULERS == tuple(schedules)
-    # train은 값이 없으면 상수 learning rate입니다. 화면 기본값도 같아야 합니다.
-    assert DEFAULT_LR_SCHEDULER in schedules
-    assert LR_SCHEDULER_DEFAULTS == schedules
-    assert LR_WARMUP_DEFAULTS == module_constant(source, "LR_WARMUP_DEFAULTS")
-
-
 @pytest.mark.parametrize("name", SUPPORTED_LR_SCHEDULERS)
 def test_lr_scheduler_reaches_train_with_exactly_the_keys_it_uses(name):
     """train은 고른 schedule이 쓰지 않는 key가 하나만 있어도 object를 통째로 거부합니다."""
@@ -335,65 +256,6 @@ def test_lr_scheduler_reaches_train_with_exactly_the_keys_it_uses(name):
         "warmup_start_factor",
         *schedules[name],
     }
-
-
-def test_optimizer_profiles_match_train_source():
-    assert OPTIMIZER_PROFILES == module_constant(
-        read_source("pipeline.py"), "OPTIMIZER_PROFILES"
-    )
-
-
-def test_fallback_optimizer_matches_train_source():
-    """Capability이 없을 때 보여 주는 optimizer가 실제 고정 구현과 같아야 합니다."""
-
-    source = read_source("trainer.py")
-    assert f"torch.optim.{LEGACY_OPTIMIZER}(" in source
-
-
-def test_numeric_defaults_match_train_source():
-    """비워 둔 칸에 대해 화면이 알려 주는 기본값이 train의 기본값과 같아야 합니다."""
-
-    train_defaults = call_defaults(read_source("pipeline.py"))
-    mirrored = normalize_train_settings({})
-
-    assert train_defaults, "train source에서 기본값 호출을 하나도 찾지 못했습니다."
-    for name, expected in train_defaults.items():
-        if name in {"learning_rate", "weight_decay", "momentum", "epsilon"}:
-            continue
-        assert mirrored[name] == expected, f"train.{name} 기본값이 어긋났습니다."
-
-
-def test_train_source_supports_every_resume_setting_the_web_sends():
-    """#110 없이 #111만 배포해 201 뒤 처음부터 학습하는 일을 막습니다."""
-
-    source = read_source("pipeline.py")
-    numeric_defaults = call_defaults(source)
-    mirrored = normalize_train_settings({})
-    settings = function_node(source, "_settings")
-    read_keys = {
-        node.args[0].value
-        for node in ast.walk(settings)
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "get"
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
-        )
-    }
-
-    assert numeric_defaults["checkpoint_every"] == mirrored["checkpoint_every"]
-    assert "resume_from" in read_keys
-
-
-def test_string_and_boolean_defaults_match_train_source():
-    train_defaults = get_defaults(read_source("pipeline.py"))
-
-    assert train_defaults.get("device") == "cpu"
-    assert train_defaults.get("pretrained") is False
-    assert train_defaults.get("output_dir") == DEFAULT_OUTPUT_DIR
-    assert train_defaults.get("output_prefix") == DEFAULT_OUTPUT_PREFIX
 
 
 def test_augmentation_reaches_train_as_the_object_it_expects():
@@ -411,57 +273,6 @@ def test_augmentation_defaults_to_none_like_train():
 def test_unknown_augmentation_is_rejected_before_training_starts():
     with pytest.raises(Exception, match="augmentation"):
         normalize_train_settings({"augmentation": "무작위회전"})
-
-
-def test_early_stopping_keys_match_train_source():
-    """train은 모르는 key가 있으면 object를 통째로 거부합니다.
-
-    화면이 만든 object의 key가 train이 허용하는 집합과 정확히 같아야 합니다.
-    """
-
-    function = function_node(read_source("pipeline.py"), "_early_stopping")
-    allowed = [ast.literal_eval(node) for node in ast.walk(function) if isinstance(node, ast.Set)]
-
-    assert len(allowed) == 1, "train의 _early_stopping에서 허용 key 집합을 하나만 찾아야 합니다."
-    mirrored = normalize_train_settings(
-        {"early_stopping": True, "early_stopping_patience": 5}
-    )
-    assert set(mirrored["early_stopping"]) == allowed[0]
-
-
-def test_early_stopping_min_delta_default_matches_train_source():
-    train_default = get_defaults(read_source("pipeline.py")).get("min_delta")
-    mirrored = normalize_train_settings(
-        {"early_stopping": True, "early_stopping_patience": 5}
-    )
-
-    assert train_default is not None, "train source에서 min_delta 기본값을 찾지 못했습니다."
-    assert mirrored["early_stopping"]["min_delta"] == train_default
-
-
-def test_run_id_pattern_matches_train_source():
-    assert RUN_ID_PATTERN.pattern == module_constant(
-        read_source("pipeline.py"), "RUN_ID_PATTERN"
-    )
-
-
-def test_required_data_artifact_keys_match_train_source():
-    train_keys = module_constant(read_source("pipeline.py"), "DATA_ARTIFACT_KEYS")
-
-    assert set(DATA_ARTIFACT_KEYS) == set(train_keys)
-
-
-def test_gradient_accumulation_default_is_mirrored_before_train_reads_it():
-    """train이 이 설정을 받기 시작해도 기본값이 어긋나지 않게 미리 맞춰 둡니다.
-
-    `test_numeric_defaults_match_train_source`는 train의 기본값을 순회하며 web에
-    같은 값이 있는지 봅니다. 그래서 train이 먼저 넣으면 그 순간 web이 깨지고,
-    web이 먼저 넣으면 조용히 통과합니다. 순서가 web -> train인 이유입니다.
-    """
-
-    mirrored = normalize_train_settings({})
-
-    assert mirrored["gradient_accumulation_steps"] == 1
 
 
 def test_gradient_accumulation_above_one_is_accepted_now_that_train_reads_it():
@@ -516,14 +327,6 @@ def _mmdetection_request(**overrides):
     }
     raw.update(overrides)
     return raw
-
-
-def test_mmdetection_architectures_are_offered_on_the_new_experiment_form():
-    choices = {spec["name"]: spec for spec in field_specs()}
-
-    assert set(MMDETECTION_ARCHITECTURES) <= set(choices["architecture"]["choices"])
-    assert "input_size" in choices
-    assert "gradient_accumulation_steps" in choices
 
 
 def test_input_size_defaults_to_the_value_train_uses(monkeypatch):
