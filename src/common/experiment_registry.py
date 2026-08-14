@@ -190,12 +190,10 @@ def read_experiment_summary(
     except ObjectNotFoundError:
         return None
     except StorageError as error:
+        # 깨진 JSON도 여기로 옵니다. 두 backend 모두 그것을 StorageError로 감싸므로
+        # `json.JSONDecodeError`를 따로 잡을 자리가 없습니다.
         raise ExperimentRegistryError(
             f"experiment index 조회에 실패했습니다 ({type(error).__name__})."
-        ) from error
-    except json.JSONDecodeError as error:
-        raise ExperimentRegistryError(
-            f"'{wanted}' index 항목이 유효한 JSON이 아닙니다."
         ) from error
 
     if not isinstance(summary, dict) or summary.get("run_id") != wanted:

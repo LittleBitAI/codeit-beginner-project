@@ -287,6 +287,22 @@ def test_summary_that_was_never_registered_is_absent_not_an_error(tmp_path):
     assert read_experiment_summary("없는-실험", config) is None
 
 
+def test_broken_index_entry_is_an_error_not_an_absent_experiment(tmp_path):
+    """읽지 못한 것을 "없다"로 답하면 화면이 멀쩡한 실험을 사라졌다고 말합니다.
+
+    목록은 항목 하나가 깨지면 그것만 건너뛰지만(실험 하나 때문에 화면 전체가 비면
+    더 곤란합니다), 이름을 대고 그 하나를 물었을 때는 답이 달라야 합니다.
+    """
+
+    config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+    (tmp_path / "artifacts/registry/index/exp-a.json").write_text(
+        "{망가진 JSON", encoding="utf-8", newline="\n"
+    )
+
+    with pytest.raises(ExperimentRegistryError):
+        read_experiment_summary("exp-a", config)
+
+
 def test_summary_read_refuses_a_name_that_could_escape_the_index(tmp_path):
     """run_id는 파일 이름이 되므로 경로 구분자를 받지 않습니다."""
 
