@@ -586,9 +586,13 @@ def test_every_offered_field_has_a_place_on_the_new_experiment_form():
         / "frontend/src/screens/NewExperimentSheet.tsx"
     ).read_text(encoding="utf-8")
     start = sheet.index("const TABS")
-    quoted = set(re.findall(r"'([a-z_0-9]+)'", sheet[start : sheet.index("];", start)]))
+    block = sheet[start : sheet.index("];", start)]
+    # 주석은 먼저 덜어 냅니다. 주석 처리된 이름은 화면에 **없는** 것인데, 그대로 세면
+    # 칸을 지워 놓고도 이 test가 조용합니다. 주석에서 칸 이름을 언급하는 경우도 같습니다.
+    block = re.sub(r"/\*.*?\*/", "", block, flags=re.DOTALL)
+    block = re.sub(r"//[^\n]*", "", block)
     # 표 자체의 key는 칸 이름이 아닙니다.
-    placed = quoted - {"basic", "hyper", "output"}
+    placed = set(re.findall(r"'([a-z_0-9]+)'", block)) - {"basic", "hyper", "output"}
 
     offered = {spec["name"] for spec in field_specs()}
 

@@ -88,9 +88,6 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
       // 몇 epoch마다 이어서 할 수 있는 checkpoint를 남길지. 학습이 어떻게 끝나는지와
       // 무엇을 남기는지가 한 묶음이라 조기 종료 뒤에 둡니다. 이 값이 곧 중지한 학습을
       // 이어갈 수 있는 지점이기도 합니다.
-      // 몇 epoch마다 이어서 할 수 있는 checkpoint를 남길지. 학습이 어떻게 끝나는지와
-      // 무엇을 남기는지가 한 묶음이라 조기 종료 뒤에 둡니다. 이 값이 곧 중지한 학습을
-      // 이어갈 수 있는 지점이기도 합니다.
       'checkpoint_every',
       'beta1',
       'beta2',
