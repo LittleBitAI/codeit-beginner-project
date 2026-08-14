@@ -191,8 +191,17 @@ export function Live({
   const ratio = progressRatio(progress);
   const first = epochs.find((item) => item.validation_loss !== null)?.validation_loss ?? null;
   const delta = first !== null && best ? first - best.validation_loss : null;
-  const failedAfterCompletedEpoch =
-    job.status === 'failed' && Math.max(progress.completed_epochs ?? 0, epochs.length) > 0;
+  // 이어서 학습할 수 있는 상태입니다. 실패든 사람이 중지했든, 마친 epoch이 있으면
+  // 그 지점의 checkpoint가 남아 있습니다. 없으면 이어갈 것이 없으므로 단추를 두지
+  // 않습니다 — 눌러 봐야 서버가 같은 이유로 거절합니다.
+  const completedEpochs = Math.max(progress.completed_epochs ?? 0, epochs.length);
+  const resumable =
+    (job.status === 'failed' || job.status === 'cancelled') && completedEpochs > 0;
+  const resumeButton = resumable ? (
+    <Button onClick={() => void resume()} disabled={resuming}>
+      {resuming ? '시작하는 중…' : '이어서 학습'}
+    </Button>
+  ) : undefined;
   const device = gpu.data?.telemetry.devices[0] ?? null;
   const telemetryDown = gpu.data && gpu.data.telemetry.source !== 'nvidia-smi';
   const gpuLine = telemetryDown
@@ -399,27 +408,23 @@ export function Live({
           </AlertRow>
         )}
         {job.status === 'failed' && (
-          <AlertRow
-            level="error"
-            title="학습이 실패했습니다"
-            action={
-              failedAfterCompletedEpoch ? (
-                <Button onClick={() => void resume()} disabled={resuming}>
-                  {resuming ? '시작하는 중…' : '이어서 학습'}
-                </Button>
-              ) : undefined
-            }
-          >
+          <AlertRow level="error" title="학습이 실패했습니다" action={resumeButton}>
             {job.message ?? '원인을 알 수 없습니다. 아래 로그를 확인해 주세요.'}
-            {failedAfterCompletedEpoch &&
+            {resumable &&
               ' 완료한 epoch가 있어 checkpoint가 저장소에 남아 있으면 새 실행 이름으로 이어갑니다.'}
             {resumed && ` '${resumed}' 이름으로 대기열에 넣었습니다.`}
             {resumeError && ` ${resumeError}`}
           </AlertRow>
         )}
-        {job.status === 'cancelled' && job.orphan_note && (
-          <AlertRow level="warning" title="중지된 학습의 임시 파일이 남아 있을 수 있습니다">
-            {job.orphan_note} 정리는 train pipeline이 소유한 영역이라 이 화면에서 지우지 않습니다.
+        {job.status === 'cancelled' && (
+          <AlertRow level="warning" title="학습을 중지했습니다" action={resumeButton}>
+            {resumable
+              ? `epoch ${completedEpochs}까지 마쳤습니다. 그 지점의 checkpoint가 남아 있으면 새 실행 이름으로 이어갑니다 — 남은 epoch이 아니라 원래 계획한 전체 epoch까지 돕니다.`
+              : '마친 epoch이 없어 저장된 checkpoint가 없습니다. 이어서 학습할 수 없고 처음부터 다시 돌려야 합니다.'}
+            {job.orphan_note &&
+              ` ${job.orphan_note} 정리는 train pipeline이 소유한 영역이라 이 화면에서 지우지 않습니다.`}
+            {resumed && ` '${resumed}' 이름으로 대기열에 넣었습니다.`}
+            {resumeError && ` ${resumeError}`}
           </AlertRow>
         )}
         {job.status === 'interrupted' && (

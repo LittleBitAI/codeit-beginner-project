@@ -20,6 +20,7 @@ from .. import experiments
 from ..gpu import cuda_is_available
 from ..jobs import get_manager
 from ..jobs.model import (
+    STATUS_CANCELLED,
     STATUS_FAILED,
     STATUS_INTERRUPTED,
     TERMINAL_STATUSES,
@@ -389,32 +390,38 @@ def resume_job(
     payload: ResumeRequest = Body(...),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """중단됐거나 checkpoint를 남기고 실패한 학습을 이어서 시작합니다.
+    """중단·중지됐거나 checkpoint를 남기고 실패한 학습을 이어서 시작합니다.
 
     이어서 하는 실행은 **새 이름**을 받습니다. 같은 이름을 다시 쓰면 train이 남아 있는
     작업 폴더를 보고 시작을 거부하고, 결과도 섞입니다. `epochs`는 남은 수가 아니라
     전체 목표이므로 비워 두면 중단된 실행의 계획을 그대로 씁니다.
+
+    사람이 중지한 학습(cancelled)도 실패와 다를 것이 없습니다. epoch마다 저장한
+    checkpoint가 그대로 남아 있으므로 같은 규칙으로 이어갑니다 — 있으면 이어가고,
+    없으면 없다고 말합니다. 서버가 상태를 잃은 interrupted만 확인 없이 넘어갑니다.
+    그 checkpoint는 이 컴퓨터가 아니라 사라진 실행 쪽에 있을 수 있기 때문입니다.
     """
 
     manager = get_manager()
     record = manager.get(job_id)
-    if record.status not in {STATUS_INTERRUPTED, STATUS_FAILED}:
+    if record.status not in {STATUS_INTERRUPTED, STATUS_FAILED, STATUS_CANCELLED}:
         raise JobConflictError(
-            "중단된 학습이나 checkpoint를 남기고 실패한 학습만 이어갈 수 있습니다."
+            "중단·중지됐거나 checkpoint를 남기고 실패한 학습만 이어갈 수 있습니다."
         )
 
     source_config = read_runtime_config(record.config_id)
-    if record.status == STATUS_FAILED:
+    if record.status in {STATUS_FAILED, STATUS_CANCELLED}:
         try:
             checkpoint_exists = resume_checkpoint_exists(source_config)
         except StorageError as error:
             raise JobConflictError(
-                "실패한 학습의 checkpoint를 확인하지 못했습니다. "
+                "그 학습의 checkpoint를 확인하지 못했습니다. "
                 "저장소 설정과 권한을 확인하세요."
             ) from error
         if not checkpoint_exists:
             raise JobConflictError(
-                "실패한 학습의 checkpoint를 찾을 수 없어 이어서 학습할 수 없습니다."
+                "저장된 checkpoint를 찾을 수 없어 이어서 학습할 수 없습니다. "
+                "첫 epoch을 마치기 전에 끝난 학습입니다."
             )
 
     config = build_resume_config(

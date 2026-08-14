@@ -341,6 +341,46 @@ def test_resume_route_refuses_a_failed_run_without_a_checkpoint(
     assert "checkpoint" in response.text
 
 
+def test_resume_route_queues_a_cancelled_run_when_its_checkpoint_exists(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """중지 단추를 누른 학습도 이어갈 수 있어야 합니다.
+
+    실패와 다를 것이 없습니다. epoch마다 저장한 checkpoint가 그대로 남아 있는데도
+    이어갈 방법이 없어, 밤새 돌린 학습을 처음부터 다시 돌려야 했습니다.
+    """
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.status = "cancelled"
+    config = read_runtime_config(record.config_id)
+    checkpoint = run_id_working_path(config["train"]) / "last_checkpoint.pt"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"resumable")
+
+    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={})
+
+    assert response.status_code == 201, response.text
+    assert response.json()["resumed_from_job_id"] == record.job_id
+
+
+def test_resume_route_refuses_a_cancelled_run_without_a_checkpoint(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """첫 epoch을 마치기 전에 중지하면 이어갈 것이 없습니다."""
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.status = "cancelled"
+
+    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={})
+
+    assert response.status_code == 409
+    assert "checkpoint" in response.text
+
+
 def test_resume_route_passes_the_login_token_to_the_started_run(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):
@@ -565,4 +605,4 @@ def test_resume_route_refuses_a_job_that_is_not_interrupted(
     response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={})
 
     assert response.status_code == 409
-    assert "중단된" in response.text
+    assert "중단" in response.text
