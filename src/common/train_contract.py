@@ -23,6 +23,7 @@ from typing import Any
 __all__ = [
     "ARCHITECTURES",
     "AUGMENTATIONS",
+    "BEST_CHECKPOINT_NAME",
     "CUDA_ONLY_PRECISIONS",
     "DATA_ARTIFACT_KEYS",
     "DEFAULT_ACCUMULATION_STEPS",
@@ -43,8 +44,13 @@ __all__ = [
     "OPTIMIZER_PROFILES",
     "OPTIONAL_DATA_ARTIFACT_KEYS",
     "PRECISIONS",
+    "RESUME_CHECKPOINT_NAME",
+    "RUNNING_PREFIX",
     "RUN_ID_PATTERN",
     "SETTING_DEFAULTS",
+    "SETTING_KEYS",
+    "WORKING_CHECKPOINT_NAMES",
+    "WORKING_DIRECTORY_SUFFIX",
 ]
 
 
@@ -140,8 +146,44 @@ DEFAULT_LR_SCHEDULER = "none"
 EARLY_STOPPING_KEYS = ("patience", "min_delta")
 DEFAULT_EARLY_STOPPING_MIN_DELTA = 0.0
 
+#: ``config["train"]``에 담아 보낼 수 있는 칸 이름 전부입니다.
+#:
+#: 값이 같은지는 위의 표들이 지키지만, 그 값을 담아 보내는 **이름**은 지금까지 아무도
+#: 지키지 않았습니다. web은 train을 import할 수 없어 이름을 옮겨 적을 뿐이고, 한쪽이
+#: 이름을 바꾸며 자기 test까지 함께 고치면 양쪽 다 초록인 채로 그 값이 조용히 버려집니다.
+#: train은 자기가 정말 이 칸들을 읽는지, web은 이 목록에 없는 칸을 보내지 않는지 각자
+#: 확인합니다. 어느 쪽도 상대를 import하지 않고 여기만 봅니다.
+SETTING_KEYS = (
+    "architecture",
+    "augmentation",
+    "batch_size",
+    "beta1",
+    "beta2",
+    "checkpoint_every",
+    "device",
+    "early_stopping",
+    "epochs",
+    "epsilon",
+    "gradient_accumulation_steps",
+    "input_size",
+    "learning_rate",
+    "lr_scheduler",
+    "momentum",
+    "num_workers",
+    "optimizer",
+    "output_dir",
+    "output_prefix",
+    "precision",
+    "pretrained",
+    "resume_from",
+    "run_id",
+    "seed",
+    "weight_decay",
+)
+
 #: 학습 중 작업 폴더에 두는 파일입니다. 마지막 것이 이어서 학습할 대상입니다.
 WORKING_CHECKPOINT_NAMES = ("best_checkpoint.pt", "last_checkpoint.pt")
+BEST_CHECKPOINT_NAME = WORKING_CHECKPOINT_NAMES[0]
 RESUME_CHECKPOINT_NAME = WORKING_CHECKPOINT_NAMES[-1]
 
 #: 끝나지 않은 학습이 어디 있는지 정하는 규칙입니다. train이 그 자리에 쓰고, GUI는
