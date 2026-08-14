@@ -9,6 +9,7 @@ listing이나 최신 record 탐색은 하지 않습니다. 목록·검색·비�
 from __future__ import annotations
 
 import json
+import posixpath
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -41,11 +42,6 @@ DEFAULT_INDEX_PREFIX = "registry/index"
 #: run_id 대조에서 걸립니다.
 _UNSAFE_RUN_ID_CHARACTERS = frozenset("\x7f") | {chr(code) for code in range(0x20)}
 
-#: index **밖**을 가리키는 이름은 읽지 않습니다. storage backend에 기대면 부족합니다 —
-#: LocalStorage가 지키는 것은 storage root라서 `..` 한 단계는 index prefix를 벗어나고도
-#: root 안에 남습니다. 목록은 prefix로 걸러 그런 파일을 세지 않으므로, 읽는 쪽만 읽어
-#: 주면 두 경로가 서로 다른 실험 집합을 보게 됩니다.
-_NAVIGATING_SEGMENTS = frozenset({".", ".."})
 
 #: 비교 화면이 실험 사이에서 실제로 견주는 값들입니다.
 _COMPARABLE_FIELDS = (
@@ -198,14 +194,22 @@ def read_experiment_summary(
     wanted = run_id.strip()
     if not _UNSAFE_RUN_ID_CHARACTERS.isdisjoint(wanted):
         raise ExperimentRegistryError("run_id에는 제어문자를 쓸 수 없습니다.")
-    if _NAVIGATING_SEGMENTS.intersection(wanted.replace("\\", "/").split("/")):
-        raise ExperimentRegistryError(
-            "run_id에는 '.' 또는 '..' 경로 segment를 쓸 수 없습니다."
-        )
 
     prefix = _index_prefix(config)
+    location = f"{prefix}/{wanted}.json"
+    # `..`가 섞인 이름은 파일 시스템이 먼저 정규화합니다. 그 결과가 index 밖으로 나가면
+    # 목록에 없는 파일을 읽게 되므로, 같은 규칙으로 미리 계산해 봅니다. Windows의
+    # LocalStorage는 역슬래시도 구분자로 읽으므로 함께 눕힙니다.
+    #
+    # segment를 이름만 보고 거부하지 않는 이유는, `a/../b`처럼 index **안에서** 상쇄되는
+    # 이름을 registry가 실제로 저장하고 목록도 세기 때문입니다. 읽는 쪽만 거부하면 목록에
+    # 보이는 실험을 열지 못합니다.
+    base = posixpath.normpath(prefix)
+    if not posixpath.normpath(location.replace("\\", "/")).startswith(f"{base}/"):
+        raise ExperimentRegistryError("run_id는 index 밖을 가리킬 수 없습니다.")
+
     try:
-        summary = create_storage(config).read_json(f"{prefix}/{wanted}.json")
+        summary = create_storage(config).read_json(location)
     except ObjectNotFoundError:
         return None
     except StorageError as error:

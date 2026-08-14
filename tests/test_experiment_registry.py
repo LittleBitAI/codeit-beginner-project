@@ -347,20 +347,23 @@ def test_summary_read_refuses_a_name_the_file_system_cannot_take(
         read_experiment_summary(run_id, config)
 
 
-def test_summary_reads_back_every_name_the_registry_can_write(tmp_path):
-    """registry가 저장할 수 있는 이름이면 이 조회도 읽어 내야 합니다.
+@pytest.mark.parametrize("run_id", ["폴더/이름", "a/../b", "a/./b"])
+def test_summary_reads_back_every_name_the_registry_can_write(tmp_path, run_id):
+    """registry가 index 안에 저장하는 이름이면 이 조회도 읽어 내야 합니다.
 
     registry는 설정으로 지정한 run_id를 검증 없이 그대로 씁니다. ``폴더/이름``은
-    ``registry/index/폴더/이름.json``에 저장되고 목록 경로는 그것을 찾아냅니다.
-    읽는 쪽만 경로 구분자를 거부하면 등록은 됐는데 조회는 안 되는 실험이 생깁니다.
+    ``registry/index/폴더/이름.json``에, ``a/../b``는 파일 시스템이 상쇄해
+    ``registry/index/b.json``에 저장되고, 목록 경로는 둘 다 찾아냅니다. 읽는 쪽이
+    이름 모양만 보고 거부하면 목록에 보이는 실험을 열지 못합니다.
     """
 
-    config = register(tmp_path, "폴더/이름", "2026-08-01T00:00:00+00:00")
+    config = register(tmp_path, run_id, "2026-08-01T00:00:00+00:00")
 
-    assert read_experiment_summary("폴더/이름", config)["run_id"] == "폴더/이름"
+    assert [item["run_id"] for item in list_experiment_summaries(config)] == [run_id]
+    assert read_experiment_summary(run_id, config)["run_id"] == run_id
 
 
-@pytest.mark.parametrize("run_id", ["../바깥", "../../../../바깥"])
+@pytest.mark.parametrize("run_id", ["../바깥", "..\\바깥", "../../../../바깥"])
 def test_summary_read_refuses_a_name_that_points_outside_the_index(tmp_path, run_id):
     """안전 장치: index 밖을 가리키는 이름은 읽지 않고, 그 이름을 되풀이하지도 않습니다.
 
@@ -369,6 +372,9 @@ def test_summary_read_refuses_a_name_that_points_outside_the_index(tmp_path, run
     파일을 세지 않으므로(prefix로 거릅니다) 읽는 쪽만 읽어 주면 두 경로가 서로 다른
     실험 집합을 보게 됩니다. 아래에 심어 둔 미끼는 run_id까지 맞아서, 막지 않으면
     마지막 대조도 통과해 그대로 반환됩니다.
+
+    역슬래시도 함께 봅니다. Windows의 LocalStorage는 그것을 경로 구분자로 읽으므로,
+    `..\\바깥`은 POSIX 규칙으로만 보면 멀쩡한 이름처럼 지나갑니다.
     """
 
     config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
