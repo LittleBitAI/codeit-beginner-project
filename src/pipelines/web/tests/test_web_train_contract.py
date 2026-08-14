@@ -63,7 +63,7 @@ from src.pipelines.web.train_config import field_specs, normalize_train_settings
     ],
     ids=["defaults", "sgd", "adamw-full", "mmdetection"],
 )
-def test_no_setting_leaves_here_under_a_name_train_does_not_read(raw):
+def test_no_setting_leaves_here_under_a_name_train_does_not_read(monkeypatch, raw):
     """train은 이 파일을 import할 수 없는 저쪽에서 같은 이름으로 값을 읽습니다.
 
     값이 같은지는 계약의 표들이 지키지만, 값을 담아 보내는 **이름**은 지금까지 아무도
@@ -71,8 +71,11 @@ def test_no_setting_leaves_here_under_a_name_train_does_not_read(raw):
     전부 초록인 채로 그 값이 train에서 조용히 버려집니다. 계약의 목록만 보고,
     train을 부르지 않습니다.
 
-    optimizer와 model마다 실려 가는 칸이 달라 네 조합을 함께 봅니다.
+    optimizer와 model마다 실려 가는 칸이 달라 네 조합을 함께 봅니다. MMDetection
+    조합은 CUDA를 요구하므로 GPU 없는 CI에서도 돌도록 있는 척합니다.
     """
+
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
 
     sent = set(normalize_train_settings(raw))
 
