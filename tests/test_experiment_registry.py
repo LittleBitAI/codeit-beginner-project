@@ -360,12 +360,26 @@ def test_summary_reads_back_every_name_the_registry_can_write(tmp_path):
     assert read_experiment_summary("폴더/이름", config)["run_id"] == "폴더/이름"
 
 
-def test_summary_read_of_a_name_that_leaves_the_index_is_an_error(tmp_path):
-    """안전 장치: 저장소 밖을 겨냥한 이름은 읽지 않고, 그 이름을 되풀이하지도 않습니다."""
+@pytest.mark.parametrize("run_id", ["../바깥", "../../../../바깥"])
+def test_summary_read_refuses_a_name_that_points_outside_the_index(tmp_path, run_id):
+    """안전 장치: index 밖을 가리키는 이름은 읽지 않고, 그 이름을 되풀이하지도 않습니다.
+
+    storage backend에 기대면 부족합니다. LocalStorage가 지키는 것은 storage **root**
+    라서, `..` 한 단계는 index prefix를 벗어나면서도 root 안에 남습니다. 목록은 그런
+    파일을 세지 않으므로(prefix로 거릅니다) 읽는 쪽만 읽어 주면 두 경로가 서로 다른
+    실험 집합을 보게 됩니다. 아래에 심어 둔 미끼는 run_id까지 맞아서, 막지 않으면
+    마지막 대조도 통과해 그대로 반환됩니다.
+    """
 
     config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+    bait = tmp_path / "artifacts/registry/바깥.json"
+    bait.write_text(
+        json.dumps({"run_id": "../바깥", "summary_version": "2"}, ensure_ascii=False),
+        encoding="utf-8",
+        newline="\n",
+    )
 
     with pytest.raises(ExperimentRegistryError) as error:
-        read_experiment_summary("../../../../바깥", config)
+        read_experiment_summary(run_id, config)
 
     assert "바깥" not in str(error.value)

@@ -41,6 +41,12 @@ DEFAULT_INDEX_PREFIX = "registry/index"
 #: run_id 대조에서 걸립니다.
 _UNSAFE_RUN_ID_CHARACTERS = frozenset("\x7f") | {chr(code) for code in range(0x20)}
 
+#: index **밖**을 가리키는 이름은 읽지 않습니다. storage backend에 기대면 부족합니다 —
+#: LocalStorage가 지키는 것은 storage root라서 `..` 한 단계는 index prefix를 벗어나고도
+#: root 안에 남습니다. 목록은 prefix로 걸러 그런 파일을 세지 않으므로, 읽는 쪽만 읽어
+#: 주면 두 경로가 서로 다른 실험 집합을 보게 됩니다.
+_NAVIGATING_SEGMENTS = frozenset({".", ".."})
+
 #: 비교 화면이 실험 사이에서 실제로 견주는 값들입니다.
 _COMPARABLE_FIELDS = (
     "created_at",
@@ -192,6 +198,10 @@ def read_experiment_summary(
     wanted = run_id.strip()
     if not _UNSAFE_RUN_ID_CHARACTERS.isdisjoint(wanted):
         raise ExperimentRegistryError("run_id에는 제어문자를 쓸 수 없습니다.")
+    if _NAVIGATING_SEGMENTS.intersection(wanted.replace("\\", "/").split("/")):
+        raise ExperimentRegistryError(
+            "run_id에는 '.' 또는 '..' 경로 segment를 쓸 수 없습니다."
+        )
 
     prefix = _index_prefix(config)
     try:
