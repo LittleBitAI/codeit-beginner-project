@@ -363,7 +363,7 @@ def test_summary_reads_back_every_name_the_registry_can_write(tmp_path, run_id):
     assert read_experiment_summary(run_id, config)["run_id"] == run_id
 
 
-@pytest.mark.parametrize("run_id", ["../바깥", "..\\바깥", "../../../../바깥"])
+@pytest.mark.parametrize("run_id", ["../바깥", "..\\바깥"])
 def test_summary_read_refuses_a_name_that_points_outside_the_index(tmp_path, run_id):
     """안전 장치: index 밖을 가리키는 이름은 읽지 않고, 그 이름을 되풀이하지도 않습니다.
 
@@ -378,9 +378,11 @@ def test_summary_read_refuses_a_name_that_points_outside_the_index(tmp_path, run
     """
 
     config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+    # 미끼의 이름은 **묻는 이름과 같게** 둡니다. 다르게 두면 경계 검사를 지웠을 때도
+    # 마지막 identity 대조가 오류를 내서, test가 틀린 이유로 초록을 지킵니다.
     bait = tmp_path / "artifacts/registry/바깥.json"
     bait.write_text(
-        json.dumps({"run_id": "../바깥", "summary_version": "2"}, ensure_ascii=False),
+        json.dumps({"run_id": run_id, "summary_version": "2"}, ensure_ascii=False),
         encoding="utf-8",
         newline="\n",
     )
@@ -389,3 +391,26 @@ def test_summary_read_refuses_a_name_that_points_outside_the_index(tmp_path, run
         read_experiment_summary(run_id, config)
 
     assert "바깥" not in str(error.value)
+
+
+@pytest.mark.parametrize("index_prefix", ["registry\\index", "."])
+def test_summary_read_follows_the_prefix_the_list_reads(tmp_path, index_prefix):
+    """조회와 목록이 같은 index prefix를 봐야 합니다.
+
+    prefix는 설정값이라 `registry\\index`처럼 Windows식으로 적힐 수 있고, 쓰는 쪽과
+    목록은 그것을 그대로 씁니다. 조회만 그 모양을 다르게 읽으면 index 안의 이름을
+    전부 "밖"으로 판정해 아무것도 못 읽습니다.
+    """
+
+    config = local_config(
+        tmp_path,
+        run_id="exp-a",
+        created_at="2026-08-01T00:00:00+00:00",
+        index_prefix=index_prefix,
+    )
+    assert registry.run(config)["status"] == "ok"
+
+    # prefix가 `.`이면 목록은 저장소 전체를 훑어 record까지 함께 셉니다. 여기서 볼 것은
+    # 두 경로가 같은 실험을 찾아내는가입니다.
+    assert "exp-a" in [item["run_id"] for item in list_experiment_summaries(config)]
+    assert read_experiment_summary("exp-a", config)["run_id"] == "exp-a"

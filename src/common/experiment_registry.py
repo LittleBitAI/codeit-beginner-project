@@ -38,8 +38,7 @@ DEFAULT_INDEX_PREFIX = "registry/index"
 #: 경로 구분자는 **막지 않습니다.** registry는 지정된 run_id를 검증 없이 그대로 써서
 #: ``폴더/이름``이 ``registry/index/폴더/이름.json``으로 저장되고, 목록 경로는 그것을
 #: 찾아냅니다. 읽는 쪽만 거부하면 등록은 됐는데 조회는 안 되는 실험이 생깁니다.
-#: 저장소 밖으로 나가는 이름은 backend가 막고, 다른 실험의 파일을 열더라도 아래
-#: run_id 대조에서 걸립니다.
+#: index 밖으로 나가는 이름은 아래에서 따로 판정합니다.
 _UNSAFE_RUN_ID_CHARACTERS = frozenset("\x7f") | {chr(code) for code in range(0x20)}
 
 
@@ -199,13 +198,15 @@ def read_experiment_summary(
     location = f"{prefix}/{wanted}.json"
     # `..`가 섞인 이름은 파일 시스템이 먼저 정규화합니다. 그 결과가 index 밖으로 나가면
     # 목록에 없는 파일을 읽게 되므로, 같은 규칙으로 미리 계산해 봅니다. Windows의
-    # LocalStorage는 역슬래시도 구분자로 읽으므로 함께 눕힙니다.
+    # LocalStorage는 역슬래시도 구분자로 읽으므로 이름과 prefix 양쪽에서 함께 눕힙니다 —
+    # 한쪽만 눕히면 `registry\index` 같은 prefix에서 모든 이름이 밖으로 판정됩니다.
     #
     # segment를 이름만 보고 거부하지 않는 이유는, `a/../b`처럼 index **안에서** 상쇄되는
     # 이름을 registry가 실제로 저장하고 목록도 세기 때문입니다. 읽는 쪽만 거부하면 목록에
-    # 보이는 실험을 열지 못합니다.
-    base = posixpath.normpath(prefix)
-    if not posixpath.normpath(location.replace("\\", "/")).startswith(f"{base}/"):
+    # 보이는 실험을 열지 못합니다. 반대로 `..foo`는 밖으로 나가지 않으므로 그대로 둡니다.
+    base = posixpath.normpath(prefix.replace("\\", "/"))
+    inside = posixpath.relpath(posixpath.normpath(location.replace("\\", "/")), base)
+    if inside == ".." or inside.startswith("../"):
         raise ExperimentRegistryError("run_id는 index 밖을 가리킬 수 없습니다.")
 
     try:
