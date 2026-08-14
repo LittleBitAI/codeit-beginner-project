@@ -10,6 +10,7 @@ from .experiment_registry import (
     compare_experiment_summaries,
     list_experiment_summaries,
     read_experiment_record,
+    read_experiment_summary,
     search_experiment_summaries,
 )
 from .storage import (
@@ -50,6 +51,7 @@ __all__ = [
     "list_experiment_summaries",
     "load_config",
     "read_experiment_record",
+    "read_experiment_summary",
     "search_experiment_summaries",
     "validate_pipeline_result",
 ]
