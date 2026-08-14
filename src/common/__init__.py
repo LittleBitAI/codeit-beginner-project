@@ -6,10 +6,12 @@ from .contract import (
     validate_pipeline_result,
 )
 from .experiment_registry import (
+    ExperimentNameError,
     ExperimentRegistryError,
     compare_experiment_summaries,
     list_experiment_summaries,
     read_experiment_record,
+    read_experiment_summary,
     search_experiment_summaries,
 )
 from .storage import (
@@ -34,6 +36,7 @@ __all__ = [
     "RETURN_SCHEMA",
     "BucketNotFoundError",
     "CredentialsNotFoundError",
+    "ExperimentNameError",
     "ExperimentRegistryError",
     "LocalStorage",
     "ObjectAlreadyExistsError",
@@ -50,6 +53,7 @@ __all__ = [
     "list_experiment_summaries",
     "load_config",
     "read_experiment_record",
+    "read_experiment_summary",
     "search_experiment_summaries",
     "validate_pipeline_result",
 ]

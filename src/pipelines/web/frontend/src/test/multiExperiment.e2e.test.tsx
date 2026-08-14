@@ -91,18 +91,13 @@ beforeEach(() => {
         });
       }
       if (path === '/api/train/experiments') return jsonResponse(experimentListing());
+      // 캔버스는 표와 곡선을 이 요청 하나로 받습니다. 이 fixture에는 epoch 기록이
+      // 없으므로 곡선은 비어 있습니다.
       if (path === '/api/train/experiments/compare') {
-        return jsonResponse({ experiments: experimentListing().experiments, missing: [] });
-      }
-      // 캔버스는 곡선을 실행마다 따로 읽습니다. 이 fixture에는 epoch 기록이 없습니다.
-      if (path.startsWith('/api/train/experiments/')) {
-        const runId = decodeURIComponent(path.split('/').pop() ?? '');
-        const found = experimentListing().experiments.find((item) => item.run_id === runId);
-        if (!found) throw new Error(`E2E fixture에 없는 실험입니다: ${runId}`);
         return jsonResponse({
-          experiment: found,
-          evaluation: { available: false, reason: 'E2E fixture' },
-          history: { available: false, reason: 'E2E fixture', epochs: [] },
+          experiments: experimentListing().experiments,
+          missing: [],
+          curves: {},
         });
       }
       if (path === '/api/train/defaults') {
@@ -181,17 +176,18 @@ describe('Web multi-experiment E2E', () => {
   });
 });
 
-describe('왼쪽 dataset 목록', () => {
+describe('기록 화면의 dataset 고르기', () => {
   it('전처리는 끝났지만 아직 학습하지 않은 판도 보여 준다', async () => {
     // 기록에서만 목록을 만들면 방금 만든 판이 보이지 않아, 그것으로 학습하려면
     // 어디로 가야 할지 알 수 없습니다.
     render(
-      <MemoryRouter initialEntries={['/']}>
+      <MemoryRouter initialEntries={['/records']}>
         <App />
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText('e2e-prepared')).toBeInTheDocument();
-    expect(screen.getByText('기록 없음 · 학습 전')).toBeInTheDocument();
+    const option = await screen.findByRole('option', { name: /e2e-prepared/ });
+
+    expect(option).toHaveTextContent('기록 없음 · 학습 전');
   });
 });

@@ -190,7 +190,7 @@ export function Live({
   if (!jobId) {
     return (
       <div style={{ padding: '36px 40px 60px' }}>
-        <LinkAction onClick={() => navigate('/')}>← 목록</LinkAction>
+        <LinkAction onClick={() => navigate('/records')}>← 기록</LinkAction>
         <div style={{ marginTop: 30 }}>
           <EmptyState
             message="아직 이 GUI로 시작한 학습이 없습니다. 새 실험으로 첫 학습을 걸어 보세요."
@@ -208,7 +208,7 @@ export function Live({
   if (!job) {
     return (
       <div style={{ padding: '36px 40px 60px' }}>
-        <LinkAction onClick={() => navigate('/')}>← 목록</LinkAction>
+        <LinkAction onClick={() => navigate('/records')}>← 기록</LinkAction>
         <div style={{ marginTop: 30, ...type.body, color: color.textMuted }}>
           {error ?? '학습 정보를 불러오고 있습니다.'}
         </div>
@@ -280,7 +280,7 @@ export function Live({
   return (
     <div style={{ padding: '36px 40px 60px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 20 }}>
-        <LinkAction onClick={() => navigate('/')}>← 목록</LinkAction>
+        <LinkAction onClick={() => navigate('/records')}>← 기록</LinkAction>
         <Button kind="primary" onClick={onNewExperiment} style={{ flex: 'none' }}>
           새 실험
         </Button>
@@ -546,7 +546,7 @@ export function Live({
           </span>
           <span style={{ ...type.bodySmall, color: color.textMuted }}>
             {queue.data?.paused
-              ? '멈춰 있습니다. 목록 화면에서 다시 돌릴 수 있습니다.'
+              ? '멈춰 있습니다. 첫 화면(내 학습)에서 다시 돌릴 수 있습니다.'
               : '이 학습이 끝나면 위에서부터 차례로 시작합니다'}
           </span>
         </div>
@@ -598,7 +598,7 @@ export function Live({
           onDeleted={() => {
             setConfirmDelete(false);
             onJobsChanged();
-            navigate('/');
+            navigate('/records');
           }}
         />
       )}

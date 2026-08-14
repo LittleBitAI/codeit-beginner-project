@@ -12,7 +12,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 import type {
   CapabilityValueSource,
-  EpochRecord,
+  ExperimentHistoryCurve,
   ExperimentSummary,
 } from '../api/types';
 import { Chart, ChartHead, ChartLegend, type Series } from '../components/LossChart';
@@ -439,7 +439,7 @@ export function Canvas({
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const [compared, setCompared] = useState<ExperimentSummary[]>([]);
-  const [curves, setCurves] = useState<Record<string, EpochRecord[]>>({});
+  const [curves, setCurves] = useState<Record<string, ExperimentHistoryCurve>>({});
   const [error, setError] = useState<string | null>(null);
   const [showDev, setShowDev] = useState(false);
 
@@ -474,32 +474,24 @@ export function Canvas({
       return;
     }
     let active = true;
+    // 표와 곡선을 요청 하나로 받습니다. 실행마다 상세를 또 부르면 서버가 그때마다
+    // registry index 전체를 훑고, 곡선에 쓰지 않는 평가 결과까지 함께 옵니다.
     void api.compareExperiments(runIds).then(
       (result) => {
         if (active) {
           setCompared(result.experiments);
+          setCurves(result.curves ?? {});
           setError(null);
         }
       },
       (caught: unknown) => {
         if (active) {
           setCompared([]);
+          setCurves({});
           setError(caught instanceof Error ? caught.message : '비교 정보를 불러오지 못했습니다.');
         }
       },
     );
-    // 곡선은 실행마다 따로 읽습니다. 하나가 없어도 나머지는 그립니다.
-    for (const runId of runIds) {
-      void api.experimentDetail(runId).then(
-        (detail) => {
-          if (!active) return;
-          setCurves((current) => ({ ...current, [runId]: detail.history.epochs ?? [] }));
-        },
-        () => {
-          if (active) setCurves((current) => ({ ...current, [runId]: [] }));
-        },
-      );
-    }
     return () => {
       active = false;
     };
@@ -515,10 +507,38 @@ export function Canvas({
   const series: Series[] = compared.map((item, index) => ({
     label: item.run_id,
     color: seriesColor[index % seriesColor.length] as string,
-    points: (curves[item.run_id] ?? [])
+    points: (curves[item.run_id]?.epochs ?? [])
       .filter((epoch) => epoch.validation_loss !== null)
       .map((epoch) => ({ x: epoch.epoch, y: epoch.validation_loss as number })),
   }));
+  /**
+   * 선이 그려지지 않은 실행마다 그 이유 한 줄입니다.
+   *
+   * 이유는 셋입니다: 기록 파일을 못 읽었거나, 아직 한 epoch도 안 끝났거나, epoch은
+   * 끝났는데 validation loss가 없거나. 그림 하나에 하나만 적으면 **섞인 경우**를
+   * 놓칩니다 — 둘 중 하나만 실패하면 그림은 나머지를 그리고, 사라진 선은 아무 말도
+   * 없이 사라집니다. 그래서 실행별로 답니다.
+   */
+  const curveNotes = compared
+    .map((item, index) => {
+      if ((series[index]?.points.length ?? 0) > 0) return null;
+      const curve = curves[item.run_id];
+      if (!curve) return null;
+      if (curve.available === false) {
+        return { runId: item.run_id, note: curve.reason ?? '학습 기록을 읽지 못했습니다.' };
+      }
+      return {
+        runId: item.run_id,
+        note:
+          (curve.epochs ?? []).length === 0
+            ? '아직 한 epoch도 끝나지 않았습니다.'
+            : 'validation loss가 기록되지 않았습니다.',
+      };
+    })
+    .filter((note): note is { runId: string; note: string } => note !== null);
+  // 하나도 못 그릴 때 그림 자리에 들어갈 말입니다. 이유는 아래 줄들이 말하므로 여기서
+  // 원인을 단정하지 않습니다 — 기본 문구는 "epoch이 하나도 끝나지 않았다"입니다.
+  const nothingDrawn = series.every((item) => item.points.length === 0);
   const maxEpoch = Math.max(
     1,
     ...series.flatMap((item) => item.points.map((point) => point.x)),
@@ -535,7 +555,7 @@ export function Canvas({
     >
       <div style={{ borderRight: `1px solid ${color.border}`, padding: '30px 0 24px', background: color.sheet }}>
         <div style={{ padding: '0 22px 20px' }}>
-          <LinkAction onClick={() => navigate('/')}>← 목록</LinkAction>
+          <LinkAction onClick={() => navigate('/records')}>← 기록</LinkAction>
           <div style={{ ...type.subTitle, color: color.text, marginTop: 16 }}>견줄 실행</div>
           {/* 어느 dataset 안에서 고르는 중인지 늘 적습니다. 이 목록은 그 dataset의
               기록만 담습니다 — 데이터가 다른 실행을 나란히 세우면 모델 차이인지
@@ -701,7 +721,7 @@ export function Canvas({
             }
             action={
               selectable.length === 0 ? (
-                <Button kind="secondary" onClick={() => navigate('/')}>
+                <Button kind="secondary" onClick={() => navigate('/records')}>
                   기록 목록으로
                 </Button>
               ) : undefined
@@ -710,7 +730,25 @@ export function Canvas({
         ) : (
           <>
             <ChartHead label="VALIDATION LOSS" right="y 데이터 범위" />
-            <Chart series={series} xMax={maxEpoch} height={260} />
+            <Chart
+              series={series}
+              xMax={maxEpoch}
+              height={260}
+              emptyMessage={
+                nothingDrawn && curveNotes.length > 0
+                  ? '그릴 loss 곡선이 없습니다. 실행별 이유는 아래에 있습니다.'
+                  : undefined
+              }
+            />
+            {curveNotes.length > 0 && (
+              <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {curveNotes.map((item) => (
+                  <span key={item.runId} style={{ ...type.note, color: color.textMuted }}>
+                    <span style={{ fontFamily: font.mono }}>{item.runId}</span> — {item.note}
+                  </span>
+                ))}
+              </div>
+            )}
 
             {showDev && (
               <div style={{ background: color.panel, padding: '18px 20px', margin: '26px 0' }}>
