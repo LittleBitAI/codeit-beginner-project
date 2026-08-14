@@ -64,7 +64,12 @@ beforeEach(() => {
             project: { name: 'pill' },
             execution: { mode: 'local' },
             storage: {},
-            train: { run_id: 'retina-basic-e15-a7f3', architecture: 'retinanet_resnet50_fpn_v2' },
+            train: {
+              run_id: 'retina-basic-e15-a7f3',
+              architecture: 'retinanet_resnet50_fpn_v2',
+              batch_size: 2,
+              gradient_accumulation_steps: 8,
+            },
             inputs: { data: { train_manifest_uri: 'artifacts/data/v5/train_manifest.json' } },
           },
         });
@@ -146,6 +151,44 @@ describe('NewExperimentSheet', () => {
     fireEvent.click(screen.getByRole('button', { name: '시작' }));
 
     await waitFor(() => expect(posted.map((item) => item.path)).toContain('/api/train/jobs'));
+  });
+
+  // 확인 창은 마지막 검증 결과를 보여 주고, 만들기는 지금 draft를 보냅니다. 값을
+  // 바꾸고 검증이 돌아오기 전에 눌러 버리면 확인한 것과 다른 설정으로 학습이 돕니다.
+  it('바꾼 값이 아직 검증되지 않았으면 시작할 수 없다', async () => {
+    show();
+    await fillAndReady();
+
+    fireEvent.change(screen.getByRole('textbox', { name: /실행 이름/ }), {
+      target: { value: 'my-run' },
+    });
+
+    expect(screen.getByRole('button', { name: '바로 시작' })).toBeDisabled();
+    await waitFor(() => expect(screen.getByRole('button', { name: '바로 시작' })).toBeEnabled());
+  });
+
+  it('확인 창을 열면 창이 포커스를 받아 ESC로 닫힌다', async () => {
+    show();
+    await fillAndReady();
+
+    fireEvent.click(screen.getByRole('button', { name: '바로 시작' }));
+
+    const dialog = screen.getByRole('dialog', { name: /시작 확인/ });
+    expect(dialog).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+
+    expect(screen.queryByText('이 설정으로 시작할까요?')).toBeNull();
+  });
+
+  // 지운 설명 문단이 계산해 주던 값입니다. 표에 원시 값 둘만 두면 실제 갱신 규모가
+  // 보이지 않습니다.
+  it('모아서 갱신하면 유효 batch를 확인 창에서 알려 준다', async () => {
+    show();
+    await fillAndReady();
+
+    fireEvent.click(screen.getByRole('button', { name: '바로 시작' }));
+
+    expect(screen.getByText(/유효 batch 16/)).toBeInTheDocument();
   });
 
   it('다시 고치기를 누르면 아무것도 만들지 않는다', async () => {

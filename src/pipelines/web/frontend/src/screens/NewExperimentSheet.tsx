@@ -6,7 +6,7 @@
  * 합니다: 시작을 누르면 설정을 먼저 만들고, 서버가 거부하면 시작하지 않습니다.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { api, ApiError } from '../api/client';
@@ -143,6 +143,19 @@ function ConfirmStart({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  // 창이 포커스를 받아야 ESC가 닿습니다. 열기 전에 눌렀던 단추에 포커스가 남아 있으면
+  // 아래 onKeyDown은 한 번도 실행되지 않습니다.
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    dialogRef.current?.focus();
+  }, []);
+
+  // 원시 값 둘로는 실제 갱신 규모가 보이지 않습니다. 지운 설명 문단이 계산해 주던 값이라
+  // 표에서 사라지면 그대로 잃습니다.
+  const accumulation = Number(train.gradient_accumulation_steps ?? 1);
+  const effectiveBatch =
+    accumulation > 1 ? Number(train.batch_size) * accumulation : null;
+
   return (
     <>
       <div
@@ -150,9 +163,11 @@ function ConfirmStart({
         style={{ position: 'fixed', inset: 0, background: 'rgba(8,6,4,.55)', zIndex: 65 }}
       />
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label={`${runId} 시작 확인`}
+        tabIndex={-1}
         onKeyDown={(event) => {
           if (event.key === 'Escape') onCancel();
         }}
@@ -207,6 +222,12 @@ function ConfirmStart({
             </div>
           ))}
         </div>
+        {effectiveBatch !== null && (
+          <div style={{ ...type.bodySmall, color: color.textBody }}>
+            유효 batch {effectiveBatch} — batch {String(train.batch_size)}개를 {accumulation}번
+            모아 한 번씩 가중치를 갱신합니다.
+          </div>
+        )}
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
           <Button kind="ghost" onClick={onCancel} disabled={pending}>
             다시 고치기
@@ -332,8 +353,14 @@ export function NewExperimentSheet({
   // 시작하기 전에 보낼 설정을 한 번 더 펼쳐 보여 줍니다.
   const [confirming, setConfirming] = useState<'start' | 'queue' | null>(null);
 
+  const [validatedKey, setValidatedKey] = useState<string | null>(null);
+
   const fields = defaults?.fields ?? [];
   const payload = useMemo(() => toPayload(draft, fields), [draft, fields]);
+  // 확인 창은 **마지막 검증 결과**를 보여 주고 만들기는 **지금 payload**를 보냅니다.
+  // 둘이 어긋난 채로 시작할 수 있으면 확인한 것과 다른 설정으로 학습이 도므로, 검증이
+  // 따라잡을 때까지(250ms) 시작을 잠급니다.
+  const payloadKey = useMemo(() => JSON.stringify(payload), [payload]);
 
   // 고른 데이터셋과 지금 칸의 값이 다른지 확인합니다. 실제로 화면에는 새 데이터셋이
   // 보이는데 예전 데이터로 학습된 적이 있어서, 다르면 눈에 띄게 알립니다.
@@ -345,11 +372,14 @@ export function NewExperimentSheet({
     const timer = window.setTimeout(() => {
       void api
         .validate(payload)
-        .then(setResult)
+        .then((value) => {
+          setResult(value);
+          setValidatedKey(payloadKey);
+        })
         .catch(() => setResult(null));
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [payload, defaults]);
+  }, [payload, payloadKey, defaults]);
 
   if (!defaults) {
     return (
@@ -367,7 +397,8 @@ export function NewExperimentSheet({
   const dataFilled = defaults.data_fields.every(
     (spec) => (draft.data[spec.name] ?? '').trim() !== '',
   );
-  const ready = Boolean(result?.valid) && dataFilled && pending === null;
+  const ready =
+    Boolean(result?.valid) && dataFilled && validatedKey === payloadKey && pending === null;
 
   const capability = resolveTrainCapability(defaults);
   const selectedOptimizer = draft.train.optimizer || capability.optimizer.default;
