@@ -170,7 +170,16 @@ export function Live({
       .then((value) => {
         if (live) setResumeCheck(value);
       })
-      .catch(() => {});
+      .catch(() => {
+        // 확인이 실패했다고 아무것도 못 하게 두면 새로고침 전까지 "확인 중"에 갇힙니다.
+        // 모를 때는 눌러 보게 하고, 그때는 서버가 답합니다.
+        if (live) {
+          setResumeCheck({
+            available: true,
+            reason: '이어갈 수 있는지 확인하지 못했습니다. 눌러 보면 서버가 답합니다.',
+          });
+        }
+      });
     return () => {
       live = false;
     };
@@ -221,6 +230,10 @@ export function Live({
   // 않습니다 — 눌러 봐야 서버가 같은 이유로 거절합니다.
   const completedEpochs = Math.max(progress.completed_epochs ?? 0, epochs.length);
   const resumable = resumeCheck?.available === true;
+  // 서버가 이유를 줬으면 그 말을 그대로 씁니다. 단추가 없는 까닭과 눌렀을 때 나올 말이
+  // 어긋나지 않아야 합니다. 세 상태(실패·중지·중단)가 모두 이 한 줄을 씁니다.
+  const resumeNote =
+    resumeCheck?.reason ?? (resumeCheck === null ? '이어갈 수 있는지 확인하고 있습니다.' : null);
   const resumeButton = resumable ? (
     <Button onClick={() => void resume()} disabled={resuming}>
       {resuming ? '시작하는 중…' : '이어서 학습'}
@@ -434,16 +447,17 @@ export function Live({
         {job.status === 'failed' && (
           <AlertRow level="error" title="학습이 실패했습니다" action={resumeButton}>
             {job.message ?? '원인을 알 수 없습니다. 아래 로그를 확인해 주세요.'}
-            {resumable && ' 저장된 checkpoint가 있어 새 실행 이름으로 이어갈 수 있습니다.'}
+            {resumeNote
+              ? ` ${resumeNote}`
+              : resumable && ' 저장된 checkpoint가 있어 새 실행 이름으로 이어갈 수 있습니다.'}
             {resumed && ` '${resumed}' 이름으로 대기열에 넣었습니다.`}
             {resumeError && ` ${resumeError}`}
           </AlertRow>
         )}
         {job.status === 'cancelled' && (
           <AlertRow level="warning" title="학습을 중지했습니다" action={resumeButton}>
-            {resumable
-              ? `epoch ${completedEpochs}까지 마쳤습니다. 그 지점의 checkpoint에서 새 실행 이름으로 이어갑니다 — 남은 epoch이 아니라 원래 계획한 전체 epoch까지 돕니다.`
-              : (resumeCheck?.reason ?? '이어갈 수 있는지 확인하고 있습니다.')}
+            {resumeNote ??
+              `epoch ${completedEpochs}까지 마쳤습니다. 그 지점의 checkpoint에서 새 실행 이름으로 이어갑니다 — 남은 epoch이 아니라 원래 계획한 전체 epoch까지 돕니다.`}
             {job.orphan_note &&
               ` ${job.orphan_note} 정리는 train pipeline이 소유한 영역이라 이 화면에서 지우지 않습니다.`}
             {resumed && ` '${resumed}' 이름으로 대기열에 넣었습니다.`}
@@ -454,15 +468,11 @@ export function Live({
           <AlertRow
             level="warning"
             title="서버가 다시 시작되어 상태를 잃었습니다"
-            action={
-              <Button onClick={() => void resume()} disabled={resuming}>
-                {resuming ? '시작하는 중…' : '이어서 학습'}
-              </Button>
-            }
+            action={resumeButton}
           >
-            {job.message ?? '이 학습의 실제 결과는 알 수 없습니다.'} epoch마다 저장한 checkpoint가
-            있으면 그 지점부터 이어서 학습합니다. 결과가 섞이지 않도록 새 실행 이름으로 시작하고,
-            남은 epoch이 아니라 원래 계획한 전체 epoch까지 돕니다.
+            {job.message ?? '이 학습의 실제 결과는 알 수 없습니다.'}{' '}
+            {resumeNote ??
+              '저장된 checkpoint에서 이어서 학습합니다. 결과가 섞이지 않도록 새 실행 이름으로 시작하고, 남은 epoch이 아니라 원래 계획한 전체 epoch까지 돕니다.'}
             {resumed && ` '${resumed}' 이름으로 대기열에 넣었습니다.`}
             {resumeError && ` ${resumeError}`}
           </AlertRow>

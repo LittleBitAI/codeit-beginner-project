@@ -19,6 +19,8 @@ let availability: { available: boolean; reason: string | null } = {
   available: true,
   reason: null,
 };
+/** 확인 요청 자체가 실패하는 경우. backend 연결이 끊기거나 저장소 설정이 틀렸을 때입니다. */
+let availabilityFails = false;
 
 function job(overrides: Partial<JobRecord> = {}): JobRecord {
   return {
@@ -64,6 +66,7 @@ beforeEach(() => {
   posted = [];
   current = null;
   availability = { available: true, reason: null };
+  availabilityFails = false;
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -86,7 +89,10 @@ beforeEach(() => {
         return jsonResponse({ lines: [], next: 0, complete: true });
       }
       // 이어갈 수 있는지는 서버가 답합니다. 화면은 그 답만 씁니다.
-      if (path === '/api/train/jobs/job-1/resume') return jsonResponse(availability);
+      if (path === '/api/train/jobs/job-1/resume') {
+        if (availabilityFails) throw new Error('backend에 연결하지 못했습니다.');
+        return jsonResponse(availability);
+      }
       if (path === '/api/train/jobs/job-1') return jsonResponse(current ?? job());
       if (path === '/api/train/queue') return jsonResponse({ entries: [], paused: false });
       if (path === '/api/gpu/status') {
@@ -126,6 +132,25 @@ describe('Live 이어서 학습', () => {
     expect(
       await screen.findByText(/retina-stopped-resume-20260101T030000Z' 이름으로 대기열에 넣었습니다/),
     ).toBeInTheDocument();
+  });
+
+  // 상태마다 다른 기준을 쓰면 한 곳은 반드시 어긋납니다. 중단된 학습도 같은 답을 봅니다.
+  it('중단된 학습도 서버가 아니라고 하면 단추를 두지 않는다', async () => {
+    availability = { available: false, reason: '저장된 checkpoint가 없습니다.' };
+    show(job({ status: 'interrupted', status_label: '중단됨' }));
+
+    expect(await screen.findByText(/저장된 checkpoint가 없습니다/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '이어서 학습' })).toBeNull();
+  });
+
+  // 확인이 실패했다고 아무것도 못 하게 두면, 새로고침 전까지 "확인 중"에 갇힙니다.
+  // 모를 때는 눌러 보게 하고 서버가 답하게 합니다.
+  it('이어갈 수 있는지 확인하지 못하면 그렇게 말하고 단추는 남긴다', async () => {
+    availabilityFails = true;
+    show(job());
+
+    expect(await screen.findByText(/확인하지 못했습니다/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '이어서 학습' })).toBeInTheDocument();
   });
 
   // **마친 epoch 수로는 알 수 없는 경우입니다.** 이 학습은 epoch 7까지 마쳤지만
