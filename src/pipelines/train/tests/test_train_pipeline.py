@@ -2747,41 +2747,45 @@ def _s3_train_config(tmp_path: Path, run_id: str) -> dict:
     }
 
 
-def test_a_new_runtime_fills_its_image_cache_from_one_archive(tmp_path, monkeypatch):
+def test_a_new_runtime_fills_its_image_cache_before_the_first_batch(tmp_path, monkeypatch):
     """Colab은 runtime이 바뀌면 빈 디스크로 시작합니다.
 
-    그때 이미지를 한 장씩 다시 받으면 1만 건을 다시 받게 됩니다. 앞선 실행이 남긴
-    묶음 하나로 채워야 이어서 학습하는 값이 있습니다.
+    그때 이미지를 batch마다 한 장씩 받으면 첫 epoch이 이미지 수만큼 기다립니다.
+    첫 batch가 돌기 전에 전부 받아 두어야 그 기다림이 사라집니다.
     """
 
-    monkeypatch.setattr(pipeline, "build_model", lambda *args, **kwargs: TinyDetector())
     objects = _s3_dataset_objects()
     storage = _bucket_storage(objects)
     monkeypatch.setattr(pipeline, "create_storage", lambda config: storage)
+    downloads_before_training: list[int] = []
 
-    def cache_at(directory: str):
+    class _CountingDetector(TinyDetector):
+        def forward(self, images, targets):
+            if not downloads_before_training:
+                downloads_before_training.append(
+                    storage.client.download_file.call_count
+                )
+            return super().forward(images, targets)
+
+    monkeypatch.setattr(
+        pipeline, "build_model", lambda *args, **kwargs: _CountingDetector()
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "ImageCacheSession",
         # 실제 cache 위치는 저장소 안이라 test가 쓰면 안 됩니다.
-        return lambda summary: image_cache_module.ImageCacheSession(
+        lambda summary: image_cache_module.ImageCacheSession(
             summary,
-            cache_root=tmp_path / directory,
+            cache_root=tmp_path / "runtime",
             temporary_root=tmp_path / "cache-temporary",
-        )
+        ),
+    )
 
-    monkeypatch.setattr(pipeline, "ImageCacheSession", cache_at("first-runtime"))
-    first = train.run(_s3_train_config(tmp_path, "colab-first"))
+    result = train.run(_s3_train_config(tmp_path, "colab-first"))
 
-    assert first["status"] == "ok", first["message"]
-    archives = [key for key in objects if key.endswith(".tar")]
-    assert len(archives) == 1
-
-    monkeypatch.setattr(pipeline, "ImageCacheSession", cache_at("second-runtime"))
-    storage.client.download_file.reset_mock()
-    second = train.run(_s3_train_config(tmp_path, "colab-second"))
-
-    assert second["status"] == "ok", second["message"]
-    downloaded = [call.args[1] for call in storage.client.download_file.call_args_list]
-    assert archives[0] in downloaded
-    assert not [key for key in downloaded if key.endswith(".png")]
+    assert result["status"] == "ok", result["message"]
+    images = [key for key in objects if key.endswith(".png")]
+    assert downloads_before_training == [len(images)]
 
 
 class _AccumulationSpy:

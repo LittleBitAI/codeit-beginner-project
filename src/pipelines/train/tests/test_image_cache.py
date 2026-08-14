@@ -5,7 +5,6 @@ import io
 import os
 import pickle
 import struct
-import tarfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -45,46 +44,12 @@ def _storage() -> Mock:
     storage = Mock()
 
     def download(source, destination, *, overwrite=False):
-        assert source == "s3://bucket/images/pill.png"
+        assert source in IMAGES
         assert overwrite is False
         Image.new("RGB", (3, 2), color="red").save(destination)
         return Path(destination)
 
     storage.download_file.side_effect = download
-    return storage
-
-
-def _s3_cache_storage() -> S3Storage:
-    """이미지 한 장과 cache 묶음 하나를 다루는 가짜 bucket입니다.
-
-    ``published``에 올라간 것만 존재합니다. 실제 실행처럼 묶음도 이미지도 같은
-    ``download_file``로 내려받습니다.
-    """
-
-    client = Mock()
-    client.head_object.return_value = {"ETag": '"pill-etag"'}
-    storage = S3Storage("bucket", client=client)
-    published: dict[str, bytes] = {}
-
-    def download_file(source, destination, *, overwrite=False):
-        destination = Path(destination)
-        payload = published.get(str(source))
-        if payload is None:
-            Image.new("RGB", (3, 2), color="red").save(destination, format="PNG")
-        else:
-            destination.write_bytes(payload)
-        return destination
-
-    def upload_file(source, destination, *, overwrite=False):
-        if not overwrite and str(destination) in published:
-            raise StorageError(f"이미 있습니다: {destination}")
-        published[str(destination)] = Path(source).read_bytes()
-        return f"s3://bucket/{destination}"
-
-    storage.exists = lambda location: str(location) in published
-    storage.download_file = Mock(side_effect=download_file)
-    storage.upload_file = Mock(side_effect=upload_file)
-    storage.published = published
     return storage
 
 
@@ -94,43 +59,69 @@ IMAGES = (
 )
 
 
-def _warm(cache_root: Path, temporary_root: Path, storage: S3Storage) -> None:
+def test_prefetch_fills_the_cache_and_skips_what_it_already_has(tmp_path):
+    """학습 전에 전부 받아 두되, 이어서 하는 실행은 남은 것만 받습니다."""
+
+    storage = _storage()
+    cache_root = tmp_path / "persistent"
+    temporary_root = tmp_path / "temporary"
+
     with ImageCacheSession(
         _summary(), cache_root=cache_root, temporary_root=temporary_root
-    ) as cache:
-        for location in IMAGES:
-            cache.fetch(location, storage)
-        cache.publish_archive(storage, expected_entries=len(IMAGES))
-
-
-def test_publish_never_replaces_an_archive_another_run_already_made(tmp_path):
-    storage = _s3_cache_storage()
-    _warm(tmp_path / "first", tmp_path / "temporary", storage)
-    uploads = storage.upload_file.call_count
-
-    _warm(tmp_path / "second", tmp_path / "temporary", storage)
-
-    # 덮어쓰면 아직 그 묶음을 받고 있던 실행이 반쪽짜리를 보게 됩니다.
-    assert storage.upload_file.call_count == uploads
-    assert all(
-        call.kwargs["overwrite"] is False for call in storage.upload_file.call_args_list
-    )
-
-
-def test_half_filled_cache_is_never_published(tmp_path):
-    storage = _s3_cache_storage()
+    ) as interrupted:
+        interrupted.fetch(IMAGES[0], storage)
 
     with ImageCacheSession(
+        _summary(), cache_root=cache_root, temporary_root=temporary_root
+    ) as resumed:
+        assert resumed.prefetch(IMAGES, storage) == len(IMAGES)
+        # 두 장 중 한 장은 앞 실행이 이미 받아 두었습니다.
+        assert storage.download_file.call_count == len(IMAGES)
+        for location in IMAGES:
+            assert resumed.fetch(location, storage).is_file()
+        assert storage.download_file.call_count == len(IMAGES)
+
+
+def test_prefetch_downloads_more_than_one_image_at_a_time(tmp_path):
+    """한 장씩 차례로 받으면 첫 epoch이 이미지 수만큼 기다립니다."""
+
+    # 두 장이 동시에 오지 않으면 여기서 기다리다 시간이 초과됩니다.
+    barrier = Barrier(len(IMAGES), timeout=5)
+    storage = _storage()
+
+    def download(source, destination, *, overwrite=False):
+        barrier.wait()
+        Image.new("RGB", (3, 2), color="red").save(destination, format="PNG")
+        return Path(destination)
+
+    storage.download_file.side_effect = download
+    with ImageCacheSession(
         _summary(),
-        cache_root=tmp_path / "cache",
+        cache_root=tmp_path / "persistent",
         temporary_root=tmp_path / "temporary",
     ) as cache:
-        cache.fetch(IMAGES[0], storage)
-        # 두 장짜리 dataset인데 한 장만 받았습니다. 이대로 올리면 다음 실행은
-        # 나머지 한 장이 영영 없는 묶음을 믿게 됩니다.
-        assert cache.publish_archive(storage, expected_entries=len(IMAGES)) is False
+        assert cache.prefetch(IMAGES, storage) == len(IMAGES)
 
-    assert storage.published == {}
+
+def test_prefetch_leaves_an_image_it_cannot_get_to_the_training_loop(tmp_path):
+    """한 장을 못 받아도 학습은 시작합니다. 그 자리에서 다시 받아 보게 둡니다."""
+
+    storage = _storage()
+
+    def download(source, destination, *, overwrite=False):
+        if source == IMAGES[1]:
+            raise StorageError("이미지를 받지 못했습니다")
+        Image.new("RGB", (3, 2), color="red").save(destination, format="PNG")
+        return Path(destination)
+
+    storage.download_file.side_effect = download
+    with ImageCacheSession(
+        _summary(),
+        cache_root=tmp_path / "persistent",
+        temporary_root=tmp_path / "temporary",
+    ) as cache:
+        assert cache.prefetch(IMAGES, storage) == 1
+        assert cache.fetch(IMAGES[0], storage).is_file()
 
 
 def _png_with_corrupt_idat() -> bytes:
@@ -192,33 +183,28 @@ def test_repeated_corrupt_s3_download_never_publishes_a_cache_entry(tmp_path):
     (_png_with_corrupt_idat(), _png_without_idat(), _truncated_jpeg()),
     ids=("png-syntax-error", "png-index-error", "jpeg-load-error"),
 )
-def test_shared_archive_image_that_cannot_be_fully_decoded_is_downloaded_again(
+def test_cached_image_that_cannot_be_fully_decoded_is_downloaded_again(
     tmp_path, corrupt_payload
 ):
-    storage = _s3_cache_storage()
+    storage = _storage()
+    cache_root = tmp_path / "persistent"
     temporary_root = tmp_path / "temporary"
 
     with ImageCacheSession(
-        _summary(), cache_root=tmp_path / "producer", temporary_root=temporary_root
-    ) as producer:
-        cached = producer.fetch(IMAGES[0], storage)
-        cached.write_bytes(corrupt_payload)
-        assert producer.publish_archive(storage, expected_entries=1) is True
+        _summary(), cache_root=cache_root, temporary_root=temporary_root
+    ) as first:
+        # 받아 둔 뒤 디스크에서 깨진 파일입니다. 그대로 쓰면 학습이 그 batch에서
+        # 멈추므로, 다음 실행이 알아보고 다시 받아 고쳐야 합니다.
+        first.fetch(IMAGES[0], storage).write_bytes(corrupt_payload)
 
     with ImageCacheSession(
-        _summary(), cache_root=tmp_path / "consumer", temporary_root=temporary_root
-    ) as consumer:
-        assert consumer.seed_from_archive(storage) is True
-        repaired = consumer.fetch(IMAGES[0], storage)
+        _summary(), cache_root=cache_root, temporary_root=temporary_root
+    ) as second:
+        repaired = second.fetch(IMAGES[0], storage)
         with Image.open(repaired) as image:
             image.load()
 
-    source_downloads = [
-        call
-        for call in storage.download_file.call_args_list
-        if call.args[0] == IMAGES[0]
-    ]
-    assert len(source_downloads) == 2
+    assert storage.download_file.call_count == 2
 
 
 def test_corrupt_s3_download_is_retried_before_cache_publish(tmp_path):
@@ -244,56 +230,6 @@ def test_corrupt_s3_download_is_retried_before_cache_publish(tmp_path):
             image.load()
 
     assert storage.download_file.call_count == 2
-
-
-@pytest.mark.parametrize(
-    "name",
-    ["../escaped.png", "/etc/escaped.png", "C:/escaped.png", "..\\escaped.png"],
-)
-def test_archive_member_named_outside_the_cache_is_refused(tmp_path, name):
-    archive = tmp_path / "image-cache.tar"
-    payload = io.BytesIO(b"payload")
-    with tarfile.open(archive, "w") as bundle:
-        info = tarfile.TarInfo(name)
-        info.size = len(payload.getvalue())
-        bundle.addfile(info, payload)
-
-    # 묶음은 bucket에서 옵니다. 이름 하나로 cache 밖 파일이 덮어써질 수 있습니다.
-    with pytest.raises(TrainError, match="escapes"):
-        image_cache_module._extract_archive(archive, tmp_path / "objects")
-
-    assert not (tmp_path / "escaped.png").exists()
-
-
-def test_archive_symlink_member_is_refused(tmp_path):
-    archive = tmp_path / "image-cache.tar"
-    with tarfile.open(archive, "w") as bundle:
-        info = tarfile.TarInfo("objects/link")
-        info.type = tarfile.SYMTYPE
-        info.linkname = "../../../escaped"
-        bundle.addfile(info)
-
-    # 이름은 멀쩡합니다. 링크가 가리키는 곳이 cache 밖이라 이름 검사로는 못 막습니다.
-    with pytest.raises(TrainError, match="escapes"):
-        image_cache_module._extract_archive(archive, tmp_path / "objects")
-
-
-def test_temporary_cache_has_no_archive_to_share(tmp_path):
-    storage = _s3_cache_storage()
-
-    # fingerprint를 만들 수 없는 dataset은 실행마다 다른 임시 폴더를 씁니다.
-    # 다음 실행이 쓸 수 없는 묶음을 올리면 bucket만 커집니다.
-    with ImageCacheSession(
-        {"train_images": 1},
-        cache_root=tmp_path / "cache",
-        temporary_root=tmp_path / "temporary",
-    ) as cache:
-        cache.fetch(IMAGES[0], storage)
-        assert cache.archive_uri is None
-        assert cache.seed_from_archive(storage) is False
-        assert cache.publish_archive(storage, expected_entries=1) is False
-
-    assert storage.published == {}
 
 
 def test_versioned_s3_cache_is_reused_and_version_change_invalidates_it(tmp_path):

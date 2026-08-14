@@ -26,7 +26,7 @@ During training, `.<run_id>.partial` sits beside the final output. Every `checkp
 
 The S3 mirror `<prefix>/<run_id>/running/last_checkpoint.pt` is **one** self-contained object, so no pair can end up half updated. Its first conditional write claims the `run_id`; only the winner overwrites it.
 
-`datasets/pill_detection/image-cache/<fingerprint>.tar` holds a full image cache, packed once after an epoch. An empty cache fills from it in one object instead of refetching every image. It never overwrites an archive, refuses members that leave the cache, and fails silently into the per-image path.
+The cache fills **before the first batch**, `PREFETCH_WORKERS` images at a time, because fetching one per batch leaves the GPU waiting out one S3 round trip per image and that wait is the whole first epoch. Images already there are skipped, so an interrupted run downloads only the rest. An image that cannot be fetched is left to the training loop rather than stopping the run.
 
 `artifacts/train-image-cache/` keeps **one** dataset, because one namespace holds a whole one and Colab does not have room for two. Starting a run on a different dataset trashes every other unleased namespace before the first image is fetched; coming back to it refetches. A lease protects its namespace only while a run keeps fetching, and expires an hour after the last one, so a killed run does not hold tens of gigabytes for the fourteen-day TTL.
 
