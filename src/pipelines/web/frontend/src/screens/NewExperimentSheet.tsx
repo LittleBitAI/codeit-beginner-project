@@ -22,6 +22,7 @@ import {
   invalidControlStyle,
 } from '../components/primitives';
 import { color, font, type } from '../design/tokens';
+import { ALL_DATA_KEYS } from '../lib/dataKeys';
 import { dataMatchesSource } from '../lib/dataSource';
 import { describeRun } from '../lib/describeRun';
 import {
@@ -34,6 +35,7 @@ import {
   selectedSchedule,
   toPayload,
 } from '../lib/draftPayload';
+import { datasetLabel } from '../lib/runSpec';
 import { resolveTrainCapability } from '../lib/trainCapabilities';
 import { useDraft } from '../state/DraftContext';
 import { useTeam } from '../team/TeamContext';
@@ -189,7 +191,7 @@ export function NewExperimentSheet({
 }) {
   const navigate = useNavigate();
   const team = useTeam();
-  const { draft, setTrainField, setDataField, setDataFields, setSaved } = useDraft();
+  const { draft, setTrainField, setDataFields, setSaved } = useDraft();
   const [tab, setTab] = useState<TabKey>('basic');
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [showJson, setShowJson] = useState(false);
@@ -199,8 +201,10 @@ export function NewExperimentSheet({
   const fields = defaults?.fields ?? [];
   const payload = useMemo(() => toPayload(draft, fields), [draft, fields]);
 
-  // 고른 데이터셋과 지금 칸의 값이 다른지 확인합니다. 실제로 화면에는 새 데이터셋이
-  // 보이는데 예전 데이터로 학습된 적이 있어서, 다르면 눈에 띄게 알립니다.
+  // 고른 데이터셋과 **실려 갈 값**이 다른지 확인합니다. 실제로 화면에는 새 데이터셋이
+  // 보이는데 예전 데이터로 학습된 적이 있어서, 다르면 눈에 띄게 알립니다. 칸을 없앤
+  // 뒤에도 남는 경로가 있습니다 — 새 데이터셋에 없는 선택 artifact는 예전 값이 그대로
+  // 남습니다.
   const mismatched = !dataMatchesSource(draft.data, source);
 
   // 입력이 멈추면 서버에 검증을 맡깁니다. 판단 기준은 언제나 서버입니다.
@@ -246,11 +250,12 @@ export function NewExperimentSheet({
   const activeTab = TABS.find((item) => item.key === tab) ?? (TABS[0] as (typeof TABS)[number]);
   const tabErrorCount = (item: (typeof TABS)[number]) =>
     item.fields.filter((name) => messageFor(errors, `train.${name}`) !== undefined).length;
-  // data 칸은 기본 표에만 그려집니다. 다른 표를 보고 있으면 그 오류는 화면에 없습니다.
-  const hiddenErrors = errors.filter((item) =>
-    item.field.startsWith('inputs.data.')
-      ? tab !== 'basic'
-      : !activeTab.fields.includes(item.field.replace(/^train\./, '')),
+  // data 오류는 이제 붙일 칸이 없습니다. 어느 표를 보고 있든 여기 모읍니다 — 고른
+  // 데이터셋이 잘못됐다는 말을 화면 어디에도 못 적으면 시작만 조용히 막힙니다.
+  const hiddenErrors = errors.filter(
+    (item) =>
+      item.field.startsWith('inputs.data.') ||
+      !activeTab.fields.includes(item.field.replace(/^train\./, '')),
   );
 
   /** 설정을 만든 뒤 곧바로 시작하거나 줄을 세웁니다. 만들기가 실패하면 아무것도 하지 않습니다. */
@@ -373,62 +378,64 @@ export function NewExperimentSheet({
         })}
       </div>
 
+      {/* 읽을 데이터는 **고른 것을 보여 주기만** 합니다. 고르는 자리는 dataset 준비
+          하나뿐이고, 거기서 아무 폴더나 붙여넣을 수 있습니다. 같은 값을 두 곳에서
+          고칠 수 있으면 어느 쪽이 실려 갔는지 나중에 아무도 모릅니다. */}
       {tab === 'basic' && (
         <div style={{ paddingTop: 4, marginBottom: 26 }}>
           <MicroLabel style={{ marginBottom: 16 }}>이 학습이 읽을 데이터</MicroLabel>
-          {source?.complete && (
-            <div style={{ ...type.monoSpec, color: color.textMuted, marginBottom: 12, overflowWrap: 'anywhere' }}>
-              전처리 데이터셋에서 자동으로 채움 · {source.directory}
-            </div>
-          )}
-          {!source?.complete && (
-            <div style={{ ...type.note, color: color.textMuted, marginBottom: 12 }}>
-              왼쪽 <b style={{ color: color.textBody }}>dataset 준비</b>에서 전처리 폴더를 고르면 이
-              네 칸이 자동으로 채워집니다.
+          {dataFilled ? (
+            <>
+              <div
+                style={{
+                  ...type.monoValue,
+                  color: color.textStrong,
+                  marginBottom: 6,
+                  overflowWrap: 'anywhere',
+                }}
+              >
+                {/* 이름은 **실려 갈 값**에서 뽑습니다. 고른 데이터셋에서 뽑으면 둘이
+                    어긋났을 때 화면이 실제로 학습할 데이터가 아닌 것을 말합니다. */}
+                {datasetLabel(draft.data) ?? '(dataset 이름을 알 수 없음)'}
+              </div>
+              <div style={{ ...type.monoSpec, color: color.textMuted, overflowWrap: 'anywhere' }}>
+                {draft.data.train_manifest_uri}
+              </div>
+            </>
+          ) : (
+            <div style={{ ...type.note, color: color.textMuted }}>
+              왼쪽 <b style={{ color: color.textBody }}>dataset 준비</b>에서 전처리 폴더를 고르면
+              학습에 필요한 artifact 위치가 자동으로 채워집니다.
             </div>
           )}
           {mismatched && source && (
-            <div style={{ marginBottom: 12 }}>
+            <div style={{ marginTop: 14 }}>
               <AlertRow
                 level="warning"
-                title="고른 데이터셋과 아래 값이 다릅니다"
+                title="고른 데이터셋과 실려 갈 값이 다릅니다"
                 action={
                   <Button
-                    onClick={() => setDataFields({ ...source.data }, null)}
+                    // 덮어쓰기만 하면 새 데이터셋에 없는 값이 예전 것으로 남습니다.
+                    // 빈 값은 payload에서 빠지므로 먼저 전부 비우고 덮어씁니다.
+                    onClick={() =>
+                      setDataFields(
+                        {
+                          ...Object.fromEntries(ALL_DATA_KEYS.map((key) => [key, ''])),
+                          ...source.data,
+                        },
+                        null,
+                      )
+                    }
                     title="고른 데이터셋의 값으로 맞춥니다"
                   >
                     맞추기
                   </Button>
                 }
               >
-                이대로 학습하면 <b>아래 칸에 적힌 데이터</b>로 돌아갑니다.
+                이대로 학습하면 <b>위에 적힌 데이터</b>로 돌아갑니다.
               </AlertRow>
             </div>
           )}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {defaults.data_fields.map((spec) => (
-              <Field
-                key={spec.name}
-                label={spec.label}
-                hint={spec.hint}
-                error={messageFor(errors, `inputs.data.${spec.name}`)}
-              >
-                <input
-                  value={draft.data[spec.name] ?? ''}
-                  placeholder="artifacts/data/... 또는 s3://bucket/..."
-                  onChange={(event) => setDataField(spec.name, event.target.value)}
-                  style={
-                    messageFor(errors, `inputs.data.${spec.name}`) ? invalidControlStyle : controlStyle
-                  }
-                />
-              </Field>
-            ))}
-          </div>
-          <div style={{ ...type.note, color: color.textMuted, marginTop: 12 }}>
-            저장소 기준 상대 경로나 <code style={{ fontFamily: font.mono }}>s3://bucket/key</code>{' '}
-            형식만 받습니다. 절대 경로와 <code style={{ fontFamily: font.mono }}>..</code>는
-            거부됩니다.
-          </div>
         </div>
       )}
 
