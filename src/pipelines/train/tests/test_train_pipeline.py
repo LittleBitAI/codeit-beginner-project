@@ -371,6 +371,18 @@ def test_train_reads_exactly_the_setting_names_in_the_shared_contract(monkeypatc
     """
 
     defaults = train_contract.SETTING_DEFAULTS
+    # optimizer가 쓰는 값의 기본값은 optimizer마다 다릅니다. 그 값을 그대로 보내면
+    # lookup 이름을 바꿔도 fallback이 같은 값을 돌려줍니다.
+    adam_profile = train_contract.OPTIMIZER_PROFILES["AdamW"]
+    sgd_profile = train_contract.OPTIMIZER_PROFILES["SGD"]
+    adam = {
+        "optimizer": "AdamW",
+        "learning_rate": adam_profile["learning_rate"] * 2,
+        "weight_decay": adam_profile["weight_decay"] * 2,
+        "beta1": 0.85,
+        "beta2": 0.95,
+        "epsilon": 1e-7,
+    }
     common = {
         "run_id": "train-keys",
         "epochs": defaults["epochs"] + 2,
@@ -381,8 +393,6 @@ def test_train_reads_exactly_the_setting_names_in_the_shared_contract(monkeypatc
         "num_workers": 2,
         "output_dir": f"{defaults['output_dir']}/nested",
         "output_prefix": f"{defaults['output_prefix']}/nested",
-        "learning_rate": 0.001,
-        "weight_decay": 0.01,
         "augmentation": {"preset": "pill_basic"},
         "gradient_accumulation_steps": 2,
         "early_stopping": {"patience": 2, "min_delta": 0.0},
@@ -392,13 +402,10 @@ def test_train_reads_exactly_the_setting_names_in_the_shared_contract(monkeypatc
     sent = [
         {
             **common,
+            **adam,
             "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
-            "optimizer": "AdamW",
             "device": "cpu",
             "batch_size": defaults["batch_size"] + 1,
-            "beta1": 0.9,
-            "beta2": 0.999,
-            "epsilon": 1e-8,
         },
         {
             **common,
@@ -406,21 +413,20 @@ def test_train_reads_exactly_the_setting_names_in_the_shared_contract(monkeypatc
             "optimizer": "SGD",
             "device": "cpu",
             "batch_size": defaults["batch_size"] + 1,
-            "momentum": 0.9,
+            "learning_rate": sgd_profile["learning_rate"] * 2,
+            "weight_decay": sgd_profile["weight_decay"] * 2,
+            "momentum": 0.8,
         },
         {
             # `input_size`와 절반 정밀도는 이 model에서만 받습니다. 그 조합은 CUDA와
             # batch_size 1을 함께 요구하므로 나머지 값만 기본값과 다르게 보냅니다.
             **common,
+            **adam,
             "architecture": train_contract.MMDETECTION_ARCHITECTURES[0],
-            "optimizer": "AdamW",
             "device": "cuda",
             "precision": "amp",
             "batch_size": 1,
             "input_size": train_contract.DEFAULT_INPUT_SIZE + 160,
-            "beta1": 0.9,
-            "beta2": 0.999,
-            "epsilon": 1e-8,
         },
     ]
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
