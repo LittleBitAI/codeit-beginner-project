@@ -1799,8 +1799,11 @@ def test_a_worker_gets_its_own_s3_connection_instead_of_the_parents(monkeypatch)
     실제로 지나갑니다.
     """
 
-    parent = S3Storage("bucket", prefix="datasets", region="ap-northeast-2")
-    inherited = parent.client  # 부모가 이미 연결을 만들어 둔 상태입니다.
+    # 진짜 boto3 client를 만들면 test가 AWS 자격 증명을 찾아 나섭니다. 부모에게는
+    # 가짜를 쥐어 주고, 새로 만든 쪽은 아무 연결도 물려받지 않았는지만 봅니다.
+    parent = S3Storage(
+        "bucket", prefix="datasets", region="ap-northeast-2", client=Mock()
+    )
 
     class _Dataset:
         storage = parent
@@ -1815,7 +1818,9 @@ def test_a_worker_gets_its_own_s3_connection_instead_of_the_parents(monkeypatch)
     trainer_module.give_worker_its_own_storage(0)
 
     assert dataset.storage is not parent
-    assert dataset.storage.client is not inherited
+    # 부모가 쓰던 연결을 물려받지 않았습니다. 자기 것은 처음 쓸 때 엽니다.
+    assert dataset.storage._provided_client is None
+    assert dataset.storage._cached_client is None
     # bucket과 접속 설정은 그대로여야 같은 곳에서 같은 권한으로 받습니다.
     assert dataset.storage.bucket == parent.bucket
     assert dataset.storage.prefix == parent.prefix
@@ -1849,6 +1854,32 @@ def test_run_rejects_resuming_into_a_different_worker_count(local_config, monkey
     assert result["status"] == "error"
     assert "num_workers" in result["message"]
     build_model_spy.assert_not_called()
+
+
+def test_resume_accepts_a_checkpoint_that_never_recorded_its_worker_count(local_config):
+    """이 key를 몰랐던 checkpoint는 0으로 읽어 그대로 이어서 할 수 있어야 합니다.
+
+    그때는 worker 없이 주 process가 직접 읽었습니다. 0으로 읽지 않으면 이 PR 이전에
+    저장한 checkpoint가 전부 이어서 할 수 없게 됩니다.
+    """
+
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+    checkpoint = torch.load(source, map_location="cpu", weights_only=False)
+    del checkpoint["training_config"]["num_workers"]
+    torch.save(checkpoint, source)
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"]["epochs"] = 4
+
+    result = train.run(resumed)
+
+    assert result["status"] == "ok", result["message"]
 
 
 @pytest.mark.parametrize("recorded", [512, 640])
