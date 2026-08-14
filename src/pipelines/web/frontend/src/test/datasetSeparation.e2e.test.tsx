@@ -21,7 +21,7 @@ const MANIFEST = `datasets/pill_detection/processed/${PREPARED}/train_manifest.j
 /** 기록 화면에서 고를 수 있는, 그러나 학습과는 상관없는 dataset들입니다. */
 const WATCHED = ['v5-118cls', 'v4-57cls'];
 
-let calls: { path: string; method: string }[] = [];
+let calls: { path: string; method: string; body: unknown }[] = [];
 
 function source(): DataSource {
   return {
@@ -113,7 +113,11 @@ beforeEach(() => {
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path =
         typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
-      calls.push({ path, method: init?.method ?? 'GET' });
+      calls.push({
+        path,
+        method: init?.method ?? 'GET',
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
 
       if (path === '/api/data/source') return jsonResponse({ source: source() });
       if (path === '/api/train/jobs') return jsonResponse({ jobs: [], active_job_id: null });
@@ -200,5 +204,19 @@ describe('보는 dataset과 학습에 쓰는 dataset', () => {
     expect(calls.filter((call) => call.path === '/api/data/source' && call.method !== 'GET')).toEqual(
       [],
     );
+
+    /**
+     * 이름과 요청 method만 보면 부족합니다. 고르기가 draft의 artifact URI 일부만
+     * 바꿔 놓아도 위 두 검사는 그대로 통과하고, 정작 서버로 가는 설정에는 다른
+     * dataset이 실립니다. **실제로 실려 가는 값**을 봅니다.
+     */
+    // 검증 요청은 입력이 멈춘 뒤(250ms) 나갑니다. 그것이 실제로 서버로 갈 설정입니다.
+    await waitFor(() =>
+      expect(calls.some((call) => call.path === '/api/train/validate')).toBe(true),
+    );
+    for (const call of calls.filter((call) => call.path === '/api/train/validate')) {
+      const data = (call.body as { inputs?: { data?: Record<string, string> } }).inputs?.data ?? {};
+      expect(data).toEqual(source().data);
+    }
   });
 });

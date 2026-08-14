@@ -157,6 +157,20 @@ describe('Board', () => {
     expect(screen.getByRole('button', { name: '모니터 →' })).toBeInTheDocument();
   });
 
+  // 같은 학습이 팀에 두 번 공유돼 있을 수 있습니다(다시 올렸거나 정리가 덜 됐거나).
+  // 첫 하나만 빼면 남은 것이 또 한 줄이 되어 한 실행이 둘로 보입니다.
+  it('같은 학습을 가리키는 팀 기록이 여럿이어도 한 줄만 남긴다', () => {
+    const shared = [
+      teamRun({ cloudRunId: 'c8', runId: 'retina-live', localJobId: 'job-1' }),
+      teamRun({ cloudRunId: 'c9', runId: 'retina-live', localJobId: 'job-1' }),
+    ];
+
+    show({ liveJob: liveJob(), teamRuns: shared, teamAvailable: true, teamLoaded: true });
+
+    expect(screen.getAllByText('retina-live')).toHaveLength(1);
+    expect(screen.getByText('1개 학습 중')).toBeInTheDocument();
+  });
+
   it('팀 기록을 아직 못 읽었으면 "없다"고 단정하지 않는다', () => {
     show({ teamAvailable: true, teamLoaded: false });
 

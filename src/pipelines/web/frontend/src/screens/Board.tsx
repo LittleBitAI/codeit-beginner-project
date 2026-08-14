@@ -24,6 +24,14 @@ import { isActiveRun, isStaleRun } from '../team/useTeamRuns';
 const ME = '나 (이 컴퓨터)';
 
 interface RunningRow {
+  /**
+   * 이 줄을 가르는 값. 화면의 key로도 씁니다.
+   *
+   * `runId`는 안 됩니다. 자동 이름은 설정과 seed의 지문이라 서로 다른 실행이 같은
+   * 이름을 갖습니다. 그것을 key로 두면 React가 두 줄을 같은 것으로 보고, 펼쳐 둔
+   * 로그가 다른 사람의 실행으로 옮겨 갑니다.
+   */
+  id: string;
   runId: string;
   /** 누가 돌리고 있는지. 이 컴퓨터면 그렇다고 적습니다. */
   who: string;
@@ -57,6 +65,7 @@ function rowFromTeamRun(run: TeamRun): RunningRow {
   const total = num(progress.total_epochs);
   const best = (progress.best ?? null) as { validation_loss?: unknown } | null;
   return {
+    id: `cloud:${run.cloudRunId}`,
     runId: run.runId,
     who: run.actorName,
     // 이름이 같은 팀원 둘이 한 사람으로 합쳐지지 않도록 고유한 값으로 가릅니다.
@@ -74,6 +83,7 @@ function rowFromJob(job: JobRecord): RunningRow {
   const progress = job.progress;
   const current = progress.available ? epochsDone(progress) : null;
   return {
+    id: `job:${job.job_id}`,
     runId: job.run_id,
     who: ME,
     whoKey: ME,
@@ -167,7 +177,7 @@ function PersonSection({
       </div>
       {rows.map((row) => (
         <RunningRowView
-          key={row.runId}
+          key={row.id}
           row={row}
           onOpen={() => row.jobId && onOpen(row.jobId)}
         />
@@ -219,13 +229,19 @@ export function Board({
     const active = teamRuns.filter((item) => isActiveRun(item) && !isStaleRun(item));
     for (const run of active) merged.set(`cloud:${run.cloudRunId}`, rowFromTeamRun(run));
 
-    /** 이 컴퓨터의 학습 하나를 세웁니다. 팀에 올라간 같은 실행이 있으면 그것을 뺍니다. */
+    /**
+     * 이 컴퓨터의 학습 하나를 세웁니다. 팀에 올라간 같은 실행은 뺍니다.
+     *
+     * 첫 하나만 빼면 안 됩니다. 같은 학습이 두 번 공유된 기록이 남아 있으면 그것이
+     * 또 한 줄이 되어, 한 실행이 화면에 둘로 보입니다.
+     */
     const mine = (jobId: string | null, row: RunningRow) => {
-      const shared = jobId
-        ? active.find((run) => run.localJobId === jobId)
-        : undefined;
-      if (shared) merged.delete(`cloud:${shared.cloudRunId}`);
-      merged.set(jobId ? `job:${jobId}` : `run:${row.runId}`, row);
+      if (jobId) {
+        for (const run of active.filter((item) => item.localJobId === jobId)) {
+          merged.delete(`cloud:${run.cloudRunId}`);
+        }
+      }
+      merged.set(row.id, row);
     };
 
     if (liveJob) mine(liveJob.job_id, rowFromJob(liveJob));
@@ -233,6 +249,7 @@ export function Board({
       const key = record.jobId ? `job:${record.jobId}` : `run:${record.runId}`;
       if (merged.has(key)) continue;
       mine(record.jobId, {
+        id: key,
         runId: record.runId,
         who: ME,
         whoKey: ME,
@@ -254,11 +271,11 @@ export function Board({
    * 같은 이름을 쓰는 팀원 둘이 한 사람으로 합쳐질 수 있습니다.
    */
   const people = useMemo(() => {
-    const byPerson = new Map<string, { who: string; rows: RunningRow[] }>();
+    const byPerson = new Map<string, { key: string; who: string; rows: RunningRow[] }>();
     for (const row of rows) {
       const group = byPerson.get(row.whoKey);
       if (group) group.rows.push(row);
-      else byPerson.set(row.whoKey, { who: row.who, rows: [row] });
+      else byPerson.set(row.whoKey, { key: row.whoKey, who: row.who, rows: [row] });
     }
     return [...byPerson.values()].sort((left, right) =>
       left.who === ME ? -1 : right.who === ME ? 1 : left.who.localeCompare(right.who),
@@ -300,7 +317,7 @@ export function Board({
       ) : (
         people.map((person) => (
           <PersonSection
-            key={person.who}
+            key={person.key}
             who={person.who}
             rows={person.rows}
             onOpen={(jobId) => navigate(`/monitor/${jobId}`)}

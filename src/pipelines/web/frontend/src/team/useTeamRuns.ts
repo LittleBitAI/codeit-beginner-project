@@ -74,7 +74,17 @@ export function useTeamRuns(): TeamRunsState {
     if (!teamId || !canRead) return;
     void cloud.listRuns(teamId).then(
       (fetched) => {
-        setRuns(fetched);
+        // 목록 응답으로 통째로 덮으면 안 됩니다. 목록을 뜬 뒤에 일어난 변화가 구독으로
+        // 먼저 도착해 있을 수 있고, 덮으면 방금 시작한 학습이 화면에서 다시 사라져
+        // 다음 event가 올 때까지 보이지 않습니다. 더 새로운 쪽(revision)을 남깁니다.
+        setRuns((previous) => {
+          const base = new Map(fetched.map((run) => [run.cloudRunId, run]));
+          for (const run of previous) {
+            const known = base.get(run.cloudRunId);
+            if (!known || run.revision > known.revision) base.set(run.cloudRunId, run);
+          }
+          return [...base.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        });
         setError(null);
         setLoaded(true);
       },
@@ -87,6 +97,15 @@ export function useTeamRuns(): TeamRunsState {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // 읽을 수 없게 되면(로그아웃, 다른 사용자, 팀 설정 해제) 들고 있던 것을 버립니다.
+  // 남겨 두면 "이 컴퓨터 것만 보인다"고 적어 놓고 앞 사용자의 팀 학습을 계속 보여 줍니다.
+  useEffect(() => {
+    if (available) return;
+    setRuns([]);
+    setLoaded(false);
+    setError(null);
+  }, [available]);
 
   useEffect(() => {
     if (team.latestEvent) setRuns((previous) => mergeRuns(previous, team.latestEvent as TeamRun));
