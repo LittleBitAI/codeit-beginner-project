@@ -5,6 +5,7 @@ import pytest
 
 import src.common.experiment_registry as experiment_registry
 from src.common import (
+    ExperimentNameError,
     ExperimentRegistryError,
     compare_experiment_summaries,
     list_experiment_summaries,
@@ -391,6 +392,35 @@ def test_summary_read_refuses_a_name_that_points_outside_the_index(tmp_path, run
         read_experiment_summary(run_id, config)
 
     assert "바깥" not in str(error.value)
+
+
+@pytest.mark.parametrize("run_id", ["", "   ", "\x00", "../바깥"])
+def test_a_name_that_cannot_be_an_index_entry_is_its_own_error(tmp_path, run_id):
+    """이름 문제와 저장소 문제를 **형으로** 구분합니다.
+
+    둘 다 오류이지만 호출자가 답할 말이 다릅니다. 이름 문제는 "그런 실험 없다"이고,
+    저장소 문제는 "지금 읽지 못했다"입니다. 하나로 뭉뚱그리면 GUI가 잘못 친 주소에
+    "서버 고장"(500)이라고 답하거나, 반대로 S3 장애를 "실험이 사라졌다"고 말합니다.
+    """
+
+    config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+
+    with pytest.raises(ExperimentNameError):
+        read_experiment_summary(run_id, config)
+
+
+def test_a_storage_failure_is_not_a_name_error(tmp_path):
+    """읽어 보려다 실패한 것은 이름 문제가 아닙니다. 그 구분이 이 형의 존재 이유입니다."""
+
+    config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+    (tmp_path / "artifacts/registry/index/exp-a.json").write_text(
+        "{망가진 JSON", encoding="utf-8", newline="\n"
+    )
+
+    with pytest.raises(ExperimentRegistryError) as error:
+        read_experiment_summary("exp-a", config)
+
+    assert not isinstance(error.value, ExperimentNameError)
 
 
 def test_summary_read_of_an_empty_prefix_stays_relative(tmp_path, monkeypatch):
