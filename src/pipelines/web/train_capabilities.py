@@ -5,6 +5,10 @@ import하거나 임의의 함수를 호출하지 않습니다. 공개 capability
 검증된 현재 구성으로 fallback하고, 나중에는 ``reported_train_capability`` 한 곳만 공개
 연결점에 맞춰 바꾸면 됩니다.
 
+고를 수 있는 이름과 기본값은 ``src/common/train_contract``에서 그대로 가져옵니다.
+예전에는 여기에 값을 복제해 두고 train의 source를 ``ast``로 읽어 어긋나는지 감시했는데,
+값이 한 벌이면 어긋날 수가 없습니다. 이름을 더하고 빼는 것은 train 담당자입니다.
+
 이 계층은 capability metadata만 호환합니다. 실제 runtime config 검증과 정규화는
 ``train_config``가 담당합니다.
 """
@@ -14,6 +18,24 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
+
+from src.common.train_contract import (
+    ARCHITECTURES as SUPPORTED_ARCHITECTURES,
+    AUGMENTATIONS as SUPPORTED_AUGMENTATIONS,
+    CUDA_ONLY_PRECISIONS,
+    DEFAULT_ACCUMULATION_STEPS,
+    DEFAULT_ARCHITECTURE as LEGACY_ARCHITECTURE,
+    DEFAULT_AUGMENTATION,
+    DEFAULT_INPUT_SIZE,
+    DEFAULT_LR_SCHEDULER,
+    DEFAULT_PRECISION,
+    LEGACY_OPTIMIZER,
+    MMDETECTION_ARCHITECTURES,
+    MMDETECTION_REQUIRED,
+    OPTIMIZERS as SUPPORTED_OPTIMIZERS,
+    PRECISIONS as SUPPORTED_PRECISIONS,
+)
+from src.common.train_contract import LR_SCHEDULER_DEFAULTS as _LR_SCHEDULERS
 
 
 __all__ = [
@@ -41,49 +63,10 @@ __all__ = [
 
 CAPABILITY_SCHEMA_VERSION = 1
 
-# Train 내부를 runtime에 import하지 않는 대신 contract test가 실제 source와 일치하는지
-# 감시합니다. 기존 설정에서 값이 빠진 경우에만 legacy 기본값을 사용합니다.
-LEGACY_ARCHITECTURE = "fasterrcnn_mobilenet_v3_large_320_fpn"
-LEGACY_OPTIMIZER = "SGD"
-# MMDetection으로 학습하는 두 모델입니다. 8GB에서 도는 조합이 정해져 있어 아래
-# MMDETECTION_REQUIRED가 그 조합만 받게 합니다.
-MMDETECTION_ARCHITECTURES = ("dino_r50_4scale", "cascade_rcnn_swin_t_fpn")
-SUPPORTED_ARCHITECTURES = (
-    LEGACY_ARCHITECTURE,
-    "fasterrcnn_resnet50_fpn_v2",
-    "retinanet_resnet50_fpn_v2",
-    *MMDETECTION_ARCHITECTURES,
-)
-# train이 MMDetection architecture에 요구하는 조합입니다. 값이 다르면 학습을 시작한
-# 뒤 메모리로 터지므로 queue에 넣기 전에 막습니다.
-MMDETECTION_REQUIRED = {
-    "device": "cuda",
-    "precision": "amp",
-    "optimizer": "AdamW",
-    "batch_size": 1,
-}
-# MMDetection model만 쓰는 입력 크기입니다. train의 기본값과 같아야 합니다.
-DEFAULT_INPUT_SIZE = 640
-# MMDetection model을 고르면 이만큼 모읍니다. 8GB에서 batch 1로 도는 두 모델이 쓸 만한
-# 유효 batch를 갖게 하는 값이고, train의 기본값과 같아야 합니다.
-DEFAULT_ACCUMULATION_STEPS = 8
-SUPPORTED_OPTIMIZERS = ("AdamW", "SGD", "Adam")
+# 새 실험이 고르는 optimizer입니다. 값이 빠진 옛 기록만 LEGACY_OPTIMIZER로 읽습니다.
 NEW_EXPERIMENT_OPTIMIZER = "AdamW"
-# train의 AUGMENTATION_PRESETS key와 같은 순서로 둡니다. 값 자체는 train이 갖고
-# 있으므로 여기서는 고를 수 있는 이름만 복제합니다.
-SUPPORTED_AUGMENTATIONS = ("none", "pill_basic")
-DEFAULT_AUGMENTATION = "none"
-# train의 PRECISION_MODES와 같은 순서로 둡니다. `amp`가 실제로 bf16을 쓸지 fp16을
-# 쓸지는 train이 GPU를 보고 정하고, `fp16`·`bf16`은 고른 그대로 씁니다. 여기서는
-# 고를 수 있는 이름만 복제합니다.
-SUPPORTED_PRECISIONS = ("fp32", "amp", "fp16", "bf16")
-# 절반 정밀도는 CUDA에서만 됩니다. train이 같은 조건을 거부합니다.
-CUDA_ONLY_PRECISIONS = ("amp", "fp16", "bf16")
-DEFAULT_PRECISION = "fp32"
-# train의 LR_SCHEDULER_DEFAULTS key와 같은 순서로 둡니다. 값 자체는 train이 갖고
-# 있으므로 여기서는 고를 수 있는 이름만 복제합니다. `none`은 상수 learning rate입니다.
-SUPPORTED_LR_SCHEDULERS = ("none", "cosine", "step", "linear")
-DEFAULT_LR_SCHEDULER = "none"
+# 고를 수 있는 schedule 이름입니다. 값 자체는 train이 씁니다.
+SUPPORTED_LR_SCHEDULERS = tuple(_LR_SCHEDULERS)
 
 _CHOICE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+\-]{0,127}$")
 

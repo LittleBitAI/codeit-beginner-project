@@ -16,12 +16,12 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from src.common import S3Storage
+from src.common.train_contract import OPTIMIZERS as SUPPORTED_OPTIMIZERS
 
 from .errors import TrainError
 from .progress import ProgressEmitter
 
 
-SUPPORTED_OPTIMIZERS = ("AdamW", "SGD", "Adam")
 RESUME_STATE_VERSION = 2
 
 
