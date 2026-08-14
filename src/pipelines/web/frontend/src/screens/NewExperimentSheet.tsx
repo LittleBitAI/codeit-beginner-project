@@ -23,7 +23,6 @@ import {
 } from '../components/primitives';
 import { color, font, type } from '../design/tokens';
 import { dataMatchesSource } from '../lib/dataSource';
-import { describeRun } from '../lib/describeRun';
 import {
   EARLY_STOPPING_FIELDS,
   LR_FIELDS,
@@ -34,6 +33,7 @@ import {
   selectedSchedule,
   toPayload,
 } from '../lib/draftPayload';
+import { datasetLabel } from '../lib/runSpec';
 import { resolveTrainCapability } from '../lib/trainCapabilities';
 import { useDraft } from '../state/DraftContext';
 import { useTeam } from '../team/TeamContext';
@@ -85,6 +85,140 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
   },
   { key: 'output', label: '출력', fields: ['output_dir', 'output_prefix'] },
 ];
+
+/** 표에 세울 순서. 화면에서 채운 순서 그대로 읽히게 둡니다. */
+const TAB_FIELD_ORDER = TABS.flatMap((tab) => tab.fields);
+
+/**
+ * 보낼 설정을 표 한 장으로 펼칩니다.
+ *
+ * 값은 서버가 정규화한 것을 그대로 씁니다. 화면의 draft를 쓰면 비워 둔 칸이 빈
+ * 줄로 나오는데, 실제로 학습에 쓰이는 것은 서버가 채운 기본값입니다.
+ *
+ * `lr_scheduler`처럼 값이 다시 묶음인 칸은 한 겹 펼쳐 `lr_scheduler.name`으로
+ * 적습니다. `[object Object]`는 아무것도 말해 주지 않습니다.
+ */
+function settingRows(train: Record<string, unknown>): { key: string; value: string }[] {
+  const ordered = [
+    ...TAB_FIELD_ORDER.filter((name) => name in train),
+    ...Object.keys(train).filter((name) => !TAB_FIELD_ORDER.includes(name)),
+  ];
+  // 이름은 창 제목에 이미 크게 있습니다.
+  return ordered
+    .filter((name) => name !== 'run_id')
+    .flatMap((name) => {
+      const value = train[name];
+      if (value !== null && typeof value === 'object') {
+        return Object.entries(value as Record<string, unknown>).map(([inner, nested]) => ({
+          key: `${name}.${inner}`,
+          value: String(nested),
+        }));
+      }
+      return [{ key: name, value: String(value) }];
+    });
+}
+
+/**
+ * 시작하기 전에 설정을 한 번 더 펼쳐 보여 줍니다.
+ *
+ * 시트를 닫고 나면 무엇으로 돌고 있는지 다시 볼 자리가 없어, "내가 뭘 세팅했는지
+ * 모르겠다"는 말이 나왔습니다. 예전에는 이 자리에 설정을 문장으로 풀어 쓴 문단이
+ * 있었지만 아무도 읽지 않았습니다 — 값을 확인하는 일에는 표가 맞습니다.
+ */
+function ConfirmStart({
+  runId,
+  dataset,
+  train,
+  mode,
+  pending,
+  onCancel,
+  onConfirm,
+}: {
+  runId: string;
+  /** 어느 데이터셋으로 도는지. 설정 하나하나보다 먼저 확인할 값입니다. */
+  dataset: string | null;
+  train: Record<string, unknown>;
+  mode: 'start' | 'queue';
+  pending: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <>
+      <div
+        onClick={onCancel}
+        style={{ position: 'fixed', inset: 0, background: 'rgba(8,6,4,.55)', zIndex: 65 }}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${runId} 시작 확인`}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') onCancel();
+        }}
+        style={{
+          position: 'fixed',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          zIndex: 70,
+          width: 'min(520px, calc(100vw - 40px))',
+          background: color.sheet,
+          border: `1px solid ${color.border}`,
+          borderRadius: 4,
+          padding: '20px 22px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 14,
+        }}
+      >
+        <span style={{ ...type.subTitle, color: color.text }}>이 설정으로 시작할까요?</span>
+        <div style={{ ...type.monoValue, color: color.textStrong, overflowWrap: 'anywhere' }}>
+          {runId}
+        </div>
+        {dataset && (
+          <div style={{ ...type.monoSpec, color: color.textMuted, overflowWrap: 'anywhere' }}>
+            {dataset}
+          </div>
+        )}
+        <div style={{ maxHeight: 320, overflow: 'auto', borderTop: `1px solid ${color.border}` }}>
+          {settingRows(train).map((row) => (
+            <div
+              key={row.key}
+              style={{
+                display: 'flex',
+                gap: 16,
+                justifyContent: 'space-between',
+                padding: '7px 0',
+                borderBottom: `1px solid ${color.borderRow}`,
+              }}
+            >
+              <span style={{ ...type.monoSpec, color: color.textMuted }}>{row.key}</span>
+              <span
+                style={{
+                  ...type.monoSpec,
+                  color: color.text,
+                  textAlign: 'right',
+                  overflowWrap: 'anywhere',
+                }}
+              >
+                {row.value}
+              </span>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <Button kind="ghost" onClick={onCancel} disabled={pending}>
+            다시 고치기
+          </Button>
+          <Button kind="primary" onClick={onConfirm} disabled={pending}>
+            {pending ? '보내는 중…' : mode === 'start' ? '시작' : '대기열에 넣습니다'}
+          </Button>
+        </div>
+      </div>
+    </>
+  );
+}
 
 function TrainField({
   spec,
@@ -195,6 +329,8 @@ export function NewExperimentSheet({
   const [showJson, setShowJson] = useState(false);
   const [pending, setPending] = useState<'start' | 'queue' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // 시작하기 전에 보낼 설정을 한 번 더 펼쳐 보여 줍니다.
+  const [confirming, setConfirming] = useState<'start' | 'queue' | null>(null);
 
   const fields = defaults?.fields ?? [];
   const payload = useMemo(() => toPayload(draft, fields), [draft, fields]);
@@ -281,6 +417,8 @@ export function NewExperimentSheet({
             ? '학습을 시작하지 못했습니다.'
             : '대기열에 넣지 못했습니다.',
       );
+      // 확인 창을 닫아야 시트에 붙은 오류가 보입니다.
+      setConfirming(null);
     } finally {
       setPending(null);
     }
@@ -293,14 +431,14 @@ export function NewExperimentSheet({
       onClose={onClose}
       footer={
         <>
-          <Button kind="primary" disabled={!ready} onClick={() => void submit('queue')}>
+          <Button kind="primary" disabled={!ready} onClick={() => setConfirming('queue')}>
             {pending === 'queue' ? '넣는 중…' : '대기열에 추가'}
           </Button>
           <Button
             kind="secondary"
             disabled={!ready || busy}
             title={busy ? '다른 학습이 도는 중이라 바로 시작할 수 없습니다' : undefined}
-            onClick={() => void submit('start')}
+            onClick={() => setConfirming('start')}
           >
             {pending === 'start' ? '시작하는 중…' : '바로 시작'}
           </Button>
@@ -490,11 +628,6 @@ export function NewExperimentSheet({
             '지금 도는 학습이 없어 대기열에 넣으면 곧바로 시작합니다.'
           )}
         </div>
-        {result?.normalized && (
-          <div style={{ ...type.bodySmall, color: color.textMuted, marginTop: 14, textWrap: 'pretty' }}>
-            {describeRun(result.normalized)}
-          </div>
-        )}
       </div>
 
       {showJson && (
@@ -514,6 +647,18 @@ export function NewExperimentSheet({
             {JSON.stringify(result?.normalized ?? payload, null, 2)}
           </pre>
         </div>
+      )}
+
+      {confirming && result?.normalized && (
+        <ConfirmStart
+          runId={draft.train.run_id?.trim() || autoRunId || '(이름은 저장할 때 지어집니다)'}
+          dataset={datasetLabel(result.normalized.inputs?.data)}
+          train={result.normalized.train as Record<string, unknown>}
+          mode={confirming}
+          pending={pending !== null}
+          onCancel={() => setConfirming(null)}
+          onConfirm={() => void submit(confirming)}
+        />
       )}
     </Sheet>
   );

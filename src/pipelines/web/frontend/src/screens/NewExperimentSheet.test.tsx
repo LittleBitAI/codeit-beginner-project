@@ -80,6 +80,9 @@ beforeEach(() => {
       if (path === '/api/train/queue') {
         return jsonResponse({ entries: [], paused: false, started: null });
       }
+      if (path === '/api/train/jobs') {
+        return jsonResponse({ job_id: 'job-1', run_id: 'retina-basic-e15-a7f3' });
+      }
       throw new Error(`fixture가 처리하지 않는 요청입니다: ${path}`);
     }),
   );
@@ -117,17 +120,52 @@ describe('NewExperimentSheet', () => {
     expect(screen.getByRole('button', { name: '대기열에 추가' })).toBeDisabled();
   });
 
-  it('설정을 만든 뒤에 대기열에 넣는다 — 만들기가 먼저다', async () => {
-    const onStarted = vi.fn();
-    show({ onStarted });
-
+  /** 시작할 수 있는 상태까지 채웁니다. */
+  async function fillAndReady() {
     fireEvent.change(screen.getByRole('textbox', { name: /학습 manifest/ }), {
       target: { value: 'artifacts/data/v5/train_manifest.json' },
     });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '대기열에 추가' })).toBeEnabled(),
+    );
+  }
 
-    const queueButton = screen.getByRole('button', { name: '대기열에 추가' });
-    await waitFor(() => expect(queueButton).toBeEnabled());
-    fireEvent.click(queueButton);
+  // 시트를 닫고 나면 무엇으로 돌고 있는지 다시 볼 자리가 없었습니다. 시작하기 전에
+  // 실제로 보낼 값을 한 번 더 펼쳐 보여 줍니다.
+  it('바로 시작은 보낼 설정을 펼쳐 보여 주고 확인을 받는다', async () => {
+    show();
+    await fillAndReady();
+
+    fireEvent.click(screen.getByRole('button', { name: '바로 시작' }));
+
+    expect(screen.getByText('이 설정으로 시작할까요?')).toBeInTheDocument();
+    expect(screen.getByText('architecture')).toBeInTheDocument();
+    // 아직 아무것도 만들지 않았습니다. 검증만 오갔습니다.
+    expect(posted.map((item) => item.path)).not.toContain('/api/train/configs');
+
+    fireEvent.click(screen.getByRole('button', { name: '시작' }));
+
+    await waitFor(() => expect(posted.map((item) => item.path)).toContain('/api/train/jobs'));
+  });
+
+  it('다시 고치기를 누르면 아무것도 만들지 않는다', async () => {
+    show();
+    await fillAndReady();
+
+    fireEvent.click(screen.getByRole('button', { name: '바로 시작' }));
+    fireEvent.click(screen.getByRole('button', { name: '다시 고치기' }));
+
+    expect(screen.queryByText('이 설정으로 시작할까요?')).toBeNull();
+    expect(posted.map((item) => item.path)).not.toContain('/api/train/configs');
+  });
+
+  it('설정을 만든 뒤에 대기열에 넣는다 — 만들기가 먼저다', async () => {
+    const onStarted = vi.fn();
+    show({ onStarted });
+    await fillAndReady();
+
+    fireEvent.click(screen.getByRole('button', { name: '대기열에 추가' }));
+    fireEvent.click(screen.getByRole('button', { name: '대기열에 넣습니다' }));
 
     await waitFor(() => expect(onStarted).toHaveBeenCalled());
     expect(posted.map((item) => item.path)).toEqual([
