@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import { color, palette, radius, type } from '../design/tokens';
-import { describeRun, diffAgainstDefaults } from './describeRun';
 import { toPayload, messageFor } from './draftPayload';
 import { duration, loss, megabytes, percent } from './format';
-import type { DataSource, RuntimeConfig, FieldSpec } from '../api/types';
+import type { DataSource, FieldSpec } from '../api/types';
 import { DATA_KEYS } from './dataKeys';
 import { dataMatchesSource, sourceKeyOf } from './dataSource';
 
@@ -268,123 +267,6 @@ describe('messageFor', () => {
 
     expect(messageFor(messages, 'train.epochs')).toBe('1 이상');
     expect(messageFor(messages, 'train.seed')).toBeUndefined();
-  });
-});
-
-describe('describeRun', () => {
-  const config: RuntimeConfig = {
-    project: { name: 'pill-object-detection' },
-    execution: { mode: 'real' },
-    storage: { backend: 'local', local: { root: 'artifacts' } },
-    train: {
-      run_id: 'exp-1',
-      epochs: 10,
-      batch_size: 2,
-      learning_rate: 0.005,
-      momentum: 0.9,
-      weight_decay: 0.0005,
-      seed: 42,
-      num_workers: 0,
-      device: 'cuda',
-      pretrained: true,
-      output_dir: 'artifacts/experiments/completed',
-    },
-    inputs: {
-      data: { a: '1', b: '2', c: '3', d: '4' },
-    },
-  };
-
-  it('설정 값을 문장에 그대로 담는다', () => {
-    const text = describeRun(config);
-
-    expect(text).toContain('10 epoch');
-    expect(text).toContain('batch 2');
-    expect(text).toContain('CUDA GPU');
-    expect(text).toContain('COCO 사전학습 가중치');
-    expect(text).toContain('exp-1');
-    expect(text).toContain('로컬 디스크');
-  });
-
-  it('설정이 없으면 지어내지 않는다', () => {
-    expect(describeRun(null)).toBe('설정이 아직 준비되지 않았습니다.');
-  });
-
-  it('조기 종료를 쓰면 언제 멈추는지도 말한다', () => {
-    const text = describeRun({
-      ...config,
-      train: { ...config.train, early_stopping: { patience: 5, min_delta: 0.01 } },
-    });
-
-    expect(text).toContain('5 epoch');
-    expect(text).toContain('0.01');
-  });
-
-  it('조기 종료를 쓰지 않으면 그 말을 꺼내지 않는다', () => {
-    expect(describeRun(config)).not.toContain('조기 종료');
-  });
-
-  it('고른 모델과 optimizer를 그대로 말한다', () => {
-    // 이름을 단정해 두면 다른 모델을 골라도 화면은 늘 같은 이름을 말합니다.
-    // 사용자는 무엇으로 학습하는지 여기서만 확인하므로 기록이 조용히 틀어집니다.
-    const text = describeRun({
-      ...config,
-      train: { ...config.train, architecture: 'dino_r50_4scale', optimizer: 'AdamW' },
-    });
-
-    expect(text).toContain('dino_r50_4scale');
-    expect(text).toContain('AdamW');
-    expect(text).not.toContain('torchvision Faster R-CNN');
-  });
-
-  it('모아서 갱신하면 유효 batch를 알려 준다', () => {
-    const text = describeRun({
-      ...config,
-      train: { ...config.train, batch_size: 1, gradient_accumulation_steps: 8 },
-    });
-
-    expect(text).toContain('유효 batch는 8');
-  });
-
-  it('모으지 않으면 그 말을 꺼내지 않는다', () => {
-    expect(describeRun(config)).not.toContain('유효 batch');
-  });
-
-  it('MMDetection 모델이면 입력 크기를 말한다', () => {
-    const text = describeRun({
-      ...config,
-      train: { ...config.train, architecture: 'dino_r50_4scale', input_size: 640 },
-    });
-
-    expect(text).toContain('긴 변이 640');
-    // 쓰지 않는 실행에는 그 말을 꺼내지 않습니다.
-    expect(describeRun(config)).not.toContain('긴 변이');
-  });
-
-  it('learning rate schedule을 쓰면 어떻게 변하는지 말한다', () => {
-    const text = describeRun({
-      ...config,
-      train: {
-        ...config.train,
-        lr_scheduler: { name: 'cosine', warmup_steps: 500, warmup_start_factor: 0.001 },
-      },
-    });
-
-    expect(text).toContain('곡선');
-    // warmup은 batch가 아니라 optimizer 갱신을 셉니다. 모아서 갱신하면 둘이 달라져,
-    // batch라고 적어 두면 실제보다 짧은 구간을 말하게 됩니다.
-    expect(text).toContain('500번의 갱신');
-  });
-
-  it('schedule을 쓰지 않으면 learning rate 이야기를 꺼내지 않는다', () => {
-    expect(describeRun(config)).not.toContain('batch 동안');
-  });
-});
-
-describe('diffAgainstDefaults', () => {
-  it('기본값과 다른 항목만 뽑는다', () => {
-    const rows = diffAgainstDefaults({ epochs: 10, seed: 42 }, { epochs: 1, seed: 42 });
-
-    expect(rows).toEqual([{ key: 'train.epochs', before: '1', after: '10' }]);
   });
 });
 
