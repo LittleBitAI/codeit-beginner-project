@@ -27,6 +27,19 @@ const DEFAULTS: Defaults = {
       hint: '',
     },
     { name: 'epochs', type: 'integer', default: 15, label: 'Epochs', hint: '' },
+    { name: 'batch_size', type: 'integer', default: 4, label: 'Batch size', hint: '' },
+    { name: 'seed', type: 'integer', default: 42, label: 'Random seed', hint: '' },
+    { name: 'learning_rate', type: 'number', default: 0.006, label: 'Learning rate', hint: '' },
+    { name: 'weight_decay', type: 'number', default: 0.01, label: 'Weight decay', hint: '' },
+    {
+      name: 'precision',
+      type: 'enum',
+      default: 'fp32',
+      choices: ['fp32', 'amp'],
+      label: '연산 정밀도',
+      hint: '',
+    },
+    { name: 'device', type: 'enum', default: 'cpu', choices: ['cpu', 'cuda'], label: 'Device', hint: '' },
     { name: 'run_id', type: 'string', label: '실행 이름', hint: '' },
   ],
   data_fields: [
@@ -109,7 +122,33 @@ function show(props: Partial<Parameters<typeof NewExperimentSheet>[0]> = {}) {
   );
 }
 
+/** 화면에 그려진 칸을 위에서부터 이름만 뽑습니다. 순서를 그대로 읽습니다. */
+function fieldLabels(): string[] {
+  return Array.from(document.querySelectorAll('label > span:first-child')).map(
+    (node) => node.textContent ?? '',
+  );
+}
+
 describe('NewExperimentSheet', () => {
+  // 기본과 고급을 가르는 기준은 "얼마나 자주 바꾸는가" 하나입니다. 기준이 보이지
+  // 않으면 사람이 매번 두 표를 다 열어 찾습니다. 실제로 그 불평이 나왔습니다.
+  it('자주 바꾸는 칸을 기본에, 잘 안 바꾸는 칸을 고급에 순서대로 둔다', async () => {
+    show();
+
+    expect(fieldLabels().slice(0, 6)).toEqual([
+      '모델',
+      'Optimizer',
+      'Random seed',
+      'Epochs',
+      'Batch size',
+      'Learning rate',
+    ]);
+
+    fireEvent.click(screen.getByText('고급'));
+
+    expect(fieldLabels()).toEqual(['실행 이름', 'Weight decay', '연산 정밀도', 'Device']);
+  });
+
   it('data artifact 칸이 비어 있으면 시작할 수 없다', async () => {
     show();
 
