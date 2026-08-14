@@ -8,9 +8,10 @@ from src.common import (
     compare_experiment_summaries,
     list_experiment_summaries,
     read_experiment_record,
+    read_experiment_summary,
     search_experiment_summaries,
 )
-from src.common.storage import ObjectNotFoundError
+from src.common.storage import LocalStorage, ObjectNotFoundError
 from src.pipelines import registry
 
 
@@ -257,3 +258,39 @@ def test_index_prefix_escaping_the_storage_root_is_rejected(tmp_path):
         list_experiment_summaries(config)
 
     assert "바깥" not in str(error.value)
+
+
+def test_reads_one_summary_by_name_without_listing_the_index(tmp_path, monkeypatch):
+    """이름을 아는 조회는 index 전체를 훑지 않습니다.
+
+    Registry는 index를 ``<prefix>/<run_id>.json`` 한 파일로 남기므로, 이름을 이미
+    아는 조회에 목록이 필요하지 않습니다. 목록은 등록된 실험 수만큼 storage를
+    왕복하기 때문에, 상세·비교 화면이 그 길을 쓰면 기록이 쌓일수록 함께 느려집니다.
+    """
+
+    register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+    config = register(tmp_path, "exp-b", "2026-08-05T00:00:00+00:00")
+
+    def refuse(self, prefix=""):
+        raise AssertionError("이름을 아는 조회는 목록을 읽으면 안 됩니다.")
+
+    monkeypatch.setattr(LocalStorage, "list", refuse)
+
+    assert read_experiment_summary("exp-a", config)["run_id"] == "exp-a"
+
+
+def test_summary_that_was_never_registered_is_absent_not_an_error(tmp_path):
+    """없는 것과 못 읽은 것을 구분합니다. 없으면 ``None``입니다."""
+
+    config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+
+    assert read_experiment_summary("없는-실험", config) is None
+
+
+def test_summary_read_refuses_a_name_that_could_escape_the_index(tmp_path):
+    """run_id는 파일 이름이 되므로 경로 구분자를 받지 않습니다."""
+
+    config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+
+    with pytest.raises(ExperimentRegistryError):
+        read_experiment_summary("../../바깥", config)

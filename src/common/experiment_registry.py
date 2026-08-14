@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from .storage import LocalStorage, StorageError, create_storage
+from .storage import LocalStorage, ObjectNotFoundError, StorageError, create_storage
 
 
 __all__ = [
@@ -21,6 +21,7 @@ __all__ = [
     "compare_experiment_summaries",
     "list_experiment_summaries",
     "read_experiment_record",
+    "read_experiment_summary",
     "search_experiment_summaries",
 ]
 
@@ -158,6 +159,50 @@ def _index_prefix(config: Mapping[str, Any] | None) -> str:
             "config['registry']['index_prefix']는 비어 있지 않은 문자열이어야 합니다."
         )
     return configured.strip().strip("/")
+
+
+def read_experiment_summary(
+    run_id: str, config: Mapping[str, Any] | None
+) -> dict[str, Any] | None:
+    """Index에서 실험 **하나의** summary만 읽습니다. 등록된 적이 없으면 ``None``입니다.
+
+    Registry는 index를 ``<prefix>/<run_id>.json`` 한 파일로 남깁니다. 그래서 이름을
+    이미 아는 조회에는 목록이 필요하지 않습니다. :func:`list_experiment_summaries`는
+    등록된 실험 수만큼 storage를 왕복하므로, 상세·비교처럼 무엇을 볼지 정해진 화면이
+    그 길을 쓰면 기록이 쌓일수록 함께 느려집니다.
+
+    없는 것과 못 읽은 것은 구분합니다. 파일이 없으면 ``None``이고, 읽지 못했거나
+    index가 다른 실험을 가리키면 :class:`ExperimentRegistryError`입니다 — 못 읽은
+    것을 "없다"로 답하면 화면이 지워지지 않은 실험을 사라졌다고 말하게 됩니다.
+    """
+
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ExperimentRegistryError("run_id는 비어 있지 않은 문자열이어야 합니다.")
+    wanted = run_id.strip()
+    # run_id가 그대로 파일 이름이 되므로 경로 구분자는 받지 않습니다. storage backend도
+    # 막지만, 여기서 막으면 어느 값이 문제인지 이름 그대로 드러납니다.
+    if "/" in wanted or "\\" in wanted:
+        raise ExperimentRegistryError("run_id에는 경로 구분자를 쓸 수 없습니다.")
+
+    prefix = _index_prefix(config)
+    try:
+        summary = create_storage(config).read_json(f"{prefix}/{wanted}.json")
+    except ObjectNotFoundError:
+        return None
+    except StorageError as error:
+        raise ExperimentRegistryError(
+            f"experiment index 조회에 실패했습니다 ({type(error).__name__})."
+        ) from error
+    except json.JSONDecodeError as error:
+        raise ExperimentRegistryError(
+            f"'{wanted}' index 항목이 유효한 JSON이 아닙니다."
+        ) from error
+
+    if not isinstance(summary, dict) or summary.get("run_id") != wanted:
+        raise ExperimentRegistryError(
+            f"'{wanted}' index 항목이 다른 실험을 가리킵니다."
+        )
+    return summary
 
 
 def _sort_value(summary: Mapping[str, Any], field: str) -> tuple[int, Any]:
