@@ -18,6 +18,7 @@ from .storage import LocalStorage, ObjectNotFoundError, StorageError, create_sto
 
 
 __all__ = [
+    "ExperimentNameError",
     "ExperimentRegistryError",
     "compare_experiment_summaries",
     "list_experiment_summaries",
@@ -54,6 +55,18 @@ _COMPARABLE_FIELDS = (
 
 class ExperimentRegistryError(RuntimeError):
     """Experiment record 조회 또는 최소 schema 검증이 실패한 경우입니다."""
+
+
+class ExperimentNameError(ExperimentRegistryError):
+    """이름이 index 항목을 가리킬 수 없어 **읽어 보지도 못한** 경우입니다.
+
+    저장소 문제가 아니라 이름 문제입니다. 둘을 형으로 구분하는 이유는 호출자가 답을
+    달리 해야 하기 때문입니다: 이름 문제는 "그런 실험 없다"이고, 저장소 문제는
+    "지금 읽지 못했다"입니다. 하나로 뭉뚱그리면 S3가 흔들린 것도 "실험이 사라졌다"로
+    보이거나, 반대로 사람이 잘못 친 주소가 "서버 고장"으로 보입니다.
+
+    :class:`ExperimentRegistryError`를 잡던 기존 호출자는 그대로 동작합니다.
+    """
 
 
 def _repo_root(config: Mapping[str, Any] | None) -> Path:
@@ -194,10 +207,10 @@ def read_experiment_summary(
     """
 
     if not isinstance(run_id, str) or not run_id.strip():
-        raise ExperimentRegistryError("run_id는 비어 있지 않은 문자열이어야 합니다.")
+        raise ExperimentNameError("run_id는 비어 있지 않은 문자열이어야 합니다.")
     wanted = run_id.strip()
     if not _UNSAFE_RUN_ID_CHARACTERS.isdisjoint(wanted):
-        raise ExperimentRegistryError("run_id에는 제어문자를 쓸 수 없습니다.")
+        raise ExperimentNameError("run_id에는 제어문자를 쓸 수 없습니다.")
 
     prefix = _index_prefix(config)
     # `index_prefix="/"`는 검증을 지나 빈 prefix가 됩니다. 그때 앞에 구분자를 붙이면
@@ -214,7 +227,7 @@ def read_experiment_summary(
     base = posixpath.normpath(prefix.replace("\\", "/"))
     inside = posixpath.relpath(posixpath.normpath(location.replace("\\", "/")), base)
     if inside == ".." or inside.startswith("../"):
-        raise ExperimentRegistryError("run_id는 index 밖을 가리킬 수 없습니다.")
+        raise ExperimentNameError("run_id는 index 밖을 가리킬 수 없습니다.")
 
     try:
         summary = create_storage(config).read_json(location)
