@@ -408,6 +408,10 @@ def test_train_reads_exactly_the_setting_names_in_the_shared_contract():
     이름을 바꾸며 자기 test까지 함께 고치면 양쪽 다 초록인 채로 그 값이 조용히
     버려집니다. 여기서는 계약의 이름만 보고, web을 부르지 않습니다.
 
+    이름 목록만 대조하면 부족합니다. 결과에 담는 이름은 그대로 두고 **입력에서 찾는
+    이름만** 바꿔도(``raw.get("resume_from")`` → ``raw.get("resume_uri")``) 목록은 그대로
+    맞기 때문입니다. 그래서 보낸 값이 결과에 **그대로 들어왔는지**까지 봅니다.
+
     optimizer마다 받는 칸이 다르므로(SGD의 momentum, AdamW의 beta) 두 번 나눠 읽고
     합칩니다. ``resume``은 ``resume_from``을 보고 train이 만드는 값이라 뺍니다.
     """
@@ -432,31 +436,38 @@ def test_train_reads_exactly_the_setting_names_in_the_shared_contract():
         "lr_scheduler": {"name": "cosine", "warmup_steps": 5, "min_lr_factor": 0.1},
         "resume_from": "artifacts/experiments/completed/.old.partial/last_checkpoint.pt",
     }
-    adam = pipeline._settings(
+    sent = [
         {
-            "train": {
-                **common,
-                "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
-                "optimizer": "AdamW",
-                "beta1": 0.9,
-                "beta2": 0.999,
-                "epsilon": 1e-8,
-            }
-        }
-    )
-    sgd = pipeline._settings(
+            **common,
+            "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
+            "optimizer": "AdamW",
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "epsilon": 1e-8,
+        },
         {
-            "train": {
-                **common,
-                "architecture": "retinanet_resnet50_fpn_v2",
-                "optimizer": "SGD",
-                "momentum": 0.9,
-            }
-        }
-    )
+            **common,
+            "architecture": "retinanet_resnet50_fpn_v2",
+            "optimizer": "SGD",
+            "momentum": 0.9,
+        },
+    ]
+    read = [pipeline._settings({"train": dict(one)}) for one in sent]
 
-    read = (set(adam) | set(sgd)) - {"resume"}
-    assert read == set(train_contract.SETTING_KEYS)
+    names = set().union(*(set(one) for one in read)) - {"resume"}
+    assert names == set(train_contract.SETTING_KEYS)
+
+    for one, got in zip(sent, read):
+        for name, value in one.items():
+            landed = got[name]
+            if isinstance(value, dict):
+                # 정규화가 빠진 값을 채워 넣으므로, 보낸 짝이 남아 있는지만 봅니다.
+                assert {**landed, **value} == landed, f"{name}이 그대로 오지 않았습니다."
+            elif isinstance(landed, dict):
+                # precision처럼 고른 이름 하나가 여러 값으로 펼쳐지는 칸입니다.
+                assert value in landed.values(), f"{name}이 그대로 오지 않았습니다."
+            else:
+                assert landed == value, f"{name}이 그대로 오지 않았습니다."
 
 
 def test_every_mmdetection_name_in_the_shared_contract_has_a_config_here():

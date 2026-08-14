@@ -1015,8 +1015,8 @@ def _publish_s3(
         raise FileExistsError(f"training run artifact already exists: {settings['run_id']}")
     attempt_prefix = f"{prefix}/attempts/{uuid4().hex}"
     destinations = {
-        "best_checkpoint_uri": f"{attempt_prefix}/best_checkpoint.pt",
-        "last_checkpoint_uri": f"{attempt_prefix}/last_checkpoint.pt",
+        "best_checkpoint_uri": f"{attempt_prefix}/{_contract.BEST_CHECKPOINT_NAME}",
+        "last_checkpoint_uri": f"{attempt_prefix}/{_contract.RESUME_CHECKPOINT_NAME}",
         "training_history_uri": f"{attempt_prefix}/training_history.json",
     }
 
