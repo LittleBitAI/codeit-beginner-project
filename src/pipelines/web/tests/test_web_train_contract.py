@@ -27,9 +27,56 @@ from src.common.train_contract import (
     LR_SCHEDULER_DEFAULTS,
     MMDETECTION_ARCHITECTURES,
     SETTING_DEFAULTS,
+    SETTING_KEYS,
 )
 from src.pipelines.web import train_config
 from src.pipelines.web.train_config import field_specs, normalize_train_settings
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {},
+        {"optimizer": "SGD", "momentum": 0.9},
+        {
+            "optimizer": "AdamW",
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "epsilon": 1e-8,
+            "augmentation": "pill_basic",
+            "gradient_accumulation_steps": 2,
+            "early_stopping": True,
+            "early_stopping_patience": 2,
+            "lr_scheduler": "cosine",
+            "lr_warmup_steps": 10,
+            "lr_min_factor": 0.1,
+            "resume_from": "artifacts/experiments/completed/.old.partial/last_checkpoint.pt",
+        },
+        {
+            "architecture": MMDETECTION_ARCHITECTURES[0],
+            "device": "cuda",
+            "precision": "amp",
+            "optimizer": "AdamW",
+            "batch_size": 1,
+            "input_size": 640,
+        },
+    ],
+    ids=["defaults", "sgd", "adamw-full", "mmdetection"],
+)
+def test_no_setting_leaves_here_under_a_name_train_does_not_read(raw):
+    """train은 이 파일을 import할 수 없는 저쪽에서 같은 이름으로 값을 읽습니다.
+
+    값이 같은지는 계약의 표들이 지키지만, 값을 담아 보내는 **이름**은 지금까지 아무도
+    지키지 않았습니다. 여기서 이름을 하나 바꾸고 바로 옆 test까지 함께 고치면 web은
+    전부 초록인 채로 그 값이 train에서 조용히 버려집니다. 계약의 목록만 보고,
+    train을 부르지 않습니다.
+
+    optimizer와 model마다 실려 가는 칸이 달라 네 조합을 함께 봅니다.
+    """
+
+    sent = set(normalize_train_settings(raw))
+
+    assert sent <= set(SETTING_KEYS), f"계약에 없는 이름입니다: {sorted(sent - set(SETTING_KEYS))}"
 
 
 def test_the_form_is_told_which_models_use_input_size():

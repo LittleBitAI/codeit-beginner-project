@@ -400,6 +400,65 @@ def test_explicit_adamw_run_records_effective_reproducibility_settings(local_con
     assert result["summary"]["augmentation"] == "pill_basic"
 
 
+def test_train_reads_exactly_the_setting_names_in_the_shared_contract():
+    """GUI가 그 이름으로 값을 실어 보냅니다. 여기가 그것을 정말 읽는 쪽입니다.
+
+    값이 같은지는 계약의 표들이 지키지만, 값을 담아 보내는 **이름**은 지금까지 아무도
+    지키지 않았습니다. web은 이 파일을 import할 수 없어 이름을 옮겨 적을 뿐이라, 한쪽이
+    이름을 바꾸며 자기 test까지 함께 고치면 양쪽 다 초록인 채로 그 값이 조용히
+    버려집니다. 여기서는 계약의 이름만 보고, web을 부르지 않습니다.
+
+    optimizer마다 받는 칸이 다르므로(SGD의 momentum, AdamW의 beta) 두 번 나눠 읽고
+    합칩니다. ``resume``은 ``resume_from``을 보고 train이 만드는 값이라 뺍니다.
+    """
+
+    common = {
+        "run_id": "train-keys",
+        "device": "cpu",
+        "epochs": 2,
+        "batch_size": 1,
+        "checkpoint_every": 1,
+        "seed": 1,
+        "pretrained": False,
+        "num_workers": 0,
+        "precision": "fp32",
+        "output_dir": "artifacts/experiments/completed",
+        "output_prefix": "experiments/completed",
+        "learning_rate": 0.001,
+        "weight_decay": 0.01,
+        "augmentation": {"preset": "pill_basic"},
+        "gradient_accumulation_steps": 2,
+        "early_stopping": {"patience": 2, "min_delta": 0.0},
+        "lr_scheduler": {"name": "cosine", "warmup_steps": 5, "min_lr_factor": 0.1},
+        "resume_from": "artifacts/experiments/completed/.old.partial/last_checkpoint.pt",
+    }
+    adam = pipeline._settings(
+        {
+            "train": {
+                **common,
+                "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
+                "optimizer": "AdamW",
+                "beta1": 0.9,
+                "beta2": 0.999,
+                "epsilon": 1e-8,
+            }
+        }
+    )
+    sgd = pipeline._settings(
+        {
+            "train": {
+                **common,
+                "architecture": "retinanet_resnet50_fpn_v2",
+                "optimizer": "SGD",
+                "momentum": 0.9,
+            }
+        }
+    )
+
+    read = (set(adam) | set(sgd)) - {"resume"}
+    assert read == set(train_contract.SETTING_KEYS)
+
+
 def test_every_mmdetection_name_in_the_shared_contract_has_a_config_here():
     """계약이 이름을 정하고, 그 이름으로 어떤 detector를 만들지는 여기서 정합니다.
 

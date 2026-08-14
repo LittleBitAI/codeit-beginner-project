@@ -792,8 +792,8 @@ def _sibling_best_uri(location: str) -> str:
     """이어서 학습할 checkpoint 옆의 best_checkpoint.pt를 가리킵니다."""
 
     if _is_s3(location):
-        return _s3_relative(location, "best_checkpoint.pt")
-    return (Path(location).parent / "best_checkpoint.pt").as_posix()
+        return _s3_relative(location, _contract.BEST_CHECKPOINT_NAME)
+    return (Path(location).parent / _contract.BEST_CHECKPOINT_NAME).as_posix()
 
 
 def _load_resume(
@@ -996,8 +996,8 @@ def _publish_local(
         return (final_directory / name).relative_to(REPOSITORY_ROOT).as_posix()
 
     return {
-        "best_checkpoint_uri": relative("best_checkpoint.pt"),
-        "last_checkpoint_uri": relative("last_checkpoint.pt"),
+        "best_checkpoint_uri": relative(_contract.BEST_CHECKPOINT_NAME),
+        "last_checkpoint_uri": relative(_contract.RESUME_CHECKPOINT_NAME),
         "training_history_uri": relative("training_history.json"),
     }
 
@@ -1021,8 +1021,8 @@ def _publish_s3(
     }
 
     with _temporary_checkpoint_directory("train-upload-") as temporary:
-        best_path = temporary / "best_checkpoint.pt"
-        last_path = temporary / "last_checkpoint.pt"
+        best_path = temporary / _contract.BEST_CHECKPOINT_NAME
+        last_path = temporary / _contract.RESUME_CHECKPOINT_NAME
         _write_checkpoint(best_path, best)
         _write_checkpoint(last_path, last)
         best_uri = storage.upload_file(best_path, destinations["best_checkpoint_uri"])
@@ -1107,11 +1107,11 @@ def _execute_claimed(
             # last를 먼저 바꿉니다. 이후 best 저장에서 중단돼도 last 안의 best 가중치로
             # 이어서 할 수 있고, last 자체를 쓰다 중단되면 os.replace 전 사본이 남습니다.
             _replace_checkpoint(
-                working_directory / "last_checkpoint.pt", resumable_payload
+                working_directory / _contract.RESUME_CHECKPOINT_NAME, resumable_payload
             )
             if written_best.get("epoch") != best["epoch"]:
                 _replace_checkpoint(
-                    working_directory / "best_checkpoint.pt",
+                    working_directory / _contract.BEST_CHECKPOINT_NAME,
                     _checkpoint_payload(best, settings, class_map, category_ids),
                 )
                 written_best["epoch"] = best["epoch"]
