@@ -28,7 +28,15 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 CACHE_ROOT = REPOSITORY_ROOT / "artifacts" / "train-image-cache" / "v1"
 TEMPORARY_ROOT = REPOSITORY_ROOT / "artifacts"
 CACHE_TTL_SECONDS = 14 * 24 * 60 * 60
+# 실행 중인 run은 이미지를 한 장 볼 때마다 자기 lease를 새로 찍습니다. 그만큼 오래
+# 조용한 lease는 찍어 줄 process가 죽었다는 뜻이라, 그 자리를 계속 지켜 줄 이유가
+# 없습니다. dataset 하나가 수십 GB라 14일을 기다리면 그 사이 디스크가 찹니다.
+LEASE_TTL_SECONDS = 60 * 60
 MAX_CACHE_BYTES = 50 * 1024**3
+# cache 한 칸이 dataset 한 벌을 통째로 담습니다. version을 바꾸면 두 벌이 되고,
+# 디스크는 그만큼 없습니다. 쓰고 있는 것만 남기고 나머지는 첫 이미지를 받기 전에
+# 비웁니다. 지웠던 version으로 돌아가면 그때 다시 받습니다.
+MAX_CACHE_DATASETS = 1
 # 다 채운 cache를 묶어 두는 자리입니다. 이름이 fingerprint라 dataset이 바뀌면 다른
 # 묶음이 되고, 옛 묶음을 실수로 쓰는 일이 없습니다.
 ARCHIVE_PREFIX = "datasets/pill_detection/image-cache"
@@ -209,6 +217,7 @@ class ImageCacheSession:
         temporary_root: Path = TEMPORARY_ROOT,
         ttl_seconds: float = CACHE_TTL_SECONDS,
         max_cache_bytes: int = MAX_CACHE_BYTES,
+        max_datasets: int = MAX_CACHE_DATASETS,
         now: Callable[[], float] = time.time,
     ) -> None:
         self._fingerprint = _dataset_fingerprint(dataset_summary)
@@ -216,6 +225,7 @@ class ImageCacheSession:
         self._temporary_root = temporary_root
         self._ttl_seconds = ttl_seconds
         self._max_cache_bytes = max_cache_bytes
+        self._max_datasets = max_datasets
         self._now = now
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
         self._lease: Path | None = None
@@ -383,6 +393,8 @@ class ImageCacheSession:
             for path in self._cache_root.iterdir()
             if path.is_dir() and path.name.startswith(".trash-")
         ]
+        lease_cutoff = now - LEASE_TTL_SECONDS
+        in_use = 0
         candidates: list[tuple[float, int, Path]] = []
         for namespace in self._cache_root.iterdir():
             if not namespace.is_dir() or namespace.name.startswith("."):
@@ -390,9 +402,10 @@ class ImageCacheSession:
             active = namespace / ".active"
             if active.is_dir():
                 for lease in active.glob("*.lease"):
-                    if lease.stat().st_mtime < cutoff:
+                    if lease.stat().st_mtime < lease_cutoff:
                         lease.unlink(missing_ok=True)
                 if any(active.glob("*.lease")):
+                    in_use += 1
                     continue
             marker = namespace / ".last_used"
             used_at = marker.stat().st_mtime if marker.exists() else namespace.stat().st_mtime
@@ -410,11 +423,15 @@ class ImageCacheSession:
             for path in self._cache_root.iterdir()
             if path.is_dir() and not path.name.startswith(".trash-")
         )
+        # 오래 안 쓴 것부터 버립니다. 쓰고 있는 dataset은 lease가 지켜 주므로 여기
+        # 남는 것은 아무도 쓰지 않는 것들뿐입니다.
+        datasets = in_use + len(remaining)
         for _, size, namespace in sorted(remaining):
-            if total <= self._max_cache_bytes:
+            if total <= self._max_cache_bytes and datasets <= self._max_datasets:
                 break
             trash.append(self._move_to_trash(namespace))
             total -= size
+            datasets -= 1
         return trash
 
     def _move_to_trash(self, namespace: Path) -> Path:

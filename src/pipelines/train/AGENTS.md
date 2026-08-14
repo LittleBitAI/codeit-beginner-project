@@ -28,6 +28,8 @@ The S3 mirror `<prefix>/<run_id>/running/last_checkpoint.pt` is **one** self-con
 
 `datasets/pill_detection/image-cache/<fingerprint>.tar` holds a full image cache, packed once after an epoch. An empty cache fills from it in one object instead of refetching every image. It never overwrites an archive, refuses members that leave the cache, and fails silently into the per-image path.
 
+`artifacts/train-image-cache/` keeps **one** dataset, because one namespace holds a whole one and Colab does not have room for two. Starting a run on a different dataset trashes every other unleased namespace before the first image is fetched; coming back to it refetches. A lease protects its namespace only while a run keeps fetching, and expires an hour after the last one, so a killed run does not hold tens of gigabytes for the fourteen-day TTL.
+
 Published files are never overwritten, and a run stops before its first batch when its `run_id` already has a non-empty working directory, an S3 `running/` checkpoint, or a finished result. On the empty disk of a new Colab runtime only the bucket knows an interrupted run is there, so the S3 checks carry the weight.
 
 ## Configurable Training

@@ -519,6 +519,50 @@ def test_cleanup_removes_expired_cache_but_protects_an_active_namespace(tmp_path
     assert active.exists()
 
 
+def test_a_lease_left_by_a_dead_run_stops_protecting_the_cache(tmp_path):
+    """죽은 process가 남긴 lease는 자리를 지켜 주지 않습니다.
+
+    실행 중인 run은 이미지를 받을 때마다 자기 lease를 새로 찍습니다. 두 시간째
+    조용한 lease는 그렇게 찍어 줄 process가 없다는 뜻입니다.
+    """
+
+    now = 20 * 24 * 60 * 60.0
+    cache_root = tmp_path / "persistent"
+    abandoned = _inactive_namespace(cache_root, "abandoned", used_at=0.0, size=4)
+    (abandoned / ".active").mkdir()
+    lease = abandoned / ".active" / "dead-run.lease"
+    lease.touch()
+    os.utime(lease, (now - 2 * 60 * 60, now - 2 * 60 * 60))
+
+    with ImageCacheSession(
+        _summary(),
+        cache_root=cache_root,
+        temporary_root=tmp_path / "temporary",
+        now=lambda: now,
+    ):
+        pass
+
+    assert not abandoned.exists()
+
+
+def test_starting_a_run_keeps_only_the_dataset_it_uses(tmp_path):
+    """dataset을 바꾸면 앞 version의 cache는 첫 이미지를 받기 전에 사라집니다."""
+
+    now = 1_000.0
+    cache_root = tmp_path / "persistent"
+    previous = _inactive_namespace(cache_root, "previous", used_at=now, size=4)
+
+    with ImageCacheSession(
+        _summary(version=6),
+        cache_root=cache_root,
+        temporary_root=tmp_path / "temporary",
+        ttl_seconds=1_000_000.0,
+        now=lambda: now,
+    ) as cache:
+        assert not previous.exists()
+        assert cache.namespace.is_dir()
+
+
 def test_cleanup_enforces_size_limit_oldest_first(tmp_path):
     cache_root = tmp_path / "persistent"
     oldest = _inactive_namespace(cache_root, "oldest", used_at=100.0, size=8)
@@ -529,6 +573,7 @@ def test_cleanup_enforces_size_limit_oldest_first(tmp_path):
         cache_root=cache_root,
         temporary_root=tmp_path / "temporary",
         max_cache_bytes=10,
+        max_datasets=3,
         ttl_seconds=1_000.0,
         now=lambda: 500.0,
     ):
