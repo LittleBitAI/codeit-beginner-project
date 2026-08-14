@@ -59,6 +59,8 @@ const DEFAULTS: Defaults = {
 };
 
 let posted: { path: string; body: unknown }[] = [];
+/** 서버가 돌려줄 오류. 비어 있으면 검증을 통과한 것으로 답합니다. */
+let serverErrors: { field: string; message: string }[] = [];
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -69,6 +71,7 @@ function jsonResponse(body: unknown): Response {
 
 beforeEach(() => {
   posted = [];
+  serverErrors = [];
   window.sessionStorage.clear();
   vi.stubGlobal(
     'fetch',
@@ -80,8 +83,8 @@ beforeEach(() => {
       }
       if (path === '/api/train/validate') {
         return jsonResponse({
-          valid: true,
-          errors: [],
+          valid: serverErrors.length === 0,
+          errors: serverErrors,
           warnings: [],
           normalized: {
             project: { name: 'pill' },
@@ -147,8 +150,22 @@ describe('NewExperimentSheet', () => {
     show({ source: null });
 
     expect(await screen.findByText('학습에 쓸 데이터셋을 아직 고르지 않았습니다')).toBeInTheDocument();
+    // 검증이 끝난 **뒤에도** 잠겨 있어야 합니다. 응답 전에 재면 아직 안 온 검증 때문에
+    // 잠긴 것을 보고 통과해 버립니다.
+    await screen.findByText('retina-basic-e15-a7f3');
     expect(screen.getByRole('button', { name: '대기열에 추가' })).toBeDisabled();
     expect(screen.getByRole('button', { name: '바로 시작' })).toBeDisabled();
+  });
+
+  // 판단 기준은 언제나 서버입니다. 화면이 통과시켜도 서버가 거부하면 시작할 수 없어야
+  // 합니다.
+  it('서버가 설정을 거부하면 시작할 수 없다', async () => {
+    serverErrors = [{ field: 'train.epochs', message: '1 이상이어야 합니다.' }];
+    seedData();
+    show({ source: SOURCE });
+
+    expect(await screen.findByText('1 이상이어야 합니다.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '대기열에 추가' })).toBeDisabled();
   });
 
   it('고른 데이터셋을 그대로 쓰고, artifact 위치를 고치는 칸은 두지 않는다', async () => {

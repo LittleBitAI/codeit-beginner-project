@@ -232,19 +232,20 @@ export function NewExperimentSheet({
   // 서버가 지어 준 이름입니다. 규칙은 backend 한 곳에만 있습니다.
   const autoRunId =
     typeof result?.normalized?.train?.run_id === 'string' ? result.normalized.train.run_id : null;
-  const dataFilled = defaults.data_fields.every(
-    (spec) => (draft.data[spec.name] ?? '').trim() !== '',
-  );
   // 지금 **고른** 데이터셋이 있어야 시작할 수 있습니다. draft에 남은 값만 보고 열어
   // 두면, 서버는 고른 것이 없다는데 지난 세션의 URI로 학습이 돕니다. 칸을 없앤 뒤로는
   // 그 값을 화면에서 지울 방법도 없어, 아무도 모르는 데이터로 밤을 새우게 됩니다.
+  //
+  // "필수 네 칸이 채워졌는가"는 따로 보지 않습니다. 고른 데이터셋이 complete이고 실려 갈
+  // 값이 그것과 같으면 이미 채워져 있습니다. 두 번 세면 조건 하나가 아무것도 막지 않는
+  // 채로 남아, 지워도 아무 테스트가 빨개지지 않습니다.
   const sourcePicked = Boolean(source?.complete);
   // 어긋난 값으로도 시작하지 않습니다. 칸을 없앤 뒤로 일부러 고른 것과 다른 데이터로
   // 돌릴 이유가 없으므로, 경고만 띄우고 열어 두면 실수로 지나칠 뿐입니다. 맞추기 한 번이
   // 곧 해결이라 막아도 막다른 길이 되지 않습니다. 화면 표시는 `sourcePicked`가 맡습니다 —
   // 어긋났을 때 "고르지 않았습니다"라고 말하면 사실이 아닙니다.
   const ready =
-    Boolean(result?.valid) && dataFilled && sourcePicked && !mismatched && pending === null;
+    Boolean(result?.valid) && sourcePicked && !mismatched && pending === null;
 
   const capability = resolveTrainCapability(defaults);
   const selectedOptimizer = draft.train.optimizer || capability.optimizer.default;
@@ -393,7 +394,7 @@ export function NewExperimentSheet({
       {tab === 'basic' && (
         <div style={{ paddingTop: 4, marginBottom: 26 }}>
           <MicroLabel style={{ marginBottom: 16 }}>이 학습이 읽을 데이터</MicroLabel>
-          {sourcePicked && dataFilled ? (
+          {sourcePicked ? (
             <>
               <div
                 style={{
@@ -464,14 +465,13 @@ export function NewExperimentSheet({
             {item.message}
           </AlertRow>
         ))}
-        {errors.length === 0 && !(sourcePicked && dataFilled) && (
+        {errors.length === 0 && !sourcePicked && (
           <AlertRow level="warning" title="학습에 쓸 데이터셋을 아직 고르지 않았습니다">
             왼쪽 <b>dataset 준비</b>에서 전처리 폴더를 골라야 시작할 수 있습니다.
           </AlertRow>
         )}
         {errors.length === 0 &&
           sourcePicked &&
-          dataFilled &&
           warnings.map((item) => (
             <AlertRow key={`${item.field}-${item.message}`} level="warning" title={item.field}>
               {item.message}
