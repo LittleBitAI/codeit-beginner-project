@@ -1129,11 +1129,8 @@ def _execute_claimed(
             class_count=len(class_map),
         )
 
-        def cache_progress(done: int, total: int) -> None:
-            # 몇 분이 걸리는 구간이라 조용하면 멈춘 것으로 보입니다. 줄 수가 이미지
-            # 수만큼 나오지 않게 200장마다, 그리고 마지막에 한 번 알립니다.
-            if done % 200 == 0 or done == total:
-                progress.emit("image_cache_progress", done=done, total=total)
+        def cache_progress(ready: int, total: int) -> None:
+            progress.emit("image_cache_progress", ready=ready, total=total)
 
         # 첫 epoch이 batch마다 멈춰 이미지를 한 장씩 받지 않도록 미리 동시에 받아
         # 둡니다. 이미 받아 둔 이미지는 건너뛰므로 이어서 하는 실행은 나머지만 받습니다.

@@ -36,6 +36,9 @@ MAX_CACHE_DATASETS = 1
 # 이미지 한 장을 받는 시간은 거의 다 S3를 오가며 기다리는 시간입니다. 여러 장을
 # 동시에 받으면 그 기다림이 겹쳐서 회선이 허용하는 만큼 빨라집니다.
 PREFETCH_WORKERS = 16
+# 몇 분이 걸리는 구간이라 조용하면 멈춘 것으로 보입니다. 줄 수가 이미지 수만큼
+# 나오지 않게 이만큼마다, 그리고 마지막에 한 번 알립니다.
+PREFETCH_PROGRESS_EVERY = 200
 _VERSION_SEGMENT = re.compile(r"v[0-9]+")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _MANIFEST_FILES = ("train_manifest.json", "validation_manifest.json")
@@ -303,18 +306,32 @@ class ImageCacheSession:
         ]
         if not remote:
             return 0
+        total = len(remote)
         ready = 0
-        with ThreadPoolExecutor(max_workers=min(PREFETCH_WORKERS, len(remote))) as pool:
+        pool = ThreadPoolExecutor(max_workers=min(PREFETCH_WORKERS, total))
+        try:
             futures = [pool.submit(self.fetch, location, storage) for location in remote]
             for done, future in enumerate(as_completed(futures), start=1):
                 try:
                     future.result()
-                    ready += 1
-                except (TrainError, StorageError, OSError):
+                except Exception:
+                    # 무엇이 실패했든 여기서 학습을 세우지 않습니다. 미리 받는 것은
+                    # 빠른 길일 뿐이고, 그 이미지는 학습이 그 자리에서 다시 받습니다.
+                    # 예외 종류를 좁게 적으면, storage가 바꿔 주지 않는 boto3의
+                    # RetriesExceededError 한 건이 몇 시간짜리 학습을 통째로 세웁니다.
                     continue
+                else:
+                    ready += 1
                 finally:
-                    if progress is not None:
-                        progress(done, len(remote))
+                    # 받은 장수를 알립니다. 시도한 수를 알리면 실패한 장까지 세어
+                    # 마지막 줄이 늘 100%가 됩니다.
+                    if progress is not None and (
+                        done % PREFETCH_PROGRESS_EVERY == 0 or done == total
+                    ):
+                        progress(ready, total)
+        finally:
+            # 도중에 빠져나갈 때 아직 시작도 안 한 다운로드까지 기다리지 않습니다.
+            pool.shutdown(wait=True, cancel_futures=True)
         return ready
 
     def _start_temporary(self) -> None:

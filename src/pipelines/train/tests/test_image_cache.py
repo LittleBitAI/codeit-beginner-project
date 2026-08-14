@@ -104,25 +104,39 @@ def test_prefetch_downloads_more_than_one_image_at_a_time(tmp_path):
         assert cache.prefetch(IMAGES, storage) == len(IMAGES)
 
 
+class _RetriesExceeded(Exception):
+    """boto3가 전송 재시도를 다 쓰면 던지는 예외를 흉내 냅니다.
+
+    ``Boto3Error``는 ``OSError``도 ``ClientError``도 아니라서 ``src/common``의
+    storage가 ``StorageError``로 바꿔 주지 않고 그대로 올라옵니다. 실패를 좁게 잡으면
+    이런 예외 한 건이 학습 전체를 세웁니다.
+    """
+
+
 def test_prefetch_leaves_an_image_it_cannot_get_to_the_training_loop(tmp_path):
-    """한 장을 못 받아도 학습은 시작합니다. 그 자리에서 다시 받아 보게 둡니다."""
+    """한 장을 못 받아도 학습은 시작하고, 받은 장수를 사실대로 알립니다."""
 
     storage = _storage()
 
     def download(source, destination, *, overwrite=False):
         if source == IMAGES[1]:
-            raise StorageError("이미지를 받지 못했습니다")
+            raise _RetriesExceeded("연결이 반복해서 끊겼습니다")
         Image.new("RGB", (3, 2), color="red").save(destination, format="PNG")
         return Path(destination)
 
     storage.download_file.side_effect = download
+    reported: list[tuple[int, int]] = []
     with ImageCacheSession(
         _summary(),
         cache_root=tmp_path / "persistent",
         temporary_root=tmp_path / "temporary",
     ) as cache:
-        assert cache.prefetch(IMAGES, storage) == 1
+        record = lambda ready, total: reported.append((ready, total))
+        assert cache.prefetch(IMAGES, storage, record) == 1
         assert cache.fetch(IMAGES[0], storage).is_file()
+
+    # 시도한 수를 세면 덜 받고도 마지막 줄이 100%가 됩니다.
+    assert reported[-1] == (1, len(IMAGES))
 
 
 def _png_with_corrupt_idat() -> bytes:
