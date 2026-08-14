@@ -1,9 +1,8 @@
 /**
- * 학습 하나를 목록에서 알아보는 데 필요한 값들을 뽑습니다.
+ * data artifact 위치에서 데이터셋 이름을 읽습니다.
  *
- * 표에는 실행 이름만 크게 두고 나머지는 이름 아래 한 줄로 내립니다. 예전에는 그
- * 자리에 job_id 앞 8자(`7d851928`)가 있었는데, 어떤 데이터로 무슨 설정을 돌렸는지는
- * 알려 주지 않으면서 자리만 차지했습니다.
+ * 왼쪽 dataset 목록과 기록 줄이 같은 이름을 쓰려면 한 곳에서 뽑아야 합니다. 규칙이
+ * 두 벌이 되면 같은 학습이 두 dataset으로 갈라져 보입니다.
  */
 
 /** data pipeline이 내놓는 학습 manifest의 파일 이름입니다. */
@@ -32,4 +31,3 @@ export function datasetLabel(dataInputs: Record<string, string> | null | undefin
   if (folder === undefined || folder.endsWith(':')) return null;
   return folder;
 }
-
