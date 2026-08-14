@@ -7,6 +7,7 @@ import pickle
 import struct
 import tarfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Barrier
 from unittest.mock import Mock
@@ -420,6 +421,24 @@ def test_cache_handle_is_picklable_for_dataloader_workers(tmp_path):
     assert path.name == "image.png"
 
 
+def test_a_leased_cache_handle_is_picklable_for_dataloader_workers(tmp_path):
+    """lease를 든 session도 worker에게 보낼 수 있어야 합니다.
+
+    열린 file은 pickle되지 않습니다. 보낼 때 손잡이를 빼지 않으면 num_workers를 올린
+    학습이 첫 batch에서 죽습니다. 위 test는 fingerprint가 없는 임시 cache를 쓰므로
+    손잡이가 아예 생기지 않아 이 경우를 잡지 못합니다.
+    """
+
+    storage = _storage()
+    with ImageCacheSession(
+        _summary(),
+        cache_root=tmp_path / "persistent",
+        temporary_root=tmp_path / "temporary",
+    ) as cache:
+        worker_cache = pickle.loads(pickle.dumps(cache))
+        assert worker_cache.fetch(IMAGES[0], storage).is_file()
+
+
 def test_process_lock_failure_falls_back_to_temporary_cache(tmp_path, monkeypatch):
     class BrokenLock:
         def __enter__(self):
@@ -503,9 +522,48 @@ def test_cleanup_removes_expired_cache_but_protects_an_active_namespace(tmp_path
     cache_root = tmp_path / "persistent"
     expired = _inactive_namespace(cache_root, "expired", used_at=0.0, size=4)
     active = _inactive_namespace(cache_root, "active", used_at=0.0, size=4)
-    (active / ".active").mkdir()
-    (active / ".active" / "other-run.lease").touch()
-    os.utime(active / ".active" / "other-run.lease", (now, now))
+
+    with _held_lease(active):
+        with ImageCacheSession(
+            _summary(),
+            cache_root=cache_root,
+            temporary_root=tmp_path / "temporary",
+            now=lambda: now,
+        ):
+            pass
+
+    assert not expired.exists()
+    assert active.exists()
+
+
+@contextmanager
+def _held_lease(namespace: Path, name: str = "other-run.lease"):
+    """다른 실행이 들고 있는 lease를 흉내 냅니다.
+
+    같은 process의 다른 손잡이도 서로 잠금을 막으므로, 살아 있는 run을 test 안에서
+    그대로 만들 수 있습니다.
+    """
+
+    active = namespace / ".active"
+    active.mkdir(parents=True, exist_ok=True)
+    lease = active / name
+    with lease.open("a+b") as stream:
+        assert image_cache_module._lock_stream(stream, blocking=False)
+        yield lease
+
+
+def test_a_lease_no_process_holds_stops_protecting_the_cache(tmp_path):
+    """주인이 사라진 lease는 자리를 지켜 주지 않습니다.
+
+    실행 중인 run은 자기 lease file을 연 채로 잠가 둡니다. 잠글 수 있다는 것은
+    그 run이 끝났거나 죽었다는 뜻입니다.
+    """
+
+    now = 20 * 24 * 60 * 60.0
+    cache_root = tmp_path / "persistent"
+    abandoned = _inactive_namespace(cache_root, "abandoned", used_at=0.0, size=4)
+    (abandoned / ".active").mkdir()
+    (abandoned / ".active" / "dead-run.lease").touch()
 
     with ImageCacheSession(
         _summary(),
@@ -515,8 +573,74 @@ def test_cleanup_removes_expired_cache_but_protects_an_active_namespace(tmp_path
     ):
         pass
 
-    assert not expired.exists()
-    assert active.exists()
+    assert not abandoned.exists()
+
+
+def test_a_held_lease_protects_its_cache_however_long_it_is_quiet(tmp_path):
+    """살아 있는 run은 오래 조용해도 지켜집니다.
+
+    첫 이미지를 받기 전 준비 작업은 얼마든지 오래 걸릴 수 있습니다. lease를 마지막으로
+    만진 시각으로 판단하면 그 사이에 시작한 다른 실행이 살아 있는 cache를 지웁니다.
+    """
+
+    now = 20 * 24 * 60 * 60.0
+    cache_root = tmp_path / "persistent"
+    working = _inactive_namespace(cache_root, "working", used_at=0.0, size=4)
+
+    with _held_lease(working) as lease:
+        os.utime(lease, (0.0, 0.0))  # 아주 오래 조용했지만 주인은 살아 있습니다.
+        with ImageCacheSession(
+            _summary(),
+            cache_root=cache_root,
+            temporary_root=tmp_path / "temporary",
+            now=lambda: now,
+        ) as cache:
+            # 정리가 터져 임시 cache로 물러나면 이 test가 엉뚱한 이유로 통과합니다.
+            assert cache.namespace.parent == cache_root
+        assert lease.exists()
+
+    assert working.exists()
+
+
+def test_starting_a_run_keeps_only_the_dataset_it_uses(tmp_path):
+    """dataset을 바꾸면 앞 version의 cache는 첫 이미지를 받기 전에 사라집니다."""
+
+    now = 1_000.0
+    cache_root = tmp_path / "persistent"
+    previous = _inactive_namespace(cache_root, "previous", used_at=now, size=4)
+
+    with ImageCacheSession(
+        _summary(version=6),
+        cache_root=cache_root,
+        temporary_root=tmp_path / "temporary",
+        ttl_seconds=1_000_000.0,
+        now=lambda: now,
+    ) as cache:
+        assert not previous.exists()
+        assert cache.namespace.is_dir()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork는 POSIX에만 있습니다")
+def test_a_forked_worker_closing_its_copy_does_not_release_the_lease(tmp_path):
+    """worker가 끝나도 부모 run의 lease는 풀리지 않아야 합니다.
+
+    POSIX DataLoader는 fork로 worker를 만들고, worker는 부모가 열어 둔 lease fd를
+    복제해 갖습니다. worker가 끝나며 그 복제본을 닫을 때 잠금까지 풀린다면, 그 순간
+    시작한 다른 실행이 살아 있는 cache를 통째로 지웁니다.
+    """
+
+    lease = tmp_path / "run.lease"
+    with lease.open("a+b") as stream:
+        assert image_cache_module._lock_stream(stream, blocking=False)
+        child = os.fork()
+        if child == 0:  # worker: 물려받은 fd를 그대로 둔 채 끝납니다.
+            os._exit(0)
+        os.waitpid(child, 0)
+
+        assert not image_cache_module._lease_is_abandoned(lease)
+
+    # 대조군입니다. 주인이 놓으면 같은 검사가 버려진 것으로 읽어야 합니다.
+    assert image_cache_module._lease_is_abandoned(lease)
 
 
 def test_cleanup_enforces_size_limit_oldest_first(tmp_path):
@@ -529,6 +653,7 @@ def test_cleanup_enforces_size_limit_oldest_first(tmp_path):
         cache_root=cache_root,
         temporary_root=tmp_path / "temporary",
         max_cache_bytes=10,
+        max_datasets=3,
         ttl_seconds=1_000.0,
         now=lambda: 500.0,
     ):
