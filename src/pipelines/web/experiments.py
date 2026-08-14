@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from src.common import (
+    ExperimentNameError,
     ExperimentRegistryError,
     list_experiment_summaries,
     read_experiment_record,
@@ -403,19 +404,26 @@ def _compare_one(
     않는 650KB짜리 평가 파일까지 읽었기 때문입니다.
     """
 
-    summary = read_experiment_summary(run_id, config)
+    # 이름이 index 항목을 가리킬 수 없는 것은 "견줄 수 없다"이지 "비교가 실패했다"가
+    # 아닙니다. 하나 때문에 나머지 실험의 표까지 사라지면 안 되므로 missing으로 보냅니다.
+    try:
+        summary = read_experiment_summary(run_id, config)
+    except ExperimentNameError:
+        return None
     if summary is None:
         return None
     uri = _text(summary.get("experiment_record_uri"))
     if uri is None:
         return None
     record = read_experiment_record(uri, config, expected_run_id=run_id)
-    history = experiment_detail.history_block(
-        _artifact_uri(record, "train", "training_history_uri"), config["storage"]
-    )
+    # 곡선은 `available`과 `reason`까지 그대로 싣습니다. epoch 목록만 보내면 못 읽은
+    # 것과 아직 한 epoch도 안 끝난 것이 똑같이 빈 배열이 되어, 화면이 원인을 지어
+    # 말하게 됩니다.
     return {
         "experiment": _enrich_summary(summary, record, score),
-        "epochs": history["epochs"],
+        "history": experiment_detail.history_block(
+            _artifact_uri(record, "train", "training_history_uri"), config["storage"]
+        ),
     }
 
 
@@ -456,6 +464,12 @@ def read_registry_experiment(run_id: str) -> dict[str, Any]:
         if uri is None:
             raise JobNotFoundError(f"'{wanted}' 실험 기록의 위치가 index에 없습니다.")
         record = read_experiment_record(uri, config, expected_run_id=wanted)
+    # 이름이 index 항목을 가리킬 수 없으면 그런 실험은 없는 것입니다. 저장소를 읽다
+    # 실패한 것과 같은 답을 하면, 주소를 잘못 친 사람에게 "서버 고장"이라고 말합니다.
+    except ExperimentNameError as error:
+        raise JobNotFoundError(
+            f"'{wanted}' 실험을 registry에서 찾을 수 없습니다({error})."
+        ) from error
     except ExperimentRegistryError as error:
         raise WebError(f"실험 기록을 읽지 못했습니다({type(error).__name__}).") from error
 
@@ -507,7 +521,7 @@ def compare_registry_experiments(run_ids: list[str]) -> dict[str, Any]:
             run_id for run_id, item in zip(requested, loaded) if item is None
         ],
         "curves": {
-            run_id: item["epochs"]
+            run_id: item["history"]
             for run_id, item in zip(requested, loaded)
             if item is not None
         },
@@ -529,6 +543,11 @@ def save_kaggle_score(
     wanted = run_id.strip()
     try:
         summary = read_experiment_summary(wanted, registry_config())
+    # 상세와 같은 이유로, 이름이 index 항목이 될 수 없으면 그런 실험은 없는 것입니다.
+    except ExperimentNameError as error:
+        raise JobNotFoundError(
+            f"'{wanted}' 실험을 registry에서 찾을 수 없습니다({error})."
+        ) from error
     except ExperimentRegistryError as error:
         raise WebError(f"실험 목록을 읽지 못했습니다({type(error).__name__}).") from error
     if summary is None:

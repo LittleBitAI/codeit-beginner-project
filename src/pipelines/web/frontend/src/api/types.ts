@@ -302,8 +302,11 @@ export interface ExperimentComparisonResult {
    *
    * 예전에는 실행마다 상세를 또 불렀는데, 그 응답은 곡선에 쓰지 않는 평가 결과까지
    * 들고 오고 서버는 그때마다 registry index 전체를 훑었습니다.
+   *
+   * epoch 목록만이 아니라 `available`·`reason`까지 옵니다. 빈 배열 하나로는 못 읽은
+   * 것과 아직 한 epoch도 안 끝난 것을 구별할 수 없어, 화면이 원인을 지어 말하게 됩니다.
    */
-  curves: Record<string, EpochRecord[]>;
+  curves: Record<string, ExperimentHistoryCurve>;
 }
 
 /** score threshold를 옮겨 가며 잰 precision·recall·F1 한 점입니다. */
