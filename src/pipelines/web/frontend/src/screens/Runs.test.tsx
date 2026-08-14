@@ -195,12 +195,16 @@ describe('Runs', () => {
       records: [
         failedRecord(),
         cancelledRecord({ metrics: { ...record().metrics, bestValidationLoss: 0.5 } }),
+        // 중단은 이어서 학습할 대상이라 특히 눈에 띄어야 합니다. 이름만 "취소·중단"이라
+        // 적고 취소만 넣으면, 중단 조건이 사라져도 이 test는 통과합니다.
+        failedRecord({ runId: 'lost', status: 'interrupted', statusLabel: '중단됨' }),
         record({ runId: 'done', registered: false }),
       ],
     });
 
-    // 결과가 남은 취소와 미등록 성공은 접히지 않습니다.
+    // 결과가 남은 취소, 중단, 미등록 성공은 접히지 않습니다.
     expect(screen.getByText('취소됨')).toBeInTheDocument();
+    expect(screen.getByText('중단됨')).toBeInTheDocument();
     expect(screen.getByText('미등록')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /결과 없이 끝남/ }));
