@@ -71,7 +71,7 @@ SUPPORTED_OPTIMIZERS = ("AdamW", "SGD", "Adam")
 NEW_EXPERIMENT_OPTIMIZER = "AdamW"
 # train의 AUGMENTATION_PRESETS key와 같은 순서로 둡니다. 값 자체는 train이 갖고
 # 있으므로 여기서는 고를 수 있는 이름만 복제합니다.
-SUPPORTED_AUGMENTATIONS = ("none", "pill_basic")
+SUPPORTED_AUGMENTATIONS = ("none", "pill_basic", "pill_geometric")
 DEFAULT_AUGMENTATION = "none"
 # train의 PRECISION_MODES와 같은 순서로 둡니다. `amp`가 실제로 bf16을 쓸지 fp16을
 # 쓸지는 train이 GPU를 보고 정하고, `fp16`·`bf16`은 고른 그대로 씁니다. 여기서는
