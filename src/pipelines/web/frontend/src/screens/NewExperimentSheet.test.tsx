@@ -133,11 +133,22 @@ function show(props: Partial<Parameters<typeof NewExperimentSheet>[0]> = {}) {
 }
 
 describe('NewExperimentSheet', () => {
-  it('data artifact 칸이 비어 있으면 시작할 수 없다', async () => {
+  it('데이터셋을 고르지 않았으면 시작할 수 없다', async () => {
     show();
 
-    expect(await screen.findByText('data artifact 위치가 비어 있습니다')).toBeInTheDocument();
+    expect(await screen.findByText('학습에 쓸 데이터셋을 아직 고르지 않았습니다')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '대기열에 추가' })).toBeDisabled();
+  });
+
+  // 칸을 없앤 뒤로 draft에 남은 예전 값을 화면에서 지울 방법이 없습니다. 서버가 고른
+  // 것이 없다고 말하는데도 시작되면, 아무도 모르는 예전 데이터로 밤새 학습이 돕니다.
+  it('고른 데이터셋이 없으면 예전 값이 남아 있어도 시작할 수 없다', async () => {
+    seedData();
+    show({ source: null });
+
+    expect(await screen.findByText('학습에 쓸 데이터셋을 아직 고르지 않았습니다')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '대기열에 추가' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '바로 시작' })).toBeDisabled();
   });
 
   it('고른 데이터셋을 그대로 쓰고, artifact 위치를 고치는 칸은 두지 않는다', async () => {
@@ -171,7 +182,7 @@ describe('NewExperimentSheet', () => {
   it('설정을 만든 뒤에 대기열에 넣는다 — 만들기가 먼저다', async () => {
     const onStarted = vi.fn();
     seedData();
-    show({ onStarted });
+    show({ onStarted, source: SOURCE });
 
     const queueButton = screen.getByRole('button', { name: '대기열에 추가' });
     await waitFor(() => expect(queueButton).toBeEnabled());
@@ -188,7 +199,7 @@ describe('NewExperimentSheet', () => {
 
   it('다른 학습이 도는 중에는 바로 시작만 막고 대기열은 열어 둔다', async () => {
     seedData();
-    show({ busy: true, queuedCount: 2 });
+    show({ busy: true, queuedCount: 2, source: SOURCE });
 
     await waitFor(() =>
       expect(screen.getByRole('button', { name: '대기열에 추가' })).toBeEnabled(),

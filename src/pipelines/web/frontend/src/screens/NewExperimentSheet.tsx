@@ -235,7 +235,11 @@ export function NewExperimentSheet({
   const dataFilled = defaults.data_fields.every(
     (spec) => (draft.data[spec.name] ?? '').trim() !== '',
   );
-  const ready = Boolean(result?.valid) && dataFilled && pending === null;
+  // 지금 **고른** 데이터셋이 있어야 시작할 수 있습니다. draft에 남은 값만 보고 열어
+  // 두면, 서버는 고른 것이 없다는데 지난 세션의 URI로 학습이 돕니다. 칸을 없앤 뒤로는
+  // 그 값을 화면에서 지울 방법도 없어, 아무도 모르는 데이터로 밤을 새우게 됩니다.
+  const sourcePicked = Boolean(source?.complete);
+  const ready = Boolean(result?.valid) && dataFilled && sourcePicked && pending === null;
 
   const capability = resolveTrainCapability(defaults);
   const selectedOptimizer = draft.train.optimizer || capability.optimizer.default;
@@ -384,7 +388,7 @@ export function NewExperimentSheet({
       {tab === 'basic' && (
         <div style={{ paddingTop: 4, marginBottom: 26 }}>
           <MicroLabel style={{ marginBottom: 16 }}>이 학습이 읽을 데이터</MicroLabel>
-          {dataFilled ? (
+          {sourcePicked && dataFilled ? (
             <>
               <div
                 style={{
@@ -455,12 +459,13 @@ export function NewExperimentSheet({
             {item.message}
           </AlertRow>
         ))}
-        {errors.length === 0 && !dataFilled && (
-          <AlertRow level="warning" title="data artifact 위치가 비어 있습니다">
-            네 값을 모두 채워야 시작할 수 있습니다.
+        {errors.length === 0 && !(sourcePicked && dataFilled) && (
+          <AlertRow level="warning" title="학습에 쓸 데이터셋을 아직 고르지 않았습니다">
+            왼쪽 <b>dataset 준비</b>에서 전처리 폴더를 골라야 시작할 수 있습니다.
           </AlertRow>
         )}
         {errors.length === 0 &&
+          sourcePicked &&
           dataFilled &&
           warnings.map((item) => (
             <AlertRow key={`${item.field}-${item.message}`} level="warning" title={item.field}>
