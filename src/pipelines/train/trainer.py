@@ -15,6 +15,8 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
+from src.common import S3Storage
+
 from .errors import TrainError
 from .progress import ProgressEmitter
 
@@ -255,6 +257,33 @@ def _collate(batch: list[Any]) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     return tuple(zip(*batch))
 
 
+def give_worker_its_own_storage(worker_id: int) -> None:
+    """fork로 만든 worker에게 자기 몫의 S3 연결을 새로 쥐어 줍니다.
+
+    worker는 부모의 dataset을 그대로 물려받고, 그 안에는 부모가 이미 만들어 둔 S3
+    client가 들어 있습니다. boto3 client는 열린 socket을 들고 있어서 process 사이에
+    나눠 쓸 수 없습니다. 나눠 쓰면 부모의 checkpoint 업로드와 worker의 이미지
+    다운로드가 같은 socket에서 엉켜 응답이 뒤바뀌거나 멈춥니다.
+
+    미리 받기에서 놓친 이미지는 학습 도중 worker가 받으므로, 이 경로는 드물게가
+    아니라 실제로 지나갑니다. 여기서 실패하면 학습이 죽으므로 조용히 넘어가지
+    않습니다. bucket과 접속 설정은 그대로 두고 연결만 새로 엽니다.
+    """
+
+    info = torch.utils.data.get_worker_info()
+    if info is None:
+        return
+    storage = getattr(info.dataset, "storage", None)
+    if not isinstance(storage, S3Storage):
+        return
+    info.dataset.storage = S3Storage(
+        storage.bucket,
+        prefix=storage.prefix,
+        profile=storage.profile,
+        region=storage.region,
+    )
+
+
 def _move_target(target: Mapping[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
     return {key: value.to(device) for key, value in target.items()}
 
@@ -362,6 +391,7 @@ def _train_model(
         num_workers=settings["num_workers"],
         collate_fn=_collate,
         generator=generator,
+        worker_init_fn=give_worker_its_own_storage,
     )
     validation_loader = DataLoader(
         validation_dataset,
@@ -369,6 +399,7 @@ def _train_model(
         shuffle=False,
         num_workers=settings["num_workers"],
         collate_fn=_collate,
+        worker_init_fn=give_worker_its_own_storage,
     )
     parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not parameters:

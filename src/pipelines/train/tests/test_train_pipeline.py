@@ -604,12 +604,24 @@ def test_gpu_training_reads_images_in_worker_processes(monkeypatch):
 
     monkeypatch.setattr(pipeline.torch.cuda, "is_available", lambda: True)
 
-    monkeypatch.setattr(pipeline.os, "name", "posix")
-    assert pipeline._settings({"train": {"device": "cuda"}})["num_workers"] > 0
-    assert pipeline._settings({"train": {"device": "cpu"}})["num_workers"] == 0
+    def workers(device: str) -> int:
+        return pipeline._settings({"train": {"device": device}})["num_workers"]
 
-    monkeypatch.setattr(pipeline.os, "name", "nt")
-    assert pipeline._settings({"train": {"device": "cuda"}})["num_workers"] == 0
+    # os.name을 직접 바꾸지 않습니다. 바꿔 두면 그 사이에 나는 실패를 pytest가
+    # 출력하다 pathlib에서 죽어, 깨진 이유가 보이지 않습니다.
+    monkeypatch.setattr(pipeline, "WORKERS_ARE_SPAWNED", False)
+    # core보다 많이 띄우면 서로 느려지기만 하고, core를 셀 수 없으면 하나만 띄웁니다.
+    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: 2)
+    assert workers("cuda") == 2
+    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: 64)
+    assert workers("cuda") == 4
+    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: None)
+    assert workers("cuda") == 1
+
+    assert workers("cpu") == 0
+
+    monkeypatch.setattr(pipeline, "WORKERS_ARE_SPAWNED", True)
+    assert workers("cuda") == 0
 
     # 직접 적은 값은 어디서나 그대로 씁니다.
     assert (
@@ -1775,6 +1787,67 @@ def test_run_rejects_resuming_into_a_different_accumulation(
 
     assert result["status"] == "error"
     assert "gradient_accumulation_steps" in result["message"]
+    build_model_spy.assert_not_called()
+
+
+def test_a_worker_gets_its_own_s3_connection_instead_of_the_parents(monkeypatch):
+    """fork한 worker가 부모의 S3 client를 그대로 쓰면 안 됩니다.
+
+    boto3 client는 열린 socket을 들고 있어 process 사이에 나눠 쓸 수 없습니다.
+    나눠 쓰면 부모의 checkpoint 업로드와 worker의 이미지 다운로드가 같은 socket에서
+    엉킵니다. 미리 받기에서 놓친 이미지는 학습 도중 worker가 받으므로 이 경로는
+    실제로 지나갑니다.
+    """
+
+    parent = S3Storage("bucket", prefix="datasets", region="ap-northeast-2")
+    inherited = parent.client  # 부모가 이미 연결을 만들어 둔 상태입니다.
+
+    class _Dataset:
+        storage = parent
+
+    dataset = _Dataset()
+    monkeypatch.setattr(
+        trainer_module.torch.utils.data,
+        "get_worker_info",
+        lambda: SimpleNamespace(dataset=dataset),
+    )
+
+    trainer_module.give_worker_its_own_storage(0)
+
+    assert dataset.storage is not parent
+    assert dataset.storage.client is not inherited
+    # bucket과 접속 설정은 그대로여야 같은 곳에서 같은 권한으로 받습니다.
+    assert dataset.storage.bucket == parent.bucket
+    assert dataset.storage.prefix == parent.prefix
+    assert dataset.storage.region == parent.region
+
+
+def test_run_rejects_resuming_into_a_different_worker_count(local_config, monkeypatch):
+    """worker 수가 바뀌면 augmentation이 뽑는 무작위 수가 달라집니다.
+
+    worker가 없으면 주 process의 RNG에서, 있으면 worker마다 따로 뿌린 RNG에서
+    나옵니다. 막지 않으면 이어붙인 실행이 끊기지 않고 돈 실행과 다른 그림으로
+    배우는데, 오류는 나지 않고 점수로만 드러납니다.
+    """
+
+    local_config["train"]["augmentation"] = {"preset": "pill_basic"}
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"].update({"epochs": 4, "num_workers": 2})
+    build_model_spy = Mock()
+    monkeypatch.setattr(pipeline, "build_model", build_model_spy)
+
+    result = train.run(resumed)
+
+    assert result["status"] == "error"
+    assert "num_workers" in result["message"]
     build_model_spy.assert_not_called()
 
 

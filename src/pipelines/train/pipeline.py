@@ -126,17 +126,22 @@ def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     return value
 
 
+# Windows는 DataLoader worker를 spawn으로 만들면서 dataset을 pickle합니다. 그 안의 S3
+# client는 pickle되지 않아 첫 batch에서 실행이 죽습니다. ``os.name``을 그때그때 보지
+# 않고 여기 한 번만 적는 이유는, test가 os.name 자체를 바꾸면 그 사이에 나는 어떤
+# 실패도 pathlib이 엉뚱한 경로 종류를 고르며 읽을 수 없는 오류로 바뀌기 때문입니다.
+WORKERS_ARE_SPAWNED = os.name == "nt"
+
+
 def _default_workers(device: str) -> int:
     """이미지를 읽어 오는 보조 process 수의 기본값입니다.
 
     GPU가 한 batch를 도는 동안 다음 batch의 이미지를 미리 풀어 두라는 것이라,
-    기다릴 GPU가 없는 CPU 학습에는 줄 이유가 없습니다.
-
-    Windows는 worker를 spawn으로 만들면서 dataset을 pickle하는데, 그 안의 S3
-    client는 pickle되지 않아 첫 batch에서 실행이 죽습니다. 그래서 여기서는 0입니다.
+    기다릴 GPU가 없는 CPU 학습에는 줄 이유가 없습니다. worker를 pickle해 보내는
+    환경에서도 0입니다(``WORKERS_ARE_SPAWNED``).
     """
 
-    if device != "cuda" or os.name == "nt":
+    if device != "cuda" or WORKERS_ARE_SPAWNED:
         return 0
     # 이미지를 푸는 것은 CPU 일이라 core보다 많이 띄우면 서로 느려지기만 합니다.
     return min(4, os.cpu_count() or 1)
@@ -884,6 +889,16 @@ def _load_resume(
             "resume checkpoint used a different train.gradient_accumulation_steps "
             f"({recorded_accumulation}) than this run "
             f"({expected['gradient_accumulation_steps']})"
+        )
+    # 같은 이유입니다. worker 수가 달라지면 augmentation의 무작위 수가 주 process의
+    # RNG가 아니라 worker마다 따로 뿌린 RNG에서 나오므로, 이어붙인 실행이 끊기지 않고
+    # 돈 실행과 다른 그림으로 배웁니다. 이 key를 몰랐던 옛 checkpoint는 0으로 읽습니다.
+    # 그때는 주 process가 직접 읽었기 때문입니다.
+    recorded_workers = training_config.get("num_workers") or 0
+    if recorded_workers != (expected["num_workers"] or 0):
+        raise ValueError(
+            "resume checkpoint used a different train.num_workers "
+            f"({recorded_workers}) than this run ({expected['num_workers']})"
         )
     # 같은 이유입니다. 크기가 달라지면 resize와 padding이 달라져 이어붙인 실행이 앞선
     # epoch과 다른 그림으로 배웁니다. 이 key를 몰랐던 옛 checkpoint는 None이라 지금
