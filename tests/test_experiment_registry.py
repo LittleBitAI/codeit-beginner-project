@@ -324,9 +324,11 @@ def test_summary_of_an_index_entry_that_names_another_experiment_is_an_error(tmp
         read_experiment_summary("exp-a", config)
 
 
-@pytest.mark.parametrize("run_id", ["../../바깥", "폴더/이름", "\x00", "줄\n바꿈"])
-def test_summary_read_refuses_a_name_that_cannot_be_a_file(tmp_path, monkeypatch, run_id):
-    """run_id는 그대로 index 파일 이름이 되므로 storage에 넘기기 전에 거부합니다.
+@pytest.mark.parametrize("run_id", ["\x00", "줄\n바꿈"])
+def test_summary_read_refuses_a_name_the_file_system_cannot_take(
+    tmp_path, monkeypatch, run_id
+):
+    """제어문자가 든 이름은 storage에 넘기기 전에 거부합니다.
 
     넘기면 backend가 아니라 그 아래 OS가 죽습니다. NUL이 든 이름은 pathlib이
     ValueError를 던지는데, 그것은 이 module의 오류가 아니라서 호출자(web GUI)가
@@ -343,3 +345,27 @@ def test_summary_read_refuses_a_name_that_cannot_be_a_file(tmp_path, monkeypatch
 
     with pytest.raises(ExperimentRegistryError):
         read_experiment_summary(run_id, config)
+
+
+def test_summary_reads_back_every_name_the_registry_can_write(tmp_path):
+    """registry가 저장할 수 있는 이름이면 이 조회도 읽어 내야 합니다.
+
+    registry는 설정으로 지정한 run_id를 검증 없이 그대로 씁니다. ``폴더/이름``은
+    ``registry/index/폴더/이름.json``에 저장되고 목록 경로는 그것을 찾아냅니다.
+    읽는 쪽만 경로 구분자를 거부하면 등록은 됐는데 조회는 안 되는 실험이 생깁니다.
+    """
+
+    config = register(tmp_path, "폴더/이름", "2026-08-01T00:00:00+00:00")
+
+    assert read_experiment_summary("폴더/이름", config)["run_id"] == "폴더/이름"
+
+
+def test_summary_read_of_a_name_that_leaves_the_index_is_an_error(tmp_path):
+    """안전 장치: 저장소 밖을 겨냥한 이름은 읽지 않고, 그 이름을 되풀이하지도 않습니다."""
+
+    config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+
+    with pytest.raises(ExperimentRegistryError) as error:
+        read_experiment_summary("../../../../바깥", config)
+
+    assert "바깥" not in str(error.value)

@@ -30,11 +30,16 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 #: Registry가 summary sidecar를 남기는 기본 prefix입니다.
 DEFAULT_INDEX_PREFIX = "registry/index"
 
-#: run_id는 그대로 index 파일 이름이 되므로, 파일 이름이 될 수 없는 글자는 storage에
-#: 넘기기 전에 거부합니다. 넘기면 backend가 아니라 그 아래 OS가 죽습니다 — NUL이 든
-#: 이름은 pathlib이 :class:`ValueError`를 던지고, 그것은 이 module의 오류가 아니라서
-#: 호출자가 다루지 못한 채 그대로 새어 나갑니다.
-_UNSAFE_RUN_ID_CHARACTERS = frozenset("/\\\x7f") | {chr(code) for code in range(0x20)}
+#: 이름에 이 글자가 있으면 storage에 넘기기 전에 거부합니다. 넘기면 backend가 아니라
+#: 그 아래 OS가 죽습니다 — NUL이 든 이름은 pathlib이 :class:`ValueError`를 던지고,
+#: 그것은 이 module의 오류가 아니라서 호출자가 다루지 못한 채 새어 나갑니다.
+#:
+#: 경로 구분자는 **막지 않습니다.** registry는 지정된 run_id를 검증 없이 그대로 써서
+#: ``폴더/이름``이 ``registry/index/폴더/이름.json``으로 저장되고, 목록 경로는 그것을
+#: 찾아냅니다. 읽는 쪽만 거부하면 등록은 됐는데 조회는 안 되는 실험이 생깁니다.
+#: 저장소 밖으로 나가는 이름은 backend가 막고, 다른 실험의 파일을 열더라도 아래
+#: run_id 대조에서 걸립니다.
+_UNSAFE_RUN_ID_CHARACTERS = frozenset("\x7f") | {chr(code) for code in range(0x20)}
 
 #: 비교 화면이 실험 사이에서 실제로 견주는 값들입니다.
 _COMPARABLE_FIELDS = (
@@ -186,9 +191,7 @@ def read_experiment_summary(
         raise ExperimentRegistryError("run_id는 비어 있지 않은 문자열이어야 합니다.")
     wanted = run_id.strip()
     if not _UNSAFE_RUN_ID_CHARACTERS.isdisjoint(wanted):
-        raise ExperimentRegistryError(
-            "run_id에는 경로 구분자와 제어문자를 쓸 수 없습니다."
-        )
+        raise ExperimentRegistryError("run_id에는 제어문자를 쓸 수 없습니다.")
 
     prefix = _index_prefix(config)
     try:
