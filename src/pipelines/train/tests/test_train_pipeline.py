@@ -595,6 +595,29 @@ def test_fp16_can_be_chosen_directly_and_never_asks_about_bf16(monkeypatch):
     support.assert_not_called()
 
 
+def test_gpu_training_reads_images_in_worker_processes(monkeypatch):
+    """GPU가 도는 동안 다음 batch의 이미지를 미리 풀어 두게 합니다.
+
+    Windows는 worker에 dataset을 pickle해 보내는데 그 안의 S3 client가 pickle되지
+    않으므로, 거기서는 늘리지 않습니다. CPU 학습은 기다릴 GPU가 없어 그대로 0입니다.
+    """
+
+    monkeypatch.setattr(pipeline.torch.cuda, "is_available", lambda: True)
+
+    monkeypatch.setattr(pipeline.os, "name", "posix")
+    assert pipeline._settings({"train": {"device": "cuda"}})["num_workers"] > 0
+    assert pipeline._settings({"train": {"device": "cpu"}})["num_workers"] == 0
+
+    monkeypatch.setattr(pipeline.os, "name", "nt")
+    assert pipeline._settings({"train": {"device": "cuda"}})["num_workers"] == 0
+
+    # 직접 적은 값은 어디서나 그대로 씁니다.
+    assert (
+        pipeline._settings({"train": {"device": "cpu", "num_workers": 2}})["num_workers"]
+        == 2
+    )
+
+
 def test_bf16_is_accepted_on_a_gpu_that_supports_it_natively(monkeypatch):
     monkeypatch.setattr(pipeline.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(

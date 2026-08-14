@@ -35,6 +35,7 @@ Published files are never overwritten, and a run stops before its first batch wh
 - Supported architectures are declared in `model.py`; never accept arbitrary builder names. Two of them are MMDetection models built through `mmdetection_adapter.py`, and `model.py` unpacks that list rather than repeating the names.
 - The MMDetection pair only fits 8GB at `device="cuda"`, `precision="amp"`, `optimizer="AdamW"`, `batch_size=1`, so anything else is refused before the first batch instead of dying partway through the night. `input_size` belongs to them alone and is refused with a torchvision architecture rather than accepted and ignored.
 - Their checkpoints carry `backend` and `model_config` for evaluate; a checkpoint without `backend` still reads as torchvision, which is what keeps older ones loadable.
+- `num_workers` defaults to a few workers on CUDA and to `0` on CPU, where nothing waits on the decode, and on Windows, where a worker is spawned by pickling the dataset and its S3 client does not pickle. An explicit value is used as given, everywhere. Web copied the old fixed `0` (proposal 015).
 - Supported optimizers are AdamW, SGD, and Adam. A missing optimizer means legacy SGD; new callers send AdamW.
 - Reject optimizer- or schedule-specific settings the selection does not use; never ignore them silently.
 - Augmentation defaults to `none`. `pill_basic` applies only to the train split and must update bounding boxes with geometric transforms.

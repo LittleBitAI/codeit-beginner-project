@@ -127,6 +127,22 @@ def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     return value
 
 
+def _default_workers(device: str) -> int:
+    """이미지를 읽어 오는 보조 process 수의 기본값입니다.
+
+    GPU가 한 batch를 도는 동안 다음 batch의 이미지를 미리 풀어 두라는 것이라,
+    기다릴 GPU가 없는 CPU 학습에는 줄 이유가 없습니다.
+
+    Windows는 worker를 spawn으로 만들면서 dataset을 pickle하는데, 그 안의 S3
+    client는 pickle되지 않아 첫 batch에서 실행이 죽습니다. 그래서 여기서는 0입니다.
+    """
+
+    if device != "cuda" or os.name == "nt":
+        return 0
+    # 이미지를 푸는 것은 CPU 일이라 core보다 많이 띄우면 서로 느려지기만 합니다.
+    return min(4, os.cpu_count() or 1)
+
+
 def _integer(settings: Mapping[str, Any], name: str, default: int, *, minimum: int) -> int:
     value = settings.get(name, default)
     if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
@@ -414,7 +430,7 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
             raw, "input_size", DEFAULT_INPUT_SIZE, minimum=1
         ),
         "batch_size": _integer(raw, "batch_size", 1, minimum=1),
-        "num_workers": _integer(raw, "num_workers", 0, minimum=0),
+        "num_workers": _integer(raw, "num_workers", _default_workers(device), minimum=0),
         "learning_rate": _float(
             raw, "learning_rate", profile["learning_rate"], minimum=0.0
         ),
