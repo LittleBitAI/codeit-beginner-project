@@ -5,11 +5,11 @@ import io
 import os
 import pickle
 import struct
-import tarfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Barrier
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from PIL import Image
@@ -45,46 +45,12 @@ def _storage() -> Mock:
     storage = Mock()
 
     def download(source, destination, *, overwrite=False):
-        assert source == "s3://bucket/images/pill.png"
+        assert source in IMAGES
         assert overwrite is False
         Image.new("RGB", (3, 2), color="red").save(destination)
         return Path(destination)
 
     storage.download_file.side_effect = download
-    return storage
-
-
-def _s3_cache_storage() -> S3Storage:
-    """이미지 한 장과 cache 묶음 하나를 다루는 가짜 bucket입니다.
-
-    ``published``에 올라간 것만 존재합니다. 실제 실행처럼 묶음도 이미지도 같은
-    ``download_file``로 내려받습니다.
-    """
-
-    client = Mock()
-    client.head_object.return_value = {"ETag": '"pill-etag"'}
-    storage = S3Storage("bucket", client=client)
-    published: dict[str, bytes] = {}
-
-    def download_file(source, destination, *, overwrite=False):
-        destination = Path(destination)
-        payload = published.get(str(source))
-        if payload is None:
-            Image.new("RGB", (3, 2), color="red").save(destination, format="PNG")
-        else:
-            destination.write_bytes(payload)
-        return destination
-
-    def upload_file(source, destination, *, overwrite=False):
-        if not overwrite and str(destination) in published:
-            raise StorageError(f"이미 있습니다: {destination}")
-        published[str(destination)] = Path(source).read_bytes()
-        return f"s3://bucket/{destination}"
-
-    storage.exists = lambda location: str(location) in published
-    storage.download_file = Mock(side_effect=download_file)
-    storage.upload_file = Mock(side_effect=upload_file)
-    storage.published = published
     return storage
 
 
@@ -94,43 +60,120 @@ IMAGES = (
 )
 
 
-def _warm(cache_root: Path, temporary_root: Path, storage: S3Storage) -> None:
+def test_prefetch_fills_the_cache_and_skips_what_it_already_has(tmp_path):
+    """학습 전에 전부 받아 두되, 이어서 하는 실행은 남은 것만 받습니다."""
+
+    storage = _storage()
+    cache_root = tmp_path / "persistent"
+    temporary_root = tmp_path / "temporary"
+
     with ImageCacheSession(
         _summary(), cache_root=cache_root, temporary_root=temporary_root
-    ) as cache:
-        for location in IMAGES:
-            cache.fetch(location, storage)
-        cache.publish_archive(storage, expected_entries=len(IMAGES))
-
-
-def test_publish_never_replaces_an_archive_another_run_already_made(tmp_path):
-    storage = _s3_cache_storage()
-    _warm(tmp_path / "first", tmp_path / "temporary", storage)
-    uploads = storage.upload_file.call_count
-
-    _warm(tmp_path / "second", tmp_path / "temporary", storage)
-
-    # 덮어쓰면 아직 그 묶음을 받고 있던 실행이 반쪽짜리를 보게 됩니다.
-    assert storage.upload_file.call_count == uploads
-    assert all(
-        call.kwargs["overwrite"] is False for call in storage.upload_file.call_args_list
-    )
-
-
-def test_half_filled_cache_is_never_published(tmp_path):
-    storage = _s3_cache_storage()
+    ) as interrupted:
+        interrupted.fetch(IMAGES[0], storage)
 
     with ImageCacheSession(
+        _summary(), cache_root=cache_root, temporary_root=temporary_root
+    ) as resumed:
+        assert resumed.prefetch(IMAGES, storage) == len(IMAGES)
+        # 두 장 중 한 장은 앞 실행이 이미 받아 두었습니다.
+        assert storage.download_file.call_count == len(IMAGES)
+        for location in IMAGES:
+            assert resumed.fetch(location, storage).is_file()
+        assert storage.download_file.call_count == len(IMAGES)
+
+
+def test_prefetch_downloads_more_than_one_image_at_a_time(tmp_path):
+    """한 장씩 차례로 받으면 첫 epoch이 이미지 수만큼 기다립니다."""
+
+    # 두 장이 동시에 오지 않으면 여기서 기다리다 시간이 초과됩니다.
+    barrier = Barrier(len(IMAGES), timeout=5)
+    storage = _storage()
+
+    def download(source, destination, *, overwrite=False):
+        barrier.wait()
+        Image.new("RGB", (3, 2), color="red").save(destination, format="PNG")
+        return Path(destination)
+
+    storage.download_file.side_effect = download
+    with ImageCacheSession(
         _summary(),
-        cache_root=tmp_path / "cache",
+        cache_root=tmp_path / "persistent",
         temporary_root=tmp_path / "temporary",
     ) as cache:
-        cache.fetch(IMAGES[0], storage)
-        # 두 장짜리 dataset인데 한 장만 받았습니다. 이대로 올리면 다음 실행은
-        # 나머지 한 장이 영영 없는 묶음을 믿게 됩니다.
-        assert cache.publish_archive(storage, expected_entries=len(IMAGES)) is False
+        assert cache.prefetch(IMAGES, storage) == len(IMAGES)
 
-    assert storage.published == {}
+
+class _RetriesExceeded(Exception):
+    """boto3가 전송 재시도를 다 쓰면 던지는 예외를 흉내 냅니다.
+
+    ``Boto3Error``는 ``OSError``도 ``ClientError``도 아니라서 ``src/common``의
+    storage가 ``StorageError``로 바꿔 주지 않고 그대로 올라옵니다. 실패를 좁게 잡으면
+    이런 예외 한 건이 학습 전체를 세웁니다.
+    """
+
+
+def test_prefetch_leaves_an_image_it_cannot_get_to_the_training_loop(tmp_path):
+    """한 장을 못 받아도 학습은 시작하고, 그 한 장은 학습이 다시 받습니다."""
+
+    storage = _storage()
+    failed_once: set[str] = set()
+
+    def download(source, destination, *, overwrite=False):
+        # 미리 받을 때만 실패하고, 학습이 다시 물으면 이번에는 내어 줍니다.
+        if source == IMAGES[1] and source not in failed_once:
+            failed_once.add(source)
+            raise _RetriesExceeded("연결이 반복해서 끊겼습니다")
+        Image.new("RGB", (3, 2), color="red").save(destination, format="PNG")
+        return Path(destination)
+
+    storage.download_file.side_effect = download
+    reported: list[tuple[int, int]] = []
+    with ImageCacheSession(
+        _summary(),
+        cache_root=tmp_path / "persistent",
+        temporary_root=tmp_path / "temporary",
+    ) as cache:
+        assert (
+            cache.prefetch(
+                IMAGES, storage, lambda ready, total: reported.append((ready, total))
+            )
+            == 1
+        )
+        # 미리 받기에서 놓친 바로 그 이미지를 학습이 그 자리에서 받아야 합니다.
+        assert cache.fetch(IMAGES[1], storage).is_file()
+
+    # 시도한 수를 세면 덜 받고도 마지막 줄이 100%가 됩니다.
+    assert reported[-1] == (1, len(IMAGES))
+
+
+def test_prefetch_reports_progress_along_the_way_not_only_at_the_end(tmp_path):
+    """몇 분이 걸리는 구간이라 중간에도 알려야 합니다.
+
+    마지막 한 줄만 나오면 화면이 그동안 멈춘 것으로 보입니다.
+    """
+
+    storage = _storage()
+    locations = tuple(f"s3://bucket/images/pill-{index}.png" for index in range(5))
+
+    def download(source, destination, *, overwrite=False):
+        Image.new("RGB", (3, 2), color="red").save(destination, format="PNG")
+        return Path(destination)
+
+    storage.download_file.side_effect = download
+    reported: list[tuple[int, int]] = []
+    with ImageCacheSession(
+        _summary(),
+        cache_root=tmp_path / "persistent",
+        temporary_root=tmp_path / "temporary",
+    ) as cache:
+        with patch.object(image_cache_module, "PREFETCH_PROGRESS_EVERY", 2):
+            cache.prefetch(
+                locations, storage, lambda ready, total: reported.append((ready, total))
+            )
+
+    # 2장마다, 그리고 마지막 한 번. 전부 성공했으므로 받은 수와 시도한 수가 같습니다.
+    assert reported == [(2, 5), (4, 5), (5, 5)]
 
 
 def _png_with_corrupt_idat() -> bytes:
@@ -192,33 +235,28 @@ def test_repeated_corrupt_s3_download_never_publishes_a_cache_entry(tmp_path):
     (_png_with_corrupt_idat(), _png_without_idat(), _truncated_jpeg()),
     ids=("png-syntax-error", "png-index-error", "jpeg-load-error"),
 )
-def test_shared_archive_image_that_cannot_be_fully_decoded_is_downloaded_again(
+def test_cached_image_that_cannot_be_fully_decoded_is_downloaded_again(
     tmp_path, corrupt_payload
 ):
-    storage = _s3_cache_storage()
+    storage = _storage()
+    cache_root = tmp_path / "persistent"
     temporary_root = tmp_path / "temporary"
 
     with ImageCacheSession(
-        _summary(), cache_root=tmp_path / "producer", temporary_root=temporary_root
-    ) as producer:
-        cached = producer.fetch(IMAGES[0], storage)
-        cached.write_bytes(corrupt_payload)
-        assert producer.publish_archive(storage, expected_entries=1) is True
+        _summary(), cache_root=cache_root, temporary_root=temporary_root
+    ) as first:
+        # 받아 둔 뒤 디스크에서 깨진 파일입니다. 그대로 쓰면 학습이 그 batch에서
+        # 멈추므로, 다음 실행이 알아보고 다시 받아 고쳐야 합니다.
+        first.fetch(IMAGES[0], storage).write_bytes(corrupt_payload)
 
     with ImageCacheSession(
-        _summary(), cache_root=tmp_path / "consumer", temporary_root=temporary_root
-    ) as consumer:
-        assert consumer.seed_from_archive(storage) is True
-        repaired = consumer.fetch(IMAGES[0], storage)
+        _summary(), cache_root=cache_root, temporary_root=temporary_root
+    ) as second:
+        repaired = second.fetch(IMAGES[0], storage)
         with Image.open(repaired) as image:
             image.load()
 
-    source_downloads = [
-        call
-        for call in storage.download_file.call_args_list
-        if call.args[0] == IMAGES[0]
-    ]
-    assert len(source_downloads) == 2
+    assert storage.download_file.call_count == 2
 
 
 def test_corrupt_s3_download_is_retried_before_cache_publish(tmp_path):
@@ -244,56 +282,6 @@ def test_corrupt_s3_download_is_retried_before_cache_publish(tmp_path):
             image.load()
 
     assert storage.download_file.call_count == 2
-
-
-@pytest.mark.parametrize(
-    "name",
-    ["../escaped.png", "/etc/escaped.png", "C:/escaped.png", "..\\escaped.png"],
-)
-def test_archive_member_named_outside_the_cache_is_refused(tmp_path, name):
-    archive = tmp_path / "image-cache.tar"
-    payload = io.BytesIO(b"payload")
-    with tarfile.open(archive, "w") as bundle:
-        info = tarfile.TarInfo(name)
-        info.size = len(payload.getvalue())
-        bundle.addfile(info, payload)
-
-    # 묶음은 bucket에서 옵니다. 이름 하나로 cache 밖 파일이 덮어써질 수 있습니다.
-    with pytest.raises(TrainError, match="escapes"):
-        image_cache_module._extract_archive(archive, tmp_path / "objects")
-
-    assert not (tmp_path / "escaped.png").exists()
-
-
-def test_archive_symlink_member_is_refused(tmp_path):
-    archive = tmp_path / "image-cache.tar"
-    with tarfile.open(archive, "w") as bundle:
-        info = tarfile.TarInfo("objects/link")
-        info.type = tarfile.SYMTYPE
-        info.linkname = "../../../escaped"
-        bundle.addfile(info)
-
-    # 이름은 멀쩡합니다. 링크가 가리키는 곳이 cache 밖이라 이름 검사로는 못 막습니다.
-    with pytest.raises(TrainError, match="escapes"):
-        image_cache_module._extract_archive(archive, tmp_path / "objects")
-
-
-def test_temporary_cache_has_no_archive_to_share(tmp_path):
-    storage = _s3_cache_storage()
-
-    # fingerprint를 만들 수 없는 dataset은 실행마다 다른 임시 폴더를 씁니다.
-    # 다음 실행이 쓸 수 없는 묶음을 올리면 bucket만 커집니다.
-    with ImageCacheSession(
-        {"train_images": 1},
-        cache_root=tmp_path / "cache",
-        temporary_root=tmp_path / "temporary",
-    ) as cache:
-        cache.fetch(IMAGES[0], storage)
-        assert cache.archive_uri is None
-        assert cache.seed_from_archive(storage) is False
-        assert cache.publish_archive(storage, expected_entries=1) is False
-
-    assert storage.published == {}
 
 
 def test_versioned_s3_cache_is_reused_and_version_change_invalidates_it(tmp_path):
@@ -420,6 +408,24 @@ def test_cache_handle_is_picklable_for_dataloader_workers(tmp_path):
     assert path.name == "image.png"
 
 
+def test_a_leased_cache_handle_is_picklable_for_dataloader_workers(tmp_path):
+    """lease를 든 session도 worker에게 보낼 수 있어야 합니다.
+
+    열린 file은 pickle되지 않습니다. 보낼 때 손잡이를 빼지 않으면 num_workers를 올린
+    학습이 첫 batch에서 죽습니다. 위 test는 fingerprint가 없는 임시 cache를 쓰므로
+    손잡이가 아예 생기지 않아 이 경우를 잡지 못합니다.
+    """
+
+    storage = _storage()
+    with ImageCacheSession(
+        _summary(),
+        cache_root=tmp_path / "persistent",
+        temporary_root=tmp_path / "temporary",
+    ) as cache:
+        worker_cache = pickle.loads(pickle.dumps(cache))
+        assert worker_cache.fetch(IMAGES[0], storage).is_file()
+
+
 def test_process_lock_failure_falls_back_to_temporary_cache(tmp_path, monkeypatch):
     class BrokenLock:
         def __enter__(self):
@@ -503,9 +509,48 @@ def test_cleanup_removes_expired_cache_but_protects_an_active_namespace(tmp_path
     cache_root = tmp_path / "persistent"
     expired = _inactive_namespace(cache_root, "expired", used_at=0.0, size=4)
     active = _inactive_namespace(cache_root, "active", used_at=0.0, size=4)
-    (active / ".active").mkdir()
-    (active / ".active" / "other-run.lease").touch()
-    os.utime(active / ".active" / "other-run.lease", (now, now))
+
+    with _held_lease(active):
+        with ImageCacheSession(
+            _summary(),
+            cache_root=cache_root,
+            temporary_root=tmp_path / "temporary",
+            now=lambda: now,
+        ):
+            pass
+
+    assert not expired.exists()
+    assert active.exists()
+
+
+@contextmanager
+def _held_lease(namespace: Path, name: str = "other-run.lease"):
+    """다른 실행이 들고 있는 lease를 흉내 냅니다.
+
+    같은 process의 다른 손잡이도 서로 잠금을 막으므로, 살아 있는 run을 test 안에서
+    그대로 만들 수 있습니다.
+    """
+
+    active = namespace / ".active"
+    active.mkdir(parents=True, exist_ok=True)
+    lease = active / name
+    with lease.open("a+b") as stream:
+        assert image_cache_module._lock_stream(stream, blocking=False)
+        yield lease
+
+
+def test_a_lease_no_process_holds_stops_protecting_the_cache(tmp_path):
+    """주인이 사라진 lease는 자리를 지켜 주지 않습니다.
+
+    실행 중인 run은 자기 lease file을 연 채로 잠가 둡니다. 잠글 수 있다는 것은
+    그 run이 끝났거나 죽었다는 뜻입니다.
+    """
+
+    now = 20 * 24 * 60 * 60.0
+    cache_root = tmp_path / "persistent"
+    abandoned = _inactive_namespace(cache_root, "abandoned", used_at=0.0, size=4)
+    (abandoned / ".active").mkdir()
+    (abandoned / ".active" / "dead-run.lease").touch()
 
     with ImageCacheSession(
         _summary(),
@@ -515,8 +560,74 @@ def test_cleanup_removes_expired_cache_but_protects_an_active_namespace(tmp_path
     ):
         pass
 
-    assert not expired.exists()
-    assert active.exists()
+    assert not abandoned.exists()
+
+
+def test_a_held_lease_protects_its_cache_however_long_it_is_quiet(tmp_path):
+    """살아 있는 run은 오래 조용해도 지켜집니다.
+
+    첫 이미지를 받기 전 준비 작업은 얼마든지 오래 걸릴 수 있습니다. lease를 마지막으로
+    만진 시각으로 판단하면 그 사이에 시작한 다른 실행이 살아 있는 cache를 지웁니다.
+    """
+
+    now = 20 * 24 * 60 * 60.0
+    cache_root = tmp_path / "persistent"
+    working = _inactive_namespace(cache_root, "working", used_at=0.0, size=4)
+
+    with _held_lease(working) as lease:
+        os.utime(lease, (0.0, 0.0))  # 아주 오래 조용했지만 주인은 살아 있습니다.
+        with ImageCacheSession(
+            _summary(),
+            cache_root=cache_root,
+            temporary_root=tmp_path / "temporary",
+            now=lambda: now,
+        ) as cache:
+            # 정리가 터져 임시 cache로 물러나면 이 test가 엉뚱한 이유로 통과합니다.
+            assert cache.namespace.parent == cache_root
+        assert lease.exists()
+
+    assert working.exists()
+
+
+def test_starting_a_run_keeps_only_the_dataset_it_uses(tmp_path):
+    """dataset을 바꾸면 앞 version의 cache는 첫 이미지를 받기 전에 사라집니다."""
+
+    now = 1_000.0
+    cache_root = tmp_path / "persistent"
+    previous = _inactive_namespace(cache_root, "previous", used_at=now, size=4)
+
+    with ImageCacheSession(
+        _summary(version=6),
+        cache_root=cache_root,
+        temporary_root=tmp_path / "temporary",
+        ttl_seconds=1_000_000.0,
+        now=lambda: now,
+    ) as cache:
+        assert not previous.exists()
+        assert cache.namespace.is_dir()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork는 POSIX에만 있습니다")
+def test_a_forked_worker_closing_its_copy_does_not_release_the_lease(tmp_path):
+    """worker가 끝나도 부모 run의 lease는 풀리지 않아야 합니다.
+
+    POSIX DataLoader는 fork로 worker를 만들고, worker는 부모가 열어 둔 lease fd를
+    복제해 갖습니다. worker가 끝나며 그 복제본을 닫을 때 잠금까지 풀린다면, 그 순간
+    시작한 다른 실행이 살아 있는 cache를 통째로 지웁니다.
+    """
+
+    lease = tmp_path / "run.lease"
+    with lease.open("a+b") as stream:
+        assert image_cache_module._lock_stream(stream, blocking=False)
+        child = os.fork()
+        if child == 0:  # worker: 물려받은 fd를 그대로 둔 채 끝납니다.
+            os._exit(0)
+        os.waitpid(child, 0)
+
+        assert not image_cache_module._lease_is_abandoned(lease)
+
+    # 대조군입니다. 주인이 놓으면 같은 검사가 버려진 것으로 읽어야 합니다.
+    assert image_cache_module._lease_is_abandoned(lease)
 
 
 def test_cleanup_enforces_size_limit_oldest_first(tmp_path):
@@ -529,6 +640,7 @@ def test_cleanup_enforces_size_limit_oldest_first(tmp_path):
         cache_root=cache_root,
         temporary_root=tmp_path / "temporary",
         max_cache_bytes=10,
+        max_datasets=3,
         ttl_seconds=1_000.0,
         now=lambda: 500.0,
     ):
