@@ -15,9 +15,9 @@ You own `src/pipelines/web/`. Never import data, train, evaluate, or registry. T
 - **Running a pipeline** happens only by subprocess, through `build_argv()` in `jobs/runner.py`, which builds `python -m src.main_pipeline --only <stage>` for the stages in `ALLOWED_STAGES`. That is the only way. Never `shell=True`, never let user input reach argv.
 - **Reading an experiment record** happens only through `read_experiment_record()` in `src/common`. No `open`, no `Path`, no importing registry.
 
-Because you cannot import train, `train_config.py` copies train's defaults and validation rules, and `tests/test_web_train_contract.py` parses train's source with `ast` and fails when they drift. It exists because an architecture name once drifted and the GUI showed the wrong one. When it fails, fix the copy here — never edit train.
+You cannot import train, so every value you both must agree on lives in `src/common/train_contract.py`: model and optimizer names, optimizer profiles, precision and schedule tables, the 8GB combination, and the settings defaults. Read them from there and never re-type them here — they were copied once, watched by a test that parsed train's source, and a name drifted anyway. Train owns them; ask before changing one.
 
-The two contract checks pull in opposite directions, which fixes the order of any joint change. The architecture list is compared for **equality**, so web cannot list a name train has not opened yet. Numeric defaults are walked from **train's** side, so a default train adds before web mirrors it breaks web immediately — web has to go first there. The MMDetection pair carries its own rules: `input_size` is offered and sent only for those architectures, and the 8GB combination is enforced here so the wrong box is named on screen rather than after the GPU is already busy.
+`train_config.py` still mirrors train's **rules** (which values are refused, which key belongs to which selection), because the GUI must refuse before the GPU is busy; `tests/test_web_train_contract.py` checks the shape of what web sends, not train's literals. The MMDetection pair carries its own: `input_size` is offered and sent only for those architectures, and the 8GB combination is enforced here so the wrong box is named on screen rather than after the GPU is already busy.
 
 ## Interface
 

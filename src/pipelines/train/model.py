@@ -16,19 +16,15 @@ from torchvision.models.detection import (
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.models.detection.retinanet import RetinaNetClassificationHead
 
+from src.common.train_contract import (
+    ARCHITECTURES as SUPPORTED_ARCHITECTURES,
+    DEFAULT_ARCHITECTURE as ARCHITECTURE,
+)
+
 from .mmdetection_adapter import (
     DEFAULT_INPUT_SIZE,
     MMDETECTION_ARCHITECTURES,
     build_mmdetection_model,
-)
-
-
-ARCHITECTURE = "fasterrcnn_mobilenet_v3_large_320_fpn"
-SUPPORTED_ARCHITECTURES = (
-    ARCHITECTURE,
-    "fasterrcnn_resnet50_fpn_v2",
-    "retinanet_resnet50_fpn_v2",
-    *MMDETECTION_ARCHITECTURES,
 )
 
 

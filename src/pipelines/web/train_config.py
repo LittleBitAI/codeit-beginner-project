@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from src.common import create_storage
+from src.common import train_contract as _contract
 
 from .errors import (
     FieldError,
@@ -78,43 +79,43 @@ __all__ = [
 ]
 
 
-# train/pipeline.py:32 와 동일
-RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# 이름과 기본값은 train과 함께 쓰는 계약(`src/common/train_contract.py`)에서 옵니다.
+RUN_ID_PATTERN = _contract.RUN_ID_PATTERN
 _RUN_ID_MAX_LENGTH = 128
 
-# train/pipeline.py:26-31 과 동일한 4개. 화면 표시 순서를 위해 tuple로 둡니다.
-DATA_ARTIFACT_KEYS = (
-    "train_manifest_uri",
-    "validation_manifest_uri",
-    "class_map_uri",
-    "dataset_summary_uri",
-)
+# 화면 표시 순서를 위해 tuple로 둡니다.
+DATA_ARTIFACT_KEYS = _contract.DATA_ARTIFACT_KEYS
 
 # Train은 읽지 않지만, 성공한 학습 뒤 Evaluate가 대회 submission을 만들 때 씁니다.
 # 기존 데이터셋에는 없어도 되므로 필수 4개와 분리합니다.
-OPTIONAL_DATA_ARTIFACT_KEYS = ("test_manifest_uri",)
+OPTIONAL_DATA_ARTIFACT_KEYS = _contract.OPTIONAL_DATA_ARTIFACT_KEYS
 
-DEFAULT_OUTPUT_DIR = "artifacts/experiments/completed"
-DEFAULT_OUTPUT_PREFIX = "experiments/completed"
+DEFAULT_OUTPUT_DIR = _contract.SETTING_DEFAULTS["output_dir"]
+DEFAULT_OUTPUT_PREFIX = _contract.SETTING_DEFAULTS["output_prefix"]
 
 # train은 patience에 기본값이 없습니다(있으면 필수). 화면이 안내하는 출발값입니다.
 DEFAULT_EARLY_STOPPING_PATIENCE = 5
-# train의 기본값과 같아야 합니다. test_web_train_contract.py가 대조합니다.
-DEFAULT_EARLY_STOPPING_MIN_DELTA = 0.0
+DEFAULT_EARLY_STOPPING_MIN_DELTA = _contract.DEFAULT_EARLY_STOPPING_MIN_DELTA
 _EARLY_STOPPING_FIELDS = ("early_stopping_patience", "early_stopping_min_delta")
 
-# (이름, 기본값, 최소값)
+# (이름, 기본값, 최소값). 최소값은 화면이 먼저 막는 값이고, 기본값은 train의 것입니다.
+# `num_workers`는 train이 device와 OS를 보고 정하므로 계약에 기본값이 없습니다. 화면은
+# 0으로 안내하고 보내지 않습니다 — 그래야 train이 자기 규칙대로 고릅니다(제안 015).
 _INTEGER_FIELDS = (
-    ("seed", 42, 0),
-    ("epochs", 1, 1),
-    ("batch_size", 1, 1),
+    ("seed", _contract.SETTING_DEFAULTS["seed"], 0),
+    ("epochs", _contract.SETTING_DEFAULTS["epochs"], 1),
+    ("batch_size", _contract.SETTING_DEFAULTS["batch_size"], 1),
     ("num_workers", 0, 0),
-    ("checkpoint_every", 1, 1),
+    ("checkpoint_every", _contract.SETTING_DEFAULTS["checkpoint_every"], 1),
 )
 # 기본값이 architecture에 따라 다른 정수 설정입니다. train과 같은 규칙입니다.
 # MMDetection 두 모델은 8GB에서 batch 1로 도므로 그만큼 모아야 쓸 만한 유효 batch가
 # 됩니다. 기존 모델은 지금까지처럼 1입니다.
-_ACCUMULATION_FIELD = ("gradient_accumulation_steps", 1, 1)
+_ACCUMULATION_FIELD = (
+    "gradient_accumulation_steps",
+    _contract.SETTING_DEFAULTS["gradient_accumulation_steps"],
+    1,
+)
 # MMDetection architecture에만 쓰는 정수 설정입니다. 다른 architecture와 함께 오면
 # train이 거부하므로 여기서 먼저 막고, 보내지도 않습니다.
 _MMDETECTION_INTEGER_FIELDS = (("input_size", DEFAULT_INPUT_SIZE, 1),)
@@ -131,15 +132,8 @@ _FINGERPRINT_SAME_AS_OMITTED = {"gradient_accumulation_steps": 1}
 RESUME_CHECKPOINT_NAME = "last_checkpoint.pt"
 WORKING_DIRECTORY_SUFFIX = ".partial"
 RUNNING_PREFIX = "running"
-# train의 LR_SCHEDULER_DEFAULTS·LR_WARMUP_DEFAULTS와 같아야 합니다.
-# test_web_train_contract.py가 train source를 읽어 대조합니다.
-LR_WARMUP_DEFAULTS = {"warmup_steps": 0, "warmup_start_factor": 0.001}
-LR_SCHEDULER_DEFAULTS = {
-    "none": {},
-    "cosine": {"min_lr_factor": 0.01},
-    "step": {"step_size": 3, "gamma": 0.1},
-    "linear": {"min_lr_factor": 0.01},
-}
+LR_WARMUP_DEFAULTS = _contract.LR_WARMUP_DEFAULTS
+LR_SCHEDULER_DEFAULTS = _contract.LR_SCHEDULER_DEFAULTS
 # 화면의 평평한 칸 이름 -> train이 받는 nested object의 key.
 _LR_FIELDS = {
     "lr_warmup_steps": "warmup_steps",
@@ -148,27 +142,7 @@ _LR_FIELDS = {
     "lr_step_size": "step_size",
     "lr_gamma": "gamma",
 }
-OPTIMIZER_PROFILES = {
-    "AdamW": {
-        "learning_rate": 0.0001,
-        "weight_decay": 0.01,
-        "beta1": 0.9,
-        "beta2": 0.999,
-        "epsilon": 1e-8,
-    },
-    "SGD": {
-        "learning_rate": 0.005,
-        "momentum": 0.9,
-        "weight_decay": 0.0005,
-    },
-    "Adam": {
-        "learning_rate": 0.0001,
-        "weight_decay": 0.0,
-        "beta1": 0.9,
-        "beta2": 0.999,
-        "epsilon": 1e-8,
-    },
-}
+OPTIMIZER_PROFILES = _contract.OPTIMIZER_PROFILES
 
 _FIELD_LABELS = {
     "run_id": ("실행 이름", "실행 결과가 저장되는 directory 이름으로 그대로 쓰입니다."),

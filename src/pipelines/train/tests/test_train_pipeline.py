@@ -19,6 +19,7 @@ from torch import nn
 from torchvision.models.detection import FasterRCNN, RetinaNet
 
 from src.common import LocalStorage, S3Storage, StorageError
+from src.common import train_contract
 from src.pipelines import train
 from src.pipelines.train import image_cache as image_cache_module
 from src.pipelines.train import pipeline, trainer as trainer_module
@@ -397,6 +398,17 @@ def test_explicit_adamw_run_records_effective_reproducibility_settings(local_con
     assert optimizer_group["eps"] == 1e-8
     assert result["summary"]["optimizer"] == "AdamW"
     assert result["summary"]["augmentation"] == "pill_basic"
+
+
+def test_every_preset_name_in_the_shared_contract_is_implemented_here():
+    """계약이 이름을 정하고, 그 이름이 실제로 무엇을 바꾸는지는 여기서 정합니다.
+
+    나머지 값(model·optimizer·기본값)은 계약에서 그대로 가져다 쓰므로 어긋날 수
+    없지만, 증강만은 이름과 내용이 나뉘어 있습니다. 계약에만 이름을 더하면 GUI는
+    그것을 고를 수 있게 되고 학습은 KeyError로 죽습니다.
+    """
+
+    assert tuple(pipeline.AUGMENTATION_PRESETS) == train_contract.AUGMENTATIONS
 
 
 @pytest.mark.parametrize(

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import shutil
 import stat
 import tempfile
@@ -19,6 +18,7 @@ from uuid import uuid4
 import torch
 
 from src.common import S3Storage, Storage, StorageError, create_storage
+from src.common import train_contract as _contract
 
 from .dataset import (
     CocoDetectionDataset,
@@ -47,34 +47,13 @@ from .trainer import (
 
 
 RETURN_KEYS = {"status", "artifacts", "summary", "message"}
-DATA_ARTIFACT_KEYS = {
-    "train_manifest_uri",
-    "validation_manifest_uri",
-    "class_map_uri",
-    "dataset_summary_uri",
-}
-RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-OPTIMIZER_PROFILES = {
-    "AdamW": {
-        "learning_rate": 0.0001,
-        "weight_decay": 0.01,
-        "beta1": 0.9,
-        "beta2": 0.999,
-        "epsilon": 1e-8,
-    },
-    "SGD": {
-        "learning_rate": 0.005,
-        "momentum": 0.9,
-        "weight_decay": 0.0005,
-    },
-    "Adam": {
-        "learning_rate": 0.0001,
-        "weight_decay": 0.0,
-        "beta1": 0.9,
-        "beta2": 0.999,
-        "epsilon": 1e-8,
-    },
-}
+# 아래 이름과 숫자는 GUI와 함께 쓰는 계약입니다. `src/common/train_contract.py`에
+# 한 벌만 두므로, 여기서 다시 적으면 두 벌이 되어 어긋날 수 있습니다.
+DATA_ARTIFACT_KEYS = set(_contract.DATA_ARTIFACT_KEYS)
+RUN_ID_PATTERN = _contract.RUN_ID_PATTERN
+OPTIMIZER_PROFILES = _contract.OPTIMIZER_PROFILES
+# preset 이름은 계약이 정하고, 각 preset이 실제로 무엇을 바꾸는지는 train의 몫입니다.
+_DEFAULTS = _contract.SETTING_DEFAULTS
 AUGMENTATION_PRESETS = {
     "none": {
         "version": 1,
@@ -99,15 +78,8 @@ AUGMENTATION_PRESETS = {
         "hue": 0.02,
     },
 }
-# Learning rate schedule마다 자기가 쓰는 값과 그 기본값입니다. 고를 수 있는 이름도 이
-# 목록이 정합니다. warmup은 아래 값으로 모든 schedule이 함께 씁니다.
-LR_WARMUP_DEFAULTS = {"warmup_steps": 0, "warmup_start_factor": 0.001}
-LR_SCHEDULER_DEFAULTS = {
-    "none": {},
-    "cosine": {"min_lr_factor": 0.01},
-    "step": {"step_size": 3, "gamma": 0.1},
-    "linear": {"min_lr_factor": 0.01},
-}
+LR_WARMUP_DEFAULTS = _contract.LR_WARMUP_DEFAULTS
+LR_SCHEDULER_DEFAULTS = _contract.LR_SCHEDULER_DEFAULTS
 _LR_SCHEDULER_KEYS = {
     key for defaults in LR_SCHEDULER_DEFAULTS.values() for key in defaults
 }
@@ -115,7 +87,7 @@ _LR_SCHEDULER_KEYS = {
 # 고른 그대로 씁니다.
 # 자동 선택만 있으면 어떤 GPU에서 무엇으로 돌지 미리 알 수 없고, 그 GPU에 맞는 쪽을
 # 사람이 고를 수도 없습니다.
-PRECISION_MODES = ("fp32", "amp", "fp16", "bf16")
+PRECISION_MODES = _contract.PRECISIONS
 # 학습 중 작업 폴더에 두는 파일입니다. 마지막 것이 이어서 학습할 대상입니다.
 WORKING_CHECKPOINT_NAMES = ("best_checkpoint.pt", "last_checkpoint.pt")
 
@@ -174,10 +146,11 @@ def _probability(settings: Mapping[str, Any], name: str, default: float) -> floa
 
 
 def _augmentation(raw: Mapping[str, Any]) -> dict[str, Any]:
-    value = raw.get("augmentation", {"preset": "none"})
+    default = _contract.DEFAULT_AUGMENTATION
+    value = raw.get("augmentation", {"preset": default})
     if not isinstance(value, Mapping):
         raise ValueError("train.augmentation must be an object")
-    preset = value.get("preset", "none")
+    preset = value.get("preset", default)
     if not isinstance(preset, str) or preset not in AUGMENTATION_PRESETS:
         choices = ", ".join(AUGMENTATION_PRESETS)
         raise ValueError(f"train.augmentation.preset must be one of: {choices}")
@@ -196,7 +169,7 @@ def _early_stopping(raw: Mapping[str, Any]) -> dict[str, float | int] | None:
         return None
     if not isinstance(value, Mapping):
         raise ValueError("train.early_stopping must be an object")
-    unexpected = set(value) - {"patience", "min_delta"}
+    unexpected = set(value) - set(_contract.EARLY_STOPPING_KEYS)
     if unexpected:
         raise ValueError(
             "train.early_stopping contains unsupported settings: "
@@ -205,7 +178,7 @@ def _early_stopping(raw: Mapping[str, Any]) -> dict[str, float | int] | None:
     patience = value.get("patience")
     if not isinstance(patience, int) or isinstance(patience, bool) or patience < 1:
         raise ValueError("train.early_stopping.patience must be an integer >= 1")
-    min_delta = value.get("min_delta", 0.0)
+    min_delta = value.get("min_delta", _contract.DEFAULT_EARLY_STOPPING_MIN_DELTA)
     if (
         not isinstance(min_delta, (int, float))
         or isinstance(min_delta, bool)
@@ -257,7 +230,7 @@ def _lr_scheduler(raw: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     if not isinstance(value, Mapping):
         raise ValueError("train.lr_scheduler must be an object")
-    name = value.get("name", "none")
+    name = value.get("name", _contract.DEFAULT_LR_SCHEDULER)
     if not isinstance(name, str) or name not in LR_SCHEDULER_DEFAULTS:
         choices = ", ".join(LR_SCHEDULER_DEFAULTS)
         raise ValueError(f"train.lr_scheduler.name must be one of: {choices}")
@@ -319,7 +292,7 @@ def _precision(
 ) -> dict[str, str | bool]:
     """요청한 정밀도를 GPU와 architecture가 함께 지원하는 dtype으로 확정합니다."""
 
-    mode = raw.get("precision", "fp32")
+    mode = raw.get("precision", _contract.DEFAULT_PRECISION)
     if not isinstance(mode, str) or mode not in PRECISION_MODES:
         raise ValueError("train.precision must be one of: " + ", ".join(PRECISION_MODES))
     if mode == "fp32":
@@ -374,17 +347,18 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(
             "train.architecture must be one of: " + ", ".join(SUPPORTED_ARCHITECTURES)
         )
-    optimizer = raw.get("optimizer", "SGD")
+    # optimizer를 고르기 전에 학습한 설정에는 이 key가 없습니다. 그때 쓰던 값입니다.
+    optimizer = raw.get("optimizer", _contract.LEGACY_OPTIMIZER)
     if not isinstance(optimizer, str) or optimizer not in SUPPORTED_OPTIMIZERS:
         raise ValueError("train.optimizer must be one of: " + ", ".join(SUPPORTED_OPTIMIZERS))
     _reject_irrelevant_optimizer_settings(raw, optimizer)
     profile = OPTIMIZER_PROFILES[optimizer]
-    device = raw.get("device", "cpu")
-    if not isinstance(device, str) or device not in {"cpu", "cuda"}:
+    device = raw.get("device", _DEFAULTS["device"])
+    if not isinstance(device, str) or device not in set(_contract.DEVICES):
         raise ValueError("train.device must be 'cpu' or 'cuda'")
     if device == "cuda" and not torch.cuda.is_available():
         raise ValueError("train.device is 'cuda', but CUDA is not available")
-    pretrained = raw.get("pretrained", False)
+    pretrained = raw.get("pretrained", _DEFAULTS["pretrained"])
     if not isinstance(pretrained, bool):
         raise ValueError("train.pretrained must be a boolean")
     resume_from = raw.get("resume_from")
@@ -402,8 +376,8 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
     run_id = raw.get("run_id") or datetime.now(timezone.utc).strftime("train-%Y%m%dT%H%M%S%fZ")
     if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
         raise ValueError("train.run_id contains unsupported characters")
-    output_dir = raw.get("output_dir", "artifacts/experiments/completed")
-    output_prefix = raw.get("output_prefix", "experiments/completed")
+    output_dir = raw.get("output_dir", _DEFAULTS["output_dir"])
+    output_prefix = raw.get("output_prefix", _DEFAULTS["output_prefix"])
     if not isinstance(output_dir, str) or not output_dir.strip():
         raise ValueError("train.output_dir must be a non-empty repository-relative path")
     if not isinstance(output_prefix, str) or not output_prefix.strip():
@@ -412,9 +386,11 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "run_id": run_id,
         "architecture": architecture,
         "optimizer": optimizer,
-        "seed": _integer(raw, "seed", 42, minimum=0),
-        "epochs": _integer(raw, "epochs", 1, minimum=1),
-        "checkpoint_every": _integer(raw, "checkpoint_every", 1, minimum=1),
+        "seed": _integer(raw, "seed", _DEFAULTS["seed"], minimum=0),
+        "epochs": _integer(raw, "epochs", _DEFAULTS["epochs"], minimum=1),
+        "checkpoint_every": _integer(
+            raw, "checkpoint_every", _DEFAULTS["checkpoint_every"], minimum=1
+        ),
         # microbatch를 몇 개 모아 한 번 갱신할지입니다. 1이면 지금까지와 같습니다.
         # web이 이 기본값을 먼저 복제해 두었습니다(PR 143).
         # 기본값이 architecture에 따라 다릅니다. 8GB에서 batch 1로 도는 두 모델은
@@ -424,7 +400,7 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
             "gradient_accumulation_steps",
             DEFAULT_ACCUMULATION_STEPS
             if architecture in MMDETECTION_ARCHITECTURES
-            else 1,
+            else _DEFAULTS["gradient_accumulation_steps"],
             minimum=1,
         ),
         # MMDetection model만 씁니다. torchvision architecture와 함께 오면 아래에서
@@ -433,7 +409,7 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "input_size": _integer(
             raw, "input_size", DEFAULT_INPUT_SIZE, minimum=1
         ),
-        "batch_size": _integer(raw, "batch_size", 1, minimum=1),
+        "batch_size": _integer(raw, "batch_size", _DEFAULTS["batch_size"], minimum=1),
         "num_workers": _integer(raw, "num_workers", _default_workers(device), minimum=0),
         "learning_rate": _float(
             raw, "learning_rate", profile["learning_rate"], minimum=0.0
@@ -529,12 +505,7 @@ def _checkpoint_payload(
 
 # 8GB GPU에서 batch 1로 도는 조합입니다. 학습을 시작한 뒤 메모리로 터지면 그 밤을
 # 통째로 버리므로 첫 batch 전에 막습니다.
-_MMDETECTION_REQUIRED = {
-    "device": "cuda",
-    "precision": "amp",
-    "optimizer": "AdamW",
-    "batch_size": 1,
-}
+_MMDETECTION_REQUIRED = _contract.MMDETECTION_REQUIRED
 
 
 def _check_mmdetection_settings(settings: Mapping[str, Any], raw: Mapping[str, Any]) -> None:

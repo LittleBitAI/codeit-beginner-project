@@ -9,18 +9,22 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from src.common.train_contract import (
+    DEFAULT_ACCUMULATION_STEPS,
+    DEFAULT_INPUT_SIZE,
+    MMDETECTION_ARCHITECTURES,
+)
+
 from .errors import TrainError
 
 
+# 고를 수 있는 이름과 기본값은 GUI와 함께 쓰는 계약(`src/common/train_contract.py`)에
+# 있습니다. 여기서는 그 이름이 어떤 config와 checkpoint를 뜻하는지만 정합니다. 이름을
+# 계약에서 풀어 받지 않는 것은 순서가 바뀌면 두 model이 조용히 뒤바뀌기 때문입니다.
 DINO_ARCHITECTURE = "dino_r50_4scale"
 CASCADE_ARCHITECTURE = "cascade_rcnn_swin_t_fpn"
-MMDETECTION_ARCHITECTURES = (DINO_ARCHITECTURE, CASCADE_ARCHITECTURE)
 PAD_MULTIPLE = 32
 MODEL_CONFIG_SCHEMA_VERSION = 1
-# 두 모델을 맞춰 둔 입력 크기입니다. 8GB에서 batch 1로 도는 기준입니다.
-DEFAULT_INPUT_SIZE = 640
-# 8GB에서 batch 1로 도는 두 모델이 쓸 만한 유효 batch를 갖도록 모으는 수입니다.
-DEFAULT_ACCUMULATION_STEPS = 8
 # mmdet 3.3.0이 거부하지만 **직접 확인해 본** mmcv 버전 하나입니다. 자세한 이유는
 # _shimmed_mmcv_version에 적었습니다. 이 하나 말고는 손대지 않습니다.
 MMCV_SHIM_EXACT = (2, 2, 0)
