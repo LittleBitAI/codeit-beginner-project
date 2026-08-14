@@ -28,10 +28,6 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 CACHE_ROOT = REPOSITORY_ROOT / "artifacts" / "train-image-cache" / "v1"
 TEMPORARY_ROOT = REPOSITORY_ROOT / "artifacts"
 CACHE_TTL_SECONDS = 14 * 24 * 60 * 60
-# 실행 중인 run은 이미지를 한 장 볼 때마다 자기 lease를 새로 찍습니다. 그만큼 오래
-# 조용한 lease는 찍어 줄 process가 죽었다는 뜻이라, 그 자리를 계속 지켜 줄 이유가
-# 없습니다. dataset 하나가 수십 GB라 14일을 기다리면 그 사이 디스크가 찹니다.
-LEASE_TTL_SECONDS = 60 * 60
 MAX_CACHE_BYTES = 50 * 1024**3
 # cache 한 칸이 dataset 한 벌을 통째로 담습니다. version을 바꾸면 두 벌이 되고,
 # 디스크는 그만큼 없습니다. 쓰고 있는 것만 남기고 나머지는 첫 이미지를 받기 전에
@@ -109,35 +105,67 @@ def _s3_object_identity(location: str, storage: Storage) -> str | None:
     return json.dumps(identity, sort_keys=True, separators=(",", ":"))
 
 
+def _lock_stream(stream: Any, *, blocking: bool) -> bool:
+    """열어 둔 file 하나를 process 사이에서 잠급니다. 닫으면 풀립니다.
+
+    ``blocking``이 False면 다른 process가 이미 잡고 있을 때 기다리지 않고 ``False``를
+    돌려줍니다. 그래서 "저 lease의 주인이 아직 살아 있는가"를 묻는 데 쓸 수 있습니다.
+    """
+
+    stream.seek(0, os.SEEK_END)
+    if stream.tell() == 0:
+        stream.write(b"\0")
+        stream.flush()
+    stream.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(
+                stream.fileno(),
+                msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK,
+                1,
+            )
+        else:
+            import fcntl
+
+            fcntl.flock(
+                stream.fileno(),
+                fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB,
+            )
+    except OSError:
+        if blocking:
+            raise
+        return False
+    return True
+
+
 @contextmanager
 def _process_lock(path: Path) -> Iterator[None]:
     """Windows와 POSIX에서 cache 정리를 process 간 직렬화합니다."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as stream:
-        if os.name == "nt":
-            import msvcrt
+        _lock_stream(stream, blocking=True)
+        yield
 
-            stream.seek(0, os.SEEK_END)
-            if stream.tell() == 0:
-                stream.write(b"\0")
-                stream.flush()
-            stream.seek(0)
-            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-            return
 
-        import fcntl
+def _lease_is_abandoned(lease: Path) -> bool:
+    """주인 process가 사라진 lease인지 봅니다.
 
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    실행 중인 run은 자기 lease file을 연 채로 잠가 둡니다. 그래서 지금 잠글 수 있다는
+    것은 그 run이 끝났거나 죽었다는 뜻입니다. 마지막으로 만진 시각을 대신 보면
+    안 됩니다. 살아 있는 run도 첫 이미지를 받기 전 준비 작업에서 얼마든지 오래 조용할
+    수 있고, 그 사이 다른 실행이 이 cache를 지워 버립니다.
+
+    확인하지 못하면 살아 있다고 봅니다. 지우지 않아서 생기는 손해는 자리뿐입니다.
+    """
+
+    try:
+        with lease.open("a+b") as stream:
+            return _lock_stream(stream, blocking=False)
+    except OSError:
+        return False
 
 
 def _safe_member_name(name: str) -> str:
@@ -229,6 +257,7 @@ class ImageCacheSession:
         self._now = now
         self._temporary: tempfile.TemporaryDirectory[str] | None = None
         self._lease: Path | None = None
+        self._lease_handle: Any | None = None
         self._persistent = False
         self._object_identities: dict[str, str] = {}
         self._verified_entries: set[str] = set()
@@ -246,7 +275,11 @@ class ImageCacheSession:
                 active = self.namespace / ".active"
                 active.mkdir(parents=True, exist_ok=True)
                 self._lease = active / f"{os.getpid()}-{uuid4().hex}.lease"
-                self._lease.touch(exist_ok=False)
+                # lease를 연 채로 잠급니다. 이 process가 어떻게 끝나든 OS가 풀어 주므로,
+                # 다른 실행은 "이 run이 살아 있는가"를 시각이 아니라 잠금으로 묻습니다.
+                self._lease_handle = self._lease.open("a+b")
+                if not _lock_stream(self._lease_handle, blocking=False):
+                    raise OSError(f"image cache lease is already held: {self._lease}")
                 (self.namespace / ".last_used").touch()
                 self._persistent = True
                 trash = self._cleanup_locked()
@@ -272,7 +305,8 @@ class ImageCacheSession:
                 (self.namespace / ".last_used").touch()
                 trash = self._cleanup_locked()
         except OSError:
-            # 남은 lease는 TTL 이후 stale lease로 정리됩니다.
+            # 남은 lease는 이 process가 끝날 때 OS가 잠금을 풀어 주므로, 다음 실행의
+            # 정리가 주인 없는 lease로 보고 거둬 갑니다.
             return
         for path in trash:
             shutil.rmtree(path, ignore_errors=True)
@@ -380,7 +414,21 @@ class ImageCacheSession:
         )
         self.namespace = Path(self._temporary.name)
 
+    def __getstate__(self) -> dict[str, Any]:
+        """DataLoader worker에게 보낼 때 lease 손잡이는 빼고 보냅니다.
+
+        열린 file은 pickle되지 않습니다. lease는 부모 process가 계속 들고 있으므로
+        worker가 따로 들 이유도 없습니다.
+        """
+
+        return {**self.__dict__, "_lease_handle": None}
+
     def _remove_lease(self) -> None:
+        # 잠금은 손잡이를 닫아야 풀립니다. 닫기 전에 지우면 Windows에서 지워지지도
+        # 않고, 지워지더라도 잠금이 남아 다음 실행이 살아 있다고 읽습니다.
+        if self._lease_handle is not None:
+            self._lease_handle.close()
+            self._lease_handle = None
         if self._lease is not None:
             self._lease.unlink(missing_ok=True)
             self._lease = None
@@ -393,7 +441,6 @@ class ImageCacheSession:
             for path in self._cache_root.iterdir()
             if path.is_dir() and path.name.startswith(".trash-")
         ]
-        lease_cutoff = now - LEASE_TTL_SECONDS
         in_use = 0
         candidates: list[tuple[float, int, Path]] = []
         for namespace in self._cache_root.iterdir():
@@ -402,7 +449,7 @@ class ImageCacheSession:
             active = namespace / ".active"
             if active.is_dir():
                 for lease in active.glob("*.lease"):
-                    if lease.stat().st_mtime < lease_cutoff:
+                    if _lease_is_abandoned(lease):
                         lease.unlink(missing_ok=True)
                 if any(active.glob("*.lease")):
                     in_use += 1
@@ -440,16 +487,15 @@ class ImageCacheSession:
         return destination
 
     def _touch(self) -> None:
+        # 살아 있다는 표시는 lease 잠금이 합니다. 여기서 적는 시각은 오래 안 쓴
+        # dataset부터 버리기 위한 순서일 뿐입니다.
         if not self._persistent:
             return
         now = self._now()
-        for marker in (self._lease, self.namespace / ".last_used"):
-            if marker is None:
-                continue
-            try:
-                os.utime(marker, (now, now))
-            except OSError:
-                continue
+        try:
+            os.utime(self.namespace / ".last_used", (now, now))
+        except OSError:
+            return
 
     def fetch(self, location: str, storage: Storage) -> Path:
         """S3 image를 완성된 directory 단위로 원자적으로 publish합니다."""
