@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
+from src.common import ExperimentNameError
 from src.pipelines.web import experiment_detail, experiments
+from src.pipelines.web.errors import JobNotFoundError
 
 
 def registry_summary(run_id: str) -> dict:
@@ -663,6 +667,64 @@ def stub_detail_sources(monkeypatch, run_id: str, documents: dict) -> None:
         "_read_document",
         lambda uri, storage_config: documents.get(uri),
     )
+
+
+def test_a_name_that_cannot_be_an_experiment_is_404_not_500(client):
+    """주소를 잘못 친 사람에게 "서버 고장"이라고 말하지 않습니다.
+
+    index를 훑던 예전 경로는 이런 이름에 "그런 실험 없음"(404)으로 답했습니다. 이름
+    한 건만 읽게 되면서 그것이 500이 됐는데, 500은 서버가 고장났다는 뜻이라 사실이
+    아닙니다. 저장소를 읽다 실패한 것은 지금도 500입니다 — S3 장애를 "실험이
+    사라졌다"로 말하면 그것도 거짓말이기 때문입니다.
+
+    이름은 `%00`으로 보냅니다. `..%2F` 같은 값은 라우터가 먼저 404를 내서 이 코드에
+    닿지도 않으므로, 그것으로 재면 매핑을 지워도 초록인 test가 됩니다.
+    """
+
+    assert client.get("/api/train/experiments/%00").status_code == 404
+    assert (
+        client.put(
+            "/api/train/experiments/%00/kaggle-score", json={"score": 0.5}
+        ).status_code
+        == 404
+    )
+
+
+@pytest.mark.parametrize("run_id", ["\x00", "../바깥", "..\\바깥"])
+def test_a_name_outside_the_index_reads_as_not_found(client, run_id):
+    """경로 구분자가 든 이름은 URL로 보낼 수 없으므로 함수를 직접 부릅니다.
+
+    화면에서 그런 이름이 오는 길은 URL만이 아닙니다 — 비교 요청 본문과 점수 기록에도
+    같은 값이 실릴 수 있어, 판정은 함수 쪽에 있어야 합니다.
+    """
+
+    with pytest.raises(JobNotFoundError):
+        experiments.read_registry_experiment(run_id)
+    with pytest.raises(JobNotFoundError):
+        experiments.save_kaggle_score(run_id, 0.5)
+
+
+def test_a_name_that_cannot_be_an_experiment_only_drops_that_column(client, monkeypatch):
+    """비교에서는 그 실험만 빠집니다. 하나 때문에 나머지 표가 사라지면 안 됩니다."""
+
+    use_index(monkeypatch, [registry_summary("run-1")])
+    monkeypatch.setattr(
+        experiments,
+        "read_experiment_summary",
+        lambda run_id, config: (_ for _ in ()).throw(ExperimentNameError("나쁜 이름"))
+        if run_id != "run-1"
+        else registry_summary("run-1"),
+    )
+    monkeypatch.setattr(
+        experiments, "read_experiment_record", lambda *a, **k: experiment_record("run-1")
+    )
+
+    payload = client.post(
+        "/api/train/experiments/compare", json={"run_ids": ["run-1", "../바깥"]}
+    ).json()
+
+    assert [item["run_id"] for item in payload["experiments"]] == ["run-1"]
+    assert payload["missing"] == ["../바깥"]
 
 
 def test_detail_reads_one_index_entry_instead_of_scanning(client, monkeypatch):
