@@ -172,10 +172,20 @@ describe('NewExperimentSheet', () => {
     show({ source: SOURCE });
 
     expect(await screen.findByText('고른 데이터셋과 실려 갈 값이 다릅니다')).toBeInTheDocument();
+    // 검증이 끝난 **뒤에도** 잠겨 있어야 합니다. 응답 전에 재면 아직 안 온 검증 때문에
+    // 잠긴 것을 보고 통과해 버립니다.
+    await screen.findByText('retina-basic-e15-a7f3');
+    // 경고만으로는 부족합니다. 칸을 없앤 뒤로 일부러 다른 데이터로 돌릴 이유가 없으므로
+    // 맞추기 전에는 시작 자체를 막습니다.
+    expect(screen.getByRole('button', { name: '대기열에 추가' })).toBeDisabled();
+
     fireEvent.click(screen.getByRole('button', { name: '맞추기' }));
 
     await waitFor(() =>
       expect(screen.queryByText('고른 데이터셋과 실려 갈 값이 다릅니다')).toBeNull(),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '대기열에 추가' })).toBeEnabled(),
     );
   });
 

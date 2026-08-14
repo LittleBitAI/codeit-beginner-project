@@ -239,7 +239,12 @@ export function NewExperimentSheet({
   // 두면, 서버는 고른 것이 없다는데 지난 세션의 URI로 학습이 돕니다. 칸을 없앤 뒤로는
   // 그 값을 화면에서 지울 방법도 없어, 아무도 모르는 데이터로 밤을 새우게 됩니다.
   const sourcePicked = Boolean(source?.complete);
-  const ready = Boolean(result?.valid) && dataFilled && sourcePicked && pending === null;
+  // 어긋난 값으로도 시작하지 않습니다. 칸을 없앤 뒤로 일부러 고른 것과 다른 데이터로
+  // 돌릴 이유가 없으므로, 경고만 띄우고 열어 두면 실수로 지나칠 뿐입니다. 맞추기 한 번이
+  // 곧 해결이라 막아도 막다른 길이 되지 않습니다. 화면 표시는 `sourcePicked`가 맡습니다 —
+  // 어긋났을 때 "고르지 않았습니다"라고 말하면 사실이 아닙니다.
+  const ready =
+    Boolean(result?.valid) && dataFilled && sourcePicked && !mismatched && pending === null;
 
   const capability = resolveTrainCapability(defaults);
   const selectedOptimizer = draft.train.optimizer || capability.optimizer.default;
