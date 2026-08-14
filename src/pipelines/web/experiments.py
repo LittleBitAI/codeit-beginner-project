@@ -410,12 +410,14 @@ def _compare_one(
     if uri is None:
         return None
     record = read_experiment_record(uri, config, expected_run_id=run_id)
-    history = experiment_detail.history_block(
-        _artifact_uri(record, "train", "training_history_uri"), config["storage"]
-    )
+    # 곡선은 `available`과 `reason`까지 그대로 싣습니다. epoch 목록만 보내면 못 읽은
+    # 것과 아직 한 epoch도 안 끝난 것이 똑같이 빈 배열이 되어, 화면이 원인을 지어
+    # 말하게 됩니다.
     return {
         "experiment": _enrich_summary(summary, record, score),
-        "epochs": history["epochs"],
+        "history": experiment_detail.history_block(
+            _artifact_uri(record, "train", "training_history_uri"), config["storage"]
+        ),
     }
 
 
@@ -507,7 +509,7 @@ def compare_registry_experiments(run_ids: list[str]) -> dict[str, Any]:
             run_id for run_id, item in zip(requested, loaded) if item is None
         ],
         "curves": {
-            run_id: item["epochs"]
+            run_id: item["history"]
             for run_id, item in zip(requested, loaded)
             if item is not None
         },

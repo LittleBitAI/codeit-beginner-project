@@ -86,6 +86,22 @@ def use_index(monkeypatch, summaries: list[dict]) -> None:
     )
 
 
+def refuse_listing(monkeypatch) -> None:
+    """index 전체를 훑으면 실패하게 둡니다.
+
+    이름을 아는 조회가 다시 목록으로 돌아가도 `use_index`는 그것까지 성공시키므로,
+    이 PR의 핵심인 "전체 index를 훑지 않는다"가 test에서 보호되지 않습니다. 두 이름을
+    함께 막는 것은 web이 부르는 이름과 공용 registry 안에서 다시 부르는 이름이 다른
+    객체이기 때문입니다.
+    """
+
+    def boom(config, **_kwargs):
+        raise AssertionError("이름을 아는 조회는 index 전체를 훑으면 안 됩니다.")
+
+    monkeypatch.setattr(experiments, "list_experiment_summaries", boom)
+    monkeypatch.setattr("src.common.experiment_registry.list_experiment_summaries", boom)
+
+
 def test_experiment_api_lists_registry_index_only(client, manager, monkeypatch):
     called = []
     monkeypatch.setattr(
@@ -598,12 +614,41 @@ def test_compare_carries_the_loss_curve_so_the_canvas_asks_once(client, monkeypa
         "/api/train/experiments/compare", json={"run_ids": ["run-1", "없는-실험"]}
     ).json()
 
-    assert [item["epoch"] for item in payload["curves"]["run-1"]] == [1, 2, 3]
+    curve = payload["curves"]["run-1"]
+    assert [item["epoch"] for item in curve["epochs"]] == [1, 2, 3]
+    assert curve["available"] is True
     # 등록되지 않은 이름은 곡선도 없고 `missing`으로 알립니다.
     assert payload["missing"] == ["없는-실험"]
     assert "없는-실험" not in payload["curves"]
     # 평가 파일(metrics.json)은 곡선에 쓰이지 않으므로 읽지 않습니다.
     assert read == ["artifacts/experiments/run-1/training_history.json"]
+
+
+def test_compare_says_why_a_curve_is_missing_instead_of_sending_an_empty_one(
+    client, monkeypatch
+):
+    """학습 기록을 못 읽은 것과 아직 한 epoch도 안 끝난 것은 다릅니다.
+
+    epoch 목록만 보내면 둘 다 빈 배열이라, 화면은 "epoch이 하나도 끝나지 않았다"고
+    단정합니다. S3가 잠깐 흔들린 것도 그렇게 읽히므로 이유를 함께 보냅니다.
+    """
+
+    use_index(monkeypatch, [registry_summary("run-1")])
+    monkeypatch.setattr(
+        experiments,
+        "read_experiment_record",
+        lambda uri, config, *, expected_run_id=None: record_with_artifacts("run-1"),
+    )
+    # 파일을 못 읽는 상황입니다.
+    monkeypatch.setattr(experiment_detail, "_read_document", lambda uri, config: None)
+
+    curve = client.post(
+        "/api/train/experiments/compare", json={"run_ids": ["run-1"]}
+    ).json()["curves"]["run-1"]
+
+    assert curve["available"] is False
+    assert curve["reason"]
+    assert curve["epochs"] == []
 
 
 def stub_detail_sources(monkeypatch, run_id: str, documents: dict) -> None:
@@ -618,6 +663,45 @@ def stub_detail_sources(monkeypatch, run_id: str, documents: dict) -> None:
         "_read_document",
         lambda uri, storage_config: documents.get(uri),
     )
+
+
+def test_detail_reads_one_index_entry_instead_of_scanning(client, monkeypatch):
+    """상세도 이름으로 한 건만 읽습니다.
+
+    비교에만 이 검사가 있었습니다. 그래서 상세를 목록 훑기로 되돌려도 test가 조용해,
+    이 PR이 없애려던 느림이 그 길로 그대로 돌아올 수 있었습니다.
+    """
+
+    refuse_listing(monkeypatch)
+    monkeypatch.setattr(
+        experiments, "read_experiment_summary", lambda run_id, config: submitted_summary(run_id)
+    )
+    monkeypatch.setattr(
+        experiments,
+        "read_experiment_record",
+        lambda uri, config, *, expected_run_id=None: record_with_artifacts("done"),
+    )
+    monkeypatch.setattr(experiment_detail, "_read_document", lambda uri, config: None)
+
+    response = client.get("/api/train/experiments/done")
+
+    assert response.status_code == 200
+    assert response.json()["experiment"]["run_id"] == "done"
+
+
+def test_kaggle_score_reads_one_index_entry_instead_of_scanning(client, monkeypatch):
+    """점수 기록도 이름으로 한 건만 읽습니다. 이유는 상세와 같습니다."""
+
+    refuse_listing(monkeypatch)
+    monkeypatch.setattr(
+        experiments, "read_experiment_summary", lambda run_id, config: submitted_summary(run_id)
+    )
+
+    saved = client.put(
+        "/api/train/experiments/done/kaggle-score", json={"score": 0.8734}
+    )
+
+    assert saved.status_code == 200
 
 
 def test_detail_carries_all_nine_metrics_and_the_loss_curve(client, monkeypatch):

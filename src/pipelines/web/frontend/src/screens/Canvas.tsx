@@ -12,7 +12,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../api/client';
 import type {
   CapabilityValueSource,
-  EpochRecord,
+  ExperimentHistoryCurve,
   ExperimentSummary,
 } from '../api/types';
 import { Chart, ChartHead, ChartLegend, type Series } from '../components/LossChart';
@@ -439,7 +439,7 @@ export function Canvas({
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const [compared, setCompared] = useState<ExperimentSummary[]>([]);
-  const [curves, setCurves] = useState<Record<string, EpochRecord[]>>({});
+  const [curves, setCurves] = useState<Record<string, ExperimentHistoryCurve>>({});
   const [error, setError] = useState<string | null>(null);
   const [showDev, setShowDev] = useState(false);
 
@@ -507,10 +507,21 @@ export function Canvas({
   const series: Series[] = compared.map((item, index) => ({
     label: item.run_id,
     color: seriesColor[index % seriesColor.length] as string,
-    points: (curves[item.run_id] ?? [])
+    points: (curves[item.run_id]?.epochs ?? [])
       .filter((epoch) => epoch.validation_loss !== null)
       .map((epoch) => ({ x: epoch.epoch, y: epoch.validation_loss as number })),
   }));
+  /**
+   * 곡선이 하나도 없을 때 그 자리에 적을 말입니다.
+   *
+   * 빈 곡선은 두 가지입니다: 아직 한 epoch도 안 끝났거나, 학습 기록 파일을 못 읽었거나.
+   * 서버가 그 이유를 함께 보내므로 지어내지 않고 그대로 옮깁니다 — "epoch이 하나도
+   * 끝나지 않았다"고 단정하면 S3가 잠깐 흔들린 것도 그렇게 읽힙니다.
+   */
+  const curveProblem =
+    compared
+      .map((item) => curves[item.run_id])
+      .find((curve) => curve && curve.available === false)?.reason ?? null;
   const maxEpoch = Math.max(
     1,
     ...series.flatMap((item) => item.points.map((point) => point.x)),
@@ -702,7 +713,12 @@ export function Canvas({
         ) : (
           <>
             <ChartHead label="VALIDATION LOSS" right="y 데이터 범위" />
-            <Chart series={series} xMax={maxEpoch} height={260} />
+            <Chart
+              series={series}
+              xMax={maxEpoch}
+              height={260}
+              emptyMessage={curveProblem ?? undefined}
+            />
 
             {showDev && (
               <div style={{ background: color.panel, padding: '18px 20px', margin: '26px 0' }}>

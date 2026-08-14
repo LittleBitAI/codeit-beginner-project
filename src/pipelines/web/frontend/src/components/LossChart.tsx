@@ -56,6 +56,7 @@ export function Chart({
   xMax,
   height = 260,
   xLabels,
+  emptyMessage,
   style,
 }: {
   series: Series[];
@@ -64,6 +65,14 @@ export function Chart({
   height?: number;
   /** 아래에 적을 두 눈금. 기본은 `epoch 1`과 `epoch {xMax}`입니다. */
   xLabels?: [ReactNode, ReactNode];
+  /**
+   * 그릴 점이 없을 때 적을 말. 기본은 "아직 한 epoch도 안 끝났다"입니다.
+   *
+   * 그 말이 맞지 않은 자리가 있습니다. 견주기 화면은 기록 파일을 읽어 그리는데,
+   * 못 읽었을 때도 점은 0개입니다. 그때 기본 문구를 쓰면 화면이 사실이 아닌 원인을
+   * 단정하므로, 아는 이유가 있으면 그것을 넘깁니다.
+   */
+  emptyMessage?: string;
   style?: CSSProperties;
 }) {
   const drawable = series.filter((item) => item.points.length > 0);
@@ -80,7 +89,7 @@ export function Chart({
           textAlign: 'center',
         }}
       >
-        epoch이 하나도 끝나지 않아 그릴 데이터가 없습니다.
+        {emptyMessage ?? 'epoch이 하나도 끝나지 않아 그릴 데이터가 없습니다.'}
       </div>
     );
   }
