@@ -1,3 +1,4 @@
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -303,10 +304,42 @@ def test_broken_index_entry_is_an_error_not_an_absent_experiment(tmp_path):
         read_experiment_summary("exp-a", config)
 
 
-def test_summary_read_refuses_a_name_that_could_escape_the_index(tmp_path):
-    """run_id는 파일 이름이 되므로 경로 구분자를 받지 않습니다."""
+def test_summary_of_an_index_entry_that_names_another_experiment_is_an_error(tmp_path):
+    """index 파일이 다른 실험을 가리키면 그 실험을 대신 돌려주면 안 됩니다.
+
+    index는 이름으로 찾는 파일이라, 내용이 어긋나면 화면이 A를 물었는데 B의 결과를
+    A라고 보여 주게 됩니다. 값이 아니라 이름이 어긋난 것이므로 조용히 넘어가면
+    사람은 끝까지 알아챌 수 없습니다.
+    """
+
+    config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
+    path = tmp_path / "artifacts/registry/index/exp-a.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["run_id"] = "exp-b"
+    path.write_text(
+        json.dumps(document, ensure_ascii=False), encoding="utf-8", newline="\n"
+    )
+
+    with pytest.raises(ExperimentRegistryError):
+        read_experiment_summary("exp-a", config)
+
+
+@pytest.mark.parametrize("run_id", ["../../바깥", "폴더/이름", "\x00", "줄\n바꿈"])
+def test_summary_read_refuses_a_name_that_cannot_be_a_file(tmp_path, monkeypatch, run_id):
+    """run_id는 그대로 index 파일 이름이 되므로 storage에 넘기기 전에 거부합니다.
+
+    넘기면 backend가 아니라 그 아래 OS가 죽습니다. NUL이 든 이름은 pathlib이
+    ValueError를 던지는데, 그것은 이 module의 오류가 아니라서 호출자(web GUI)가
+    404 대신 500으로 흘려보냅니다. 목록을 훑던 예전 경로는 같은 이름에 "없음"으로
+    답했으므로, 막지 않으면 이 함수가 그 자리에 회귀를 들여놓는 셈입니다.
+    """
 
     config = register(tmp_path, "exp-a", "2026-08-01T00:00:00+00:00")
 
+    def refuse(_config):
+        raise AssertionError("이런 이름은 storage까지 가면 안 됩니다.")
+
+    monkeypatch.setattr(experiment_registry, "create_storage", refuse)
+
     with pytest.raises(ExperimentRegistryError):
-        read_experiment_summary("../../바깥", config)
+        read_experiment_summary(run_id, config)

@@ -30,6 +30,12 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 #: Registry가 summary sidecar를 남기는 기본 prefix입니다.
 DEFAULT_INDEX_PREFIX = "registry/index"
 
+#: run_id는 그대로 index 파일 이름이 되므로, 파일 이름이 될 수 없는 글자는 storage에
+#: 넘기기 전에 거부합니다. 넘기면 backend가 아니라 그 아래 OS가 죽습니다 — NUL이 든
+#: 이름은 pathlib이 :class:`ValueError`를 던지고, 그것은 이 module의 오류가 아니라서
+#: 호출자가 다루지 못한 채 그대로 새어 나갑니다.
+_UNSAFE_RUN_ID_CHARACTERS = frozenset("/\\\x7f") | {chr(code) for code in range(0x20)}
+
 #: 비교 화면이 실험 사이에서 실제로 견주는 값들입니다.
 _COMPARABLE_FIELDS = (
     "created_at",
@@ -179,10 +185,10 @@ def read_experiment_summary(
     if not isinstance(run_id, str) or not run_id.strip():
         raise ExperimentRegistryError("run_id는 비어 있지 않은 문자열이어야 합니다.")
     wanted = run_id.strip()
-    # run_id가 그대로 파일 이름이 되므로 경로 구분자는 받지 않습니다. storage backend도
-    # 막지만, 여기서 막으면 어느 값이 문제인지 이름 그대로 드러납니다.
-    if "/" in wanted or "\\" in wanted:
-        raise ExperimentRegistryError("run_id에는 경로 구분자를 쓸 수 없습니다.")
+    if not _UNSAFE_RUN_ID_CHARACTERS.isdisjoint(wanted):
+        raise ExperimentRegistryError(
+            "run_id에는 경로 구분자와 제어문자를 쓸 수 없습니다."
+        )
 
     prefix = _index_prefix(config)
     try:
