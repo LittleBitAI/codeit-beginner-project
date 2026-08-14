@@ -153,7 +153,13 @@ export const api = {
   saveSettings: (body: AppSettings) =>
     request<AppSettings>('/api/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
-  /** 이 학습을 이어갈 수 있는지. 판단은 실제 저장소를 보는 서버가 합니다. */
+  /**
+   * 이 학습을 이어서 **시도할 수 있는지**. 판단은 실제 저장소를 보는 서버가 합니다.
+   *
+   * `available`은 "이어갈 수 있다"가 아니라 "눌러 볼 수 있다"입니다. 저장소를 읽지 못한
+   * 경우도 true로 오고 이유가 함께 옵니다 — 못 읽었다고 단추를 없애면 눌러서 알아낼 수
+   * 있는 것까지 막습니다.
+   */
   resumeAvailability: (jobId: string) =>
     request<{ available: boolean; reason: string | null }>(
       `/api/train/jobs/${jobId}/resume`,

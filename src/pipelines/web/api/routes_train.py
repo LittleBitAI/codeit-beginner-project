@@ -382,12 +382,17 @@ RESUMABLE_STATUSES = {STATUS_INTERRUPTED, STATUS_FAILED, STATUS_CANCELLED}
 
 @router.get("/jobs/{job_id}/resume")
 def resume_availability(job_id: str) -> dict[str, Any]:
-    """이 학습을 이어갈 수 있는지 미리 알려 줍니다.
+    """이 학습을 이어서 **시도할 수 있는지** 알려 줍니다.
 
     화면이 이어서 학습 단추를 세울지 정하는 데 씁니다. 화면이 완료한 epoch 수로 셈하면
     "저장됐을 가능성"만 알 뿐입니다 — checkpoint는 `checkpoint_every` 주기로 저장되고,
     이어온 실행에는 앞선 실행의 epoch까지 섞여 있습니다. 실제 저장소를 보는 쪽이
     알려 줘야 단추와 서버의 답이 같아집니다.
+
+    `available`은 "이어갈 수 있다"가 아니라 **"눌러 볼 수 있다"**입니다. 저장소를 읽지
+    못한 것과 checkpoint가 없는 것은 다릅니다. 못 읽었다고 단추를 없애면 눌러서 알아낼
+    수 있는 것까지 막고, 사람은 새로고침 말고 할 것이 없습니다. 모를 때는 시도할 수 있게
+    두고 이유를 함께 적습니다 — 실제로 이어갈 수 없으면 POST가 같은 말로 거절합니다.
 
     끝나지 않은 학습은 저장소를 보지 않고 답합니다. 목록마다 부르면 job 수만큼 S3를
     두드리게 되므로, 화면은 학습 하나를 열 때만 부릅니다.
@@ -400,7 +405,7 @@ def resume_availability(job_id: str) -> dict[str, Any]:
         exists = resume_checkpoint_exists(read_runtime_config(record.config_id))
     except StorageError:
         return {
-            "available": False,
+            "available": True,
             "reason": "checkpoint를 확인하지 못했습니다. 저장소 설정과 권한을 확인하세요.",
         }
     if not exists:

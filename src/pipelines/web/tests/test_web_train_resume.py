@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from src.common import StorageError
 from src.pipelines.web import train_config
 from src.pipelines.web.errors import TeamSyncAuthError, WebValidationError
 from src.pipelines.web.train_config import (
@@ -354,6 +355,33 @@ def test_resume_availability_says_why_it_cannot_resume(
 
     assert body["available"] is False
     assert "checkpoint" in body["reason"]
+
+
+def test_resume_availability_lets_you_try_when_it_cannot_check(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """확인하지 못한 것과 이어갈 수 없는 것은 다릅니다.
+
+    저장소를 못 읽었다고 단추를 없애면, 눌러서 알아낼 수 있는 것까지 막고 사람은
+    새로고침 말고 할 것이 없습니다. 모를 때는 시도할 수 있게 두고 POST가 답합니다.
+    """
+
+    from src.pipelines.web.api import routes_train
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.status = "cancelled"
+
+    def explode(_config):
+        raise StorageError("S3에 닿지 못했습니다.")
+
+    monkeypatch.setattr(routes_train, "resume_checkpoint_exists", explode)
+
+    body = client.get(f"/api/train/jobs/{record.job_id}/resume").json()
+
+    assert body["available"] is True
+    assert "확인하지 못했습니다" in body["reason"]
 
 
 def test_resume_availability_refuses_a_run_that_has_not_finished(
