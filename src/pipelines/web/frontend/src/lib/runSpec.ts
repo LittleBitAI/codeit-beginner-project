@@ -87,4 +87,3 @@ export function stagesOf(job: JobRecord): Stage[] {
     { key: 'submit', label: '제출', done: Boolean(submitted) },
   ];
 }
-
