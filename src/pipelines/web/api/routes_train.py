@@ -396,33 +396,32 @@ def resume_job(
     작업 폴더를 보고 시작을 거부하고, 결과도 섞입니다. `epochs`는 남은 수가 아니라
     전체 목표이므로 비워 두면 중단된 실행의 계획을 그대로 씁니다.
 
-    사람이 중지한 학습(cancelled)도 실패와 다를 것이 없습니다. epoch마다 저장한
-    checkpoint가 그대로 남아 있으므로 같은 규칙으로 이어갑니다 — 있으면 이어가고,
-    없으면 없다고 말합니다. 서버가 상태를 잃은 interrupted만 확인 없이 넘어갑니다.
-    그 checkpoint는 이 컴퓨터가 아니라 사라진 실행 쪽에 있을 수 있기 때문입니다.
+    끝난 이유는 묻지 않고 **checkpoint가 있는지만** 봅니다. 사람이 중지했든, 실패했든,
+    서버가 상태를 잃었든 이어갈 수 있는 조건은 같습니다. 확인을 건너뛰면 새 설정과 job을
+    만들고 대기열까지 다시 돌린 뒤에야 train이 checkpoint를 읽다가 죽습니다 — 미리 말할
+    수 있는 실패를 실행을 만든 뒤로 미루는 셈입니다.
     """
 
     manager = get_manager()
     record = manager.get(job_id)
     if record.status not in {STATUS_INTERRUPTED, STATUS_FAILED, STATUS_CANCELLED}:
         raise JobConflictError(
-            "중단·중지됐거나 checkpoint를 남기고 실패한 학습만 이어갈 수 있습니다."
+            "중단·중지됐거나 실패한 학습만 이어갈 수 있습니다."
         )
 
     source_config = read_runtime_config(record.config_id)
-    if record.status in {STATUS_FAILED, STATUS_CANCELLED}:
-        try:
-            checkpoint_exists = resume_checkpoint_exists(source_config)
-        except StorageError as error:
-            raise JobConflictError(
-                "그 학습의 checkpoint를 확인하지 못했습니다. "
-                "저장소 설정과 권한을 확인하세요."
-            ) from error
-        if not checkpoint_exists:
-            raise JobConflictError(
-                "저장된 checkpoint를 찾을 수 없어 이어서 학습할 수 없습니다. "
-                "첫 epoch을 마치기 전에 끝난 학습입니다."
-            )
+    try:
+        checkpoint_exists = resume_checkpoint_exists(source_config)
+    except StorageError as error:
+        raise JobConflictError(
+            "그 학습의 checkpoint를 확인하지 못했습니다. "
+            "저장소 설정과 권한을 확인하세요."
+        ) from error
+    if not checkpoint_exists:
+        raise JobConflictError(
+            "저장된 checkpoint를 찾을 수 없어 이어서 학습할 수 없습니다. "
+            "checkpoint 주기를 채우기 전에 끝난 학습입니다."
+        )
 
     config = build_resume_config(
         source_config,

@@ -195,8 +195,13 @@ export function Live({
   // 그 지점의 checkpoint가 남아 있습니다. 없으면 이어갈 것이 없으므로 단추를 두지
   // 않습니다 — 눌러 봐야 서버가 같은 이유로 거절합니다.
   const completedEpochs = Math.max(progress.completed_epochs ?? 0, epochs.length);
+  // checkpoint는 한 epoch마다가 아니라 `checkpoint_every` 주기로 저장됩니다. epoch을
+  // 마쳤다는 것만 보고 단추를 세우면, 화면은 이어갈 수 있다고 해 놓고 서버가 실제 파일을
+  // 찾지 못해 거절합니다. 두 쪽이 같은 기준을 봐야 합니다.
+  const checkpointEvery = Number(job.settings?.checkpoint_every ?? 1) || 1;
+  const savedCheckpoints = Math.floor(completedEpochs / checkpointEvery);
   const resumable =
-    (job.status === 'failed' || job.status === 'cancelled') && completedEpochs > 0;
+    (job.status === 'failed' || job.status === 'cancelled') && savedCheckpoints > 0;
   const resumeButton = resumable ? (
     <Button onClick={() => void resume()} disabled={resuming}>
       {resuming ? '시작하는 중…' : '이어서 학습'}
@@ -420,7 +425,9 @@ export function Live({
           <AlertRow level="warning" title="학습을 중지했습니다" action={resumeButton}>
             {resumable
               ? `epoch ${completedEpochs}까지 마쳤습니다. 그 지점의 checkpoint가 남아 있으면 새 실행 이름으로 이어갑니다 — 남은 epoch이 아니라 원래 계획한 전체 epoch까지 돕니다.`
-              : '마친 epoch이 없어 저장된 checkpoint가 없습니다. 이어서 학습할 수 없고 처음부터 다시 돌려야 합니다.'}
+              : completedEpochs === 0
+                ? '마친 epoch이 없어 저장된 checkpoint가 없습니다. 이어서 학습할 수 없고 처음부터 다시 돌려야 합니다.'
+                : `epoch ${completedEpochs}까지 마쳤지만 checkpoint는 ${checkpointEvery} epoch마다 저장되어 아직 남은 것이 없습니다. 이어서 학습할 수 없고 처음부터 다시 돌려야 합니다.`}
             {job.orphan_note &&
               ` ${job.orphan_note} 정리는 train pipeline이 소유한 영역이라 이 화면에서 지우지 않습니다.`}
             {resumed && ` '${resumed}' 이름으로 대기열에 넣었습니다.`}

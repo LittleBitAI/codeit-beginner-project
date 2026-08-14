@@ -270,7 +270,15 @@ def test_resume_config_rejects_a_bad_run_id():
 # --- route ------------------------------------------------------------------
 
 
-def _interrupted_job(client, manager, monkeypatch, fake_process_factory, data_inputs):
+def _interrupted_job(
+    client, manager, monkeypatch, fake_process_factory, data_inputs, checkpoint=True
+):
+    """중단된 학습 하나를 만듭니다.
+
+    기본으로 이어갈 checkpoint를 남깁니다. 그것이 보통의 모습이고, 이어하기는 어느
+    상태에서든 checkpoint가 있어야 하기 때문입니다. 없는 경우를 보려면 `checkpoint=False`.
+    """
+
     from src.pipelines.web.jobs import runner
 
     created = client.post(
@@ -291,6 +299,11 @@ def _interrupted_job(client, manager, monkeypatch, fake_process_factory, data_in
     assert manager._active_job_id is None, "test 학습이 종료되지 않았습니다."
     record = manager.get(started.job_id)
     record.status = "interrupted"
+    if checkpoint:
+        config = read_runtime_config(record.config_id)
+        path = run_id_working_path(config["train"]) / "last_checkpoint.pt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"resumable")
     return record
 
 
@@ -309,6 +322,25 @@ def test_resume_route_queues_a_new_run_from_an_interrupted_job(
     assert body["resumed_from_job_id"] == record.job_id
 
 
+def test_resume_route_refuses_an_interrupted_job_without_a_checkpoint(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """중단된 학습도 checkpoint가 없으면 이어갈 수 없습니다.
+
+    확인을 건너뛰면 새 설정과 job을 만들고 대기열까지 다시 돌린 뒤에야 train이
+    checkpoint를 읽다가 죽습니다. 미리 말할 수 있는 실패입니다.
+    """
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs, checkpoint=False
+    )
+
+    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={})
+
+    assert response.status_code == 409
+    assert "checkpoint" in response.text
+
+
 def test_resume_route_queues_a_failed_run_when_its_checkpoint_exists(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):
@@ -316,10 +348,6 @@ def test_resume_route_queues_a_failed_run_when_its_checkpoint_exists(
         client, manager, monkeypatch, fake_process_factory, data_inputs
     )
     record.status = "failed"
-    config = read_runtime_config(record.config_id)
-    checkpoint = run_id_working_path(config["train"]) / "last_checkpoint.pt"
-    checkpoint.parent.mkdir(parents=True)
-    checkpoint.write_bytes(b"resumable")
 
     response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={})
 
@@ -331,7 +359,7 @@ def test_resume_route_refuses_a_failed_run_without_a_checkpoint(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):
     record = _interrupted_job(
-        client, manager, monkeypatch, fake_process_factory, data_inputs
+        client, manager, monkeypatch, fake_process_factory, data_inputs, checkpoint=False
     )
     record.status = "failed"
 
@@ -354,10 +382,6 @@ def test_resume_route_queues_a_cancelled_run_when_its_checkpoint_exists(
         client, manager, monkeypatch, fake_process_factory, data_inputs
     )
     record.status = "cancelled"
-    config = read_runtime_config(record.config_id)
-    checkpoint = run_id_working_path(config["train"]) / "last_checkpoint.pt"
-    checkpoint.parent.mkdir(parents=True)
-    checkpoint.write_bytes(b"resumable")
 
     response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={})
 
@@ -368,10 +392,10 @@ def test_resume_route_queues_a_cancelled_run_when_its_checkpoint_exists(
 def test_resume_route_refuses_a_cancelled_run_without_a_checkpoint(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):
-    """첫 epoch을 마치기 전에 중지하면 이어갈 것이 없습니다."""
+    """checkpoint 주기를 채우기 전에 중지하면 이어갈 것이 없습니다."""
 
     record = _interrupted_job(
-        client, manager, monkeypatch, fake_process_factory, data_inputs
+        client, manager, monkeypatch, fake_process_factory, data_inputs, checkpoint=False
     )
     record.status = "cancelled"
 

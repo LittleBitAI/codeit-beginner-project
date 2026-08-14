@@ -136,6 +136,30 @@ describe('Live 이어서 학습', () => {
     ).toBeInTheDocument();
   });
 
+  // checkpoint는 한 epoch마다가 아니라 checkpoint_every 주기로 저장됩니다. 화면이 그
+  // 주기를 무시하면 이어갈 수 있다고 해 놓고 서버가 409로 거절합니다.
+  it('checkpoint 주기를 채우지 못했으면 단추를 두지 않는다', async () => {
+    show(
+      job({
+        settings: { checkpoint_every: 5 },
+        progress: {
+          available: true,
+          reason: null,
+          message: null,
+          total_epochs: 15,
+          current_epoch: 4,
+          completed_epochs: 4,
+          eta_seconds: null,
+          epochs: [],
+        },
+      }),
+    );
+
+    expect(await screen.findByText('학습을 중지했습니다')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '이어서 학습' })).toBeNull();
+    expect(screen.getByText(/5 epoch마다/)).toBeInTheDocument();
+  });
+
   it('마친 epoch이 없으면 단추를 두지 않고 이유를 적는다', async () => {
     show(stoppedEarly());
 
