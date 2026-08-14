@@ -8,7 +8,7 @@ Trains a config-selected torchvision detector and writes checkpoints plus a trai
 
 ## Boundaries
 
-You own `src/pipelines/train/`. Do not edit another pipeline and never import one; `src/common` is the only shared code available to you. `config["inputs"]` is read-only.
+You own `src/pipelines/train/`. Do not edit another pipeline and never import one; `src/common` is the only shared code available. `config["inputs"]` is read-only.
 
 Web cannot import you, so `src/pipelines/web/train_config.py` copies your defaults and validation rules, and `test_web_train_contract.py` reads your source with `ast` and fails when they drift. **That failure is the alarm working.** Tell the web owner; do not edit their file.
 
@@ -34,19 +34,19 @@ Published files are never overwritten, and a run stops before its first batch wh
 
 ## Configurable Training
 
-- Supported architectures are declared in `model.py`; never accept arbitrary builder names. Two of them are MMDetection models built through `mmdetection_adapter.py`, and `model.py` unpacks that list rather than repeating the names.
-- The MMDetection pair only fits 8GB at `device="cuda"`, `precision="amp"`, `optimizer="AdamW"`, `batch_size=1`, so anything else is refused before the first batch instead of dying partway through the night. `input_size` belongs to them alone and is refused with a torchvision architecture rather than accepted and ignored.
+- Supported architectures are declared in `model.py`; never accept arbitrary builder names. Two are MMDetection models built through `mmdetection_adapter.py`, whose list `model.py` unpacks rather than repeating.
+- The MMDetection pair only fits 8GB at `device="cuda"`, `precision="amp"`, `optimizer="AdamW"`, `batch_size=1`; anything else is refused before the first batch rather than dying partway through the night. `input_size` is theirs alone and is refused with a torchvision architecture, not ignored.
 - Their checkpoints carry `backend` and `model_config` for evaluate; a checkpoint without `backend` still reads as torchvision, which is what keeps older ones loadable.
 - `num_workers` defaults to a few workers on CUDA, and `0` on CPU and wherever `WORKERS_ARE_SPAWNED`: a spawned worker gets the dataset by pickle, which its S3 client cannot do. An explicit value is used as given. Web copied the old fixed `0` (proposal 015). A **forked** worker inherits that client, which boto3 cannot share across processes; `give_worker_its_own_storage` reconnects it.
 - Supported optimizers are AdamW, SGD, and Adam. A missing optimizer means legacy SGD; new callers send AdamW.
 - Reject optimizer- or schedule-specific settings the selection does not use; never ignore them silently.
-- Augmentation defaults to `none`. `pill_basic` applies only to the train split and must update bounding boxes with geometric transforms.
-- `precision` is `fp32`, `amp`, `fp16`, or `bf16`; all but `fp32` need CUDA. `amp` uses fp16 plus a scaler for MMDetection because its custom CUDA ops do not dispatch bf16; other architectures take native bf16 else fp16 plus a scaler. Explicit `bf16` is refused rather than emulated.
-- `lr_scheduler` is absent by default: the constant learning rate of before. Its factor is recomputed on every **optimizer update**, so warmup counts updates rather than microbatches; only `step` decays per epoch. With `gradient_accumulation_steps` above 1 those differ, and measuring the schedule in microbatches leaves `linear` and `cosine` short of the floor they were configured to reach.
+- Augmentation defaults to `none`; `pill_basic` and `pill_geometric` are train-split only and geometric transforms must move the boxes with them. Rotate by quarter turns only: other angles loosen an axis-aligned box and cost the IoU 0.75-0.95 score. Crops drop the pills they cut.
+- `precision` is `fp32`, `amp`, `fp16`, or `bf16`; all but `fp32` need CUDA. `amp` uses fp16 plus a scaler for MMDetection, whose custom CUDA ops do not dispatch bf16; others take native bf16 else fp16 plus a scaler. Explicit `bf16` is refused, not emulated.
+- `lr_scheduler` is absent by default: the constant learning rate of before. Its factor is recomputed on every **optimizer update**, so warmup counts updates, not microbatches; only `step` decays per epoch. Above 1 `gradient_accumulation_steps` those differ, and counting microbatches leaves `linear` and `cosine` short of their configured floor.
 - `gradient_accumulation_steps` groups that many microbatches into one update, which is how a GPU too small for a larger `batch_size` still gets one. Three parts of it fail silently rather than loudly: clearing gradients every microbatch throws away what was gathered, dividing by the configured size rather than the size a group actually held misweights a short final group, and dropping that final group drops those images from the epoch. It is recorded in `training_config` and compared before a resume, because a different value moves the optimizer and the schedule differently — a checkpoint written before the key existed reads as 1.
-- Checkpoints record the normalized model, optimizer, augmentation, schedule, and seed settings under `training_config`. Keep it JSON-safe and free of storage credentials.
+- Checkpoints record normalized model, optimizer, augmentation, schedule, and seed settings under `training_config`. Keep it JSON-safe and credential-free.
 - `resume_from` continues an interrupted run from its self-contained `last_checkpoint.pt`, including the best epoch from before interruption. `epochs` counts the whole run, not the part that remains.
-- Every reason a resume cannot work is checked before the first batch: missing `resume_state`, a history with gaps, a different architecture, class map, optimizer, schedule, or `num_workers`, missing AMP scaler or schedule state, `epochs` no larger than the resumed epoch, and spent patience. Worker count is there because augmentation draws from a per-worker RNG; an older checkpoint reads as `0`.
+- Every reason a resume cannot work is checked before the first batch: missing `resume_state`, a history with gaps, a different architecture, class map, optimizer, schedule, or `num_workers`, missing AMP scaler or schedule state, `epochs` no larger than the resumed epoch, and spent patience. Worker count is there because augmentation draws from a per-worker RNG; older checkpoints read as `0`.
 
 ## Run and Test
 
