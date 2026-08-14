@@ -175,6 +175,8 @@ function Shell() {
               records={records}
               teamRuns={team.runs}
               teamAvailable={team.available}
+              teamLoaded={team.loaded}
+              teamError={team.error}
             />
           }
         />

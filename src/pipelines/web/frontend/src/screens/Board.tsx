@@ -10,7 +10,7 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import type { JobRecord, Progress, TeamRun } from '../api/types';
-import { EmptyState, LinkAction, LiveDot } from '../components/primitives';
+import { AlertRow, EmptyState, LinkAction, LiveDot } from '../components/primitives';
 import { color, font, type } from '../design/tokens';
 import { useElapsedSeconds } from '../hooks/useElapsedSeconds';
 import { duration, loss } from '../lib/format';
@@ -27,6 +27,8 @@ interface RunningRow {
   runId: string;
   /** 누가 돌리고 있는지. 이 컴퓨터면 그렇다고 적습니다. */
   who: string;
+  /** 사람을 가르는 값. 이름은 겹칠 수 있으므로 묶을 때는 이것을 씁니다. */
+  whoKey: string;
   epoch: string;
   valLoss: string;
   /** 무슨 데이터로 돌리는지. 모르면 적지 않습니다. */
@@ -57,6 +59,8 @@ function rowFromTeamRun(run: TeamRun): RunningRow {
   return {
     runId: run.runId,
     who: run.actorName,
+    // 이름이 같은 팀원 둘이 한 사람으로 합쳐지지 않도록 고유한 값으로 가릅니다.
+    whoKey: run.actorSub || run.actorName,
     epoch: current === null ? '-' : `epoch ${current}${total === null ? '' : ` / ${total}`}`,
     valLoss: loss(num(best?.validation_loss)),
     dataset: datasetLabel(run.dataInputs as Record<string, string>),
@@ -72,6 +76,7 @@ function rowFromJob(job: JobRecord): RunningRow {
   return {
     runId: job.run_id,
     who: ME,
+    whoKey: ME,
     epoch:
       current === null
         ? '-'
@@ -176,6 +181,8 @@ export function Board({
   records,
   teamRuns,
   teamAvailable,
+  teamLoaded,
+  teamError,
 }: {
   /** 이 컴퓨터가 지금 돌리는 학습. */
   liveJob: JobRecord | null;
@@ -185,53 +192,77 @@ export function Board({
   teamRuns: TeamRun[];
   /** 팀 기록을 읽을 수 있는 환경인지. 아니면 빈 것이 "없다"는 뜻이 아닙니다. */
   teamAvailable: boolean;
+  /** 팀 기록을 한 번이라도 읽어 봤는지. 읽기 전에도 목록은 비어 있습니다. */
+  teamLoaded: boolean;
+  /** 팀 기록을 읽다 실패했으면 그 이유. 실패를 "없음"으로 말하면 안 됩니다. */
+  teamError: string | null;
 }) {
   const navigate = useNavigate();
 
   /**
-   * 지금 도는 학습. 팀이 공유한 것과 이 컴퓨터 것을 `run_id`로 합칩니다.
+   * 지금 도는 학습. 팀이 공유한 것과 이 컴퓨터 것을 합칩니다.
    *
-   * 팀 기록이 켜져 있으면 내 학습도 거기 올라가므로 그대로 두면 같은 학습이 두 줄이
-   * 됩니다. 이 컴퓨터 것이 이깁니다 — 모니터로 들어갈 수 있는 쪽이라서입니다.
+   * **`run_id`로 합치면 안 됩니다.** 자동으로 지어지는 이름은 설정과 seed의 지문이라,
+   * 팀원 둘이 같은 설정으로 돌리면 이름이 같습니다 — 그것이 중복 실험을 알아채라고
+   * 일부러 그렇게 만든 값입니다. 그 이름으로 묶으면 한 사람의 학습이 다른 사람의
+   * 줄에 덮여 통째로 사라집니다. 실행을 실제로 가르는 것은 팀 기록의 `cloudRunId`와
+   * 이 컴퓨터의 `job_id`입니다.
+   *
+   * 대신 내 학습은 팀에도 올라가므로 같은 실행이 두 줄이 될 수 있습니다. 그것은
+   * 팀 기록이 들고 있는 `localJobId`로 알아보고 이 컴퓨터 줄을 남깁니다 — 모니터로
+   * 들어갈 수 있는 쪽이라서입니다.
    */
   const rows = useMemo(() => {
     const merged = new Map<string, RunningRow>();
     // heartbeat가 2분 넘게 끊긴 것은 여기 세우지 않습니다. 도는 척만 하고 있을 뿐이라
     // "지금 돌고 있는 것"이라는 이 표의 뜻과 어긋납니다. 아래에 따로 모읍니다.
-    for (const run of teamRuns.filter((item) => isActiveRun(item) && !isStaleRun(item))) {
-      merged.set(run.runId, rowFromTeamRun(run));
-    }
-    if (liveJob) merged.set(liveJob.run_id, rowFromJob(liveJob));
+    const active = teamRuns.filter((item) => isActiveRun(item) && !isStaleRun(item));
+    for (const run of active) merged.set(`cloud:${run.cloudRunId}`, rowFromTeamRun(run));
+
+    /** 이 컴퓨터의 학습 하나를 세웁니다. 팀에 올라간 같은 실행이 있으면 그것을 뺍니다. */
+    const mine = (jobId: string | null, row: RunningRow) => {
+      const shared = jobId
+        ? active.find((run) => run.localJobId === jobId)
+        : undefined;
+      if (shared) merged.delete(`cloud:${shared.cloudRunId}`);
+      merged.set(jobId ? `job:${jobId}` : `run:${row.runId}`, row);
+    };
+
+    if (liveJob) mine(liveJob.job_id, rowFromJob(liveJob));
     for (const record of records.filter(isRunning)) {
-      if (!merged.has(record.runId)) {
-        merged.set(record.runId, {
-          runId: record.runId,
-          who: ME,
-          epoch: '-',
-          valLoss: loss(record.metrics.bestValidationLoss),
-          dataset: record.datasetKey,
-          startedAt: record.at,
-          jobId: record.jobId,
-          cloudRunId: null,
-        });
-      }
+      const key = record.jobId ? `job:${record.jobId}` : `run:${record.runId}`;
+      if (merged.has(key)) continue;
+      mine(record.jobId, {
+        runId: record.runId,
+        who: ME,
+        whoKey: ME,
+        epoch: '-',
+        valLoss: loss(record.metrics.bestValidationLoss),
+        dataset: record.datasetKey,
+        startedAt: record.at,
+        jobId: record.jobId,
+        cloudRunId: null,
+      });
     }
     return [...merged.values()];
   }, [teamRuns, liveJob, records]);
 
-  /** 사람별로 묶습니다. 내 줄이 언제나 맨 위입니다. */
+  /**
+   * 사람별로 묶습니다. 내 줄이 언제나 맨 위입니다.
+   *
+   * 묶는 값은 보이는 이름이 아니라 `actorSub`입니다. 이름은 사람이 정하는 표시용이라
+   * 같은 이름을 쓰는 팀원 둘이 한 사람으로 합쳐질 수 있습니다.
+   */
   const people = useMemo(() => {
-    const byPerson = new Map<string, RunningRow[]>();
+    const byPerson = new Map<string, { who: string; rows: RunningRow[] }>();
     for (const row of rows) {
-      const list = byPerson.get(row.who);
-      if (list) list.push(row);
-      else byPerson.set(row.who, [row]);
+      const group = byPerson.get(row.whoKey);
+      if (group) group.rows.push(row);
+      else byPerson.set(row.whoKey, { who: row.who, rows: [row] });
     }
-    return [...byPerson.entries()]
-      .map(([who, list]) => ({ who, rows: list }))
-      .sort((left, right) =>
-        left.who === ME ? -1 : right.who === ME ? 1 : left.who.localeCompare(right.who),
-      );
+    return [...byPerson.values()].sort((left, right) =>
+      left.who === ME ? -1 : right.who === ME ? 1 : left.who.localeCompare(right.who),
+    );
   }, [rows]);
 
   const stale = teamRuns.filter(isStaleRun);
@@ -244,9 +275,27 @@ export function Board({
         컴퓨터 것만 보입니다.
       </div>
 
+      {/* 팀 기록을 못 읽었으면 그렇게 말합니다. 읽지 못한 것을 "없다"로 말하면, 팀원이
+          밤새 GPU를 돌리는 중에도 화면은 아무도 안 돌린다고 합니다. */}
+      {teamAvailable && teamError && (
+        <div style={{ marginTop: 22 }}>
+          <AlertRow level="warning" title="팀 기록을 읽지 못했습니다">
+            {teamError} 아래는 이 컴퓨터에서 돌리는 학습뿐입니다.
+          </AlertRow>
+        </div>
+      )}
+
       {rows.length === 0 ? (
         <div style={{ marginTop: 30 }}>
-          <EmptyState message="지금 돌고 있는 학습이 없습니다." />
+          <EmptyState
+            message={
+              teamAvailable && !teamLoaded && !teamError
+                ? '팀 기록을 읽고 있습니다.'
+                : teamAvailable && teamError
+                  ? '이 컴퓨터에서 돌고 있는 학습이 없습니다. 팀 것은 위 이유로 알 수 없습니다.'
+                  : '지금 돌고 있는 학습이 없습니다.'
+            }
+          />
         </div>
       ) : (
         people.map((person) => (

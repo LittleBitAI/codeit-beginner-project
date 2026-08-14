@@ -69,25 +69,29 @@ function teamRun(overrides: Partial<TeamRun> = {}): TeamRun {
 function show(props: Partial<Parameters<typeof Board>[0]> = {}) {
   return render(
     <MemoryRouter>
-      <Board liveJob={null} records={[]} teamRuns={[]} teamAvailable={false} {...props} />
+      <Board
+        liveJob={null}
+        records={[]}
+        teamRuns={[]}
+        teamAvailable={false}
+        teamLoaded={false}
+        teamError={null}
+        {...props}
+      />
     </MemoryRouter>,
   );
 }
 
 describe('Board', () => {
-  it('사람별로 묶고, 같은 학습을 두 번 세지 않는다', () => {
-    // 내 학습도 팀에 올라가 있습니다. 그대로 두면 같은 학습이 두 줄이 됩니다.
-    const mine = teamRun({ cloudRunId: 'c2', runId: 'retina-live', actorName: '나' });
-
-    show({ liveJob: liveJob(), teamRuns: [teamRun(), mine], teamAvailable: true });
+  it('팀원 것과 내 것을 함께 세운다', () => {
+    show({ liveJob: liveJob(), teamRuns: [teamRun()], teamAvailable: true, teamLoaded: true });
 
     expect(screen.getByText('mate-run')).toBeInTheDocument();
     expect(screen.getByText('김팀원')).toBeInTheDocument();
-    expect(screen.getAllByText('retina-live')).toHaveLength(1);
+    expect(screen.getByText('retina-live')).toBeInTheDocument();
     // 내 줄은 이 컴퓨터 것으로 남아 모니터로 들어갈 수 있습니다.
     expect(screen.getByText('나 (이 컴퓨터)')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '모니터 →' })).toBeInTheDocument();
-    expect(screen.queryByText('나')).toBeNull();
   });
 
   it('무엇으로 돌리는지도 함께 적는다', () => {
@@ -105,7 +109,7 @@ describe('Board', () => {
       heartbeatAt: '2026-08-05T00:00:00Z',
     });
 
-    show({ teamRuns: [stale], teamAvailable: true });
+    show({ teamRuns: [stale], teamAvailable: true, teamLoaded: true });
 
     expect(screen.getByText('지금 돌고 있는 학습이 없습니다.')).toBeInTheDocument();
     expect(screen.getByText('연결이 끊긴 학습 1개')).toBeInTheDocument();
@@ -116,5 +120,55 @@ describe('Board', () => {
     show({ liveJob: liveJob(), teamAvailable: false });
 
     expect(screen.getByText(/팀 실시간 연결이 꺼져 있어/)).toBeInTheDocument();
+  });
+
+  // 자동으로 지어지는 이름은 설정과 seed의 지문입니다. 팀원 둘이 같은 설정으로
+  // 돌리면 이름이 같아지고, 그 이름으로 묶으면 한 사람의 학습이 통째로 사라집니다.
+  it('이름이 같은 서로 다른 실행을 한 줄로 합치지 않는다', () => {
+    const first = teamRun({ cloudRunId: 'c1', actorSub: 'sub-1', actorName: '김팀원' });
+    const second = teamRun({ cloudRunId: 'c2', actorSub: 'sub-2', actorName: '박팀원' });
+
+    show({ teamRuns: [first, second], teamAvailable: true, teamLoaded: true });
+
+    expect(screen.getAllByText('mate-run')).toHaveLength(2);
+    expect(screen.getByText('김팀원')).toBeInTheDocument();
+    expect(screen.getByText('박팀원')).toBeInTheDocument();
+  });
+
+  it('이름이 같은 팀원 둘을 한 사람으로 묶지 않는다', () => {
+    const one = teamRun({ cloudRunId: 'c1', actorSub: 'sub-1', runId: 'run-1' });
+    const other = teamRun({ cloudRunId: 'c2', actorSub: 'sub-2', runId: 'run-2' });
+
+    show({ teamRuns: [one, other], teamAvailable: true, teamLoaded: true });
+
+    // 이름은 같지만 사람은 둘입니다. 묶음이 둘이어야 각자 몇 개를 돌리는지 맞습니다.
+    expect(screen.getAllByText('김팀원')).toHaveLength(2);
+    expect(screen.getAllByText('1개 학습 중')).toHaveLength(2);
+  });
+
+  it('내 학습이 팀에도 올라가 있으면 이 컴퓨터 줄만 남긴다', () => {
+    // 같은 실행입니다. 팀 기록은 그것을 localJobId로 알려 줍니다.
+    const mine = teamRun({ cloudRunId: 'c9', runId: 'retina-live', localJobId: 'job-1', actorName: '나' });
+
+    show({ liveJob: liveJob(), teamRuns: [mine], teamAvailable: true, teamLoaded: true });
+
+    expect(screen.getAllByText('retina-live')).toHaveLength(1);
+    expect(screen.getByText('나 (이 컴퓨터)')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '모니터 →' })).toBeInTheDocument();
+  });
+
+  it('팀 기록을 아직 못 읽었으면 "없다"고 단정하지 않는다', () => {
+    show({ teamAvailable: true, teamLoaded: false });
+
+    expect(screen.getByText('팀 기록을 읽고 있습니다.')).toBeInTheDocument();
+    expect(screen.queryByText('지금 돌고 있는 학습이 없습니다.')).toBeNull();
+  });
+
+  it('팀 기록을 읽다 실패했으면 그 이유를 적는다', () => {
+    show({ teamAvailable: true, teamLoaded: false, teamError: '연결이 끊겼습니다.' });
+
+    expect(screen.getByText('팀 기록을 읽지 못했습니다')).toBeInTheDocument();
+    expect(screen.getByText(/연결이 끊겼습니다/)).toBeInTheDocument();
+    expect(screen.queryByText('지금 돌고 있는 학습이 없습니다.')).toBeNull();
   });
 });

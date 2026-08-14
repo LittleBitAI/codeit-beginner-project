@@ -51,6 +51,11 @@ export interface TeamRunsState {
   error: string | null;
   /** 팀 기록을 읽을 수 있는 환경인지. 아니면 `runs`가 비어 있어도 "없다"가 아닙니다. */
   available: boolean;
+  /**
+   * 한 번이라도 읽어 봤는지. 읽기 전에도 `runs`는 빈 배열이라, 이것 없이는 화면이
+   * 첫 순간에 "팀에 도는 학습이 없다"고 단정합니다.
+   */
+  loaded: boolean;
   refresh: () => void;
 }
 
@@ -63,13 +68,15 @@ export function useTeamRuns(): TeamRunsState {
   const available = Boolean(teamId) && canRead;
   const [runs, setRuns] = useState<TeamRun[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   const refresh = useCallback(() => {
     if (!teamId || !canRead) return;
     void cloud.listRuns(teamId).then(
-      (loaded) => {
-        setRuns(loaded);
+      (fetched) => {
+        setRuns(fetched);
         setError(null);
+        setLoaded(true);
       },
       (problem: unknown) => {
         setError(problem instanceof Error ? problem.message : '팀 기록을 읽지 못했습니다.');
@@ -85,5 +92,5 @@ export function useTeamRuns(): TeamRunsState {
     if (team.latestEvent) setRuns((previous) => mergeRuns(previous, team.latestEvent as TeamRun));
   }, [team.latestEvent]);
 
-  return { runs, error, available, refresh };
+  return { runs, error, available, loaded, refresh };
 }
