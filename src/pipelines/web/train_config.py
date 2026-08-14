@@ -126,12 +126,16 @@ _MMDETECTION_INTEGER_FIELDS = (("input_size", DEFAULT_INPUT_SIZE, 1),)
 # 설정과 seed로 다시 돌렸을 때 예전 실행과 이름이 어긋나 중복 실험을 알아채지 못하고
 # GPU 시간을 두 번 씁니다. 생략과 1은 같은 동작이므로 이름에 반영할 것은 1보다 큰
 # 값뿐입니다.
-_FINGERPRINT_SAME_AS_OMITTED = {"gradient_accumulation_steps": 1}
-# 이어서 학습할 checkpoint의 파일 이름과 작업 폴더 규칙입니다. train이 정한 것을
-# 그대로 옮겼습니다(`src/pipelines/train/pipeline.py`).
-RESUME_CHECKPOINT_NAME = "last_checkpoint.pt"
-WORKING_DIRECTORY_SUFFIX = ".partial"
-RUNNING_PREFIX = "running"
+_FINGERPRINT_SAME_AS_OMITTED = {
+    "gradient_accumulation_steps": _contract.SETTING_DEFAULTS[
+        "gradient_accumulation_steps"
+    ]
+}
+# 이어서 학습할 checkpoint의 파일 이름과 작업 폴더 규칙입니다. train이 쓰는 자리를
+# 그대로 찾아야 해서 계약에서 읽습니다.
+RESUME_CHECKPOINT_NAME = _contract.RESUME_CHECKPOINT_NAME
+WORKING_DIRECTORY_SUFFIX = _contract.WORKING_DIRECTORY_SUFFIX
+RUNNING_PREFIX = _contract.RUNNING_PREFIX
 LR_WARMUP_DEFAULTS = _contract.LR_WARMUP_DEFAULTS
 LR_SCHEDULER_DEFAULTS = _contract.LR_SCHEDULER_DEFAULTS
 # 화면의 평평한 칸 이름 -> train이 받는 nested object의 key.

@@ -140,6 +140,16 @@ DEFAULT_LR_SCHEDULER = "none"
 EARLY_STOPPING_KEYS = ("patience", "min_delta")
 DEFAULT_EARLY_STOPPING_MIN_DELTA = 0.0
 
+#: 학습 중 작업 폴더에 두는 파일입니다. 마지막 것이 이어서 학습할 대상입니다.
+WORKING_CHECKPOINT_NAMES = ("best_checkpoint.pt", "last_checkpoint.pt")
+RESUME_CHECKPOINT_NAME = WORKING_CHECKPOINT_NAMES[-1]
+
+#: 끝나지 않은 학습이 어디 있는지 정하는 규칙입니다. train이 그 자리에 쓰고, GUI는
+#: 이어서 학습 버튼을 올릴지 정하려고 같은 자리를 찾아봅니다. 한쪽만 바뀌면 GUI는
+#: 있는 checkpoint를 없다고 하거나, 없는 것을 있다고 하고 train이 곧바로 거부합니다.
+WORKING_DIRECTORY_SUFFIX = ".partial"
+RUNNING_PREFIX = "running"
+
 #: 비워 두고 보냈을 때 train이 쓰는 값입니다. GUI는 빈 칸에 이 값을 안내합니다.
 #: `num_workers`는 여기 없습니다 — train이 device와 OS를 보고 정하므로 GUI가 미리
 #: 말할 수 있는 값이 아닙니다. `gradient_accumulation_steps`는 MMDetection model에서만

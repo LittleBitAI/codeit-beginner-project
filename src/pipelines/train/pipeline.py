@@ -88,8 +88,9 @@ _LR_SCHEDULER_KEYS = {
 # 자동 선택만 있으면 어떤 GPU에서 무엇으로 돌지 미리 알 수 없고, 그 GPU에 맞는 쪽을
 # 사람이 고를 수도 없습니다.
 PRECISION_MODES = _contract.PRECISIONS
-# 학습 중 작업 폴더에 두는 파일입니다. 마지막 것이 이어서 학습할 대상입니다.
-WORKING_CHECKPOINT_NAMES = ("best_checkpoint.pt", "last_checkpoint.pt")
+# 학습 중 작업 폴더에 두는 파일과 그 폴더 이름 규칙입니다. GUI도 이어서 학습할
+# checkpoint를 찾으려면 같은 규칙을 알아야 해서 계약에 둡니다.
+WORKING_CHECKPOINT_NAMES = _contract.WORKING_CHECKPOINT_NAMES
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -624,7 +625,9 @@ def _working_directory(settings: Mapping[str, Any]) -> Path:
     이어서 할 파일을 찾을 수 있습니다.
     """
 
-    return _repo_output(settings["output_dir"]) / f".{settings['run_id']}.partial"
+    return _repo_output(settings["output_dir"]) / (
+        f".{settings['run_id']}{_contract.WORKING_DIRECTORY_SUFFIX}"
+    )
 
 
 def _validate_working_directory(path: Path) -> None:
@@ -739,7 +742,7 @@ def _reject_existing_run(settings: Mapping[str, Any], storage: Storage) -> None:
             raise FileExistsError(
                 f"training run artifact already exists: {settings['run_id']}"
             )
-        running = f"{prefix}/running/{WORKING_CHECKPOINT_NAMES[-1]}"
+        running = f"{prefix}/{_contract.RUNNING_PREFIX}/{_contract.RESUME_CHECKPOINT_NAME}"
         if storage.exists(running):
             # 이 key를 덮어쓰면 중단된 학습의 유일한 사본이 사라집니다. Colab은
             # runtime이 바뀌면 로컬 작업 폴더가 없으므로 S3를 직접 봐야 압니다.
@@ -958,7 +961,10 @@ def _mirror_to_s3(
     """
 
     payload = _with_embedded_best(last_payload, best)
-    destination = f"{_s3_run_prefix(settings)}/running/{WORKING_CHECKPOINT_NAMES[-1]}"
+    destination = (
+        f"{_s3_run_prefix(settings)}/{_contract.RUNNING_PREFIX}"
+        f"/{_contract.RESUME_CHECKPOINT_NAME}"
+    )
     with _temporary_checkpoint_directory("train-mirror-") as temporary:
         path = temporary / WORKING_CHECKPOINT_NAMES[-1]
         _write_checkpoint(path, payload)

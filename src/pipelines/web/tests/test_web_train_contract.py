@@ -319,3 +319,6 @@ def test_every_offered_field_has_a_place_on_the_new_experiment_form():
     offered = {spec["name"] for spec in field_specs()}
 
     assert offered - placed == set(), "화면에 자리가 없는 칸이 있습니다."
+    # 반대쪽도 봅니다. 서버가 주지 않는 칸이 화면에 남아 있으면 사람은 그 값을 채우고
+    # 시작 버튼을 누르는데, 그 값은 어디에도 실려 가지 않고 조용히 버려집니다.
+    assert placed - offered == set(), "서버가 주지 않는 칸이 화면에 적혀 있습니다."

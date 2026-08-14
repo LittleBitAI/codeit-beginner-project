@@ -400,6 +400,51 @@ def test_explicit_adamw_run_records_effective_reproducibility_settings(local_con
     assert result["summary"]["augmentation"] == "pill_basic"
 
 
+def test_every_mmdetection_name_in_the_shared_contract_has_a_config_here():
+    """계약이 이름을 정하고, 그 이름으로 어떤 detector를 만들지는 여기서 정합니다.
+
+    이름만 늘고 config가 없으면 GUI는 즉시 그 모델을 고를 수 있게 내놓는데 학습은
+    엉뚱한 모델로 돌거나 죽습니다. 두 이름이 실제로 갈라지는지도 함께 봅니다.
+    """
+
+    from src.pipelines.train.mmdetection_adapter import (
+        CASCADE_ARCHITECTURE,
+        DINO_ARCHITECTURE,
+        build_mmdetection_config,
+    )
+
+    assert {DINO_ARCHITECTURE, CASCADE_ARCHITECTURE} == set(
+        train_contract.MMDETECTION_ARCHITECTURES
+    )
+    built = {
+        name: build_mmdetection_config(name, foreground_classes=3)["type"]
+        for name in train_contract.MMDETECTION_ARCHITECTURES
+    }
+    assert len(set(built.values())) == len(built), f"같은 detector로 갈립니다: {built}"
+
+
+def test_a_contract_name_without_a_config_here_stops_instead_of_training_cascade(
+    monkeypatch,
+):
+    """계약에 이름만 늘고 여기 config가 없을 때, 조용히 cascade로 학습하지 않는다.
+
+    GUI는 계약을 읽어 그 이름을 곧바로 고를 수 있게 내놓습니다. 여기가 마지막 관문이라
+    떨어뜨리면 사람은 다른 모델을 골랐다고 믿은 채 밤새 cascade를 학습합니다.
+    """
+
+    from src.pipelines.train import mmdetection_adapter
+
+    monkeypatch.setattr(
+        mmdetection_adapter,
+        "MMDETECTION_ARCHITECTURES",
+        (*train_contract.MMDETECTION_ARCHITECTURES, "later_added_detector"),
+    )
+    with pytest.raises(ValueError, match="later_added_detector"):
+        mmdetection_adapter.build_mmdetection_config(
+            "later_added_detector", foreground_classes=3
+        )
+
+
 def test_every_preset_name_in_the_shared_contract_is_implemented_here():
     """계약이 이름을 정하고, 그 이름이 실제로 무엇을 바꾸는지는 여기서 정합니다.
 

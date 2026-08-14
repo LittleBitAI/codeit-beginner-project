@@ -365,7 +365,11 @@ def build_mmdetection_config(
         raise ValueError("foreground_classes must be positive")
     if architecture == DINO_ARCHITECTURE:
         return _dino_config(foreground_classes)
-    return _cascade_config(foreground_classes)
+    if architecture == CASCADE_ARCHITECTURE:
+        return _cascade_config(foreground_classes)
+    # 계약에 이름이 하나 더 늘었는데 여기 config가 없으면, 그것을 조용히 cascade로
+    # 학습하게 됩니다. GUI는 이미 그 이름을 고를 수 있게 내놓은 뒤입니다.
+    raise ValueError(f"MMDetection architecture has no config here: {architecture}")
 
 
 def model_config_metadata(input_size: int) -> dict[str, int | str]:
