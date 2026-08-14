@@ -1,32 +1,25 @@
 /**
  * 화면 전체의 틀입니다.
  *
- * 왼쪽은 **dataset 목록**입니다. 화면 이름을 늘어놓는 대신 "어떤 데이터의 기록을
- * 보고 있는지"를 세로로 세웁니다. 이 도구에서 사람이 실제로 갈아 끼우는 것이
- * 화면이 아니라 dataset이기 때문입니다. 화면 사이 이동은 본문 안의 링크가 합니다.
+ * 왼쪽은 **할 일의 차례**입니다. 학습 한 번은 `dataset 준비 → EDA → 새 실험 →
+ * 기록`으로 흐르므로 메뉴도 그 순서로 세웁니다. 예전에는 여기에 dataset 목록이
+ * 있었는데, 그것은 "무엇을 볼지" 고르는 값이지 화면이 아니라 학습에 쓸 데이터를
+ * 바꾸는 것으로 읽혔습니다. 지금 그 고르기는 기록 화면 안에 있고, 학습에 실제로
+ * 쓰이는 데이터는 dataset 준비에서만 바뀝니다.
+ *
+ * 맨 위 제목이 첫 화면(내 학습 현황)으로 가는 길입니다.
  */
 
 import type { ReactNode } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 import { color, font, type } from '../design/tokens';
 import type { GpuStatus } from '../api/types';
-import { LiveDot, MicroLabel } from './primitives';
+import { LiveDot } from './primitives';
 import { ThemeToggle } from './ThemeToggle';
 
-/** 왼쪽 목록의 한 줄. 기록에서 뽑은 dataset 하나입니다. */
-export interface DatasetOption {
-  /** 고르기·비교에 쓰는 값. dataset 이름 그대로입니다. */
-  key: string;
-  /** 목록에 적는 짧은 이름. */
-  short: string;
-  /** 이름 아래 한 줄 설명. */
-  sub: string;
-  /** 이 dataset으로 남은 기록 수. */
-  count: number;
-}
-
 /** 색은 `<svg>`의 `color`에 한 번 얹고 안쪽은 `currentColor`로 물려받습니다. */
-const iconBox = { flex: 'none' as const, color: color.textMuted };
+const iconBox = { flex: 'none' as const };
 
 function IconDataset() {
   return (
@@ -69,24 +62,76 @@ function IconEda() {
   );
 }
 
-function RailAction({ icon, children, onClick }: { icon: ReactNode; children: ReactNode; onClick: () => void }) {
+function IconRecords() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style={iconBox}>
+      <path
+        d="M2.5 4h11M2.5 8h11M2.5 12h7"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function IconBoard() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style={iconBox}>
+      <circle cx="5.2" cy="5" r="2.1" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="11.2" cy="5" r="2.1" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M1.8 13.2c0-1.7 1.5-3 3.4-3s3.4 1.3 3.4 3M8.4 13.2c0-1.7 1.5-3 3.4-3 1.2 0 2.3.5 2.9 1.3"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/** 왼쪽 메뉴 한 줄. 화면으로 가거나 오른쪽 시트를 엽니다. */
+function RailItem({
+  icon,
+  active,
+  children,
+  right,
+  onClick,
+}: {
+  icon: ReactNode;
+  active?: boolean;
+  children: ReactNode;
+  right?: ReactNode;
+  onClick: () => void;
+}) {
   return (
     <button
       type="button"
+      aria-current={active ? 'page' : undefined}
+      data-row-hover={active ? undefined : ''}
       onClick={onClick}
       style={{
+        position: 'relative',
         display: 'flex',
         alignItems: 'center',
-        gap: 9,
-        font: `400 12.5px/1 ${font.sans}`,
-        color: color.textMuted,
-        background: 'transparent',
+        gap: 10,
+        width: '100%',
+        padding: '10px 20px',
+        textAlign: 'left',
         border: 0,
-        padding: 0,
+        background: active ? color.fill : 'transparent',
+        color: active ? color.text : color.textMuted,
+        font: `${active ? 500 : 400} 12.5px/1.4 ${font.sans}`,
       }}
     >
+      {active && (
+        <span
+          style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 2, background: color.accent }}
+        />
+      )}
       {icon}
-      {children}
+      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{children}</span>
+      {right && <span style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center' }}>{right}</span>}
     </button>
   );
 }
@@ -147,9 +192,6 @@ function GpuGauge({ gpu }: { gpu: GpuStatus | null }) {
 
 export function AppShell({
   children,
-  datasets,
-  activeDataset,
-  onPickDataset,
   gpu,
   running,
   onOpenPrepare,
@@ -157,16 +199,16 @@ export function AppShell({
   onOpenSettings,
 }: {
   children: ReactNode;
-  datasets: DatasetOption[];
-  activeDataset: string | null;
-  onPickDataset: (key: string) => void;
   gpu: GpuStatus | null;
-  /** 지금 도는 학습이 있는지. 목록의 해당 dataset 옆에 점을 답니다. */
-  running: string | null;
+  /** 이 컴퓨터에서 지금 도는 학습이 있는지. 제목 옆에 점을 답니다. */
+  running: boolean;
   onOpenPrepare: () => void;
   onOpenEda: () => void;
   onOpenSettings: () => void;
 }) {
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+
   return (
     <div
       style={{
@@ -190,125 +232,66 @@ export function AppShell({
           overflowY: 'auto',
         }}
       >
-        <div style={{ padding: '0 20px 26px' }}>
-          <div style={{ font: `600 14px/1.4 ${font.sans}`, color: color.text }}>알약 객체 탐지</div>
-          <div style={{ font: `400 11.5px/1.5 ${font.mono}`, color: color.textMuted }}>Training</div>
-        </div>
-
-        <MicroLabel style={{ padding: '0 20px 12px' }}>DATASETS</MicroLabel>
-
-        {datasets.length === 0 ? (
-          <div style={{ padding: '0 20px', ...type.note, color: color.textFaint }}>
-            아직 기록이 없습니다. 아래 <b style={{ color: color.textMuted }}>dataset 준비</b>로
-            전처리를 먼저 돌리세요.
-          </div>
-        ) : (
-          datasets.map((item) => {
-            const on = item.key === activeDataset;
-            return (
-              <button
-                key={item.key}
-                type="button"
-                aria-current={on ? 'true' : undefined}
-                data-row-hover={on ? undefined : ''}
-                onClick={() => onPickDataset(item.key)}
-                style={{
-                  padding: '12px 20px',
-                  position: 'relative',
-                  textAlign: 'left',
-                  border: 0,
-                  background: on ? color.fill : 'transparent',
-                  width: '100%',
-                }}
-              >
-                {on && (
-                  <span
-                    style={{
-                      position: 'absolute',
-                      left: 0,
-                      top: 0,
-                      bottom: 0,
-                      width: 2,
-                      background: color.accent,
-                    }}
-                  />
-                )}
-                <span
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'baseline',
-                    gap: 10,
-                  }}
-                >
-                  <span
-                    style={{
-                      font: `500 12.5px/1.4 ${font.mono}`,
-                      color: on ? color.text : color.textBody,
-                      minWidth: 0,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                    }}
-                  >
-                    {item.short}
-                  </span>
-                  <span
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 7,
-                      flex: 'none',
-                      font: `500 12px/1 ${font.mono}`,
-                      color: color.textMuted,
-                    }}
-                  >
-                    {running === item.key && <LiveDot size={6} pulse />}
-                    {item.count}
-                  </span>
-                </span>
-                <span
-                  style={{
-                    display: 'block',
-                    font: `400 12px/1.5 ${font.sans}`,
-                    color: color.textMuted,
-                    marginTop: 5,
-                  }}
-                >
-                  {item.sub}
-                </span>
-              </button>
-            );
-          })
-        )}
-
-        <div
+        {/* 제목이 곧 첫 화면(내 학습 현황)으로 가는 길입니다. */}
+        <button
+          type="button"
+          aria-current={pathname === '/' ? 'page' : undefined}
+          onClick={() => navigate('/')}
           style={{
-            marginTop: 'auto',
-            padding: '26px 20px 0',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'flex-start',
-            gap: 14,
+            padding: '0 20px 26px',
+            textAlign: 'left',
+            border: 0,
+            background: 'transparent',
           }}
         >
-          <RailAction icon={<IconDataset />} onClick={onOpenPrepare}>
-            dataset 준비
-          </RailAction>
-          {/* 고른 dataset을 model 없이 뜯어봅니다. 준비 바로 아래에 두는 것은
-              "만들고 → 살펴본다"가 한 가지 일의 순서이기 때문입니다. */}
-          <RailAction icon={<IconEda />} onClick={onOpenEda}>
-            EDA
-          </RailAction>
-          <RailAction icon={<IconSettings />} onClick={onOpenSettings}>
-            설정
-          </RailAction>
-        </div>
+          <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ font: `600 14px/1.4 ${font.sans}`, color: color.text }}>알약 객체 탐지</span>
+            {running && <LiveDot size={6} pulse />}
+          </span>
+          <span
+            style={{
+              display: 'block',
+              font: `400 11.5px/1.5 ${font.mono}`,
+              color: pathname === '/' ? color.accent : color.textMuted,
+            }}
+          >
+            {running ? '학습 중' : 'Training'}
+          </span>
+        </button>
 
-        <GpuGauge gpu={gpu} />
+        <RailItem icon={<IconDataset />} onClick={onOpenPrepare}>
+          dataset 준비
+        </RailItem>
+        {/* 고른 dataset을 model 없이 뜯어봅니다. 준비 바로 아래에 두는 것은
+            "만들고 → 살펴본다"가 한 가지 일의 순서이기 때문입니다. */}
+        <RailItem icon={<IconEda />} onClick={onOpenEda}>
+          EDA
+        </RailItem>
+        <RailItem
+          icon={<IconRecords />}
+          active={pathname.startsWith('/records') || pathname.startsWith('/canvas')}
+          onClick={() => navigate('/records')}
+        >
+          기록
+        </RailItem>
+        <RailItem
+          icon={<IconBoard />}
+          active={pathname.startsWith('/board')}
+          onClick={() => navigate('/board')}
+        >
+          현황판
+        </RailItem>
+        <RailItem icon={<IconSettings />} onClick={onOpenSettings}>
+          설정
+        </RailItem>
+
+        <div style={{ marginTop: 'auto' }}>
+          <GpuGauge gpu={gpu} />
+        </div>
       </nav>
 
       {/* 팀원 학습 시작 알림 토스트는 두지 않습니다. 화면 오른쪽 아래를 가리는 값에
-          비해 얻는 것이 적었습니다. 같은 정보는 기록 목록의 "학습 중" 표에 있습니다. */}
+          비해 얻는 것이 적었습니다. 같은 정보는 현황판에 있습니다. */}
       <div style={{ minWidth: 0, position: 'relative' }}>{children}</div>
       <ThemeToggle />
     </div>

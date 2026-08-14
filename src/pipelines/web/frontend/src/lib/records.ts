@@ -232,13 +232,60 @@ export function groupByDataset(records: RunRecord[]): DatasetGroup[] {
     .sort((left, right) => right.count - left.count || left.key.localeCompare(right.key));
 }
 
-export type RecordFilter = 'all' | 'evaluated' | 'submitted' | 'running' | 'unregistered';
+export interface ModelGroup {
+  /** 모델 계열 이름. 기록 줄의 `family`와 같습니다. */
+  model: string;
+  /** 넘어온 순서 그대로입니다. 정렬은 이미 호출한 쪽이 정했습니다. */
+  records: RunRecord[];
+  bestKaggle: number | null;
+  bestValidationLoss: number | null;
+}
+
+function best(values: (number | null)[], pick: (list: number[]) => number): number | null {
+  const present = values.filter((value): value is number => value !== null);
+  return present.length === 0 ? null : pick(present);
+}
+
+/**
+ * 기록을 모델 계열별로 묶습니다. 기록이 많은 순, 같으면 이름 순입니다.
+ *
+ * 목록을 시각 순으로만 세우면 "retinanet이 faster-rcnn보다 나은가"를 눈으로 줄을
+ * 세어 가며 골라내야 합니다. 실제로 사람이 이 화면에서 묻는 것은 대개 그것이라,
+ * 묶음마다 건수와 가장 좋은 값을 머리글에 적어 답이 먼저 보이게 합니다.
+ */
+export function groupByModel(records: RunRecord[]): ModelGroup[] {
+  const byModel = new Map<string, RunRecord[]>();
+  for (const record of records) {
+    const list = byModel.get(record.family);
+    if (list) list.push(record);
+    else byModel.set(record.family, [record]);
+  }
+  return [...byModel.entries()]
+    .map(([model, list]) => ({
+      model,
+      records: list,
+      bestKaggle: best(list.map((item) => item.metrics.kaggle), (values) => Math.max(...values)),
+      bestValidationLoss: best(
+        list.map((item) => item.metrics.bestValidationLoss),
+        (values) => Math.min(...values),
+      ),
+    }))
+    .sort(
+      (left, right) =>
+        right.records.length - left.records.length || left.model.localeCompare(right.model),
+    );
+}
+
+/**
+ * 기록 화면의 표. "학습 중"은 여기 없습니다 — 지금 도는 것은 현황판과 첫 화면이
+ * 맡고, 이 표는 **끝난 학습을 무엇으로 좁혀 볼지**만 정합니다.
+ */
+export type RecordFilter = 'all' | 'evaluated' | 'submitted' | 'unregistered';
 
 export const FILTER_LABEL: Record<RecordFilter, string> = {
   all: '전체',
   evaluated: '평가 완료',
   submitted: '제출 완료',
-  running: '학습 중',
   unregistered: '미등록·실패',
 };
 
@@ -251,7 +298,6 @@ export function matchesFilter(record: RunRecord, filter: RecordFilter): boolean 
   if (filter === 'all') return true;
   if (filter === 'evaluated') return record.evaluated;
   if (filter === 'submitted') return record.submitted;
-  if (filter === 'running') return isRunning(record);
   return !record.registered;
 }
 

@@ -4,6 +4,7 @@ import type { ExperimentSummary, JobRecord } from '../api/types';
 import {
   countLabel,
   groupByDataset,
+  groupByModel,
   hasResult,
   mergeRecords,
   sortRecords,
@@ -255,5 +256,50 @@ describe('groupByDataset', () => {
       { key: 'v5-118cls', count: 2 },
       { key: 'v4-57cls', count: 1 },
     ]);
+  });
+});
+
+describe('groupByModel', () => {
+  it('기록이 많은 모델을 위에 세우고 넘어온 순서를 묶음 안에서 지킨다', () => {
+    const records = mergeRecords(
+      [
+        experiment({ run_id: 'retina-1' }),
+        experiment({ run_id: 'retina-2' }),
+        experiment({
+          run_id: 'faster-1',
+          model: { architecture: 'fasterrcnn_resnet50_fpn_v2', pretrained: true, source: 'record' },
+        }),
+      ],
+      [],
+    );
+    // 정렬은 화면이 이미 정합니다. 묶으면서 그 순서를 흔들면 SORT 표가 거짓말이 됩니다.
+    const ordered = [...records].sort((left, right) => left.runId.localeCompare(right.runId));
+
+    const groups = groupByModel(ordered);
+
+    expect(groups.map((group) => group.model)).toEqual([
+      'retinanet_resnet50_fpn_v2',
+      'fasterrcnn_resnet50_fpn_v2',
+    ]);
+    expect(groups[0]?.records.map((item) => item.runId)).toEqual(['retina-1', 'retina-2']);
+  });
+
+  it('묶음 머리글에 가장 좋은 값을 적고, 값이 없으면 지어내지 않는다', () => {
+    const records = mergeRecords(
+      [
+        experiment({ run_id: 'a' }),
+        experiment({
+          run_id: 'b',
+          metrics: { ...experiment().metrics, kaggle_score: null, best_validation_loss: 0.2 },
+        }),
+      ],
+      [],
+    );
+
+    const [group] = groupByModel(records);
+
+    expect(group?.bestKaggle).toBe(0.61);
+    expect(group?.bestValidationLoss).toBe(0.2);
+    expect(groupByModel(mergeRecords([], []))).toEqual([]);
   });
 });
