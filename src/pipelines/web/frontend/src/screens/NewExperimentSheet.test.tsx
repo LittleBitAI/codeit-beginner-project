@@ -55,6 +55,13 @@ const DEFAULTS: Defaults = {
     { name: 'learning_rate', type: 'number', default: 0.006, label: 'Learning rate', hint: '' },
     { name: 'weight_decay', type: 'number', default: 0.01, label: 'Weight decay', hint: '' },
     {
+      name: 'checkpoint_every',
+      type: 'integer',
+      default: 1,
+      label: 'Checkpoint 주기',
+      hint: '',
+    },
+    {
       name: 'precision',
       type: 'enum',
       default: 'fp32',
@@ -180,7 +187,15 @@ describe('NewExperimentSheet', () => {
 
     fireEvent.click(screen.getByText('고급'));
 
-    expect(fieldLabels()).toEqual(['실행 이름', 'Weight decay', '연산 정밀도', 'Device']);
+    // 서버가 주는 칸은 하나도 빠뜨리지 않습니다. 표에 자리가 없으면 그 칸은 화면에
+    // 아예 나타나지 않고, 사람은 기본값으로 돈다는 것조차 모릅니다.
+    expect(fieldLabels()).toEqual([
+      '실행 이름',
+      'Weight decay',
+      'Checkpoint 주기',
+      '연산 정밀도',
+      'Device',
+    ]);
   });
 
   it('데이터셋을 고르지 않았으면 시작할 수 없다', async () => {
