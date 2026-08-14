@@ -42,6 +42,16 @@ import { useTeam } from '../team/TeamContext';
 
 type TabKey = 'basic' | 'hyper' | 'output';
 
+/**
+ * 기본과 고급을 가르는 기준은 **얼마나 자주 바꾸는가** 하나입니다.
+ *
+ * 안에서도 자주 바꾸는 것이 위입니다. 기준을 말로 적어 두지 않으면 새 칸이 생길
+ * 때마다 아무 데나 붙고, 사람은 두 표를 다 열어 찾게 됩니다. 실제로 "기본과 고급의
+ * 기준을 모르겠다"는 말이 나왔습니다.
+ *
+ * 부모 칸에 딸린 것은 부모 바로 뒤에 둡니다(schedule의 세부 값, 조기 종료의 수치).
+ * 떨어뜨리면 어느 칸에 딸린 값인지 화면만 보고는 알 수 없습니다.
+ */
 const TABS: { key: TabKey; label: string; fields: string[] }[] = [
   {
     key: 'basic',
@@ -50,30 +60,23 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
       'architecture',
       'optimizer',
       'augmentation',
-      'precision',
-      'run_id',
       'seed',
-      'device',
-      'pretrained',
+      'epochs',
+      'batch_size',
+      // MMDetection 모델만 쓰는 값입니다. 그 모델을 고른 것이 곧 이 값을 정해야
+      // 한다는 뜻이고, GPU 메모리 한계도 batch size와 묶여 있어 그 옆입니다.
+      'input_size',
+      // GPU 메모리가 모자라 batch size를 못 올릴 때 쓰는 값이라 그 옆에 둡니다.
+      'gradient_accumulation_steps',
+      'learning_rate',
     ],
   },
   {
     key: 'hyper',
     label: '고급',
     fields: [
-      'epochs',
-      'batch_size',
-      // GPU 메모리가 모자라 batch size를 못 올릴 때 쓰는 값이라 그 옆에 둡니다.
-      'gradient_accumulation_steps',
-      // MMDetection 모델만 쓰는 값입니다. 다른 모델을 고르면 서버가 거부합니다.
-      'input_size',
-      'learning_rate',
-      'momentum',
+      'run_id',
       'weight_decay',
-      'beta1',
-      'beta2',
-      'epsilon',
-      'num_workers',
       'lr_scheduler',
       'lr_warmup_steps',
       'lr_warmup_start_factor',
@@ -83,6 +86,15 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
       'early_stopping',
       'early_stopping_patience',
       'early_stopping_min_delta',
+      'beta1',
+      'beta2',
+      'epsilon',
+      // SGD를 고르면 beta 셋 대신 이 칸이 그 자리에 나타납니다.
+      'momentum',
+      'num_workers',
+      'precision',
+      'pretrained',
+      'device',
     ],
   },
   { key: 'output', label: '출력', fields: ['output_dir', 'output_prefix'] },
