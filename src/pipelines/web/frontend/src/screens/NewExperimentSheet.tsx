@@ -22,6 +22,7 @@ import {
   invalidControlStyle,
 } from '../components/primitives';
 import { color, font, type } from '../design/tokens';
+import { ALL_DATA_KEYS } from '../lib/dataKeys';
 import { dataMatchesSource } from '../lib/dataSource';
 import {
   EARLY_STOPPING_FIELDS,
@@ -40,6 +41,16 @@ import { useTeam } from '../team/TeamContext';
 
 type TabKey = 'basic' | 'hyper' | 'output';
 
+/**
+ * 기본과 고급을 가르는 기준은 **얼마나 자주 바꾸는가** 하나입니다.
+ *
+ * 안에서도 자주 바꾸는 것이 위입니다. 기준을 말로 적어 두지 않으면 새 칸이 생길
+ * 때마다 아무 데나 붙고, 사람은 두 표를 다 열어 찾게 됩니다. 실제로 "기본과 고급의
+ * 기준을 모르겠다"는 말이 나왔습니다.
+ *
+ * 부모 칸에 딸린 것은 부모 바로 뒤에 둡니다(schedule의 세부 값, 조기 종료의 수치).
+ * 떨어뜨리면 어느 칸에 딸린 값인지 화면만 보고는 알 수 없습니다.
+ */
 const TABS: { key: TabKey; label: string; fields: string[] }[] = [
   {
     key: 'basic',
@@ -48,30 +59,23 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
       'architecture',
       'optimizer',
       'augmentation',
-      'precision',
-      'run_id',
       'seed',
-      'device',
-      'pretrained',
+      'epochs',
+      'batch_size',
+      // MMDetection 모델만 쓰는 값입니다. 그 모델을 고른 것이 곧 이 값을 정해야
+      // 한다는 뜻이고, GPU 메모리 한계도 batch size와 묶여 있어 그 옆입니다.
+      'input_size',
+      // GPU 메모리가 모자라 batch size를 못 올릴 때 쓰는 값이라 그 옆에 둡니다.
+      'gradient_accumulation_steps',
+      'learning_rate',
     ],
   },
   {
     key: 'hyper',
     label: '고급',
     fields: [
-      'epochs',
-      'batch_size',
-      // GPU 메모리가 모자라 batch size를 못 올릴 때 쓰는 값이라 그 옆에 둡니다.
-      'gradient_accumulation_steps',
-      // MMDetection 모델만 쓰는 값입니다. 다른 모델을 고르면 서버가 거부합니다.
-      'input_size',
-      'learning_rate',
-      'momentum',
+      'run_id',
       'weight_decay',
-      'beta1',
-      'beta2',
-      'epsilon',
-      'num_workers',
       'lr_scheduler',
       'lr_warmup_steps',
       'lr_warmup_start_factor',
@@ -81,6 +85,15 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
       'early_stopping',
       'early_stopping_patience',
       'early_stopping_min_delta',
+      'beta1',
+      'beta2',
+      'epsilon',
+      // SGD를 고르면 beta 셋 대신 이 칸이 그 자리에 나타납니다.
+      'momentum',
+      'num_workers',
+      'precision',
+      'pretrained',
+      'device',
     ],
   },
   { key: 'output', label: '출력', fields: ['output_dir', 'output_prefix'] },
@@ -349,7 +362,7 @@ export function NewExperimentSheet({
 }) {
   const navigate = useNavigate();
   const team = useTeam();
-  const { draft, setTrainField, setDataField, setDataFields, setSaved } = useDraft();
+  const { draft, setTrainField, setDataFields, setSaved } = useDraft();
   const [tab, setTab] = useState<TabKey>('basic');
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [showJson, setShowJson] = useState(false);
@@ -367,8 +380,10 @@ export function NewExperimentSheet({
   // 따라잡을 때까지(250ms) 시작을 잠급니다.
   const payloadKey = useMemo(() => JSON.stringify(payload), [payload]);
 
-  // 고른 데이터셋과 지금 칸의 값이 다른지 확인합니다. 실제로 화면에는 새 데이터셋이
-  // 보이는데 예전 데이터로 학습된 적이 있어서, 다르면 눈에 띄게 알립니다.
+  // 고른 데이터셋과 **실려 갈 값**이 다른지 확인합니다. 실제로 화면에는 새 데이터셋이
+  // 보이는데 예전 데이터로 학습된 적이 있어서, 다르면 눈에 띄게 알립니다. 칸을 없앤
+  // 뒤에도 남는 경로가 있습니다 — 새 데이터셋에 없는 선택 artifact는 예전 값이 그대로
+  // 남습니다.
   const mismatched = !dataMatchesSource(draft.data, source);
 
   // 입력이 멈추면 서버에 검증을 맡깁니다. 판단 기준은 언제나 서버입니다.
@@ -417,11 +432,34 @@ export function NewExperimentSheet({
   // 서버가 지어 준 이름입니다. 규칙은 backend 한 곳에만 있습니다.
   const autoRunId =
     typeof result?.normalized?.train?.run_id === 'string' ? result.normalized.train.run_id : null;
-  const dataFilled = defaults.data_fields.every(
-    (spec) => (draft.data[spec.name] ?? '').trim() !== '',
-  );
+  // 지금 **고른** 데이터셋이 있어야 시작할 수 있습니다. draft에 남은 값만 보고 열어
+  // 두면, 서버는 고른 것이 없다는데 지난 세션의 URI로 학습이 돕니다. 칸을 없앤 뒤로는
+  // 그 값을 화면에서 지울 방법도 없어, 아무도 모르는 데이터로 밤을 새우게 됩니다.
+  //
+  // "필수 네 칸이 채워졌는가"는 따로 보지 않습니다. 고른 데이터셋이 complete이고 실려 갈
+  // 값이 그것과 같으면 이미 채워져 있습니다. 두 번 세면 조건 하나가 아무것도 막지 않는
+  // 채로 남아, 지워도 아무 테스트가 빨개지지 않습니다.
+  const sourcePicked = Boolean(source?.complete);
+  // 어긋난 값으로도 시작하지 않습니다. 칸을 없앤 뒤로 일부러 고른 것과 다른 데이터로
+  // 돌릴 이유가 없으므로, 경고만 띄우고 열어 두면 실수로 지나칠 뿐입니다. 맞추기 한 번이
+  // 곧 해결이라 막아도 막다른 길이 되지 않습니다. 화면 표시는 `sourcePicked`가 맡습니다 —
+  // 어긋났을 때 "고르지 않았습니다"라고 말하면 사실이 아닙니다.
+  //
+  // 시작을 여는 조건은 넷이고, 하나라도 빠지면 각각 다른 구멍이 열립니다. 각 조건을
+  // 지우면 서로 다른 테스트가 빨개지는 것을 확인했습니다.
+  //
+  // - `result.valid`: 서버가 받아들인 설정인가. 판단 기준은 언제나 서버입니다.
+  // - `sourcePicked`: 지금 고른 데이터셋이 있는가.
+  // - `!mismatched`: 실려 갈 값이 그 데이터셋과 같은가.
+  // - `validatedKey === payloadKey`: 지금 값이 검증을 거쳤는가. 확인 창은 마지막 검증
+  //   결과를 보여 주고 만들기는 지금 payload를 보내므로, 어긋난 채로 열어 두면 확인한
+  //   것과 다른 설정으로 학습이 돕니다.
   const ready =
-    Boolean(result?.valid) && dataFilled && validatedKey === payloadKey && pending === null;
+    Boolean(result?.valid) &&
+    sourcePicked &&
+    !mismatched &&
+    validatedKey === payloadKey &&
+    pending === null;
 
   const capability = resolveTrainCapability(defaults);
   const selectedOptimizer = draft.train.optimizer || capability.optimizer.default;
@@ -436,11 +474,12 @@ export function NewExperimentSheet({
   const activeTab = TABS.find((item) => item.key === tab) ?? (TABS[0] as (typeof TABS)[number]);
   const tabErrorCount = (item: (typeof TABS)[number]) =>
     item.fields.filter((name) => messageFor(errors, `train.${name}`) !== undefined).length;
-  // data 칸은 기본 표에만 그려집니다. 다른 표를 보고 있으면 그 오류는 화면에 없습니다.
-  const hiddenErrors = errors.filter((item) =>
-    item.field.startsWith('inputs.data.')
-      ? tab !== 'basic'
-      : !activeTab.fields.includes(item.field.replace(/^train\./, '')),
+  // data 오류는 이제 붙일 칸이 없습니다. 어느 표를 보고 있든 여기 모읍니다 — 고른
+  // 데이터셋이 잘못됐다는 말을 화면 어디에도 못 적으면 시작만 조용히 막힙니다.
+  const hiddenErrors = errors.filter(
+    (item) =>
+      item.field.startsWith('inputs.data.') ||
+      !activeTab.fields.includes(item.field.replace(/^train\./, '')),
   );
 
   /** 설정을 만든 뒤 곧바로 시작하거나 줄을 세웁니다. 만들기가 실패하면 아무것도 하지 않습니다. */
@@ -565,62 +604,64 @@ export function NewExperimentSheet({
         })}
       </div>
 
+      {/* 읽을 데이터는 **고른 것을 보여 주기만** 합니다. 고르는 자리는 dataset 준비
+          하나뿐이고, 거기서 아무 폴더나 붙여넣을 수 있습니다. 같은 값을 두 곳에서
+          고칠 수 있으면 어느 쪽이 실려 갔는지 나중에 아무도 모릅니다. */}
       {tab === 'basic' && (
         <div style={{ paddingTop: 4, marginBottom: 26 }}>
           <MicroLabel style={{ marginBottom: 16 }}>이 학습이 읽을 데이터</MicroLabel>
-          {source?.complete && (
-            <div style={{ ...type.monoSpec, color: color.textMuted, marginBottom: 12, overflowWrap: 'anywhere' }}>
-              전처리 데이터셋에서 자동으로 채움 · {source.directory}
-            </div>
-          )}
-          {!source?.complete && (
-            <div style={{ ...type.note, color: color.textMuted, marginBottom: 12 }}>
-              왼쪽 <b style={{ color: color.textBody }}>dataset 준비</b>에서 전처리 폴더를 고르면 이
-              네 칸이 자동으로 채워집니다.
+          {sourcePicked ? (
+            <>
+              <div
+                style={{
+                  ...type.monoValue,
+                  color: color.textStrong,
+                  marginBottom: 6,
+                  overflowWrap: 'anywhere',
+                }}
+              >
+                {/* 이름은 **실려 갈 값**에서 뽑습니다. 고른 데이터셋에서 뽑으면 둘이
+                    어긋났을 때 화면이 실제로 학습할 데이터가 아닌 것을 말합니다. */}
+                {datasetLabel(draft.data) ?? '(dataset 이름을 알 수 없음)'}
+              </div>
+              <div style={{ ...type.monoSpec, color: color.textMuted, overflowWrap: 'anywhere' }}>
+                {draft.data.train_manifest_uri}
+              </div>
+            </>
+          ) : (
+            <div style={{ ...type.note, color: color.textMuted }}>
+              왼쪽 <b style={{ color: color.textBody }}>dataset 준비</b>에서 전처리 폴더를 고르면
+              학습에 필요한 artifact 위치가 자동으로 채워집니다.
             </div>
           )}
           {mismatched && source && (
-            <div style={{ marginBottom: 12 }}>
+            <div style={{ marginTop: 14 }}>
               <AlertRow
                 level="warning"
-                title="고른 데이터셋과 아래 값이 다릅니다"
+                title="고른 데이터셋과 실려 갈 값이 다릅니다"
                 action={
                   <Button
-                    onClick={() => setDataFields({ ...source.data }, null)}
+                    // 덮어쓰기만 하면 새 데이터셋에 없는 값이 예전 것으로 남습니다.
+                    // 빈 값은 payload에서 빠지므로 먼저 전부 비우고 덮어씁니다.
+                    onClick={() =>
+                      setDataFields(
+                        {
+                          ...Object.fromEntries(ALL_DATA_KEYS.map((key) => [key, ''])),
+                          ...source.data,
+                        },
+                        null,
+                      )
+                    }
                     title="고른 데이터셋의 값으로 맞춥니다"
                   >
                     맞추기
                   </Button>
                 }
               >
-                이대로 학습하면 <b>아래 칸에 적힌 데이터</b>로 돌아갑니다.
+                이대로 학습하면 <b>위에 적힌 데이터</b>로 돌아갑니다.
               </AlertRow>
             </div>
           )}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {defaults.data_fields.map((spec) => (
-              <Field
-                key={spec.name}
-                label={spec.label}
-                hint={spec.hint}
-                error={messageFor(errors, `inputs.data.${spec.name}`)}
-              >
-                <input
-                  value={draft.data[spec.name] ?? ''}
-                  placeholder="artifacts/data/... 또는 s3://bucket/..."
-                  onChange={(event) => setDataField(spec.name, event.target.value)}
-                  style={
-                    messageFor(errors, `inputs.data.${spec.name}`) ? invalidControlStyle : controlStyle
-                  }
-                />
-              </Field>
-            ))}
-          </div>
-          <div style={{ ...type.note, color: color.textMuted, marginTop: 12 }}>
-            저장소 기준 상대 경로나 <code style={{ fontFamily: font.mono }}>s3://bucket/key</code>{' '}
-            형식만 받습니다. 절대 경로와 <code style={{ fontFamily: font.mono }}>..</code>는
-            거부됩니다.
-          </div>
         </div>
       )}
 
@@ -640,13 +681,13 @@ export function NewExperimentSheet({
             {item.message}
           </AlertRow>
         ))}
-        {errors.length === 0 && !dataFilled && (
-          <AlertRow level="warning" title="data artifact 위치가 비어 있습니다">
-            네 값을 모두 채워야 시작할 수 있습니다.
+        {errors.length === 0 && !sourcePicked && (
+          <AlertRow level="warning" title="학습에 쓸 데이터셋을 아직 고르지 않았습니다">
+            왼쪽 <b>dataset 준비</b>에서 전처리 폴더를 골라야 시작할 수 있습니다.
           </AlertRow>
         )}
         {errors.length === 0 &&
-          dataFilled &&
+          sourcePicked &&
           warnings.map((item) => (
             <AlertRow key={`${item.field}-${item.message}`} level="warning" title={item.field}>
               {item.message}
