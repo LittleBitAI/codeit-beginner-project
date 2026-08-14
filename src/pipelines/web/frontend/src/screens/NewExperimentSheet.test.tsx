@@ -167,17 +167,35 @@ describe('NewExperimentSheet', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '바로 시작' })).toBeEnabled());
   });
 
-  it('확인 창을 열면 창이 포커스를 받아 ESC로 닫힌다', async () => {
+  // 창이 떠 있는 동안에도 뒤쪽 칸은 살아 있습니다. 열어 둔 채로 값이 바뀌면 창은
+  // 옛 값을 보여 주는데 만들기는 바뀐 값을 보냅니다.
+  it('확인 창을 연 뒤 설정이 바뀌면 창을 닫아 다시 확인하게 한다', async () => {
+    show();
+    await fillAndReady();
+    fireEvent.click(screen.getByRole('button', { name: '바로 시작' }));
+    expect(screen.getByText('이 설정으로 시작할까요?')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('textbox', { name: /실행 이름/ }), {
+      target: { value: 'changed' },
+    });
+
+    expect(screen.queryByText('이 설정으로 시작할까요?')).toBeNull();
+  });
+
+  it('확인 창은 포커스를 받아 ESC로 닫히고, 닫으면 포커스를 돌려준다', async () => {
     show();
     await fillAndReady();
 
-    fireEvent.click(screen.getByRole('button', { name: '바로 시작' }));
+    const startButton = screen.getByRole('button', { name: '바로 시작' });
+    startButton.focus();
+    fireEvent.click(startButton);
 
     const dialog = screen.getByRole('dialog', { name: /시작 확인/ });
     expect(dialog).toHaveFocus();
     fireEvent.keyDown(dialog, { key: 'Escape' });
 
     expect(screen.queryByText('이 설정으로 시작할까요?')).toBeNull();
+    expect(startButton).toHaveFocus();
   });
 
   // 지운 설명 문단이 계산해 주던 값입니다. 표에 원시 값 둘만 두면 실제 갱신 규모가

@@ -144,10 +144,15 @@ function ConfirmStart({
   onConfirm: () => void;
 }) {
   // 창이 포커스를 받아야 ESC가 닿습니다. 열기 전에 눌렀던 단추에 포커스가 남아 있으면
-  // 아래 onKeyDown은 한 번도 실행되지 않습니다.
+  // 아래 onKeyDown은 한 번도 실행되지 않습니다. 닫을 때는 눌렀던 자리로 돌려줍니다 —
+  // 그러지 않으면 키보드로 쓰는 사람이 하던 자리를 잃고 문서 맨 위에서 다시 찾습니다.
   const dialogRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    const opener = document.activeElement;
     dialogRef.current?.focus();
+    return () => {
+      if (opener instanceof HTMLElement) opener.focus();
+    };
   }, []);
 
   // 원시 값 둘로는 실제 갱신 규모가 보이지 않습니다. 지운 설명 문단이 계산해 주던 값이라
@@ -367,19 +372,37 @@ export function NewExperimentSheet({
   const mismatched = !dataMatchesSource(draft.data, source);
 
   // 입력이 멈추면 서버에 검증을 맡깁니다. 판단 기준은 언제나 서버입니다.
+  //
+  // 이미 떠난 요청은 취소할 수 없으므로 **늦게 온 답을 버립니다.** 그러지 않으면 옛
+  // 설정의 답이 새 설정의 답을 덮어써, 지금 화면의 값은 멀쩡한데 시작 단추가 잠긴 채로
+  // 남습니다. 그 상태는 다시 무언가를 고치기 전까지 풀리지 않습니다.
   useEffect(() => {
     if (!defaults) return;
+    let live = true;
     const timer = window.setTimeout(() => {
       void api
         .validate(payload)
         .then((value) => {
+          if (!live) return;
           setResult(value);
           setValidatedKey(payloadKey);
         })
-        .catch(() => setResult(null));
+        .catch(() => {
+          if (live) setResult(null);
+        });
     }, 250);
-    return () => window.clearTimeout(timer);
+    return () => {
+      live = false;
+      window.clearTimeout(timer);
+    };
   }, [payload, payloadKey, defaults]);
+
+  // 확인 창이 떠 있는 동안 값이 바뀌면 창을 닫습니다. 창은 마지막 검증 결과를 보여 주고
+  // 만들기는 지금 payload를 보내므로, 열어 둔 채로 두면 확인한 것과 다른 설정이 실려
+  // 갑니다. 뒤쪽 칸은 창이 떠 있어도 키보드로 닿습니다.
+  useEffect(() => {
+    setConfirming(null);
+  }, [payloadKey]);
 
   if (!defaults) {
     return (
