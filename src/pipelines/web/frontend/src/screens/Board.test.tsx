@@ -218,6 +218,45 @@ describe('Board', () => {
     expect(within(rowOf('6')).getByRole('button', { name: '로그 보기' })).toBeInTheDocument();
   });
 
+  // 줄뿐 아니라 **사람 구역**도 이름이 아닌 값으로 가려야 합니다. 이름이 같은 두
+  // 사람의 구역이 한 key를 나눠 가지면, 순서가 바뀔 때 구역이 재사용되면서 펼쳐 둔
+  // 로그가 엉뚱한 사람에게 붙습니다.
+  it('이름이 같은 두 사람의 순서가 바뀌어도 펼친 로그가 그 사람에게 남는다', () => {
+    const one = teamRun({
+      cloudRunId: 'c1',
+      actorSub: 'sub-1',
+      progress: { current_epoch: 7, total_epochs: 15 },
+    });
+    const other = teamRun({
+      cloudRunId: 'c2',
+      actorSub: 'sub-2',
+      progress: { current_epoch: 3, total_epochs: 15 },
+    });
+    const { rerender } = show({ teamRuns: [one, other], teamAvailable: true, teamLoaded: true });
+
+    const rowOf = (done: string) =>
+      screen.getByText(new RegExp(`epoch ${done} / 15`)).closest('div')?.parentElement
+        ?.parentElement as HTMLElement;
+
+    fireEvent.click(within(rowOf('2')).getByRole('button', { name: '로그 보기' }));
+
+    rerender(
+      <MemoryRouter>
+        <Board
+          liveJob={null}
+          records={[]}
+          teamRuns={[other, one]}
+          teamAvailable
+          teamLoaded
+          teamError={null}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(within(rowOf('2')).getByRole('button', { name: '로그 접기' })).toBeInTheDocument();
+    expect(within(rowOf('6')).getByRole('button', { name: '로그 보기' })).toBeInTheDocument();
+  });
+
   it('팀 기록을 아직 못 읽었으면 "없다"고 단정하지 않는다', () => {
     show({ teamAvailable: true, teamLoaded: false });
 

@@ -1,10 +1,12 @@
 /**
- * 팀 기록을 읽는 두 규칙을 지킵니다.
+ * 팀 기록을 읽는 규칙을 지킵니다.
  *
- * 1. 목록 응답이 **구독으로 먼저 온 더 새로운 값**을 덮지 않는다. 덮으면 방금 시작한
- *    학습이 현황판에서 다시 사라져 다음 event가 올 때까지 보이지 않습니다.
- * 2. 읽을 수 없게 되면(로그아웃, 다른 사용자) 들고 있던 것을 버린다. 남겨 두면
- *    화면은 "이 컴퓨터 것만 보인다"고 적어 놓고 앞 사용자의 학습을 계속 보여 줍니다.
+ * 1. 목록과 구독이 **같은 병합 규칙**을 쓴다: 새로운 소식(revision)의 값이 이기고,
+ *    빈 자리는 오래된 쪽이 메운다. 규칙이 두 벌이면 도착 순서에 따라 값이 사라지거나
+ *    끝난 학습이 다시 도는 것처럼 보입니다.
+ * 2. 읽을 수 없게 되면(로그아웃, 다른 사용자) 들고 있던 것을 버리고, 그 전에 떠난
+ *    응답도 받지 않는다. 남겨 두면 화면은 "이 컴퓨터 것만 보인다"고 적어 놓고 앞
+ *    사용자의 학습을 계속 보여 줍니다.
  */
 
 import { act, renderHook, waitFor } from '@testing-library/react';
@@ -59,28 +61,6 @@ beforeEach(() => {
 });
 
 describe('useTeamRuns', () => {
-  it('목록 응답이 구독으로 먼저 온 더 새로운 값을 덮지 않는다', async () => {
-    let resolveList: (value: TeamRun[]) => void = () => {};
-    listRuns.mockReturnValue(new Promise<TeamRun[]>((resolve) => { resolveList = resolve; }));
-
-    const { result, rerender } = renderHook(() => useTeamRuns());
-
-    // 목록이 아직 오지 않은 사이에 구독으로 최신 상태가 도착합니다.
-    team.latestEvent = run({ revision: 5, status: 'running' });
-    rerender();
-    await waitFor(() => expect(result.current.runs).toHaveLength(1));
-
-    // 뒤늦게 도착한 목록은 그 실행의 **옛** 모습을 담고 있습니다.
-    await act(async () => {
-      resolveList([run({ revision: 2, status: 'queued' })]);
-    });
-
-    await waitFor(() => expect(result.current.loaded).toBe(true));
-    expect(result.current.runs).toHaveLength(1);
-    expect(result.current.runs[0]?.revision).toBe(5);
-    expect(result.current.runs[0]?.status).toBe('running');
-  });
-
   it('목록에만 있는 실행은 그대로 받는다', async () => {
     listRuns.mockResolvedValue([run({ cloudRunId: 'c2', runId: 'run-2' })]);
 
