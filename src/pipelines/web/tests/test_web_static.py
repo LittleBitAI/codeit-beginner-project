@@ -65,7 +65,14 @@ def test_css_is_served_with_a_css_mime_type(static_client):
 
 @pytest.mark.parametrize(
     "path",
-    ("/new", "/review", "/monitor", "/monitor/" + "a" * 32, "/monitor/anything"),
+    (
+        "/records",
+        "/board",
+        "/canvas",
+        "/monitor",
+        "/monitor/" + "a" * 32,
+        "/monitor/anything",
+    ),
 )
 def test_deep_links_fall_back_to_index(static_client, path):
     """화면 주소를 직접 열거나 새로고침해도 404가 나면 안 됩니다.

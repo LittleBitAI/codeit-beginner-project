@@ -151,7 +151,6 @@ function show(props: Partial<Parameters<typeof NewExperimentSheet>[0]> = {}) {
         <NewExperimentSheet
           defaults={DEFAULTS}
           source={null}
-          datasetKey="v5-118cls"
           queuedCount={0}
           busy={false}
           onClose={() => {}}
@@ -246,11 +245,12 @@ describe('NewExperimentSheet', () => {
 
   it('고른 데이터셋을 그대로 쓰고, artifact 위치를 고치는 칸은 두지 않는다', async () => {
     seedData();
-    // 이름은 시트 제목이 아니라 실려 갈 값에서 나와야 합니다.
-    show({ source: SOURCE, datasetKey: null });
+    // 이름은 다른 화면에서 고른 값이 아니라 **실려 갈** 값에서 나와야 합니다.
+    show({ source: SOURCE });
 
     expect(screen.queryByRole('textbox', { name: /학습 manifest/ })).toBeNull();
-    expect(screen.getByText('v5-118cls')).toBeInTheDocument();
+    // 제목과 본문 둘 다 실려 갈 값에서 이름을 뽑습니다.
+    expect(screen.getAllByText('v5-118cls')).toHaveLength(2);
     expect(screen.getByText(MANIFEST)).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByRole('button', { name: '대기열에 추가' })).toBeEnabled(),

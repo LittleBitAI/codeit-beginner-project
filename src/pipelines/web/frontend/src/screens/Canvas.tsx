@@ -527,7 +527,7 @@ export function Canvas({
     >
       <div style={{ borderRight: `1px solid ${color.border}`, padding: '30px 0 24px', background: color.sheet }}>
         <div style={{ padding: '0 22px 20px' }}>
-          <LinkAction onClick={() => navigate('/')}>← 목록</LinkAction>
+          <LinkAction onClick={() => navigate('/records')}>← 기록</LinkAction>
           <div style={{ ...type.subTitle, color: color.text, marginTop: 16 }}>견줄 실행</div>
           {/* 어느 dataset 안에서 고르는 중인지 늘 적습니다. 이 목록은 그 dataset의
               기록만 담습니다 — 데이터가 다른 실행을 나란히 세우면 모델 차이인지
@@ -693,7 +693,7 @@ export function Canvas({
             }
             action={
               selectable.length === 0 ? (
-                <Button kind="secondary" onClick={() => navigate('/')}>
+                <Button kind="secondary" onClick={() => navigate('/records')}>
                   기록 목록으로
                 </Button>
               ) : undefined

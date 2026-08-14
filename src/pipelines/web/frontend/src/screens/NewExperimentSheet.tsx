@@ -348,15 +348,14 @@ function TrainField({
 export function NewExperimentSheet({
   defaults,
   source,
-  datasetKey,
   queuedCount,
   busy,
   onClose,
   onStarted,
 }: {
   defaults: Defaults | null;
+  /** dataset 준비에서 고른 데이터. 이 학습에 **실제로 실려 갈** 값입니다. */
   source: DataSource | null;
-  datasetKey: string | null;
   /** 지금 줄 서 있는 학습 수. 이 설정이 몇 번째로 들어가는지 말해 줍니다. */
   queuedCount: number;
   /** 지금 도는 학습이 있는지. 있으면 바로 시작할 수 없습니다. */
@@ -524,7 +523,14 @@ export function NewExperimentSheet({
   return (
     <Sheet
       title="새 실험"
-      subtitle={datasetKey ?? '데이터셋을 아직 고르지 않았습니다'}
+      /* 부제목은 **실려 갈 데이터**의 이름입니다. 예전에는 왼쪽 목록에서 고른
+         이름을 적었는데, 그것은 기록을 보는 대상일 뿐이라 화면에는 A가 보이는데
+         학습은 B로 도는 일이 있었습니다. */
+      subtitle={
+        source?.complete
+          ? (datasetLabel(source.data) ?? source.directory)
+          : '데이터셋을 아직 고르지 않았습니다'
+      }
       onClose={onClose}
       footer={
         <>
