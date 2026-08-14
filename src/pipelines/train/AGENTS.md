@@ -10,7 +10,7 @@ Trains a config-selected torchvision detector and writes checkpoints plus a trai
 
 You own `src/pipelines/train/`. Do not edit another pipeline and never import one; `src/common` is the only shared code available to you. `config["inputs"]` is read-only.
 
-Web cannot import you, so `src/pipelines/web/train_config.py` copies your defaults and validation rules, and `test_web_train_contract.py` reads your source with `ast` and fails when they drift. **That failure is the alarm working.** Tell the web owner; do not edit their file.
+Web cannot import you, so the values you both must agree on live in `src/common/train_contract.py`: model and optimizer names, optimizer profiles, precision and schedule tables, the 8GB combination, and the settings defaults. **You own that file** — a name added there is offered by the GUI at once, so add it only once you accept it, and never re-type its values here.
 
 ## Interface
 
@@ -34,11 +34,11 @@ Published files are never overwritten, and a run stops before its first batch wh
 
 ## Configurable Training
 
-- Supported architectures are declared in `model.py`; never accept arbitrary builder names. Two of them are MMDetection models built through `mmdetection_adapter.py`, and `model.py` unpacks that list rather than repeating the names.
+- Architectures come from the contract; never accept arbitrary builder names. Two of them are MMDetection models built through `mmdetection_adapter.py`.
 - The MMDetection pair only fits 8GB at `device="cuda"`, `precision="amp"`, `optimizer="AdamW"`, `batch_size=1`, so anything else is refused before the first batch instead of dying partway through the night. `input_size` belongs to them alone and is refused with a torchvision architecture rather than accepted and ignored.
 - Their checkpoints carry `backend` and `model_config` for evaluate; a checkpoint without `backend` still reads as torchvision, which is what keeps older ones loadable.
 - `num_workers` defaults to a few workers on CUDA, and `0` on CPU and wherever `WORKERS_ARE_SPAWNED`: a spawned worker gets the dataset by pickle, which its S3 client cannot do. An explicit value is used as given. Web copied the old fixed `0` (proposal 015). A **forked** worker inherits that client, which boto3 cannot share across processes; `give_worker_its_own_storage` reconnects it.
-- Supported optimizers are AdamW, SGD, and Adam. A missing optimizer means legacy SGD; new callers send AdamW.
+- A missing optimizer means legacy SGD; new callers send AdamW.
 - Reject optimizer- or schedule-specific settings the selection does not use; never ignore them silently.
 - Augmentation defaults to `none`. `pill_basic` applies only to the train split and must update bounding boxes with geometric transforms.
 - `precision` is `fp32`, `amp`, `fp16`, or `bf16`; all but `fp32` need CUDA. `amp` uses fp16 plus a scaler for MMDetection because its custom CUDA ops do not dispatch bf16; other architectures take native bf16 else fp16 plus a scaler. Explicit `bf16` is refused rather than emulated.

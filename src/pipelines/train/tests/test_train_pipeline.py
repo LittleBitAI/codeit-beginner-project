@@ -349,6 +349,57 @@ def test_optimizer_factory_uses_the_selected_implementation(name, expected_type)
     assert isinstance(optimizer, expected_type)
 
 
+def test_explicit_adamw_run_records_effective_reproducibility_settings(local_config):
+    local_config["train"].update(
+        {
+            "optimizer": "AdamW",
+            "architecture": "fasterrcnn_resnet50_fpn_v2",
+            "augmentation": {"preset": "pill_basic"},
+            "learning_rate": 0.0002,
+        }
+    )
+
+    result = train.run(local_config)
+
+    assert result["status"] == "ok"
+    checkpoint = torch.load(
+        REPOSITORY_ROOT / result["artifacts"]["last_checkpoint_uri"],
+        map_location="cpu",
+        weights_only=True,
+    )
+    recorded = checkpoint["training_config"]
+    assert checkpoint["architecture"] == "fasterrcnn_resnet50_fpn_v2"
+    assert checkpoint["epoch"] == 2
+    assert checkpoint["seed"] == 17
+    assert recorded["optimizer"] == {
+        "name": "AdamW",
+        "learning_rate": 0.0002,
+        "weight_decay": 0.01,
+        "betas": [0.9, 0.999],
+        "epsilon": 1e-08,
+    }
+    assert recorded["augmentation"] == {
+        "version": 1,
+        "preset": "pill_basic",
+        "horizontal_flip_probability": 0.5,
+        "vertical_flip_probability": 0.5,
+        "color_probability": 0.3,
+        "brightness": 0.1,
+        "contrast": 0.1,
+        "saturation": 0.1,
+        "hue": 0.02,
+    }
+    assert recorded["seed"] == 17
+    assert recorded["epochs"] == 2
+    optimizer_group = checkpoint["optimizer_state_dict"]["param_groups"][0]
+    assert optimizer_group["lr"] == 0.0002
+    assert optimizer_group["weight_decay"] == 0.01
+    assert optimizer_group["betas"] == (0.9, 0.999)
+    assert optimizer_group["eps"] == 1e-8
+    assert result["summary"]["optimizer"] == "AdamW"
+    assert result["summary"]["augmentation"] == "pill_basic"
+
+
 def test_train_reads_exactly_the_setting_names_in_the_shared_contract(monkeypatch):
     """GUI가 그 이름으로 값을 실어 보냅니다. 여기가 그것을 정말 읽는 쪽입니다.
 
@@ -471,55 +522,37 @@ def test_every_mmdetection_name_in_the_shared_contract_has_a_config_here():
     assert len(set(built.values())) == len(built), f"같은 detector로 갈립니다: {built}"
 
 
-def test_explicit_adamw_run_records_effective_reproducibility_settings(local_config):
-    local_config["train"].update(
-        {
-            "optimizer": "AdamW",
-            "architecture": "fasterrcnn_resnet50_fpn_v2",
-            "augmentation": {"preset": "pill_basic"},
-            "learning_rate": 0.0002,
-        }
-    )
+def test_a_contract_name_without_a_config_here_stops_instead_of_training_cascade(
+    monkeypatch,
+):
+    """계약에 이름만 늘고 여기 config가 없을 때, 조용히 cascade로 학습하지 않는다.
 
-    result = train.run(local_config)
+    GUI는 계약을 읽어 그 이름을 곧바로 고를 수 있게 내놓습니다. 여기가 마지막 관문이라
+    떨어뜨리면 사람은 다른 모델을 골랐다고 믿은 채 밤새 cascade를 학습합니다.
+    """
 
-    assert result["status"] == "ok"
-    checkpoint = torch.load(
-        REPOSITORY_ROOT / result["artifacts"]["last_checkpoint_uri"],
-        map_location="cpu",
-        weights_only=True,
+    from src.pipelines.train import mmdetection_adapter
+
+    monkeypatch.setattr(
+        mmdetection_adapter,
+        "MMDETECTION_ARCHITECTURES",
+        (*train_contract.MMDETECTION_ARCHITECTURES, "later_added_detector"),
     )
-    recorded = checkpoint["training_config"]
-    assert checkpoint["architecture"] == "fasterrcnn_resnet50_fpn_v2"
-    assert checkpoint["epoch"] == 2
-    assert checkpoint["seed"] == 17
-    assert recorded["optimizer"] == {
-        "name": "AdamW",
-        "learning_rate": 0.0002,
-        "weight_decay": 0.01,
-        "betas": [0.9, 0.999],
-        "epsilon": 1e-08,
-    }
-    assert recorded["augmentation"] == {
-        "version": 1,
-        "preset": "pill_basic",
-        "horizontal_flip_probability": 0.5,
-        "vertical_flip_probability": 0.5,
-        "color_probability": 0.3,
-        "brightness": 0.1,
-        "contrast": 0.1,
-        "saturation": 0.1,
-        "hue": 0.02,
-    }
-    assert recorded["seed"] == 17
-    assert recorded["epochs"] == 2
-    optimizer_group = checkpoint["optimizer_state_dict"]["param_groups"][0]
-    assert optimizer_group["lr"] == 0.0002
-    assert optimizer_group["weight_decay"] == 0.01
-    assert optimizer_group["betas"] == (0.9, 0.999)
-    assert optimizer_group["eps"] == 1e-8
-    assert result["summary"]["optimizer"] == "AdamW"
-    assert result["summary"]["augmentation"] == "pill_basic"
+    with pytest.raises(ValueError, match="later_added_detector"):
+        mmdetection_adapter.build_mmdetection_config(
+            "later_added_detector", foreground_classes=3
+        )
+
+
+def test_every_preset_name_in_the_shared_contract_is_implemented_here():
+    """계약이 이름을 정하고, 그 이름이 실제로 무엇을 바꾸는지는 여기서 정합니다.
+
+    나머지 값(model·optimizer·기본값)은 계약에서 그대로 가져다 쓰므로 어긋날 수
+    없지만, 증강만은 이름과 내용이 나뉘어 있습니다. 계약에만 이름을 더하면 GUI는
+    그것을 고를 수 있게 되고 학습은 KeyError로 죽습니다.
+    """
+
+    assert tuple(pipeline.AUGMENTATION_PRESETS) == train_contract.AUGMENTATIONS
 
 
 @pytest.mark.parametrize(

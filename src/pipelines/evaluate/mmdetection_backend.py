@@ -24,13 +24,16 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from src.common.train_contract import MMDETECTION_ARCHITECTURES as SUPPORTED_ARCHITECTURES
+
 from .errors import PredictionError
 
 
 BACKEND_NAME = "mmdetection"
+# 이름은 train과 함께 쓰는 계약이 정합니다(`src/common/train_contract.py`). 여기서는
+# 그 이름의 checkpoint를 어떤 model로 되살릴지만 정합니다.
 DINO_ARCHITECTURE = "dino_r50_4scale"
 CASCADE_ARCHITECTURE = "cascade_rcnn_swin_t_fpn"
-SUPPORTED_ARCHITECTURES = (DINO_ARCHITECTURE, CASCADE_ARCHITECTURE)
 MODEL_CONFIG_SCHEMA_VERSION = 1
 PAD_MULTIPLE = 32
 RESIZE_RULE = "longest_edge"
