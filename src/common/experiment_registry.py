@@ -186,6 +186,11 @@ def read_experiment_summary(
     없는 것과 못 읽은 것은 구분합니다. 파일이 없으면 ``None``이고, 읽지 못했거나
     index가 다른 실험을 가리키면 :class:`ExperimentRegistryError`입니다 — 못 읽은
     것을 "없다"로 답하면 화면이 지워지지 않은 실험을 사라졌다고 말하게 됩니다.
+
+    이름은 목록이 보는 것과 **같은 곳**을 가리켜야 합니다. 경계는 이름을 문자열로
+    정규화해 판정하므로, index 안에 사람이 만들어 둔 symlink가 있으면 그것은
+    따라갑니다. 링크가 storage root 밖을 가리키면 backend가 막습니다. 이 module의
+    경계는 어디까지나 storage root이고, :func:`read_experiment_record`도 같습니다.
     """
 
     if not isinstance(run_id, str) or not run_id.strip():
