@@ -6,15 +6,6 @@
  * 알려 주지 않으면서 자리만 차지했습니다.
  */
 
-import type { JobRecord } from '../api/types';
-
-/** 학습이 어디까지 갔는지. 학습 -> 평가 -> 제출 순서 그대로입니다. */
-export interface Stage {
-  key: 'train' | 'evaluate' | 'submit';
-  label: string;
-  done: boolean;
-}
-
 /** data pipeline이 내놓는 학습 manifest의 파일 이름입니다. */
 const MANIFEST_FILE = 'train_manifest.json';
 
@@ -42,48 +33,3 @@ export function datasetLabel(dataInputs: Record<string, string> | null | undefin
   return folder;
 }
 
-function text(value: unknown): string | null {
-  if (typeof value === 'string' && value.trim() !== '') return value.trim();
-  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
-  return null;
-}
-
-/**
- * 이름 아래에 붙일 한 줄입니다. 모르는 값은 지어내지 않고 빼기만 합니다.
- *
- * 전부 모르면 빈 문자열이라 화면이 그 줄을 아예 그리지 않습니다.
- */
-export function specLine(job: JobRecord): string {
-  const seed = text(job.settings?.seed);
-  return [
-    datasetLabel(job.data_inputs),
-    text(job.settings?.device),
-    text(job.settings?.optimizer),
-    seed === null ? null : `seed ${seed}`,
-  ]
-    .filter((part): part is string => part !== null)
-    .join(' · ');
-}
-
-/**
- * 학습 -> 평가 -> 제출 세 단계입니다. 새 backend field 없이 이미 있는 상태로만 셉니다.
- *
- * 제출은 evaluate가 submission.csv를 실제로 만들었고 registry 등록까지 끝난
- * 경우입니다. 판단을 `submission_requested`가 아니라 **artifact가 있는지**로 하는
- * 이유는, 그 field가 나중에 생겨서 이미 제출을 만든 예전 기록에는 아예 없기
- * 때문입니다. 요청했는지보다 결과물이 남았는지가 사람이 알고 싶은 것이기도 합니다.
- * 등록이 index_failed면 실험 목록에 안 나오므로 여기서도 끝난 것으로 보지 않습니다.
- */
-export function stagesOf(job: JobRecord): Stage[] {
-  const trained = job.status === 'succeeded';
-  const evaluated = trained && job.evaluation?.status === 'succeeded';
-  const submitted =
-    evaluated &&
-    Boolean(job.evaluation?.artifacts?.submission_uri) &&
-    job.registration?.status === 'succeeded';
-  return [
-    { key: 'train', label: '학습', done: trained },
-    { key: 'evaluate', label: '평가', done: Boolean(evaluated) },
-    { key: 'submit', label: '제출', done: Boolean(submitted) },
-  ];
-}
