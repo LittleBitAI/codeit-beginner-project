@@ -184,6 +184,20 @@ describe('hasResult', () => {
     return mergeRecords([], [job(overrides)])[0]!;
   }
 
+  // 학습이 끝나기 전에 멈추면 결과 JSON이 없어 summary가 비어 있습니다. 그래도 진행
+  // 기록에는 그때까지의 best가 남아 있습니다. 그것을 못 읽으면 결과가 있는 기록이
+  // 접히고 loss 자리에 -가 찍힙니다.
+  it('summary가 비어 있어도 진행 기록에 남은 검증 오차를 읽는다', () => {
+    const record = local({
+      status: 'cancelled',
+      summary: {},
+      progress: { ...job().progress, best: { epoch: 3, validation_loss: 0.42 } },
+    });
+
+    expect(record.metrics.bestValidationLoss).toBe(0.42);
+    expect(hasResult(record)).toBe(true);
+  });
+
   it('중단된 학습은 이어서 할 checkpoint가 있으므로 접지 않는다', () => {
     expect(hasResult(local({ status: 'interrupted' }))).toBe(true);
   });

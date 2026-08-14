@@ -893,7 +893,13 @@ function RecordRow({ record, onOpen }: { record: RunRecord; onOpen: () => void }
           {/* 실패·취소한 줄에 미등록까지 붙이면 배지 둘이 같은 말을 합니다. 등록될
               수 있었는데 아직 안 된 것, 곧 성공으로 끝난 학습에만 붙입니다. */}
           {record.status === 'succeeded' && !record.registered && <Badge tone="muted">미등록</Badge>}
+          {/* 끝난 이유는 반드시 적습니다. 미등록을 성공에만 붙이기로 하면서 취소·중단
+              줄에는 아무 표시도 남지 않았습니다. 특히 중단은 이어서 학습할 대상이라
+              성공한 기록과 눈으로 구별되어야 합니다. */}
           {record.status === 'failed' && <Badge tone="danger">{record.statusLabel}</Badge>}
+          {(record.status === 'cancelled' || record.status === 'interrupted') && (
+            <Badge tone="muted">{record.statusLabel}</Badge>
+          )}
           {running && (
             <span style={{ display: 'flex', alignItems: 'center', gap: 7, flex: 'none' }}>
               <LiveDot size={6} pulse />

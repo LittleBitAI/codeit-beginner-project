@@ -178,21 +178,52 @@ describe('Runs', () => {
 
     expect(screen.getByText('good')).toBeInTheDocument();
     expect(screen.queryByText('oom')).toBeNull();
+    expect(screen.queryByText('stopped')).toBeNull();
     expect(screen.getByText('2건 (실패 1 · 취소·중단 1)')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /결과 없이 끝남/ }));
 
+    // 접은 것을 전부 되돌려 줘야 합니다. 하나라도 빠지면 그 기록은 어디에서도 못 봅니다.
     expect(screen.getByText('oom')).toBeInTheDocument();
+    expect(screen.getByText('stopped')).toBeInTheDocument();
   });
 
-  // 등록되지 않은 이유가 실패라면 배지 두 개가 같은 말을 두 번 합니다.
-  it('실패한 줄에는 미등록 배지를 겹쳐 붙이지 않는다', () => {
-    show({ records: [failedRecord()] });
+  // 등록되지 않은 이유가 실패라면 배지 두 개가 같은 말을 두 번 합니다. 그렇다고 상태를
+  // 통째로 지우면 취소·중단 줄에 아무 표시도 남지 않아, 성공한 기록과 구별되지 않습니다.
+  it('끝난 이유는 한 번만, 그러나 반드시 적는다', () => {
+    show({
+      records: [
+        failedRecord(),
+        cancelledRecord({ metrics: { ...record().metrics, bestValidationLoss: 0.5 } }),
+        // 중단은 이어서 학습할 대상이라 특히 눈에 띄어야 합니다. 이름만 "취소·중단"이라
+        // 적고 취소만 넣으면, 중단 조건이 사라져도 이 test는 통과합니다.
+        failedRecord({ runId: 'lost', status: 'interrupted', statusLabel: '중단됨' }),
+        record({ runId: 'done', registered: false }),
+      ],
+    });
+
+    // 결과가 남은 취소, 중단, 미등록 성공은 접히지 않습니다.
+    expect(screen.getByText('취소됨')).toBeInTheDocument();
+    expect(screen.getByText('중단됨')).toBeInTheDocument();
+    expect(screen.getByText('미등록')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /결과 없이 끝남/ }));
 
     expect(screen.getByText('실패')).toBeInTheDocument();
-    expect(screen.queryByText('미등록')).toBeNull();
+    // 실패한 줄에는 미등록이 겹치지 않습니다 — 미등록 배지는 위의 성공 줄 하나뿐입니다.
+    expect(screen.getAllByText('미등록')).toHaveLength(1);
+  });
+
+  // 접기는 전체 표에서만 합니다. 이미 좁혀 놓은 표에서 또 접으면 "12건이라는데 아무것도
+  // 안 보인다"가 됩니다.
+  it('미등록·실패 표에서는 접지 않는다', () => {
+    show({ records: [record({ runId: 'good' }), failedRecord(), cancelledRecord()] });
+
+    fireEvent.click(screen.getByRole('button', { name: /미등록·실패/ }));
+
+    expect(screen.queryByText(/결과 없이 끝남/)).toBeNull();
+    expect(screen.getByText('oom')).toBeInTheDocument();
+    expect(screen.getByText('stopped')).toBeInTheDocument();
   });
 
   it('대기열에서 빼기를 누르면 그 항목만 알려 준다', () => {

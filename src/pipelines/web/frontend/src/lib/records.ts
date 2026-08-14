@@ -138,7 +138,11 @@ function fromJob(job: JobRecord): RunRecord {
       map75: num(evaluation?.mAP75),
       precision50: num(evaluation?.precision50),
       recall50: num(evaluation?.recall50),
-      bestValidationLoss: num(job.summary?.best_validation_loss),
+      // 끝까지 못 간 학습은 결과 JSON이 없어 summary가 비어 있습니다. 그때도 진행
+      // 기록에는 그 시점의 best가 남아 있으므로 그것을 씁니다. 못 읽으면 검증 오차를
+      // 남긴 실패·취소가 "결과 없음"으로 접히고 loss 자리에 -가 찍힙니다.
+      bestValidationLoss:
+        num(job.summary?.best_validation_loss) ?? num(job.progress?.best?.validation_loss),
       bestEpoch: num(job.progress?.best?.epoch),
       epochs: num(job.progress?.total_epochs) ?? num(settings.epochs),
       elapsedSeconds: num(job.elapsed_seconds),
