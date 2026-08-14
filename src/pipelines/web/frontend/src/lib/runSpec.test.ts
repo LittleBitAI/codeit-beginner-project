@@ -1,5 +1,5 @@
 import type { JobRecord } from '../api/types';
-import { countLabel, datasetLabel, hasResult, specLine, stagesOf } from './runSpec';
+import { datasetLabel, specLine, stagesOf } from './runSpec';
 
 function job(overrides: Partial<JobRecord> = {}): JobRecord {
   return {
@@ -133,28 +133,3 @@ describe('stagesOf', () => {
   });
 });
 
-describe('hasResult', () => {
-  it('중단된 학습은 이어서 할 checkpoint가 있으므로 위 구역에 둔다', () => {
-    expect(hasResult(job({ status: 'interrupted' }))).toBe(true);
-  });
-
-  it('실패·취소라도 검증 오차가 남았으면 결과가 있는 것이다', () => {
-    expect(hasResult(job({ status: 'cancelled', summary: { best_validation_loss: 0.06 } }))).toBe(
-      true,
-    );
-    expect(hasResult(job({ status: 'failed' }))).toBe(false);
-    expect(hasResult(job({ status: 'cancelled' }))).toBe(false);
-  });
-});
-
-describe('countLabel', () => {
-  it('감춘 기록이 무엇으로 이루어졌는지 항상 말해 준다', () => {
-    const jobs = [
-      job({ status: 'failed' }),
-      job({ status: 'failed' }),
-      job({ status: 'cancelled' }),
-    ];
-
-    expect(countLabel(jobs)).toBe('3건 (실패 2 · 취소·중단 1)');
-  });
-});

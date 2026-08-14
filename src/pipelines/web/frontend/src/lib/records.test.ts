@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ExperimentSummary, JobRecord } from '../api/types';
-import { groupByDataset, mergeRecords, sortRecords, UNKNOWN_DATASET } from './records';
+import {
+  countLabel,
+  groupByDataset,
+  hasResult,
+  mergeRecords,
+  sortRecords,
+  UNKNOWN_DATASET,
+} from './records';
 
 function experiment(overrides: Partial<ExperimentSummary> = {}): ExperimentSummary {
   return {
@@ -168,6 +175,38 @@ describe('sortRecords', () => {
 
     expect(sorted[0]?.runId).toBe('retina-e15-b4-a7f3');
     expect(sorted[1]?.runId).toBe('no-score');
+  });
+});
+
+describe('hasResult', () => {
+  /** job 하나를 그대로 기록 한 줄로 만듭니다. registry에 없는 실행과 같은 모양입니다. */
+  function local(overrides: Partial<JobRecord> = {}) {
+    return mergeRecords([], [job(overrides)])[0]!;
+  }
+
+  it('중단된 학습은 이어서 할 checkpoint가 있으므로 접지 않는다', () => {
+    expect(hasResult(local({ status: 'interrupted' }))).toBe(true);
+  });
+
+  it('실패·취소라도 검증 오차가 남았으면 결과가 있는 것이다', () => {
+    expect(
+      hasResult(local({ status: 'cancelled', summary: { best_validation_loss: 0.06 } })),
+    ).toBe(true);
+    expect(hasResult(local({ status: 'failed' }))).toBe(false);
+    expect(hasResult(local({ status: 'cancelled' }))).toBe(false);
+  });
+
+  it('감춘 기록이 무엇으로 이루어졌는지 항상 말해 준다', () => {
+    const records = mergeRecords(
+      [],
+      [
+        job({ run_id: 'a', status: 'failed' }),
+        job({ run_id: 'b', status: 'failed' }),
+        job({ run_id: 'c', status: 'cancelled' }),
+      ],
+    );
+
+    expect(countLabel(records)).toBe('3건 (실패 2 · 취소·중단 1)');
   });
 });
 
