@@ -387,6 +387,25 @@ def test_real_dependencies_expose_the_config_type():
     assert converted.a.b == 1
 
 
+def test_this_pipeline_can_build_every_mmdetection_model_the_contract_names():
+    """계약이 이름을 정하고, 그 이름으로 무엇을 만들지는 각 pipeline이 정합니다.
+
+    허용 목록은 계약 전체를 그대로 받는데(`SUPPORTED_ARCHITECTURES`) 만들 줄 아는
+    것은 여기 적힌 둘뿐입니다. 계약에 세 번째 이름이 생기면 GUI는 그것을 내놓고
+    train은 학습까지 마치는데, 평가만 마지막에 거부합니다 — 밤새 학습한 뒤에.
+    """
+
+    buildable = set()
+    for architecture in mmdetection_backend.SUPPORTED_ARCHITECTURES:
+        try:
+            mmdetection_backend.build_detector_config(architecture, foreground_classes=3)
+        except PredictionError:
+            continue
+        buildable.add(architecture)
+
+    assert buildable == set(mmdetection_backend.SUPPORTED_ARCHITECTURES)
+
+
 @pytest.mark.parametrize(
     ("architecture", "detector_type"),
     [

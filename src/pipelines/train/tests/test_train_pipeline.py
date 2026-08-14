@@ -19,6 +19,7 @@ from torch import nn
 from torchvision.models.detection import FasterRCNN, RetinaNet
 
 from src.common import LocalStorage, S3Storage, StorageError
+from src.common import train_contract
 from src.pipelines import train
 from src.pipelines.train import image_cache as image_cache_module
 from src.pipelines.train import pipeline, trainer as trainer_module
@@ -346,6 +347,122 @@ def test_optimizer_factory_uses_the_selected_implementation(name, expected_type)
     optimizer = build_optimizer([parameter], settings)
 
     assert isinstance(optimizer, expected_type)
+
+
+def test_train_reads_exactly_the_setting_names_in_the_shared_contract(monkeypatch):
+    """GUI가 그 이름으로 값을 실어 보냅니다. 여기가 그것을 정말 읽는 쪽입니다.
+
+    값이 같은지는 계약의 표들이 지키지만, 값을 담아 보내는 **이름**은 지금까지 아무도
+    지키지 않았습니다. web은 이 파일을 import할 수 없어 이름을 옮겨 적을 뿐이라, 한쪽이
+    이름을 바꾸며 자기 test까지 함께 고치면 양쪽 다 초록인 채로 그 값이 조용히
+    버려집니다. 여기서는 계약의 이름만 보고, web을 부르지 않습니다.
+
+    이름 목록만 대조하면 부족합니다. 결과에 담는 이름은 그대로 두고 **입력에서 찾는
+    이름만** 바꿔도(``raw.get("resume_from")`` → ``raw.get("resume_uri")``) 목록은 그대로
+    맞기 때문입니다. 그래서 보낸 값이 결과에 **그대로 들어왔는지**까지 봅니다.
+
+    보내는 값은 **하나도 기본값과 같지 않아야** 합니다. 기본값을 보내면 lookup 이름을
+    바꿔도 fallback이 같은 값을 돌려주어 이 test가 그대로 통과합니다.
+
+    optimizer마다 받는 칸이 다르므로(SGD의 momentum, AdamW의 beta) 나눠 읽고 합칩니다.
+    ``input_size``와 절반 정밀도는 MMDetection model에서만 받고 그 조합은 CUDA를
+    요구하므로, 마지막 한 벌은 CUDA가 있는 척하고 읽습니다. ``resume``은
+    ``resume_from``을 보고 train이 만드는 값이라 뺍니다.
+    """
+
+    defaults = train_contract.SETTING_DEFAULTS
+    common = {
+        "run_id": "train-keys",
+        "epochs": defaults["epochs"] + 2,
+        "checkpoint_every": defaults["checkpoint_every"] + 1,
+        "seed": defaults["seed"] + 1,
+        "pretrained": not defaults["pretrained"],
+        # CPU 기본값은 0입니다. 명시한 값은 그대로 쓰입니다.
+        "num_workers": 2,
+        "output_dir": f"{defaults['output_dir']}/nested",
+        "output_prefix": f"{defaults['output_prefix']}/nested",
+        "learning_rate": 0.001,
+        "weight_decay": 0.01,
+        "augmentation": {"preset": "pill_basic"},
+        "gradient_accumulation_steps": 2,
+        "early_stopping": {"patience": 2, "min_delta": 0.0},
+        "lr_scheduler": {"name": "cosine", "warmup_steps": 5, "min_lr_factor": 0.1},
+        "resume_from": "artifacts/experiments/completed/.old.partial/last_checkpoint.pt",
+    }
+    sent = [
+        {
+            **common,
+            "architecture": "fasterrcnn_mobilenet_v3_large_320_fpn",
+            "optimizer": "AdamW",
+            "device": "cpu",
+            "batch_size": defaults["batch_size"] + 1,
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "epsilon": 1e-8,
+        },
+        {
+            **common,
+            "architecture": "retinanet_resnet50_fpn_v2",
+            "optimizer": "SGD",
+            "device": "cpu",
+            "batch_size": defaults["batch_size"] + 1,
+            "momentum": 0.9,
+        },
+        {
+            # `input_size`와 절반 정밀도는 이 model에서만 받습니다. 그 조합은 CUDA와
+            # batch_size 1을 함께 요구하므로 나머지 값만 기본값과 다르게 보냅니다.
+            **common,
+            "architecture": train_contract.MMDETECTION_ARCHITECTURES[0],
+            "optimizer": "AdamW",
+            "device": "cuda",
+            "precision": "amp",
+            "batch_size": 1,
+            "input_size": train_contract.DEFAULT_INPUT_SIZE + 160,
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "epsilon": 1e-8,
+        },
+    ]
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    read = [pipeline._settings({"train": dict(one)}) for one in sent]
+
+    names = set().union(*(set(one) for one in read)) - {"resume"}
+    assert names == set(train_contract.SETTING_KEYS)
+
+    for one, got in zip(sent, read):
+        for name, value in one.items():
+            landed = got[name]
+            if isinstance(value, dict):
+                # 정규화가 빠진 값을 채워 넣으므로, 보낸 짝이 남아 있는지만 봅니다.
+                assert {**landed, **value} == landed, f"{name}이 그대로 오지 않았습니다."
+            elif isinstance(landed, dict):
+                # precision처럼 고른 이름 하나가 여러 값으로 펼쳐지는 칸입니다.
+                assert value in landed.values(), f"{name}이 그대로 오지 않았습니다."
+            else:
+                assert landed == value, f"{name}이 그대로 오지 않았습니다."
+
+
+def test_every_mmdetection_name_in_the_shared_contract_has_a_config_here():
+    """계약이 이름을 정하고, 그 이름으로 어떤 detector를 만들지는 여기서 정합니다.
+
+    이름만 늘고 config가 없으면 GUI는 즉시 그 모델을 고를 수 있게 내놓는데 학습은
+    엉뚱한 모델로 돌거나 죽습니다. 두 이름이 실제로 갈라지는지도 함께 봅니다.
+    """
+
+    from src.pipelines.train.mmdetection_adapter import (
+        CASCADE_ARCHITECTURE,
+        DINO_ARCHITECTURE,
+        build_mmdetection_config,
+    )
+
+    assert {DINO_ARCHITECTURE, CASCADE_ARCHITECTURE} == set(
+        train_contract.MMDETECTION_ARCHITECTURES
+    )
+    built = {
+        name: build_mmdetection_config(name, foreground_classes=3)["type"]
+        for name in train_contract.MMDETECTION_ARCHITECTURES
+    }
+    assert len(set(built.values())) == len(built), f"같은 detector로 갈립니다: {built}"
 
 
 def test_explicit_adamw_run_records_effective_reproducibility_settings(local_config):

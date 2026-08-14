@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from src.common.train_contract import ARCHITECTURES, SETTING_DEFAULTS, SETTING_KEYS
 from src.pipelines.web import train_config
 from src.pipelines.web.api.routes_train import ARCHITECTURE
 from src.pipelines.web.train_capabilities import (
@@ -146,6 +147,80 @@ def function_node(source: str, name: str) -> ast.FunctionDef:
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
     pytest.fail(f"train source에서 {name} 함수를 찾지 못했습니다.")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {},
+        {"optimizer": "SGD", "momentum": 0.9},
+        {
+            "optimizer": "AdamW",
+            "beta1": 0.9,
+            "beta2": 0.999,
+            "epsilon": 1e-8,
+            "augmentation": "pill_basic",
+            "gradient_accumulation_steps": 2,
+            "early_stopping": True,
+            "early_stopping_patience": 2,
+            "lr_scheduler": "cosine",
+            "lr_warmup_steps": 10,
+            "lr_min_factor": 0.1,
+            "resume_from": "artifacts/experiments/completed/.old.partial/last_checkpoint.pt",
+        },
+        {
+            "architecture": MMDETECTION_ARCHITECTURES[0],
+            "device": "cuda",
+            "precision": "amp",
+            "optimizer": "AdamW",
+            "batch_size": 1,
+            "input_size": 640,
+        },
+    ],
+    ids=["defaults", "sgd", "adamw-full", "mmdetection"],
+)
+def test_no_setting_leaves_here_under_a_name_train_does_not_read(raw):
+    """train은 이 파일을 import할 수 없는 저쪽에서 같은 이름으로 값을 읽습니다.
+
+    값이 같은지는 계약의 표들이 지키지만, 값을 담아 보내는 **이름**은 지금까지 아무도
+    지키지 않았습니다. 여기서 이름을 하나 바꾸고 바로 옆 test까지 함께 고치면 web은
+    전부 초록인 채로 그 값이 train에서 조용히 버려집니다. 계약의 목록만 보고,
+    train을 부르지 않습니다.
+
+    optimizer와 model마다 실려 가는 칸이 달라 네 조합을 함께 봅니다.
+    """
+
+    sent = set(normalize_train_settings(raw))
+
+    assert sent <= set(SETTING_KEYS), f"계약에 없는 이름입니다: {sorted(sent - set(SETTING_KEYS))}"
+
+
+def test_the_form_offers_every_architecture_the_contract_names():
+    """고를 수 있는 모델은 계약이 정합니다. 화면이 그중 하나를 빠뜨리면 안 됩니다."""
+
+    choices = {spec["name"]: spec for spec in field_specs()}
+
+    assert choices["architecture"]["choices"] == list(ARCHITECTURES)
+    assert "input_size" in choices
+    assert "gradient_accumulation_steps" in choices
+
+
+def test_numeric_and_flag_defaults_reach_train_as_the_contract_says():
+    """비워 둔 칸에 화면이 안내하는 값이 train이 쓰는 기본값과 같아야 합니다.
+
+    화면은 이 값들을 자기 표(`_INTEGER_FIELDS`)로 한 번 더 거쳐 보내므로, 계약을
+    고쳐도 그 표를 함께 고치지 않으면 안내와 실제가 갈립니다.
+    """
+
+    mirrored = normalize_train_settings({})
+
+    for name in ("seed", "epochs", "checkpoint_every", "batch_size", "device", "pretrained"):
+        assert mirrored[name] == SETTING_DEFAULTS[name], f"{name} 기본값이 어긋났습니다."
+    assert mirrored["gradient_accumulation_steps"] == SETTING_DEFAULTS[
+        "gradient_accumulation_steps"
+    ]
+    assert train_config.DEFAULT_OUTPUT_DIR == SETTING_DEFAULTS["output_dir"]
+    assert train_config.DEFAULT_OUTPUT_PREFIX == SETTING_DEFAULTS["output_prefix"]
 
 
 def test_the_form_is_told_which_models_use_input_size():
