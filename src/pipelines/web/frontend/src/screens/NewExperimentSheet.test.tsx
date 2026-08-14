@@ -182,6 +182,57 @@ describe('NewExperimentSheet', () => {
     expect(screen.queryByText('이 설정으로 시작할까요?')).toBeNull();
   });
 
+  // 이미 떠난 검증 요청은 취소할 수 없습니다. 옛 설정의 답이 새 설정의 답을 덮으면
+  // 화면의 값은 멀쩡한데 시작이 잠긴 채로 남고, 다시 무언가를 고치기 전까지 풀리지
+  // 않습니다. 응답을 손으로 풀어 순서를 뒤집으므로 시간에 기대지 않습니다.
+  it('늦게 온 옛 검증 응답이 최신 설정을 잠그지 않는다', async () => {
+    const release: (() => void)[] = [];
+    window.sessionStorage.setItem(
+      'pill-training-draft',
+      JSON.stringify({
+        train: {},
+        data: { train_manifest_uri: 'artifacts/data/v5/train_manifest.json' },
+      }),
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const path =
+          typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+        if (path !== '/api/train/validate') throw new Error(`예상 밖 요청입니다: ${path}`);
+        await new Promise<void>((resolve) => release.push(resolve));
+        return jsonResponse({
+          valid: true,
+          errors: [],
+          warnings: [],
+          normalized: {
+            project: { name: 'pill' },
+            execution: { mode: 'local' },
+            storage: {},
+            train: { run_id: 'retina-basic-e15-a7f3' },
+            inputs: { data: {} },
+          },
+        });
+      }),
+    );
+
+    show();
+    await waitFor(() => expect(release).toHaveLength(1));
+
+    fireEvent.change(screen.getByRole('textbox', { name: /실행 이름/ }), {
+      target: { value: 'my-run' },
+    });
+    await waitFor(() => expect(release).toHaveLength(2));
+
+    release[1]!();
+    await waitFor(() => expect(screen.getByRole('button', { name: '바로 시작' })).toBeEnabled());
+
+    release[0]!();
+    await waitFor(() => expect(release).toHaveLength(2));
+
+    expect(screen.getByRole('button', { name: '바로 시작' })).toBeEnabled();
+  });
+
   it('확인 창은 포커스를 받아 ESC로 닫히고, 닫으면 포커스를 돌려준다', async () => {
     show();
     await fillAndReady();
