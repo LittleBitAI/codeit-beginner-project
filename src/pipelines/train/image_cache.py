@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from PIL import Image
 
-from src.common import S3Storage, Storage, StorageError
+from src.common import S3Storage, Storage
 
 from .errors import TrainError
 

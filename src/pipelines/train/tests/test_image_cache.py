@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Barrier
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from PIL import Image
@@ -114,12 +114,15 @@ class _RetriesExceeded(Exception):
 
 
 def test_prefetch_leaves_an_image_it_cannot_get_to_the_training_loop(tmp_path):
-    """한 장을 못 받아도 학습은 시작하고, 받은 장수를 사실대로 알립니다."""
+    """한 장을 못 받아도 학습은 시작하고, 그 한 장은 학습이 다시 받습니다."""
 
     storage = _storage()
+    failed_once: set[str] = set()
 
     def download(source, destination, *, overwrite=False):
-        if source == IMAGES[1]:
+        # 미리 받을 때만 실패하고, 학습이 다시 물으면 이번에는 내어 줍니다.
+        if source == IMAGES[1] and source not in failed_once:
+            failed_once.add(source)
             raise _RetriesExceeded("연결이 반복해서 끊겼습니다")
         Image.new("RGB", (3, 2), color="red").save(destination, format="PNG")
         return Path(destination)
@@ -131,12 +134,46 @@ def test_prefetch_leaves_an_image_it_cannot_get_to_the_training_loop(tmp_path):
         cache_root=tmp_path / "persistent",
         temporary_root=tmp_path / "temporary",
     ) as cache:
-        record = lambda ready, total: reported.append((ready, total))
-        assert cache.prefetch(IMAGES, storage, record) == 1
-        assert cache.fetch(IMAGES[0], storage).is_file()
+        assert (
+            cache.prefetch(
+                IMAGES, storage, lambda ready, total: reported.append((ready, total))
+            )
+            == 1
+        )
+        # 미리 받기에서 놓친 바로 그 이미지를 학습이 그 자리에서 받아야 합니다.
+        assert cache.fetch(IMAGES[1], storage).is_file()
 
     # 시도한 수를 세면 덜 받고도 마지막 줄이 100%가 됩니다.
     assert reported[-1] == (1, len(IMAGES))
+
+
+def test_prefetch_reports_progress_along_the_way_not_only_at_the_end(tmp_path):
+    """몇 분이 걸리는 구간이라 중간에도 알려야 합니다.
+
+    마지막 한 줄만 나오면 화면이 그동안 멈춘 것으로 보입니다.
+    """
+
+    storage = _storage()
+    locations = tuple(f"s3://bucket/images/pill-{index}.png" for index in range(5))
+
+    def download(source, destination, *, overwrite=False):
+        Image.new("RGB", (3, 2), color="red").save(destination, format="PNG")
+        return Path(destination)
+
+    storage.download_file.side_effect = download
+    reported: list[tuple[int, int]] = []
+    with ImageCacheSession(
+        _summary(),
+        cache_root=tmp_path / "persistent",
+        temporary_root=tmp_path / "temporary",
+    ) as cache:
+        with patch.object(image_cache_module, "PREFETCH_PROGRESS_EVERY", 2):
+            cache.prefetch(
+                locations, storage, lambda ready, total: reported.append((ready, total))
+            )
+
+    # 2장마다, 그리고 마지막 한 번. 전부 성공했으므로 받은 수와 시도한 수가 같습니다.
+    assert reported == [(2, 5), (4, 5), (5, 5)]
 
 
 def _png_with_corrupt_idat() -> bytes:
