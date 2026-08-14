@@ -7,10 +7,10 @@ import json
 import os
 import re
 import shutil
-import tarfile
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from PIL import Image
 
-from src.common import S3Storage, Storage, StorageError
+from src.common import S3Storage, Storage
 
 from .errors import TrainError
 
@@ -33,10 +33,12 @@ MAX_CACHE_BYTES = 50 * 1024**3
 # 디스크는 그만큼 없습니다. 쓰고 있는 것만 남기고 나머지는 첫 이미지를 받기 전에
 # 비웁니다. 지웠던 version으로 돌아가면 그때 다시 받습니다.
 MAX_CACHE_DATASETS = 1
-# 다 채운 cache를 묶어 두는 자리입니다. 이름이 fingerprint라 dataset이 바뀌면 다른
-# 묶음이 되고, 옛 묶음을 실수로 쓰는 일이 없습니다.
-ARCHIVE_PREFIX = "datasets/pill_detection/image-cache"
-ARCHIVE_NAME = "image-cache.tar"
+# 이미지 한 장을 받는 시간은 거의 다 S3를 오가며 기다리는 시간입니다. 여러 장을
+# 동시에 받으면 그 기다림이 겹쳐서 회선이 허용하는 만큼 빨라집니다.
+PREFETCH_WORKERS = 16
+# 몇 분이 걸리는 구간이라 조용하면 멈춘 것으로 보입니다. 줄 수가 이미지 수만큼
+# 나오지 않게 이만큼마다, 그리고 마지막에 한 번 알립니다.
+PREFETCH_PROGRESS_EVERY = 200
 _VERSION_SEGMENT = re.compile(r"v[0-9]+")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _MANIFEST_FILES = ("train_manifest.json", "validation_manifest.json")
@@ -168,38 +170,6 @@ def _lease_is_abandoned(lease: Path) -> bool:
         return False
 
 
-def _safe_member_name(name: str) -> str:
-    """묶음 안의 이름이 cache directory 밖을 가리키지 않는지 확인합니다.
-
-    묶음은 bucket에서 옵니다. 이름 하나가 ``../``이면 푸는 쪽 파일이 조용히
-    덮어써지므로, 하나라도 이상하면 전부 거부하고 평소대로 이미지를 받습니다.
-    """
-
-    if not name or name.startswith(("/", "\\")) or ":" in name:
-        raise TrainError(f"image cache archive member escapes the cache: {name}")
-    parts = name.replace("\\", "/").split("/")
-    if any(part in {"", ".", ".."} for part in parts):
-        raise TrainError(f"image cache archive member escapes the cache: {name}")
-    return name
-
-
-def _extract_archive(archive: Path, destination: Path) -> None:
-    """cache 묶음을 풉니다. 파일과 directory 말고는 하나도 받지 않습니다."""
-
-    destination.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(archive, "r") as bundle:
-        members = bundle.getmembers()
-        for member in members:
-            # symlink는 자기 밖을 가리킬 수 있고, 그 뒤에 풀리는 파일이 그 링크를
-            # 통해 cache 밖에 써집니다. 이름 검사만으로는 막지 못합니다.
-            if not (member.isfile() or member.isdir()):
-                raise TrainError(
-                    f"image cache archive member escapes the cache: {member.name}"
-                )
-            _safe_member_name(member.name)
-        bundle.extractall(destination, members=members)
-
-
 def _directory_size(path: Path) -> int:
     total = 0
     for candidate in path.rglob("*"):
@@ -311,100 +281,58 @@ class ImageCacheSession:
         for path in trash:
             shutil.rmtree(path, ignore_errors=True)
 
-    @property
-    def archive_uri(self) -> str | None:
-        """다 채운 cache가 통째로 올라가는 자리입니다.
+    def prefetch(
+        self,
+        locations: Iterable[str],
+        storage: Storage,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> int:
+        """학습을 시작하기 전에 이미지를 동시에 받아 cache를 채웁니다.
 
-        실행마다 새로 만드는 임시 cache는 다음 실행이 쓸 수 없으므로 ``None``입니다.
+        받아 두지 않으면 첫 epoch은 batch마다 멈춰 이미지를 한 장씩 받습니다. 한
+        장에 S3를 두 번 오가는 동안 GPU는 놀고, 그 기다림이 이미지 수만큼 그대로
+        쌓입니다. 미리 여러 장을 동시에 받으면 기다림이 겹쳐서 첫 epoch이 나머지
+        epoch과 같은 속도가 됩니다.
+
+        이미 받아 둔 이미지는 그대로 두므로, 중간에 끊긴 실행은 남은 것만 받습니다.
+        한 장이 실패해도 여기서 멈추지 않습니다. 그 이미지는 학습이 그 자리에서
+        평소대로 다시 받고, 그때도 실패하면 그때 실패합니다.
         """
 
-        if not self._persistent or self._fingerprint is None:
-            return None
-        return f"{ARCHIVE_PREFIX}/{self._fingerprint}.tar"
-
-    def _entry_names(self) -> list[str]:
-        """이미 받아 둔 image entry 이름입니다. 받는 중인 임시 폴더는 뺍니다."""
-
-        objects = self.namespace / "objects"
-        if not objects.is_dir():
-            return []
-        return sorted(
-            path.name
-            for path in objects.iterdir()
-            if path.is_dir() and not path.name.startswith(".")
-        )
-
-    def seed_from_archive(self, storage: Storage) -> bool:
-        """묶음 하나를 받아 cache를 채웁니다.
-
-        런타임이 바뀌면 디스크가 비어 있어 이미지를 한 장씩 다시 받게 됩니다. 같은
-        1.9 GB라도 객체 하나로 받는 편이 훨씬 빠릅니다.
-
-        여기서 실패해도 학습은 그대로 진행됩니다. 이건 빠른 길일 뿐이고, 없으면
-        평소처럼 이미지를 한 장씩 받습니다.
-        """
-
-        location = self.archive_uri
-        if location is None or not isinstance(storage, S3Storage):
-            return False
-        if self._entry_names():
-            return False  # 이미 받아 둔 것이 있으면 건드리지 않습니다.
-        staging = self.namespace / f".seed-{uuid4().hex}"
+        remote = [
+            location
+            for location in dict.fromkeys(locations)
+            if urlsplit(location).scheme.lower() == "s3"
+        ]
+        if not remote:
+            return 0
+        total = len(remote)
+        ready = 0
+        pool = ThreadPoolExecutor(max_workers=min(PREFETCH_WORKERS, total))
         try:
-            if not storage.exists(location):
-                return False
-            self._temporary_root.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(
-                prefix="train-cache-archive-", dir=self._temporary_root
-            ) as scratch:
-                archive = Path(scratch) / ARCHIVE_NAME
-                storage.download_file(location, archive)
-                _extract_archive(archive, staging)
-            objects = self.namespace / "objects"
-            objects.mkdir(parents=True, exist_ok=True)
-            for entry in staging.iterdir():
+            futures = [pool.submit(self.fetch, location, storage) for location in remote]
+            for done, future in enumerate(as_completed(futures), start=1):
                 try:
-                    entry.rename(objects / entry.name)
-                except OSError:
-                    # 같은 cache를 쓰는 다른 실행이 먼저 놓았습니다. 내용은 같습니다.
+                    future.result()
+                except Exception:
+                    # 무엇이 실패했든 여기서 학습을 세우지 않습니다. 미리 받는 것은
+                    # 빠른 길일 뿐이고, 그 이미지는 학습이 그 자리에서 다시 받습니다.
+                    # 예외 종류를 좁게 적으면, storage가 바꿔 주지 않는 boto3의
+                    # RetriesExceededError 한 건이 몇 시간짜리 학습을 통째로 세웁니다.
                     continue
-            return True
-        except (TrainError, StorageError, OSError, tarfile.TarError):
-            return False
+                else:
+                    ready += 1
+                finally:
+                    # 받은 장수를 알립니다. 시도한 수를 알리면 실패한 장까지 세어
+                    # 마지막 줄이 늘 100%가 됩니다.
+                    if progress is not None and (
+                        done % PREFETCH_PROGRESS_EVERY == 0 or done == total
+                    ):
+                        progress(ready, total)
         finally:
-            shutil.rmtree(staging, ignore_errors=True)
-
-    def publish_archive(self, storage: Storage, *, expected_entries: int) -> bool:
-        """다 채운 cache를 묶어 한 번만 올립니다.
-
-        ``expected_entries``는 이 dataset의 이미지 수입니다. 그만큼 받기 전에 올리면
-        다음 실행이 나머지가 영영 없는 묶음을 믿게 되므로, 다 찼을 때만 올립니다.
-        """
-
-        location = self.archive_uri
-        if location is None or not isinstance(storage, S3Storage):
-            return False
-        names = self._entry_names()
-        if not names or len(names) != expected_entries:
-            return False
-        objects = self.namespace / "objects"
-        try:
-            if storage.exists(location):
-                return False  # 이미 다른 실행이 올렸습니다.
-            self._temporary_root.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(
-                prefix="train-cache-archive-", dir=self._temporary_root
-            ) as scratch:
-                archive = Path(scratch) / ARCHIVE_NAME
-                with tarfile.open(archive, "w") as bundle:
-                    for name in names:
-                        bundle.add(objects / name, arcname=name)
-                # 먼저 올린 실행의 묶음을 덮어쓰면, 그것을 받고 있던 쪽이 반쪽짜리를
-                # 보게 됩니다. 진 쪽은 그냥 올리지 않습니다.
-                storage.upload_file(archive, location, overwrite=False)
-            return True
-        except (StorageError, OSError, tarfile.TarError):
-            return False
+            # 도중에 빠져나갈 때 아직 시작도 안 한 다운로드까지 기다리지 않습니다.
+            pool.shutdown(wait=True, cancel_futures=True)
+        return ready
 
     def _start_temporary(self) -> None:
         self._persistent = False
