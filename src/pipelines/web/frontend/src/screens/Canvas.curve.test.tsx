@@ -90,8 +90,9 @@ function record(): RunRecord {
   };
 }
 
-/** 곡선을 못 읽은 비교 응답 하나만 돌려주는 fixture입니다. */
-function stubCompare(curve: unknown) {
+/** 고른 실행과 그 곡선을 돌려주는 fixture입니다. */
+function stubCompare(curves: Record<string, unknown>) {
+  const runIds = Object.keys(curves);
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
@@ -101,14 +102,26 @@ function stubCompare(curve: unknown) {
       }
       return new Response(
         JSON.stringify({
-          experiments: [experiment()],
+          experiments: runIds.map((runId) => ({ ...experiment(), run_id: runId, experiment_id: runId })),
           missing: [],
-          curves: { 'retina-a7f3': curve },
+          curves,
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
     }),
   );
+}
+
+/** epoch은 끝났는데 validation loss만 없는 기록입니다. */
+function trainOnlyEpochs() {
+  return [{ epoch: 1, train_loss: 0.5, validation_loss: null, epoch_seconds: 10, is_best: false }];
+}
+
+function drawableEpochs() {
+  return [
+    { epoch: 1, train_loss: 0.9, validation_loss: 0.8, epoch_seconds: 10, is_best: false },
+    { epoch: 2, train_loss: 0.5, validation_loss: 0.4, epoch_seconds: 10, is_best: true },
+  ];
 }
 
 beforeEach(() => {
@@ -120,9 +133,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function show() {
+function show(runIds = ['retina-a7f3']) {
   return render(
-    <MemoryRouter initialEntries={['/canvas?run=retina-a7f3']}>
+    <MemoryRouter initialEntries={[`/canvas?${runIds.map((id) => `run=${id}`).join('&')}`]}>
       <Canvas datasetKey="v5" records={[record()]} loading={false} onScoreSaved={() => {}} />
     </MemoryRouter>,
   );
@@ -130,35 +143,57 @@ function show() {
 
 describe('Canvas 곡선', () => {
   it('학습 기록을 못 읽었으면 그 이유를 적고 epoch 수를 단정하지 않는다', async () => {
-    stubCompare({ available: false, reason: REASON, epochs: [] });
+    stubCompare({ 'retina-a7f3': { available: false, reason: REASON, epochs: [] } });
 
     show();
 
-    expect(await screen.findByText(REASON)).toBeInTheDocument();
+    expect(await screen.findByText(new RegExp(REASON))).toBeInTheDocument();
     expect(screen.queryByText(/epoch이 하나도 끝나지 않아/)).toBeNull();
   });
 
-  it('정말로 한 epoch도 안 끝났으면 지금까지처럼 그렇게 적는다', async () => {
-    stubCompare({ available: true, reason: null, epochs: [] });
+  it('정말로 한 epoch도 안 끝났으면 그렇게 적는다', async () => {
+    stubCompare({ 'retina-a7f3': { available: true, reason: null, epochs: [] } });
 
     show();
 
-    expect(await screen.findByText(/epoch이 하나도 끝나지 않아/)).toBeInTheDocument();
+    expect(await screen.findByText(/아직 한 epoch도 끝나지 않았습니다/)).toBeInTheDocument();
+  });
+
+  // epoch은 끝났는데 validation loss만 없는 기록이 있습니다. 점이 0개인 것은 같지만
+  // "epoch이 하나도 끝나지 않았다"는 말은 사실이 아닙니다.
+  it('validation loss만 없으면 epoch이 없었다고 말하지 않는다', async () => {
+    stubCompare({ 'retina-a7f3': { available: true, reason: null, epochs: trainOnlyEpochs() } });
+
+    show();
+
+    expect(
+      await screen.findByText(/validation loss가 기록되지 않았습니다/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/한 epoch도 끝나지 않았습니다/)).toBeNull();
   });
 
   it('곡선이 있으면 그림을 그린다', async () => {
     stubCompare({
-      available: true,
-      reason: null,
-      epochs: [
-        { epoch: 1, train_loss: 0.9, validation_loss: 0.8, epoch_seconds: 10, is_best: false },
-        { epoch: 2, train_loss: 0.5, validation_loss: 0.4, epoch_seconds: 10, is_best: true },
-      ],
+      'retina-a7f3': { available: true, reason: null, epochs: drawableEpochs() },
     });
 
     show();
 
     await waitFor(() => expect(document.querySelector('svg polyline')).not.toBeNull());
     expect(screen.queryByText(/epoch이 하나도 끝나지 않아/)).toBeNull();
+  });
+
+  // 하나는 그려지고 하나는 못 그리는 경우가 가장 잘 숨습니다. 그림은 나머지를 그리고,
+  // 사라진 선은 범례에만 남기 때문입니다.
+  it('섞여 있으면 그리면서도 사라진 선의 이유를 적는다', async () => {
+    stubCompare({
+      'retina-a7f3': { available: true, reason: null, epochs: drawableEpochs() },
+      'retina-b8c4': { available: false, reason: REASON, epochs: [] },
+    });
+
+    show(['retina-a7f3', 'retina-b8c4']);
+
+    await waitFor(() => expect(document.querySelector('svg polyline')).not.toBeNull());
+    expect(await screen.findByText(new RegExp(REASON))).toBeInTheDocument();
   });
 });

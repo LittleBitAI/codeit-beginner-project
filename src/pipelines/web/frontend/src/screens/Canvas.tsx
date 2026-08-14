@@ -512,16 +512,33 @@ export function Canvas({
       .map((epoch) => ({ x: epoch.epoch, y: epoch.validation_loss as number })),
   }));
   /**
-   * 곡선이 하나도 없을 때 그 자리에 적을 말입니다.
+   * 선이 그려지지 않은 실행마다 그 이유 한 줄입니다.
    *
-   * 빈 곡선은 두 가지입니다: 아직 한 epoch도 안 끝났거나, 학습 기록 파일을 못 읽었거나.
-   * 서버가 그 이유를 함께 보내므로 지어내지 않고 그대로 옮깁니다 — "epoch이 하나도
-   * 끝나지 않았다"고 단정하면 S3가 잠깐 흔들린 것도 그렇게 읽힙니다.
+   * 이유는 셋입니다: 기록 파일을 못 읽었거나, 아직 한 epoch도 안 끝났거나, epoch은
+   * 끝났는데 validation loss가 없거나. 그림 하나에 하나만 적으면 **섞인 경우**를
+   * 놓칩니다 — 둘 중 하나만 실패하면 그림은 나머지를 그리고, 사라진 선은 아무 말도
+   * 없이 사라집니다. 그래서 실행별로 답니다.
    */
-  const curveProblem =
-    compared
-      .map((item) => curves[item.run_id])
-      .find((curve) => curve && curve.available === false)?.reason ?? null;
+  const curveNotes = compared
+    .map((item, index) => {
+      if ((series[index]?.points.length ?? 0) > 0) return null;
+      const curve = curves[item.run_id];
+      if (!curve) return null;
+      if (curve.available === false) {
+        return { runId: item.run_id, note: curve.reason ?? '학습 기록을 읽지 못했습니다.' };
+      }
+      return {
+        runId: item.run_id,
+        note:
+          (curve.epochs ?? []).length === 0
+            ? '아직 한 epoch도 끝나지 않았습니다.'
+            : 'validation loss가 기록되지 않았습니다.',
+      };
+    })
+    .filter((note): note is { runId: string; note: string } => note !== null);
+  // 하나도 못 그릴 때 그림 자리에 들어갈 말입니다. 이유는 아래 줄들이 말하므로 여기서
+  // 원인을 단정하지 않습니다 — 기본 문구는 "epoch이 하나도 끝나지 않았다"입니다.
+  const nothingDrawn = series.every((item) => item.points.length === 0);
   const maxEpoch = Math.max(
     1,
     ...series.flatMap((item) => item.points.map((point) => point.x)),
@@ -717,8 +734,21 @@ export function Canvas({
               series={series}
               xMax={maxEpoch}
               height={260}
-              emptyMessage={curveProblem ?? undefined}
+              emptyMessage={
+                nothingDrawn && curveNotes.length > 0
+                  ? '그릴 loss 곡선이 없습니다. 실행별 이유는 아래에 있습니다.'
+                  : undefined
+              }
             />
+            {curveNotes.length > 0 && (
+              <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {curveNotes.map((item) => (
+                  <span key={item.runId} style={{ ...type.note, color: color.textMuted }}>
+                    <span style={{ fontFamily: font.mono }}>{item.runId}</span> — {item.note}
+                  </span>
+                ))}
+              </div>
+            )}
 
             {showDev && (
               <div style={{ background: color.panel, padding: '18px 20px', margin: '26px 0' }}>
