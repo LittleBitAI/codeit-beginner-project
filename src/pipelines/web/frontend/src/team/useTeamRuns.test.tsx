@@ -90,6 +90,53 @@ describe('useTeamRuns', () => {
     expect(result.current.runs[0]?.cloudRunId).toBe('c2');
   });
 
+  // 목록과 구독이 규칙을 따로 쓰면, 도착 순서에 따라 값이 사라지거나 끝난 학습이
+  // 다시 도는 것처럼 보입니다. 한 규칙만 씁니다.
+  it('빈 field는 덮지 않고, 오래된 소식이 새 상태를 되돌리지 않는다', async () => {
+    let resolveList: (value: TeamRun[]) => void = () => {};
+    listRuns.mockReturnValue(new Promise<TeamRun[]>((resolve) => { resolveList = resolve; }));
+
+    const { result, rerender } = renderHook(() => useTeamRuns());
+
+    // 구독은 고른 field만 실어 옵니다. 여기서는 상태만 온 최신 소식입니다.
+    team.latestEvent = run({ revision: 5, status: 'succeeded', settings: {}, dataInputs: {} });
+    rerender();
+    await waitFor(() => expect(result.current.runs).toHaveLength(1));
+
+    // 뒤늦게 온 목록은 값이 다 있지만 옛 상태입니다.
+    await act(async () => {
+      resolveList([
+        run({ revision: 2, status: 'running', settings: { architecture: 'retina' } }),
+      ]);
+    });
+
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    const [merged] = result.current.runs;
+    // 상태는 새 쪽, 비어 있던 값은 옛 쪽이 메웁니다.
+    expect(merged?.status).toBe('succeeded');
+    expect(merged?.settings).toEqual({ architecture: 'retina' });
+  });
+
+  it('로그아웃 뒤 늦게 도착한 목록 응답은 받지 않는다', async () => {
+    let resolveList: (value: TeamRun[]) => void = () => {};
+    listRuns.mockReturnValue(new Promise<TeamRun[]>((resolve) => { resolveList = resolve; }));
+
+    const { result, rerender } = renderHook(() => useTeamRuns());
+
+    // 응답이 오기 전에 로그아웃합니다.
+    team.config = { team_id: 't', actor: 'ci' };
+    team.user = null;
+    rerender();
+    await waitFor(() => expect(result.current.available).toBe(false));
+
+    await act(async () => {
+      resolveList([run()]);
+    });
+
+    expect(result.current.runs).toEqual([]);
+    expect(result.current.loaded).toBe(false);
+  });
+
   it('읽을 수 없게 되면 들고 있던 팀 기록을 버린다', async () => {
     listRuns.mockResolvedValue([run()]);
 

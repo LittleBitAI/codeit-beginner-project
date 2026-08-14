@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -169,6 +169,53 @@ describe('Board', () => {
 
     expect(screen.getAllByText('retina-live')).toHaveLength(1);
     expect(screen.getByText('1개 학습 중')).toBeInTheDocument();
+  });
+
+  /**
+   * key가 이름이면 React가 서로 다른 실행을 같은 줄로 봅니다.
+   *
+   * 그 자체는 조용합니다(경고 한 줄). 실제로 아픈 것은 줄에 붙은 **상태**입니다:
+   * 펼쳐 둔 로그가 구독 갱신으로 순서가 바뀌는 순간 다른 사람의 실행으로 옮겨 갑니다.
+   * 그래서 개수가 아니라 그 이동을 잽니다.
+   */
+  it('순서가 바뀌어도 펼쳐 둔 로그가 다른 실행으로 옮겨 가지 않는다', () => {
+    const seven = teamRun({
+      cloudRunId: 'c7',
+      actorSub: 'sub-7',
+      progress: { current_epoch: 7, total_epochs: 15 },
+    });
+    const three = teamRun({
+      cloudRunId: 'c3',
+      actorSub: 'sub-7',
+      progress: { current_epoch: 3, total_epochs: 15 },
+    });
+    const { rerender } = show({ teamRuns: [seven, three], teamAvailable: true, teamLoaded: true });
+
+    // 줄에는 **끝낸** epoch 수가 적히므로 7과 3은 6과 2로 보입니다.
+    const rowOf = (done: string) =>
+      screen.getByText(new RegExp(`epoch ${done} / 15`)).closest('div')?.parentElement
+        ?.parentElement as HTMLElement;
+
+    fireEvent.click(within(rowOf('2')).getByRole('button', { name: '로그 보기' }));
+    expect(within(rowOf('2')).getByRole('button', { name: '로그 접기' })).toBeInTheDocument();
+
+    // 구독 갱신으로 순서가 바뀝니다.
+    rerender(
+      <MemoryRouter>
+        <Board
+          liveJob={null}
+          records={[]}
+          teamRuns={[three, seven]}
+          teamAvailable
+          teamLoaded
+          teamError={null}
+        />
+      </MemoryRouter>,
+    );
+
+    // 펼친 것은 여전히 같은 실행이어야 합니다.
+    expect(within(rowOf('2')).getByRole('button', { name: '로그 접기' })).toBeInTheDocument();
+    expect(within(rowOf('6')).getByRole('button', { name: '로그 보기' })).toBeInTheDocument();
   });
 
   it('팀 기록을 아직 못 읽었으면 "없다"고 단정하지 않는다', () => {
