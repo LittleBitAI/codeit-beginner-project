@@ -6,6 +6,7 @@ from .contract import (
     validate_pipeline_result,
 )
 from .experiment_registry import (
+    ExperimentNameError,
     ExperimentRegistryError,
     compare_experiment_summaries,
     list_experiment_summaries,
@@ -35,6 +36,7 @@ __all__ = [
     "RETURN_SCHEMA",
     "BucketNotFoundError",
     "CredentialsNotFoundError",
+    "ExperimentNameError",
     "ExperimentRegistryError",
     "LocalStorage",
     "ObjectAlreadyExistsError",
