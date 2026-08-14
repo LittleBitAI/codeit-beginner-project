@@ -297,6 +297,13 @@ export interface ExperimentListing {
 export interface ExperimentComparisonResult {
   experiments: ExperimentSummary[];
   missing: string[];
+  /**
+   * 실행 이름별 loss 곡선. 견주기 화면이 요청 하나로 표와 곡선을 다 받습니다.
+   *
+   * 예전에는 실행마다 상세를 또 불렀는데, 그 응답은 곡선에 쓰지 않는 평가 결과까지
+   * 들고 오고 서버는 그때마다 registry index 전체를 훑었습니다.
+   */
+  curves: Record<string, EpochRecord[]>;
 }
 
 /** score threshold를 옮겨 가며 잰 precision·recall·F1 한 점입니다. */

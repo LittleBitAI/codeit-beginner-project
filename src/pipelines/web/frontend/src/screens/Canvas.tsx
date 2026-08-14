@@ -474,32 +474,24 @@ export function Canvas({
       return;
     }
     let active = true;
+    // 표와 곡선을 요청 하나로 받습니다. 실행마다 상세를 또 부르면 서버가 그때마다
+    // registry index 전체를 훑고, 곡선에 쓰지 않는 평가 결과까지 함께 옵니다.
     void api.compareExperiments(runIds).then(
       (result) => {
         if (active) {
           setCompared(result.experiments);
+          setCurves(result.curves ?? {});
           setError(null);
         }
       },
       (caught: unknown) => {
         if (active) {
           setCompared([]);
+          setCurves({});
           setError(caught instanceof Error ? caught.message : '비교 정보를 불러오지 못했습니다.');
         }
       },
     );
-    // 곡선은 실행마다 따로 읽습니다. 하나가 없어도 나머지는 그립니다.
-    for (const runId of runIds) {
-      void api.experimentDetail(runId).then(
-        (detail) => {
-          if (!active) return;
-          setCurves((current) => ({ ...current, [runId]: detail.history.epochs ?? [] }));
-        },
-        () => {
-          if (active) setCurves((current) => ({ ...current, [runId]: [] }));
-        },
-      );
-    }
     return () => {
       active = false;
     };

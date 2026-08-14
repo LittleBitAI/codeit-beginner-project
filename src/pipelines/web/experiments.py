@@ -13,6 +13,7 @@ from src.common import (
     ExperimentRegistryError,
     list_experiment_summaries,
     read_experiment_record,
+    read_experiment_summary,
 )
 
 from . import experiment_detail, kaggle_scores, train_capabilities
@@ -386,30 +387,36 @@ def list_registry_experiments() -> list[dict[str, Any]]:
         raise WebError(f"실험 목록을 읽지 못했습니다({type(error).__name__}).") from error
 
 
-# Record 하나마다 storage 왕복이 한 번씩 붙습니다. 순서대로 읽으면 고른 실험 수에
-# 비례해 기다리게 되므로 함께 읽습니다. 화면에서 한 번에 고르는 수가 많지 않아
-# 상한은 낮게 둡니다.
+# 실험 하나를 견주려면 storage를 세 번(index summary, record, 학습 기록) 왕복합니다.
+# 순서대로 읽으면 고른 수에 비례해 기다리게 되므로 실험별로 함께 읽습니다. 화면에서
+# 한 번에 고르는 수가 많지 않아 상한은 낮게 둡니다.
 _COMPARE_READ_WORKERS = 8
 
 
-def _read_records(
-    targets: list[tuple[str, str]], config: Mapping[str, Any]
-) -> list[tuple[str, dict[str, Any]]]:
-    """(run_id, record) 목록을 **요청한 순서 그대로** 돌려줍니다.
+def _compare_one(
+    run_id: str, config: Mapping[str, Any], score: float | None
+) -> dict[str, Any] | None:
+    """실험 하나의 비교 정보와 loss 곡선입니다. 견줄 수 없으면 ``None``입니다.
 
-    읽기는 함께 하고 결과만 제출 순서로 모읍니다. 읽다가 실패하면 그 예외가
-    그대로 올라와 호출자가 지금처럼 처리합니다.
+    Index 전체를 훑지 않고 이름으로 한 건만 읽습니다. 곡선을 여기서 함께 읽는 것은,
+    화면이 어차피 실험마다 상세를 다시 부르며 그때마다 index를 또 훑고 곡선에 쓰지도
+    않는 650KB짜리 평가 파일까지 읽었기 때문입니다.
     """
 
-    if not targets:
-        return []
-    workers = max(1, min(_COMPARE_READ_WORKERS, len(targets)))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [
-            executor.submit(read_experiment_record, uri, config, expected_run_id=run_id)
-            for run_id, uri in targets
-        ]
-        return [(targets[index][0], future.result()) for index, future in enumerate(futures)]
+    summary = read_experiment_summary(run_id, config)
+    if summary is None:
+        return None
+    uri = _text(summary.get("experiment_record_uri"))
+    if uri is None:
+        return None
+    record = read_experiment_record(uri, config, expected_run_id=run_id)
+    history = experiment_detail.history_block(
+        _artifact_uri(record, "train", "training_history_uri"), config["storage"]
+    )
+    return {
+        "experiment": _enrich_summary(summary, record, score),
+        "epochs": history["epochs"],
+    }
 
 
 def _artifact_uri(record: Mapping[str, Any], pipeline: str, key: str) -> str | None:
@@ -441,14 +448,7 @@ def read_registry_experiment(run_id: str) -> dict[str, Any]:
     wanted = run_id.strip()
     config = registry_config()
     try:
-        summary = next(
-            (
-                item
-                for item in list_experiment_summaries(config)
-                if item.get("run_id") == wanted
-            ),
-            None,
-        )
+        summary = read_experiment_summary(wanted, config)
         if summary is None:
             raise JobNotFoundError(f"'{wanted}' 실험을 registry에서 찾을 수 없습니다.")
 
@@ -485,36 +485,33 @@ def compare_registry_experiments(run_ids: list[str]) -> dict[str, Any]:
         )
     config = registry_config()
     requested = [run_id.strip() for run_id in run_ids]
+    scores = kaggle_scores.load_scores()
     try:
-        # Index는 한 번만 읽습니다. `compare_experiment_summaries`도 안에서 같은
-        # 목록을 읽으므로 그것까지 부르면 전체 index를 두 번 읽게 되고, 실험
-        # 하나만 골라도 등록된 전부를 훑게 됩니다. 화면이 실제로 쓰는 것은 그
-        # 결과 중 `experiment_record_uri` 하나뿐이라 summary에서 바로 꺼냅니다.
-        wanted = set(requested)
-        summaries = {
-            summary["run_id"]: summary
-            for summary in list_experiment_summaries(config)
-            if summary.get("run_id") in wanted
-        }
-        missing = [run_id for run_id in requested if run_id not in summaries]
-
-        targets: list[tuple[str, str]] = []
-        for run_id in requested:
-            summary = summaries.get(run_id)
-            if not isinstance(summary, Mapping):
-                continue
-            uri = summary.get("experiment_record_uri")
-            if isinstance(uri, str) and uri.strip():
-                targets.append((run_id, uri))
-
-        scores = kaggle_scores.load_scores()
-        resolved = [
-            _enrich_summary(summaries[run_id], record, scores.get(run_id))
-            for run_id, record in _read_records(targets, config)
-        ]
-        return {"experiments": resolved, "missing": missing}
+        # 고른 것만 이름으로 읽습니다. 예전에는 index 전체를 훑어 그중에서 골랐는데,
+        # 실험 하나를 견주려 해도 등록된 전부를 읽어야 했습니다.
+        workers = max(1, min(_COMPARE_READ_WORKERS, len(requested)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            loaded = list(
+                executor.map(
+                    lambda run_id: _compare_one(run_id, config, scores.get(run_id)),
+                    requested,
+                )
+            )
     except ExperimentRegistryError as error:
         raise WebError(f"실험 비교 정보를 읽지 못했습니다({type(error).__name__}).") from error
+
+    # 응답 순서는 요청 순서 그대로입니다. 곡선은 실행 이름으로 찾아 씁니다.
+    return {
+        "experiments": [item["experiment"] for item in loaded if item is not None],
+        "missing": [
+            run_id for run_id, item in zip(requested, loaded) if item is None
+        ],
+        "curves": {
+            run_id: item["epochs"]
+            for run_id, item in zip(requested, loaded)
+            if item is not None
+        },
+    }
 
 
 def save_kaggle_score(
@@ -531,14 +528,7 @@ def save_kaggle_score(
         raise WebValidationError([FieldError("run_id", "실험 이름이 필요합니다.")])
     wanted = run_id.strip()
     try:
-        summary = next(
-            (
-                item
-                for item in list_experiment_summaries(registry_config())
-                if item.get("run_id") == wanted
-            ),
-            None,
-        )
+        summary = read_experiment_summary(wanted, registry_config())
     except ExperimentRegistryError as error:
         raise WebError(f"실험 목록을 읽지 못했습니다({type(error).__name__}).") from error
     if summary is None:

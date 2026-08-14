@@ -67,6 +67,25 @@ def experiment_record(run_id: str) -> dict:
     }
 
 
+def use_index(monkeypatch, summaries: list[dict]) -> None:
+    """registry index에 이 실험들이 있는 상태로 둡니다.
+
+    목록은 prefix 아래를 훑고, 이름을 아는 조회(비교·상세·점수 기록)는 그 이름의
+    항목 하나만 읽습니다. 두 길이 같은 index를 보게 해야 한쪽만 바꿔 놓고 통과하는
+    test가 생기지 않습니다.
+    """
+
+    by_run = {item["run_id"]: item for item in summaries}
+    monkeypatch.setattr(
+        experiments, "list_experiment_summaries", lambda config: list(summaries)
+    )
+    monkeypatch.setattr(
+        experiments,
+        "read_experiment_summary",
+        lambda run_id, config: by_run.get(run_id),
+    )
+
+
 def test_experiment_api_lists_registry_index_only(client, manager, monkeypatch):
     called = []
     monkeypatch.setattr(
@@ -86,19 +105,21 @@ def test_experiment_api_lists_registry_index_only(client, manager, monkeypatch):
 
 
 def test_compare_reads_only_selected_exact_records(client, monkeypatch):
-    summaries = [registry_summary("run-1"), registry_summary("run-2")]
     read = []
-    listed = []
 
-    def list_summaries(config, **_kwargs):
-        listed.append(config)
-        return summaries
+    def refuse_listing(config, **_kwargs):
+        raise AssertionError("비교는 index 전체를 훑으면 안 됩니다.")
 
-    # 두 이름을 함께 바꿔야 index를 몇 번 읽는지 셀 수 있습니다. web이 부르는
-    # 이름과, 공용 registry 안에서 다시 부르는 이름이 다른 객체이기 때문입니다.
-    monkeypatch.setattr(experiments, "list_experiment_summaries", list_summaries)
+    # 두 이름을 함께 막아야 합니다. web이 부르는 이름과, 공용 registry 안에서 다시
+    # 부르는 이름이 다른 객체이기 때문입니다.
+    monkeypatch.setattr(experiments, "list_experiment_summaries", refuse_listing)
     monkeypatch.setattr(
-        "src.common.experiment_registry.list_experiment_summaries", list_summaries
+        "src.common.experiment_registry.list_experiment_summaries", refuse_listing
+    )
+    monkeypatch.setattr(
+        experiments,
+        "read_experiment_summary",
+        lambda run_id, config: registry_summary(run_id),
     )
 
     def read_record(uri, config, *, expected_run_id=None):
@@ -128,8 +149,6 @@ def test_compare_reads_only_selected_exact_records(client, monkeypatch):
     # record는 함께 읽으므로 읽는 순서는 정해져 있지 않습니다. 고른 것만 읽었는지와
     # 응답 순서가 요청 순서와 같은지가 지켜야 할 약속입니다.
     assert {run_id for _, run_id in read} == {"run-1", "run-2"}
-    # Index는 한 번만 읽습니다. 실험 하나를 골라도 전부를 훑으면 화면이 그만큼 느립니다.
-    assert len(listed) == 1
     assert "experiment_record_uri" not in response.text
 
 
@@ -137,7 +156,7 @@ def test_compare_uses_sgd_for_legacy_record_without_optimizer(client, monkeypatc
     summary = registry_summary("legacy")
     legacy = experiment_record("legacy")
     legacy["config_snapshot"]["train"] = {}
-    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
+    use_index(monkeypatch, [summary])
     monkeypatch.setattr(experiments, "read_experiment_record", lambda *a, **k: legacy)
 
     response = client.post(
@@ -161,7 +180,7 @@ def test_compare_preserves_explicit_zero_values(client, monkeypatch):
     summary["seed"] = 7
     record = experiment_record("zero-values")
     record["config_snapshot"]["train"].update({"learning_rate": 0.0, "seed": 0})
-    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
+    use_index(monkeypatch, [summary])
     monkeypatch.setattr(experiments, "read_experiment_record", lambda *a, **k: record)
 
     response = client.post(
@@ -273,7 +292,7 @@ def test_experiment_metrics_stay_empty_without_losses_block(client, monkeypatch)
     summary = registry_summary("old-index")
     assert "losses" not in summary
     record = experiment_record("old-index")
-    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
+    use_index(monkeypatch, [summary])
     monkeypatch.setattr(experiments, "read_experiment_record", lambda *a, **k: record)
 
     listed = client.get("/api/train/experiments").json()["experiments"][0]
@@ -318,7 +337,7 @@ def test_experiment_list_matches_compare_for_unavailable_training(client, monkey
     summary["training_source"] = "unavailable"
     record = experiment_record("legacy")
     record["config_snapshot"]["train"] = {}
-    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [summary])
+    use_index(monkeypatch, [summary])
     monkeypatch.setattr(experiments, "read_experiment_record", lambda *a, **k: record)
 
     listed = client.get("/api/train/experiments").json()["experiments"][0]
@@ -379,11 +398,7 @@ def test_kaggle_score_marks_a_generated_submission_as_actually_submitted(
 ):
     """직접 입력한 실제 점수만 Kaggle 제출을 확인하는 증거입니다."""
 
-    monkeypatch.setattr(
-        experiments,
-        "list_experiment_summaries",
-        lambda config: [submitted_summary("done")],
-    )
+    use_index(monkeypatch, [submitted_summary("done")])
 
     saved = client.put(
         "/api/train/experiments/done/kaggle-score", json={"score": 0.8734}
@@ -398,11 +413,7 @@ def test_kaggle_score_marks_a_generated_submission_as_actually_submitted(
 
 
 def test_kaggle_score_rejects_values_outside_the_metric_range(client, monkeypatch):
-    monkeypatch.setattr(
-        experiments,
-        "list_experiment_summaries",
-        lambda config: [submitted_summary("done")],
-    )
+    use_index(monkeypatch, [submitted_summary("done")])
 
     response = client.put(
         "/api/train/experiments/done/kaggle-score", json={"score": 1.01}
@@ -414,11 +425,7 @@ def test_kaggle_score_rejects_values_outside_the_metric_range(client, monkeypatc
 def test_kaggle_score_does_not_overwrite_an_existing_record(client, monkeypatch):
     """수정을 요청하지 않은 저장은 기존 실제 점수를 그대로 둡니다."""
 
-    monkeypatch.setattr(
-        experiments,
-        "list_experiment_summaries",
-        lambda config: [submitted_summary("done")],
-    )
+    use_index(monkeypatch, [submitted_summary("done")])
 
     first = client.put(
         "/api/train/experiments/done/kaggle-score", json={"score": 0.8123}
@@ -438,11 +445,7 @@ def test_kaggle_score_is_corrected_only_when_the_request_asks_to_overwrite(
 ):
     """잘못 적은 점수는 화면에서 수정 버튼을 켠 요청에서만 바뀝니다."""
 
-    monkeypatch.setattr(
-        experiments,
-        "list_experiment_summaries",
-        lambda config: [submitted_summary("done")],
-    )
+    use_index(monkeypatch, [submitted_summary("done")])
 
     client.put("/api/train/experiments/done/kaggle-score", json={"score": 0.8123})
     corrected = client.put(
@@ -567,12 +570,44 @@ def record_with_artifacts(run_id: str) -> dict:
     return record
 
 
-def stub_detail_sources(monkeypatch, run_id: str, documents: dict) -> None:
+def test_compare_carries_the_loss_curve_so_the_canvas_asks_once(client, monkeypatch):
+    """곡선까지 비교 응답에 함께 옵니다.
+
+    예전에는 화면이 비교를 부른 뒤 고른 실행마다 상세를 또 불렀습니다. 상세는 그때
+    마다 index 전체를 훑고, 곡선에 쓰지도 않는 650KB짜리 평가 파일까지 읽었습니다.
+    실행 3개를 견주면 그것만 네 번이라 화면이 눈에 띄게 느렸습니다.
+    """
+
+    use_index(monkeypatch, [registry_summary("run-1"), registry_summary("run-2")])
     monkeypatch.setattr(
         experiments,
-        "list_experiment_summaries",
-        lambda config: [submitted_summary(run_id)],
+        "read_experiment_record",
+        lambda uri, config, *, expected_run_id=None: record_with_artifacts(
+            expected_run_id
+        ),
     )
+    read = []
+
+    def read_document(uri, storage_config):
+        read.append(uri)
+        return training_history()
+
+    monkeypatch.setattr(experiment_detail, "_read_document", read_document)
+
+    payload = client.post(
+        "/api/train/experiments/compare", json={"run_ids": ["run-1", "없는-실험"]}
+    ).json()
+
+    assert [item["epoch"] for item in payload["curves"]["run-1"]] == [1, 2, 3]
+    # 등록되지 않은 이름은 곡선도 없고 `missing`으로 알립니다.
+    assert payload["missing"] == ["없는-실험"]
+    assert "없는-실험" not in payload["curves"]
+    # 평가 파일(metrics.json)은 곡선에 쓰이지 않으므로 읽지 않습니다.
+    assert read == ["artifacts/experiments/run-1/training_history.json"]
+
+
+def stub_detail_sources(monkeypatch, run_id: str, documents: dict) -> None:
+    use_index(monkeypatch, [submitted_summary(run_id)])
     monkeypatch.setattr(
         experiments,
         "read_experiment_record",
@@ -658,7 +693,7 @@ def test_detail_shows_settings_even_when_the_result_files_are_gone(client, monke
 
 
 def test_detail_reports_404_for_an_unregistered_run(client, monkeypatch):
-    monkeypatch.setattr(experiments, "list_experiment_summaries", lambda config: [])
+    use_index(monkeypatch, [])
 
     assert client.get("/api/train/experiments/nope").status_code == 404
 
