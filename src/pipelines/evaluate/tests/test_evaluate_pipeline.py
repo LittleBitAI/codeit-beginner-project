@@ -199,7 +199,10 @@ def test_competition_run_reuses_one_checkpoint_and_writes_submission(
             [20, 10],
         ]
     ]
-    assert set(result["artifacts"]) == ARTIFACT_KEYS | {"submission_uri"}
+    assert set(result["artifacts"]) == ARTIFACT_KEYS | {
+        "submission_uri",
+        "test_predictions_uri",
+    }
     assert result["artifacts"]["submission_uri"] == (
         "submissions/evaluate-0001/submission.csv"
     )
@@ -223,6 +226,75 @@ def test_competition_run_reuses_one_checkpoint_and_writes_submission(
     assert result["summary"]["score_threshold"] == 0.0
     assert result["summary"]["max_detections_per_image"] == 4
     assert "test_metrics" not in result["summary"]
+
+
+def test_competition_run_saves_the_submitted_test_predictions(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """제출한 것과 똑같은 test 예측을 파일로 남깁니다.
+
+    CSV는 사람이 올리는 형식이라 앙상블처럼 예측을 다시 읽어 쓰는 쪽에서는 상자를
+    문자열로 되돌려 읽어야 합니다. 같은 내용을 JSON으로도 남겨 그 왕복을 없앱니다.
+    """
+    from src.pipelines.evaluate import pipeline
+
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"].pop("predictions_input_uri")
+
+    def fake_predict_groups(
+        store, record_groups, *, checkpoint_uri, device, seed, on_progress=None
+    ):
+        return [
+            _normalised_validation_predictions(),
+            [
+                _test_prediction(10, 7, 1.0, 0.95),
+                _test_prediction(10, 3, 2.0, 0.80),
+                _test_prediction(10, 7, 3.0, 0.70),
+                _test_prediction(10, 3, 4.0, 0.60),
+                # 이미지당 상한(4) 밖이라 제출에 없고, 이 파일에도 없어야 합니다.
+                _test_prediction(10, 3, 5.0, 0.50),
+                _test_prediction(20, 7, 6.0, 0.90),
+            ],
+        ]
+
+    monkeypatch.setattr(pipeline, "predict_record_groups_with_checkpoint", fake_predict_groups)
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    # artifact key 자체는 위 계약 test가 지킵니다. 여기서는 자리와 내용만 봅니다.
+    assert result["artifacts"]["test_predictions_uri"] == (
+        "artifacts/evaluate/evaluate-0001/test_predictions.json"
+    )
+
+    document = _read_json(repository_root, result["artifacts"]["test_predictions_uri"])
+    assert document["bbox_format"] == "xywh"
+    # 어느 test set을 본 예측인지 없으면 다른 dataset 판끼리 섞여도 모릅니다.
+    assert document["test_manifest_uri"] == "data/test/instances.json"
+    saved = {
+        (item["image_id"], item["category_id"], item["bbox"][0], item["score"])
+        for item in document["predictions"]
+    }
+    assert saved == {
+        (10, 7, 1.0, 0.95),
+        (10, 3, 2.0, 0.80),
+        (10, 7, 3.0, 0.70),
+        (10, 3, 4.0, 0.60),
+        (20, 7, 6.0, 0.90),
+    }
+
+    # 제출 CSV와 같은 줄을 담고 있어야 합니다. 둘이 어긋나면 앙상블이 올리지 않은
+    # 예측으로 융합하게 됩니다.
+    rows = (
+        (repository_root / result["artifacts"]["submission_uri"])
+        .read_text(encoding="utf-8")
+        .splitlines()[1:]
+    )
+    from_csv = {
+        (int(parts[1]), int(parts[2]), float(parts[3]), float(parts[7]))
+        for parts in (row.split(",") for row in rows)
+    }
+    assert from_csv == saved
 
 
 def test_existing_submission_stops_before_inference(

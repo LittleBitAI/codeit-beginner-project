@@ -24,6 +24,7 @@ from .submission import render_submission_csv
 DEFAULT_OUTPUT_ROOT = "artifacts/evaluate"
 DEFAULT_METRICS_FILENAME = "metrics.json"
 DEFAULT_PREDICTIONS_FILENAME = "predictions.json"
+DEFAULT_TEST_PREDICTIONS_FILENAME = "test_predictions.json"
 DEFAULT_SUBMISSION_ROOT = "submissions"
 DEFAULT_SUBMISSION_FILENAME = "submission.csv"
 DEFAULT_MAX_DETECTIONS_PER_IMAGE = 4
@@ -56,6 +57,9 @@ class Settings:
     metrics_uri: str
     predictions_uri: str
     submission_uri: str | None
+    # 제출한 것과 같은 test 예측을 JSON으로도 남길 위치입니다. test manifest가 있을
+    # 때만 값이 있습니다.
+    test_predictions_uri: str | None
     iou_thresholds: tuple[float, ...]
     score_threshold: float
     max_detections_per_image: int | None
@@ -268,6 +272,12 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         _optional_uri(settings.get("predictions_filename"), "evaluate.predictions_filename")
         or DEFAULT_PREDICTIONS_FILENAME
     )
+    test_predictions_filename = (
+        _optional_uri(
+            settings.get("test_predictions_filename"), "evaluate.test_predictions_filename"
+        )
+        or DEFAULT_TEST_PREDICTIONS_FILENAME
+    )
 
     score_threshold = settings.get("score_threshold", 0.0)
     if (
@@ -301,6 +311,9 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
             "metrics와 predictions는 같은 위치에 저장할 수 없습니다. "
             f"evaluate.metrics_filename과 evaluate.predictions_filename을 다르게 두세요: {metrics_uri}"
         )
+    test_predictions_uri = (
+        join_uri(output_dir, test_predictions_filename) if test_manifest_uri is not None else None
+    )
 
     configured_submission_uri = _optional_uri(
         settings.get("submission_uri"), "evaluate.submission_uri"
@@ -313,9 +326,16 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
             join_uri(DEFAULT_SUBMISSION_ROOT, resolved_run_id),
             DEFAULT_SUBMISSION_FILENAME,
         )
-    if submission_uri is not None and submission_uri in {metrics_uri, predictions_uri}:
+    # 출력이 넷으로 늘어 짝마다 따로 보면 빠뜨리기 쉽습니다. 한 번에 셉니다.
+    written_uris = [
+        uri
+        for uri in (metrics_uri, predictions_uri, submission_uri, test_predictions_uri)
+        if uri is not None
+    ]
+    if len(set(written_uris)) != len(written_uris):
         raise ConfigurationError(
-            "metrics, predictions, submission은 같은 위치에 저장할 수 없습니다."
+            "metrics, predictions, submission, test predictions는 같은 위치에 "
+            "저장할 수 없습니다."
         )
 
     # 메인 지표 구간은 대회 실행 여부와 무관하게 [0.75, 0.80, 0.85, 0.90, 0.95]입니다.
@@ -333,6 +353,7 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         metrics_uri=metrics_uri,
         predictions_uri=predictions_uri,
         submission_uri=submission_uri,
+        test_predictions_uri=test_predictions_uri,
         iou_thresholds=iou_thresholds,
         score_threshold=float(score_threshold),
         max_detections_per_image=_resolve_max_detections(settings.get("max_detections_per_image")),
@@ -400,6 +421,8 @@ def run(config: dict) -> dict:
         output_uris = [settings.metrics_uri, settings.predictions_uri]
         if settings.submission_uri is not None:
             output_uris.append(settings.submission_uri)
+        if settings.test_predictions_uri is not None:
+            output_uris.append(settings.test_predictions_uri)
         for uri in output_uris:
             if not settings.overwrite and store.exists(uri):
                 raise ArtifactWriteError(
@@ -514,6 +537,7 @@ def run(config: dict) -> dict:
 
         submission_text: str | None = None
         submission_rows = 0
+        test_predictions: list[dict[str, Any]] | None = None
         if test_group_index is not None:
             # 제외는 test 경로에만 적용합니다. validation 지표에는 보조 class도
             # 남아 있어야 "대회 밖 알약을 알약으로 잡았는가"를 볼 수 있습니다.
@@ -562,6 +586,33 @@ def run(config: dict) -> dict:
                 created_uris.append(settings.submission_uri)
             progress.emit("submission_written", rows=submission_rows)
 
+        test_predictions_uri: str | None = None
+        if settings.test_predictions_uri is not None and test_predictions is not None:
+            test_predictions_document = {
+                **common_fields,
+                # 어느 test manifest를 본 예측인지 적습니다. 이것이 없으면 서로 다른
+                # dataset 판의 예측을 image_id만 보고 섞어도 조용히 지나갑니다.
+                "test_manifest_uri": settings.test_manifest_uri,
+                "bbox_format": "xywh",
+                # 제출에서 뺀 class가 있으면 이 파일에도 없습니다. 무엇이 빠졌는지
+                # 적어 두지 않으면 나중에 읽는 쪽이 모델이 못 맞힌 것으로 읽습니다.
+                "submission_excluded_category_ids": sorted(
+                    settings.submission_excluded_category_ids
+                ),
+                "prediction_count": len(test_predictions),
+                "predictions": [
+                    _public_prediction(prediction) for prediction in test_predictions
+                ],
+            }
+            test_predictions_existed = store.exists(settings.test_predictions_uri)
+            test_predictions_uri = store.write_json(
+                settings.test_predictions_uri,
+                test_predictions_document,
+                overwrite=settings.overwrite,
+            )
+            if not test_predictions_existed:
+                created_uris.append(settings.test_predictions_uri)
+
         predictions_existed = store.exists(settings.predictions_uri)
         predictions_uri = store.write_json(
             settings.predictions_uri, predictions_document, overwrite=settings.overwrite
@@ -595,6 +646,8 @@ def run(config: dict) -> dict:
     }
     if submission_uri is not None:
         artifacts["submission_uri"] = submission_uri
+    if test_predictions_uri is not None:
+        artifacts["test_predictions_uri"] = test_predictions_uri
 
     return {
         "status": "ok",
