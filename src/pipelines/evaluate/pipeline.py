@@ -217,13 +217,21 @@ def _prediction_source(
     잘못 셀 일이 없습니다.
     """
 
-    checkpoint = document.get("checkpoint_uri")
-    if not checkpoint:
+    # 합친 결과라고 스스로 밝힌 파일은 checkpoint가 채워져 있어도 거부합니다.
+    # 없는 것만 보면 표식과 checkpoint를 함께 담아 우회할 수 있습니다.
+    fused_from = document.get("fused_from")
+    if document.get("prediction_source") == "fusion" or fused_from:
         raise InputArtifactError(
-            f"{uri}: 어느 checkpoint의 증거인지 말하지 않아 합칠 수 없습니다. 합친 "
-            "결과를 다시 합칠 수는 없습니다 — 원본 예측들을 한 번에 주세요."
+            f"{uri}: 합친 결과를 다시 합칠 수는 없습니다 — 원본 예측들을 한 번에 "
+            "주세요."
         )
-    return str(store.artifact_identity(str(checkpoint)))
+
+    checkpoint = document.get("checkpoint_uri")
+    if not isinstance(checkpoint, str) or not checkpoint.strip():
+        raise InputArtifactError(
+            f"{uri}: 어느 checkpoint의 증거인지 말하지 않아 합칠 수 없습니다."
+        )
+    return str(store.artifact_identity(checkpoint.strip()))
 
 
 def _load_fusion_inputs(
@@ -246,8 +254,7 @@ def _load_fusion_inputs(
 
     **서로 다른 실행인가.** 그 예측을 만든 **checkpoint**로 봅니다. 그것이 모델의
     신원이고, 같은 checkpoint는 몇 번을 넣어도 한 실행입니다. 표기가 달라도 같은
-    파일이면 걸리도록 저장 계층에 물어봅니다. 합친 파일에는 checkpoint가 없으므로
-    **무엇을 합쳤는지**로 봅니다 — 같은 것들을 합친 둘은 같은 증거입니다.
+    파일이면 걸리도록 저장 계층에 물어봅니다. 합친 결과는 아예 받지 않습니다.
     """
 
     def manifest_content(
@@ -319,8 +326,9 @@ def _load_fusion_inputs(
 def _resolve_prediction_inputs(value: Any) -> tuple[str, ...]:
     """합칠 예측 파일 목록을 읽습니다.
 
-    기본값은 빈 tuple이라 설정하지 않으면 동작이 달라지지 않습니다. 하나만 주는 것도
-    막지 않습니다 — 합치지는 않지만 추론 없이 제출을 다시 만드는 길이 됩니다.
+    기본값은 빈 tuple이라 설정하지 않으면 동작이 달라지지 않습니다. **둘 미만은
+    막습니다.** 하나만 주면 합칠 것이 없는데도 겹치는 상자를 묶어 원본과 다른 예측이
+    나옵니다. 추론 없이 제출을 다시 만드는 길로 쓸 수 없습니다.
     """
 
     if value is None:
@@ -336,6 +344,11 @@ def _resolve_prediction_inputs(value: Any) -> tuple[str, ...]:
     if any(uri is None for uri in uris):
         raise ConfigurationError(
             "evaluate.test_predictions_input_uris의 항목은 비어 있지 않은 문자열이어야 합니다."
+        )
+    if len(uris) < 2:
+        raise ConfigurationError(
+            "evaluate.test_predictions_input_uris에는 합칠 예측이 둘 이상 필요합니다. "
+            "하나만 주면 합칠 것이 없는데도 겹치는 상자를 묶어 원본과 달라집니다."
         )
     return tuple(uri for uri in uris if uri is not None)
 

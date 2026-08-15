@@ -1131,7 +1131,10 @@ def test_fusion_refuses_predictions_from_another_test_set(
             ],
         },
     )
-    base_config["evaluate"]["test_predictions_input_uris"] = ["data/test/other.json"]
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/other.json",
+        _write_fusion_input(repository_root, "ours2", [10, 20], checkpoint="ckpt/o.pt"),
+    ]
 
     result = run(base_config)
 
@@ -1317,7 +1320,10 @@ def test_fusion_refuses_a_prediction_that_does_not_say_which_test_set_it_saw(
             ],
         },
     )
-    base_config["evaluate"]["test_predictions_input_uris"] = ["data/test/nameless.json"]
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/nameless.json",
+        _write_fusion_input(repository_root, "named", [10, 20], checkpoint="ckpt/n.pt"),
+    ]
 
     result = run(base_config)
 
@@ -1409,3 +1415,89 @@ def test_two_manifests_pointing_at_one_image_file_are_the_same_test_set(
     result = run(base_config)
 
     assert result["status"] == "ok", result["message"]
+
+
+def test_a_fusion_result_is_refused_even_when_it_names_a_checkpoint(
+    base_config: dict, repository_root: Path
+):
+    """합친 결과라고 밝힌 파일은 checkpoint가 채워져 있어도 받지 않습니다.
+
+    checkpoint가 **없는 것만** 보면 표식과 checkpoint를 함께 담아 우회할 수 있고,
+    그러면 중첩 융합이 실행 수를 잘못 세는 자리로 되돌아갑니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    write_json(
+        repository_root / "data/test/sneaky.json",
+        {
+            "test_manifest_uri": "data/test/instances.json",
+            "checkpoint_uri": "ckpt/looks-real.pt",
+            "prediction_source": "fusion",
+            "predictions": [
+                {"image_id": 10, "category_id": 7,
+                 "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}
+            ],
+        },
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/sneaky.json",
+        _write_fusion_input(repository_root, "honest", [10, 20], checkpoint="ckpt/h2.pt"),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "합친 결과를 다시 합칠 수는 없습니다" in result["message"]
+
+
+def test_one_prediction_file_is_not_a_fusion(
+    base_config: dict, repository_root: Path
+):
+    """하나만 주면 막습니다.
+
+    합칠 것이 없는데도 겹치는 상자를 묶어 원본과 다른 예측이 나옵니다. 추론 없이
+    제출을 다시 만드는 길처럼 보이지만 결과가 달라집니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        _write_fusion_input(repository_root, "alone", [10, 20], checkpoint="ckpt/a1.pt"),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "둘 이상 필요합니다" in result["message"]
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    [pytest.param(7, id="숫자"), pytest.param(["a"], id="list"), pytest.param("   ", id="공백만")],
+)
+def test_a_checkpoint_that_is_not_a_name_is_refused(
+    base_config: dict, repository_root: Path, checkpoint: object
+):
+    """checkpoint 자리에 이름이 아닌 것이 오면 막습니다.
+
+    그대로 문자열로 바꾸면 `7`과 `'7'`이 같은 실행이 되거나, 공백만 있는 값이 서로
+    다른 실행으로 세어집니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    write_json(
+        repository_root / "data/test/odd.json",
+        {
+            "test_manifest_uri": "data/test/instances.json",
+            "checkpoint_uri": checkpoint,
+            "predictions": [
+                {"image_id": 10, "category_id": 7,
+                 "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}
+            ],
+        },
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/odd.json",
+        _write_fusion_input(repository_root, "sane", [10, 20], checkpoint="ckpt/s.pt"),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "어느 checkpoint의 증거인지" in result["message"]
