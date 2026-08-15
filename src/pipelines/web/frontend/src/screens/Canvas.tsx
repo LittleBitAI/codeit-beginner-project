@@ -248,7 +248,8 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
         <div style={{ ...type.subTitle, color: color.text }}>약한 class</div>
         <div style={{ ...type.note, color: color.textFaint, marginTop: 6, maxWidth: '46em' }}>
           고른 실행에 class별 요약이 없습니다. 평가 전이거나, 이 요약이 생기기 전에
-          등록된 기록입니다. 다시 등록하면 채워집니다.
+          등록된 기록입니다. 평가를 다시 실행해 등록하면 채워집니다 — 등록만으로는
+          생기지 않습니다.
         </div>
       </div>
     );
@@ -258,7 +259,19 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
   for (const item of measured) {
     for (const row of item.per_class_summary?.weak ?? []) names.set(row.category_id, row.name);
   }
-  if (names.size === 0) return null;
+  // 요약은 있는데 약한 class가 하나도 없는 것은 **좋은 결과**입니다. 표를 감추면
+  // 위의 "요약이 없다"와 구별되지 않습니다.
+  if (names.size === 0) {
+    return (
+      <div style={{ marginTop: 34 }}>
+        <div style={{ ...type.subTitle, color: color.text }}>약한 class</div>
+        <div style={{ ...type.note, color: color.textMuted, marginTop: 6, maxWidth: '46em' }}>
+          정답이 {measured[0]?.per_class_summary?.min_truth_count}개 이상인 class 중 AP가 낮은
+          것이 없습니다.
+        </div>
+      </div>
+    );
+  }
 
   const byRun = experiments.map(
     (item) =>

@@ -183,12 +183,10 @@ describe('약한 class 표', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-        // 두 실행을 실제로 요청했는지 봅니다. 하나만 보내도 통과하면 이 test는
-        // 비교가 아니라 fixture를 재는 것이 됩니다.
-        const body = String(init?.body ?? '');
-        if (!body.includes('run-a') || !body.includes('run-b')) {
-          throw new Error(`두 실행을 요청하지 않았습니다: ${body}`);
-        }
+        // 두 실행을 실제로 요청했는지 봅니다. 부분 문자열로 보면 `run-a-wrong`도
+        // 통과하므로 보낸 배열을 그대로 비교합니다.
+        const sent = JSON.parse(String(init?.body ?? '{}')) as { run_ids?: string[] };
+        expect(sent.run_ids).toEqual(['run-a', 'run-b']);
         return new Response(
           JSON.stringify({ experiments: [experiment(), other], missing: [], curves: {} }),
           { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -238,6 +236,51 @@ describe('약한 class 표', () => {
     // 실행 이름은 곡선 범례에도 있습니다. 표 안에서 찾아야 머리글을 지킵니다.
     const table = (await screen.findByText('약한 class')).parentElement as HTMLElement;
     expect(within(table).getAllByText('run-a').length).toBeGreaterThan(0);
+  });
+
+  it('약한 class가 하나도 없으면 그렇게 적는다', async () => {
+    // 요약은 있는데 목록이 빈 것은 좋은 결과입니다. 표가 사라지면 "요약이 없다"와
+    // 구별되지 않습니다.
+    const clean = {
+      ...experiment(),
+      per_class_summary: {
+        min_truth_count: 5,
+        top_n: 10,
+        counts: { weak: 0, sparse: 0, unmeasured: 0 },
+        weak: [],
+        sparse: [],
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ experiments: [clean], missing: [], curves: {} }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    show([record()]);
+
+    expect(await screen.findByText(/AP가 낮은\s*것이 없습니다/)).toBeTruthy();
+  });
+
+  it('요약이 아예 없으면 평가부터 다시 하라고 안내한다', async () => {
+    const bare = { ...experiment() };
+    delete (bare as { per_class_summary?: unknown }).per_class_summary;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ experiments: [bare], missing: [], curves: {} }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    show([record()]);
+
+    // 등록만으로는 생기지 않습니다. 그 말을 빼면 틀린 복구 안내가 됩니다.
+    expect(await screen.findByText(/평가를 다시 실행해 등록하면/)).toBeTruthy();
   });
 
   it('팀원이 돌린 실행에는 로그 링크를 내지 않는다', async () => {
