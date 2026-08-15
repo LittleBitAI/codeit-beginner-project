@@ -107,6 +107,33 @@ class Storage(ABC):
     def list(self, prefix: str | Path = "") -> list[str]:
         """Prefix 아래 object URI/path를 반환합니다."""
 
+    @abstractmethod
+    def identity(self, location: str | Path) -> tuple[str, ...]:
+        """이 backend가 **위치 표기를 해석한 결과**를 돌려줍니다.
+
+        쓰기 전에 "두 산출물이 같은 곳에 저장되는가"를 판정하려는 쪽이, 스스로
+        규칙을 지어내는 대신 이것을 물어보게 하려는 것입니다. 규칙을 밖에서 다시
+        만들면 backend가 실제로 하는 해석과 어긋납니다.
+
+        **약속하는 것:** 읽고 쓸 때와 같은 해석을 거친 뒤에도 같은 자리를 가리키는
+        표기는 같은 값이 됩니다. backend가 다르면 절대 겹치지 않습니다.
+
+        **이미 있는 파일**은 파일 시스템에 직접 물어봅니다. 그래서 hard link로 이어진
+        두 경로와 volume마다 다르게 설정된 대소문자 규칙까지 가립니다. 덮어쓰기를 켠
+        실행이 이 갈래로 들어옵니다.
+
+        **아직 없는 파일**은 물어볼 대상이 없어 표기로만 판정합니다. 대소문자는 그
+        platform의 기본 규칙(`os.path.normcase`)만 따르므로, volume 설정이 다르면
+        가리지 못합니다. inode를 주지 않는 filesystem(`st_ino == 0`)도 같습니다.
+
+        **이 값은 부른 그 순간의 답입니다.** 비교와 실제 쓰기 사이를 묶어 주지
+        않습니다. 두 번 부르는 사이에 파일이 생기거나 지워지면 같은 자리라도 답이
+        갈릴 수 있습니다. 부르는 쪽은 바로 이어서 비교하고, 실제 보호는 덮어쓰기
+        기본 금지에 맡겨야 합니다.
+
+        값의 모양은 약속하지 않습니다. 사람에게 보여 줄 이름이 아닙니다.
+        """
+
 
 class LocalStorage(Storage):
     """설정된 root 안에서 동작하는 local filesystem storage입니다."""
@@ -222,6 +249,30 @@ class LocalStorage(Storage):
 
     def exists(self, location: str | Path) -> bool:
         return self._resolve(location).is_file()
+
+    def identity(self, location: str | Path) -> tuple[str, ...]:
+        # 읽고 쓸 때와 **같은** `_resolve`를 씁니다.
+        path = self._resolve(location)
+        try:
+            status: os.stat_result | None = path.stat()
+        except FileNotFoundError:
+            # 없는 파일만 표기로 내려갑니다. 권한 없음이나 I/O 오류를 "없다"로 읽으면
+            # 이미 있는 파일의 hard link 겹침을 놓치고, 진짜 오류도 숨깁니다.
+            status = None
+        except OSError as error:
+            self._raise_local_error(error, path)
+            raise  # `_raise_local_error`가 반드시 던집니다. 흐름을 분명히 둡니다.
+
+        # 이미 있는 파일은 filesystem에 직접 묻습니다. hard link로 이어진 두 경로와
+        # volume마다 다르게 설정된 대소문자 규칙은 여기서만 가릴 수 있습니다.
+        # `overwrite`를 켠 실행은 이미 있는 파일에 쓰므로 이 갈래로 들어옵니다.
+        #
+        # `st_ino`가 0인 filesystem이 있습니다. 그대로 쓰면 같은 device의 **모든**
+        # 파일이 한 값이 되어, 쓸 수 있는 조합을 겹친다고 거절합니다. 표기로 내립니다.
+        if status is not None and status.st_ino:
+            return ("local-file", str(status.st_dev), str(status.st_ino))
+        # `normcase`는 그 platform의 기본 대소문자 규칙입니다.
+        return ("local-path", os.path.normcase(str(path)))
 
     def list(self, prefix: str | Path = "") -> list[str]:
         prefix_path = self._resolve(prefix)
@@ -433,6 +484,12 @@ class S3Storage(Storage):
         except (ClientError, NoCredentialsError, PartialCredentialsError, ProfileNotFound) as error:
             self._raise_s3_error(error, bucket=bucket, key=key)
         return self._uri(bucket, key)
+
+    def identity(self, location: str | Path) -> tuple[str, ...]:
+        # 읽고 쓸 때와 **같은** `_resolve`를 씁니다. scheme 대소문자, percent
+        # encoding, prefix 붙이기가 거기서 이미 정리되므로 여기서 다시 규칙을
+        # 만들지 않습니다. `//`처럼 S3에서 실제로 다른 key는 다르게 남습니다.
+        return ("s3", *self._resolve(location))
 
     def exists(self, location: str | Path) -> bool:
         bucket, key = self._resolve(location)

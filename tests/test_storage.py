@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -218,3 +219,156 @@ def test_s3_uri_must_match_configured_bucket():
 
     with pytest.raises(StorageConfigurationError, match="bucket이 다릅니다"):
         storage.exists("s3://other-bucket/datasets/item.jpg")
+
+
+def test_local_identity_is_the_same_for_paths_that_name_one_file(tmp_path):
+    """표기가 달라도 같은 파일이면 같은 identity입니다.
+
+    쓰기 전에 "두 산출물이 같은 파일을 가리키는가"를 판정하려면, 부르는 쪽이 규칙을
+    지어내지 않고 저장 계층이 실제로 쓰는 대상을 물어볼 수 있어야 합니다.
+    """
+    storage = LocalStorage(tmp_path / "storage")
+
+    same = storage.identity("run/metrics.json")
+    assert storage.identity("./run/metrics.json") == same
+    assert storage.identity("run/./metrics.json") == same
+    assert storage.identity("run/other/../metrics.json") == same
+    assert storage.identity("run/predictions.json") != same
+
+
+def test_local_identity_refuses_paths_outside_the_root(tmp_path):
+    storage = LocalStorage(tmp_path / "storage")
+
+    with pytest.raises(StorageConfigurationError):
+        storage.identity("../바깥/metrics.json")
+
+
+def test_s3_identity_is_the_same_for_uris_that_name_one_object():
+    """S3 URI의 표기 차이(scheme 대소문자, percent encoding)를 가립니다."""
+    storage = S3Storage(bucket="example-bucket", prefix="run")
+
+    same = storage.identity("s3://example-bucket/run/metrics.json")
+    assert storage.identity("S3://example-bucket/run/metrics.json") == same
+    assert storage.identity("s3://example-bucket/run/metrics%2Ejson") == same
+    # prefix를 붙이는 상대 key도 같은 object를 가리킵니다.
+    assert storage.identity("metrics.json") == same
+    assert storage.identity("s3://example-bucket/run/predictions.json") != same
+
+
+def test_s3_and_local_identities_never_collide(tmp_path):
+    """backend가 다르면 같은 이름이라도 다른 대상입니다."""
+    local = LocalStorage(tmp_path / "storage")
+    s3 = S3Storage(bucket="example-bucket")
+
+    assert local.identity("metrics.json") != s3.identity("metrics.json")
+
+
+def test_local_identity_follows_the_platform_case_rule(tmp_path):
+    """대소문자는 그 platform의 기본 규칙을 따릅니다.
+
+    구현이 쓰는 `os.path.normcase`로 기대값을 만들면 구현을 구현으로 재는 셈이라,
+    platform 자체로 기대를 정합니다. Windows는 같은 파일로, POSIX는 다른 파일로
+    봅니다.
+
+    volume마다 다르게 설정한 대소문자 규칙까지는 가리지 못합니다. 판정이 파일이
+    생기기 전에 필요해 filesystem에 물어볼 수 없기 때문이고, `identity`의 계약도
+    그렇게 적혀 있습니다.
+    """
+    storage = LocalStorage(tmp_path / "storage")
+
+    same_identity = storage.identity("Metrics.json") == storage.identity("metrics.json")
+
+    assert same_identity is (os.name == "nt")
+
+
+def test_s3_identity_keeps_keys_that_s3_treats_as_different(tmp_path):
+    """S3 key는 글자 그대로입니다. 표기를 정리해 합치면 안 됩니다.
+
+    `a//b`와 `a/b`는 S3에서 서로 다른 object입니다. 여기에 경로 정규화를 더하면
+    다른 대상을 같다고 판정해 쓸 수 있는 설정을 거절하게 됩니다.
+    """
+    storage = S3Storage(bucket="example-bucket")
+
+    assert storage.identity("run/a//b") != storage.identity("run/a/b")
+
+
+def test_s3_identity_refuses_an_empty_key_like_reading_and_writing_do(tmp_path):
+    storage = S3Storage(bucket="example-bucket")
+
+    with pytest.raises(StorageConfigurationError):
+        storage.identity("")
+
+
+def test_local_identity_asks_the_filesystem_for_files_that_already_exist(tmp_path):
+    """이미 있는 파일은 hard link로 이어진 두 경로를 같다고 봅니다.
+
+    덮어쓰기를 켠 실행은 이미 있는 파일에 씁니다. 표기로만 판정하면 서로 hard
+    link인 두 출력이 다르다고 나와, 차례로 덮고도 성공을 보고합니다.
+    """
+    root = tmp_path / "storage"
+    root.mkdir(parents=True)
+    (root / "metrics.json").write_text("{}", encoding="utf-8", newline="\n")
+    try:
+        os.link(root / "metrics.json", root / "predictions.json")
+    except (OSError, NotImplementedError, AttributeError) as error:
+        pytest.skip(f"이 filesystem은 hard link를 만들 수 없습니다: {error}")
+
+    storage = LocalStorage(root)
+
+    assert storage.identity("metrics.json") == storage.identity("predictions.json")
+
+
+def test_local_identity_of_a_missing_file_never_matches_an_existing_one(tmp_path):
+    """아직 없는 파일과 이미 있는 파일을 섞어 같다고 말하지 않습니다."""
+    root = tmp_path / "storage"
+    root.mkdir(parents=True)
+    (root / "metrics.json").write_text("{}", encoding="utf-8", newline="\n")
+
+    storage = LocalStorage(root)
+
+    assert storage.identity("metrics.json") != storage.identity("predictions.json")
+
+
+def test_local_identity_does_not_read_an_access_error_as_a_missing_file(tmp_path, monkeypatch):
+    """권한 오류를 "없는 파일"로 읽지 않습니다.
+
+    그렇게 읽으면 이미 있는 파일의 hard link 겹침을 놓치고, 진짜 오류도 조용히
+    숨깁니다. 읽기·쓰기와 같은 typed error로 올립니다.
+    """
+    root = tmp_path / "storage"
+    root.mkdir(parents=True)
+    (root / "metrics.json").write_text("{}", encoding="utf-8", newline="\n")
+    storage = LocalStorage(root)
+
+    def deny(self, *args, **kwargs):
+        raise PermissionError("의도한 권한 오류")
+
+    monkeypatch.setattr(Path, "stat", deny)
+
+    with pytest.raises(StorageAccessDeniedError):
+        storage.identity("metrics.json")
+
+
+def test_local_identity_ignores_an_inode_that_the_filesystem_does_not_give(
+    tmp_path, monkeypatch
+):
+    """`st_ino`가 0이면 그것을 identity로 쓰지 않습니다.
+
+    그대로 쓰면 같은 device의 **모든** 파일이 한 값이 되어, 쓸 수 있는 조합을
+    겹친다고 거절합니다.
+    """
+    root = tmp_path / "storage"
+    root.mkdir(parents=True)
+    (root / "metrics.json").write_text("{}", encoding="utf-8", newline="\n")
+    (root / "predictions.json").write_text("{}", encoding="utf-8", newline="\n")
+    storage = LocalStorage(root)
+
+    real_stat = Path.stat
+
+    def without_inode(self, *args, **kwargs):
+        status = real_stat(self, *args, **kwargs)
+        return os.stat_result((status.st_mode, 0, status.st_dev) + tuple(status)[3:])
+
+    monkeypatch.setattr(Path, "stat", without_inode)
+
+    assert storage.identity("metrics.json") != storage.identity("predictions.json")
