@@ -12,11 +12,21 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .errors import ArtifactWriteError, ConfigurationError, EvaluateError
+from .errors import (
+    ArtifactWriteError,
+    ConfigurationError,
+    EvaluateError,
+    InputArtifactError,
+)
+from .fusion import DEFAULT_IOU_THRESHOLD as DEFAULT_FUSION_IOU_THRESHOLD
 from .fusion import fuse_predictions
 from .manifest import load_class_map, load_manifest, load_test_manifest
 from .metrics import DEFAULT_IOU_THRESHOLDS, evaluate_detections, filter_predictions
-from .predictor import load_predictions, predict_record_groups_with_checkpoint
+from .predictor import (
+    load_predictions,
+    parse_predictions,
+    predict_record_groups_with_checkpoint,
+)
 from .progress import ProgressEmitter
 from .storage_io import ArtifactStore, join_uri
 from .submission import render_submission_csv
@@ -192,6 +202,78 @@ def _without_categories(
         }
         for record in records
     ]
+
+
+def _load_fusion_inputs(
+    store: ArtifactStore,
+    uris: Sequence[str],
+    *,
+    test_records: Sequence[Mapping[str, Any]],
+    test_manifest_uri: str,
+) -> tuple[list[list[dict[str, Any]]], list[dict[str, Any]]]:
+    """합칠 예측을 읽고, 합쳐도 되는 것들인지 확인합니다.
+
+    두 가지를 봅니다.
+
+    **같은 시험지를 봤는가.** 예측에 나온 image id만 보면 안 됩니다. 아무것도 검출하지
+    못한 이미지는 목록에 없는 것이 정상이라 멀쩡한 입력을 거절하고, 같은 id를 쓰는
+    다른 시험지는 그대로 지나갑니다. 각 파일이 적어 둔 test manifest를 **실제로 읽어**
+    image id 집합을 견줍니다. manifest 검증이 `file_name`의 숫자와 image id가 같음을
+    이미 강제하므로, 그 집합이 곧 내용입니다.
+
+    **서로 다른 실행인가.** 같은 파일을 두 곳에 복사해 넣으면 저장 위치만으로는
+    갈라내지 못합니다. 그 예측을 만든 **checkpoint**로 봅니다. 그것이 모델의 신원이고,
+    같은 checkpoint는 몇 번을 넣어도 한 실행입니다.
+    """
+
+    own_images = {record["image_id"] for record in test_records}
+    own_manifest = store.artifact_identity(test_manifest_uri)
+    checked_manifests: set[tuple[str, ...]] = {own_manifest}
+
+    groups: list[list[dict[str, Any]]] = []
+    lineage: list[dict[str, Any]] = []
+    seen_models: dict[str, str] = {}
+    image_keys = {record["image_key"] for record in test_records}
+
+    for uri in uris:
+        document = store.read_json(uri)
+        if not isinstance(document, Mapping):
+            raise InputArtifactError(f"{uri}: 합칠 예측은 object여야 합니다.")
+
+        declared = document.get("test_manifest_uri")
+        if not isinstance(declared, str) or not declared.strip():
+            raise InputArtifactError(
+                f"{uri}: 어느 test manifest를 본 예측인지 적혀 있지 않아 합칠 수 "
+                "없습니다."
+            )
+        declared_target = store.artifact_identity(declared)
+        if declared_target not in checked_manifests:
+            other_records, _ = load_test_manifest(store, declared)
+            if {record["image_id"] for record in other_records} != own_images:
+                raise ConfigurationError(
+                    f"{uri}는 다른 시험지를 본 예측입니다: {declared}"
+                )
+            checked_manifests.add(declared_target)
+
+        # checkpoint가 모델의 신원입니다. 합친 파일을 다시 합치는 경우에는 없으므로
+        # 그때는 저장 위치로 갈라냅니다.
+        checkpoint = document.get("checkpoint_uri")
+        model = str(checkpoint) if checkpoint else str(store.artifact_identity(uri))
+        if model in seen_models:
+            raise ConfigurationError(
+                f"같은 실행의 예측이 두 번 있습니다: {seen_models[model]}와 {uri}"
+            )
+        seen_models[model] = uri
+
+        groups.append(parse_predictions(document, source=uri, known_image_keys=image_keys))
+        lineage.append(
+            {
+                "uri": uri,
+                "run_id": document.get("run_id"),
+                "checkpoint_uri": checkpoint,
+            }
+        )
+    return groups, lineage
 
 
 def _resolve_prediction_inputs(value: Any) -> tuple[str, ...]:
@@ -519,36 +601,14 @@ def run(config: dict) -> dict:
         # image를 가리키는지 `load_predictions`가 확인하므로, 다른 시험지를 본 예측을
         # 섞으면 거기서 걸립니다.
         fused_test_predictions: list[dict[str, Any]] | None = None
+        fusion_lineage: list[dict[str, Any]] = []
         if test_records is not None and settings.test_predictions_input_uris:
-            # 같은 파일을 두 번 주면 서로 다른 실행으로 세어 **자기 자신과 동의**하게
-            # 됩니다. 표기가 달라도 같은 파일이면 걸리도록 저장 계층에 물어봅니다.
-            seen_targets: dict[tuple[str, ...], str] = {}
-            for uri in settings.test_predictions_input_uris:
-                target = store.artifact_identity(uri)
-                if target in seen_targets:
-                    raise ConfigurationError(
-                        "합칠 예측에 같은 파일이 두 번 있습니다: "
-                        f"{seen_targets[target]}와 {uri}"
-                    )
-                seen_targets[target] = uri
-
-            test_image_keys = {record["image_key"] for record in test_records}
-            groups = [
-                load_predictions(store, uri, known_image_keys=test_image_keys)
-                for uri in settings.test_predictions_input_uris
-            ]
-            # 각 파일이 **같은 이미지들**을 봤는지 확인합니다. `load_predictions`는
-            # manifest에 없는 id만 막을 뿐이라, 다른 시험지가 같은 id를 쓰거나 일부만
-            # 담고 있으면 그대로 지나갑니다.
-            covered = [
-                {str(prediction["image_key"]) for prediction in group} for group in groups
-            ]
-            for uri, keys in zip(settings.test_predictions_input_uris, covered):
-                if keys != covered[0]:
-                    raise ConfigurationError(
-                        "합칠 예측이 서로 다른 이미지를 담고 있습니다. 같은 시험지를 "
-                        f"본 예측만 합칠 수 있습니다: {settings.test_predictions_input_uris[0]}와 {uri}"
-                    )
+            groups, fusion_lineage = _load_fusion_inputs(
+                store,
+                settings.test_predictions_input_uris,
+                test_records=test_records,
+                test_manifest_uri=str(settings.test_manifest_uri),
+            )
             fused_test_predictions = fuse_predictions(groups)
             progress.emit(
                 "test_predictions_fused",
@@ -699,7 +759,10 @@ def run(config: dict) -> dict:
                     "fusion" if fused_test_predictions is not None else "checkpoint"
                 ),
                 "predictions_input_uri": None,
-                "fused_from": list(settings.test_predictions_input_uris) or None,
+                "fused_from": fusion_lineage or None,
+                "fusion_iou_threshold": (
+                    DEFAULT_FUSION_IOU_THRESHOLD if fusion_lineage else None
+                ),
                 "bbox_format": "xywh",
                 # 제출에서 뺀 class가 있으면 이 파일에도 없습니다. 무엇이 빠졌는지
                 # 적어 두지 않으면 나중에 읽는 쪽이 모델이 못 맞힌 것으로 읽습니다.
