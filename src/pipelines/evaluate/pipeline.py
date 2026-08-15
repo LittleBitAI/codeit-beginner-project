@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .errors import ArtifactWriteError, ConfigurationError, EvaluateError
+from .fusion import fuse_predictions
 from .manifest import load_class_map, load_manifest, load_test_manifest
 from .metrics import DEFAULT_IOU_THRESHOLDS, evaluate_detections, filter_predictions
 from .predictor import load_predictions, predict_record_groups_with_checkpoint
@@ -54,6 +55,9 @@ class Settings:
     class_map_uri: str | None
     checkpoint_uri: str | None
     predictions_input_uri: str | None
+    # 있으면 test 추론 대신 이 예측 파일들을 합쳐 씁니다. 실행 여럿을
+    # 합치는 유일한 통로이며, 비어 있으면 지금까지처럼 추론합니다.
+    test_predictions_input_uris: tuple[str, ...]
     metrics_uri: str
     predictions_uri: str
     submission_uri: str | None
@@ -190,6 +194,30 @@ def _without_categories(
     ]
 
 
+def _resolve_prediction_inputs(value: Any) -> tuple[str, ...]:
+    """합칠 예측 파일 목록을 읽습니다.
+
+    기본값은 빈 tuple이라 설정하지 않으면 동작이 달라지지 않습니다. 하나만 주는 것도
+    막지 않습니다 — 합치지는 않지만 추론 없이 제출을 다시 만드는 길이 됩니다.
+    """
+
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ConfigurationError(
+            "evaluate.test_predictions_input_uris는 URI의 list여야 합니다."
+        )
+    uris = [
+        _optional_uri(item, "evaluate.test_predictions_input_uris의 항목")
+        for item in value
+    ]
+    if any(uri is None for uri in uris):
+        raise ConfigurationError(
+            "evaluate.test_predictions_input_uris의 항목은 비어 있지 않은 문자열이어야 합니다."
+        )
+    return tuple(uri for uri in uris if uri is not None)
+
+
 def _resolve_max_detections(value: Any) -> int | None:
     if value is None:
         return DEFAULT_MAX_DETECTIONS_PER_IMAGE
@@ -255,10 +283,22 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
             "예측을 만들 수 없습니다. evaluate.predictions_input_uri 또는 "
             "inputs.train.best_checkpoint_uri(evaluate.checkpoint_uri)가 필요합니다."
         )
-    if test_manifest_uri is not None and checkpoint_uri is None:
+    test_predictions_input_uris = _resolve_prediction_inputs(
+        settings.get("test_predictions_input_uris")
+    )
+    if (
+        test_manifest_uri is not None
+        and checkpoint_uri is None
+        and not test_predictions_input_uris
+    ):
         raise ConfigurationError(
-            "test image 추론에는 checkpoint가 필요합니다. evaluate.checkpoint_uri 또는 "
-            "inputs.train.best_checkpoint_uri를 설정하세요."
+            "test image 추론에는 checkpoint가 필요합니다. evaluate.checkpoint_uri, "
+            "inputs.train.best_checkpoint_uri, 또는 합칠 예측을 가리키는 "
+            "evaluate.test_predictions_input_uris를 설정하세요."
+        )
+    if test_predictions_input_uris and test_manifest_uri is None:
+        raise ConfigurationError(
+            "evaluate.test_predictions_input_uris에는 test_manifest_uri가 필요합니다."
         )
 
     output_dir = _optional_uri(settings.get("output_dir"), "evaluate.output_dir") or join_uri(
@@ -334,6 +374,7 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         class_map_uri=class_map_uri,
         checkpoint_uri=checkpoint_uri,
         predictions_input_uri=predictions_input_uri,
+        test_predictions_input_uris=test_predictions_input_uris,
         metrics_uri=metrics_uri,
         predictions_uri=predictions_uri,
         submission_uri=submission_uri,
@@ -474,7 +515,24 @@ def run(config: dict) -> dict:
             validation_group_index = len(inference_groups)
             inference_groups.append(records)
             group_stages.append("validation")
-        if test_records is not None:
+        # 합칠 예측을 받았으면 test는 추론하지 않습니다. 파일마다 이 test manifest의
+        # image를 가리키는지 `load_predictions`가 확인하므로, 다른 시험지를 본 예측을
+        # 섞으면 거기서 걸립니다.
+        fused_test_predictions: list[dict[str, Any]] | None = None
+        if test_records is not None and settings.test_predictions_input_uris:
+            test_image_keys = {record["image_key"] for record in test_records}
+            fused_test_predictions = fuse_predictions(
+                [
+                    load_predictions(store, uri, known_image_keys=test_image_keys)
+                    for uri in settings.test_predictions_input_uris
+                ]
+            )
+            progress.emit(
+                "test_predictions_fused",
+                sources=len(settings.test_predictions_input_uris),
+                predictions=len(fused_test_predictions),
+            )
+        elif test_records is not None:
             test_group_index = len(inference_groups)
             inference_groups.append(test_records)
             group_stages.append("test")
@@ -543,11 +601,19 @@ def run(config: dict) -> dict:
         submission_text: str | None = None
         submission_rows = 0
         test_predictions: list[dict[str, Any]] | None = None
-        if test_group_index is not None:
+        # 추론했으면 그 결과를, 합쳤으면 합친 결과를 씁니다. 그 뒤 걸러 내는 규칙은
+        # 어느 쪽이든 같습니다 — 합친 예측만 다른 상한이나 다른 제외를 타면 제출이
+        # 두 가지 규칙으로 만들어집니다.
+        raw_test_predictions = (
+            generated_groups[test_group_index]
+            if test_group_index is not None
+            else fused_test_predictions
+        )
+        if raw_test_predictions is not None:
             # 제외는 test 경로에만 적용합니다. validation 지표에는 보조 class도
             # 남아 있어야 "대회 밖 알약을 알약으로 잡았는가"를 볼 수 있습니다.
             test_predictions = filter_predictions(
-                generated_groups[test_group_index],
+                raw_test_predictions,
                 score_threshold=settings.score_threshold,
                 max_detections_per_image=settings.max_detections_per_image,
                 excluded_category_ids=settings.submission_excluded_category_ids,

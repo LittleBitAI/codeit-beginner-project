@@ -1066,3 +1066,66 @@ def test_outputs_that_are_hard_links_of_each_other_are_rejected(
 
     assert result["status"] == "error"
     assert "같은 위치에 저장할 수 없습니다" in result["message"]
+
+
+def test_fusing_saved_predictions_makes_a_submission_without_a_checkpoint(
+    base_config: dict, repository_root: Path
+):
+    """합칠 예측을 주면 추론 없이 제출을 만듭니다.
+
+    앙상블의 목적입니다. 이미 점수가 달린 체크포인트들의 예측을 다시 읽어 합치는
+    것이라 재학습도 재추론도 필요 없습니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    base_config["inputs"]["train"].pop("best_checkpoint_uri")
+
+    for name, bbox_x in (("a", 3.0), ("b", 3.4)):
+        write_json(
+            repository_root / f"data/test/{name}.json",
+            {
+                "predictions": [
+                    {"image_id": 10, "category_id": 7, "bbox": [bbox_x, 2.0, 3.0, 4.0], "score": 0.9},
+                    {"image_id": 20, "category_id": 3, "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.5},
+                ]
+            },
+        )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/a.json",
+        "data/test/b.json",
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    rows = (
+        (repository_root / result["artifacts"]["submission_uri"])
+        .read_text(encoding="utf-8")
+        .splitlines()[1:]
+    )
+    # 두 실행이 거의 같은 자리를 가리켰으므로 image 10은 한 줄로 합쳐집니다.
+    assert len(rows) == 2
+    fused = [row for row in rows if row.split(",")[1] == "10"][0].split(",")
+    # 상자는 두 값 사이에 놓입니다.
+    assert 3.0 < float(fused[3]) < 3.4
+    # 둘 다 찾았으므로 확신도가 그대로입니다.
+    assert float(fused[7]) == pytest.approx(0.9)
+
+
+def test_fusion_refuses_predictions_from_another_test_set(
+    base_config: dict, repository_root: Path
+):
+    """다른 시험지를 본 예측을 섞지 않습니다.
+
+    image_id만 보고 섞으면 조용히 틀린 제출이 나옵니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    write_json(
+        repository_root / "data/test/other.json",
+        {"predictions": [{"image_id": 999, "category_id": 7, "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}]},
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = ["data/test/other.json"]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "manifest에 없는 image_id" in result["message"]
