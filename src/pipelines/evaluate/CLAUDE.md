@@ -12,7 +12,7 @@ You own `src/pipelines/evaluate/`. Never edit or import another pipeline; `src/c
 
 ## Interface
 
-`run(config) -> dict` is the only public symbol. On success `artifacts` carries exactly `run_id`, `metrics_uri`, and `predictions_uri`, plus `submission_uri` when `test_manifest_uri` is present. On failure, `status="error"` and `artifacts={}` — a partial success is never reported as `ok`.
+`run(config) -> dict` is the only public symbol. On success `artifacts` carries exactly `run_id`, `metrics_uri`, and `predictions_uri`, plus `submission_uri` and `test_predictions_uri` when `test_manifest_uri` is present. On failure, `status="error"` and `artifacts={}` — a partial success is never reported as `ok`.
 
 Settings come from `config["evaluate"]`, falling back to `config["inputs"]`. `predictions_input_uri` skips validation inference and only scores existing predictions; test inference still needs a checkpoint. In dummy mode with no `config["evaluate"]`, evaluation is skipped.
 
@@ -20,7 +20,7 @@ Manifests are JSONL or one COCO document, validated for duplicate ids, annotatio
 
 ## Outputs
 
-A metrics file and a predictions file under the output directory, plus `submissions/{run_id}/submission.csv` when asked. They are written only after validation metrics and test predictions are complete, so a failure leaves no partial result.
+A metrics file and a predictions file under the output directory, plus `submissions/{run_id}/submission.csv` and `test_predictions.json` when asked. They are written only after validation metrics and test predictions are complete, so a failure leaves no partial result.
 
 Two rules are easy to undo by accident:
 
@@ -49,6 +49,7 @@ Tests use contract-shaped fixtures with no upstream pipeline; inference on CPU.
   - False positives bucket strongest-overlap-first: `duplicate`, `classification`, `localization`, `background`. `duplicate` would otherwise inflate one of the others. `LOCALIZATION_IOU_FLOOR` keeps far-off boxes out of `localization`.
   - `per_class_summary` only re-sorts `per_class`: `truth_count` splits the groups, `ap = null` is never read as 0, and it is not IoU-keyed.
 - Competition runs use the same validation IoU thresholds; test labels and metrics are never accepted or produced.
+- `test_predictions.json` carries the **same rows as the submission CSV**, so a later stage reads boxes as numbers instead of parsing the CSV back. It is written whenever a test manifest is given. For more fusion candidates than the four a submission keeps, set `max_detections_per_image` to `false`; that run's CSV is then not submittable, which is the point — it exists to be fused. The file records the excluded ids, or a reader takes a dropped class for one the model missed.
 - `evaluate.submission_excluded_category_ids` drops those categories from the **submission CSV only**, inside `filter_predictions` *before* the per-image cap so the 4 slots go to scorable rows. Test call only. Default empty changes nothing.
 - `evaluate.metrics_excluded_category_ids` drops them from **validation scoring only**, so local mAP averages the classes the competition scores. It filters *before* the per-image cap: filtering after lets an excluded high scorer crowd out a scorable one. Ground-truth images stay — dropping one turns its predictions into false positives — and saved predictions keep every row. Default empty changes nothing.
 - Identical output filenames are rejected before anything runs.

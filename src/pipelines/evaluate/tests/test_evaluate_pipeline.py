@@ -199,7 +199,10 @@ def test_competition_run_reuses_one_checkpoint_and_writes_submission(
             [20, 10],
         ]
     ]
-    assert set(result["artifacts"]) == ARTIFACT_KEYS | {"submission_uri"}
+    assert set(result["artifacts"]) == ARTIFACT_KEYS | {
+        "submission_uri",
+        "test_predictions_uri",
+    }
     assert result["artifacts"]["submission_uri"] == (
         "submissions/evaluate-0001/submission.csv"
     )
@@ -223,6 +226,138 @@ def test_competition_run_reuses_one_checkpoint_and_writes_submission(
     assert result["summary"]["score_threshold"] == 0.0
     assert result["summary"]["max_detections_per_image"] == 4
     assert "test_metrics" not in result["summary"]
+
+
+def test_competition_run_saves_the_submitted_test_predictions(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """제출한 것과 똑같은 test 예측을 파일로 남깁니다.
+
+    CSV는 사람이 올리는 형식이라 앙상블처럼 예측을 다시 읽어 쓰는 쪽에서는 상자를
+    문자열로 되돌려 읽어야 합니다. 같은 내용을 JSON으로도 남겨 그 왕복을 없앱니다.
+    """
+    from src.pipelines.evaluate import pipeline
+
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"].pop("predictions_input_uri")
+
+    def fake_predict_groups(
+        store, record_groups, *, checkpoint_uri, device, seed, on_progress=None
+    ):
+        return [
+            _normalised_validation_predictions(),
+            [
+                _test_prediction(10, 7, 1.0, 0.95),
+                _test_prediction(10, 3, 2.0, 0.80),
+                _test_prediction(10, 7, 3.0, 0.70),
+                _test_prediction(10, 3, 4.0, 0.60),
+                # 이미지당 상한(4) 밖이라 제출에 없고, 이 파일에도 없어야 합니다.
+                _test_prediction(10, 3, 5.0, 0.50),
+                _test_prediction(20, 7, 6.0, 0.90),
+            ],
+        ]
+
+    monkeypatch.setattr(pipeline, "predict_record_groups_with_checkpoint", fake_predict_groups)
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    # artifact key 자체는 위 계약 test가 지킵니다. 여기서는 자리와 내용만 봅니다.
+    assert result["artifacts"]["test_predictions_uri"] == (
+        "artifacts/evaluate/evaluate-0001/test_predictions.json"
+    )
+
+    document = _read_json(repository_root, result["artifacts"]["test_predictions_uri"])
+    assert document["bbox_format"] == "xywh"
+    # 어느 test set을 본 예측인지 없으면 다른 dataset 판끼리 섞여도 모릅니다.
+    assert document["test_manifest_uri"] == "data/test/instances.json"
+    # 뺀 class가 있는지 없는지를 적어 두지 않으면, 읽는 쪽이 빠진 class를 모델이 못
+    # 맞힌 것으로 읽습니다.
+    assert document["submission_excluded_category_ids"] == []
+    assert document["prediction_count"] == 5
+
+    # 상자 네 값을 전부 담고 순서까지 세어 비교합니다. 일부만 보면 y·너비·높이가
+    # 망가지거나 같은 줄이 두 번 들어가도 지나갑니다.
+    saved = sorted(
+        (item["image_id"], item["category_id"], *item["bbox"], item["score"])
+        for item in document["predictions"]
+    )
+    assert saved == sorted(
+        [
+            (10, 7, 1.0, 2.0, 3.0, 4.0, 0.95),
+            (10, 3, 2.0, 2.0, 3.0, 4.0, 0.80),
+            (10, 7, 3.0, 2.0, 3.0, 4.0, 0.70),
+            (10, 3, 4.0, 2.0, 3.0, 4.0, 0.60),
+            (20, 7, 6.0, 2.0, 3.0, 4.0, 0.90),
+        ]
+    )
+
+    # 제출 CSV와 같은 줄을 담고 있어야 합니다. 둘이 어긋나면 앙상블이 올리지 않은
+    # 예측으로 융합하게 됩니다.
+    rows = (
+        (repository_root / result["artifacts"]["submission_uri"])
+        .read_text(encoding="utf-8")
+        .splitlines()[1:]
+    )
+    from_csv = sorted(
+        (
+            int(parts[1]),
+            int(parts[2]),
+            *(float(value) for value in parts[3:7]),
+            float(parts[7]),
+        )
+        for parts in (row.split(",") for row in rows)
+    )
+    assert from_csv == saved
+
+
+def test_empty_test_predictions_still_leave_a_file(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """예측이 하나도 없어도 파일은 남깁니다.
+
+    제출 CSV는 header만 남는데 JSON만 사라지면, 읽는 쪽이 "평가를 안 돌렸다"와
+    "돌렸는데 아무것도 못 찾았다"를 구분할 수 없습니다.
+    """
+    from src.pipelines.evaluate import pipeline
+
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"].pop("predictions_input_uri")
+
+    monkeypatch.setattr(
+        pipeline,
+        "predict_record_groups_with_checkpoint",
+        lambda *args, **kwargs: [_normalised_validation_predictions(), []],
+    )
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    document = _read_json(repository_root, result["artifacts"]["test_predictions_uri"])
+    assert document["predictions"] == []
+    assert document["prediction_count"] == 0
+
+
+def test_existing_test_predictions_stop_before_inference(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from src.pipelines.evaluate import pipeline
+
+    _add_test_manifest(base_config, repository_root)
+    existing = repository_root / "artifacts/evaluate/evaluate-0001/test_predictions.json"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text("keep\n", encoding="utf-8", newline="\n")
+
+    def unexpected_inference(*args, **kwargs):
+        pytest.fail("preflight 뒤에는 inference가 호출되면 안 됩니다.")
+
+    monkeypatch.setattr(pipeline, "predict_record_groups_with_checkpoint", unexpected_inference)
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert existing.read_text(encoding="utf-8") == "keep\n"
 
 
 def test_existing_submission_stops_before_inference(
@@ -272,6 +407,9 @@ def test_failed_metrics_write_removes_new_submission(
     assert result["status"] == "error"
     assert not (repository_root / "submissions/evaluate-0001/submission.csv").exists()
     assert not (repository_root / "artifacts/evaluate/evaluate-0001/predictions.json").exists()
+    assert not (
+        repository_root / "artifacts/evaluate/evaluate-0001/test_predictions.json"
+    ).exists()
 
 
 def test_test_manifest_requires_checkpoint_even_with_validation_predictions(
@@ -534,6 +672,16 @@ def test_excluded_categories_leave_the_submission_but_stay_in_validation(
     assert metrics["metrics"]["mAP"] is not None
     # 무엇을 뺐는지 실행 기록에 남습니다. JSON으로 직렬화할 수 있는 list여야 합니다.
     assert result["summary"]["submission_excluded_category_ids"] == [1, 3]
+
+    # test 예측 파일도 제출과 같아야 합니다. 뺀 class가 여기 다시 들어오면 앙상블이
+    # 올리지 않은 예측으로 융합하고, 뺀 목록을 안 적으면 읽는 쪽이 그 class를 모델이
+    # 못 맞힌 것으로 읽습니다.
+    test_predictions = _read_json(
+        repository_root, result["artifacts"]["test_predictions_uri"]
+    )
+    assert test_predictions["submission_excluded_category_ids"] == [1, 3]
+    assert {entry["category_id"] for entry in test_predictions["predictions"]} == {7}
+    assert test_predictions["prediction_count"] == 2
     assert validate_pipeline_result(result, pipeline_name="evaluate") is result
 
 
@@ -835,3 +983,86 @@ def test_metrics_exclusion_applies_before_the_per_image_cap(
     [entry] = metrics["per_class"]
     assert entry["prediction_count"] == 1
     assert entry["ap"] is not None and entry["ap"] > 0.0
+
+
+@pytest.mark.parametrize(
+    "metrics_filename",
+    [
+        pytest.param("test_predictions.json", id="같은-이름"),
+        pytest.param("./test_predictions.json", id="표기만-다른-같은-파일"),
+    ],
+)
+def test_test_predictions_cannot_share_a_file_with_another_output(
+    base_config: dict, repository_root: Path, metrics_filename: str
+):
+    """새 출력이 다른 산출물과 같은 파일이면 실행 전에 막습니다.
+
+    출력이 하나 늘면 겹칠 수 있는 짝도 늘어납니다. 이름 자체는 설정으로 열지 않지만,
+    다른 출력의 이름을 이쪽으로 맞추면 여전히 겹칩니다. `overwrite=true`면 덮고도
+    성공을 보고하므로 실행 전에 거절해야 합니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"]["metrics_filename"] = metrics_filename
+    base_config["evaluate"]["overwrite"] = True
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "같은 위치에 저장할 수 없습니다" in result["message"]
+
+
+def test_test_predictions_record_the_checkpoint_as_their_source(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """validation이 저장된 예측을 읽어도 test 예측의 출처는 checkpoint입니다.
+
+    실행 전체의 `prediction_source`를 그대로 베끼면, 이 파일이 "저장된 예측에서
+    왔다"고 잘못 말합니다. 나중에 합치는 쪽이 어느 모델이 만든 것인지 잘못 읽습니다.
+    """
+    from src.pipelines.evaluate import pipeline
+
+    _add_test_manifest(base_config, repository_root)
+    # `predictions_input_uri`를 그대로 둡니다 — validation은 파일에서 읽고 test만
+    # 추론합니다. 대회 실행의 정상 경로입니다.
+    monkeypatch.setattr(
+        pipeline,
+        "predict_record_groups_with_checkpoint",
+        lambda *args, **kwargs: [[_test_prediction(10, 7, 1.0, 0.9)]],
+    )
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    # 실행 전체는 저장된 예측을 읽었다고 말합니다.
+    assert result["summary"]["prediction_source"] == "predictions_file"
+    # 그러나 test 예측 파일은 checkpoint에서 왔습니다.
+    document = _read_json(repository_root, result["artifacts"]["test_predictions_uri"])
+    assert document["prediction_source"] == "checkpoint"
+    assert document["predictions_input_uri"] is None
+
+
+def test_outputs_that_are_hard_links_of_each_other_are_rejected(
+    base_config: dict, repository_root: Path
+):
+    """이미 있는 두 출력이 서로 hard link면 겹친 것으로 봅니다.
+
+    덮어쓰기를 켠 실행은 이미 있는 파일에 씁니다. 표기로만 판정하면 이름이 달라
+    통과한 뒤 차례로 덮고도 성공을 보고합니다. 저장 계층에 물어봐야 걸립니다.
+    """
+    import os
+
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"]["overwrite"] = True
+
+    output_dir = repository_root / "artifacts/evaluate/evaluate-0001"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "metrics.json").write_text("{}", encoding="utf-8", newline="\n")
+    try:
+        os.link(output_dir / "metrics.json", output_dir / "test_predictions.json")
+    except (OSError, NotImplementedError, AttributeError) as error:
+        pytest.skip(f"이 filesystem은 hard link를 만들 수 없습니다: {error}")
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "같은 위치에 저장할 수 없습니다" in result["message"]

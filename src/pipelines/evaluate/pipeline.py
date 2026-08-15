@@ -24,6 +24,7 @@ from .submission import render_submission_csv
 DEFAULT_OUTPUT_ROOT = "artifacts/evaluate"
 DEFAULT_METRICS_FILENAME = "metrics.json"
 DEFAULT_PREDICTIONS_FILENAME = "predictions.json"
+DEFAULT_TEST_PREDICTIONS_FILENAME = "test_predictions.json"
 DEFAULT_SUBMISSION_ROOT = "submissions"
 DEFAULT_SUBMISSION_FILENAME = "submission.csv"
 DEFAULT_MAX_DETECTIONS_PER_IMAGE = 4
@@ -56,6 +57,9 @@ class Settings:
     metrics_uri: str
     predictions_uri: str
     submission_uri: str | None
+    # 제출한 것과 같은 test 예측을 JSON으로도 남길 위치입니다. test manifest가 있을
+    # 때만 값이 있습니다.
+    test_predictions_uri: str | None
     iou_thresholds: tuple[float, ...]
     score_threshold: float
     max_detections_per_image: int | None
@@ -268,6 +272,9 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         _optional_uri(settings.get("predictions_filename"), "evaluate.predictions_filename")
         or DEFAULT_PREDICTIONS_FILENAME
     )
+    # 이름을 설정으로 열지 않습니다. 열면 다른 출력과 겹칠 수 있는 짝이 늘어나고,
+    # 겹침을 저장 계층과 똑같이 판정하는 일은 이 변경이 감당할 범위가 아닙니다.
+    # 필요해지면 그때 열면 됩니다.
 
     score_threshold = settings.get("score_threshold", 0.0)
     if (
@@ -296,11 +303,13 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
 
     metrics_uri = join_uri(output_dir, metrics_filename)
     predictions_uri = join_uri(output_dir, predictions_filename)
-    if metrics_uri == predictions_uri:
-        raise ConfigurationError(
-            "metrics와 predictions는 같은 위치에 저장할 수 없습니다. "
-            f"evaluate.metrics_filename과 evaluate.predictions_filename을 다르게 두세요: {metrics_uri}"
-        )
+    # 출력 위치가 겹치는지는 `run()`에서 저장 계층의 이름으로 견줍니다. 여기서는
+    # 저장소 root를 모르므로 `./m.json` 같은 표기 차이를 가릴 수 없습니다.
+    test_predictions_uri = (
+        join_uri(output_dir, DEFAULT_TEST_PREDICTIONS_FILENAME)
+        if test_manifest_uri is not None
+        else None
+    )
 
     configured_submission_uri = _optional_uri(
         settings.get("submission_uri"), "evaluate.submission_uri"
@@ -313,11 +322,6 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
             join_uri(DEFAULT_SUBMISSION_ROOT, resolved_run_id),
             DEFAULT_SUBMISSION_FILENAME,
         )
-    if submission_uri is not None and submission_uri in {metrics_uri, predictions_uri}:
-        raise ConfigurationError(
-            "metrics, predictions, submission은 같은 위치에 저장할 수 없습니다."
-        )
-
     # 메인 지표 구간은 대회 실행 여부와 무관하게 [0.75, 0.80, 0.85, 0.90, 0.95]입니다.
     iou_thresholds = _resolve_iou_thresholds(
         settings.get("iou_thresholds"), competition=test_manifest_uri is not None
@@ -333,6 +337,7 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         metrics_uri=metrics_uri,
         predictions_uri=predictions_uri,
         submission_uri=submission_uri,
+        test_predictions_uri=test_predictions_uri,
         iou_thresholds=iou_thresholds,
         score_threshold=float(score_threshold),
         max_detections_per_image=_resolve_max_detections(settings.get("max_detections_per_image")),
@@ -397,9 +402,32 @@ def run(config: dict) -> dict:
         random.seed(settings.seed)
         store = ArtifactStore(config)
 
+        # 겹침은 **저장 계층에 물어서** 견줍니다. 표기 규칙을 여기서 지어내면
+        # backend가 실제로 하는 해석과 어긋납니다 — `./m.json`과 `m.json`을 다르게
+        # 보거나, S3에서 서로 다른 object인 `a//b`와 `a/b`를 같다고 막습니다.
+        # 이미 있는 파일이면 hard link까지 가려 주므로 덮어쓰기를 켠 실행도 걸립니다.
+        written_by_target: dict[tuple[str, ...], str] = {}
+        for label, uri in (
+            ("metrics", settings.metrics_uri),
+            ("predictions", settings.predictions_uri),
+            ("submission", settings.submission_uri),
+            ("test predictions", settings.test_predictions_uri),
+        ):
+            if uri is None:
+                continue
+            target = store.artifact_identity(uri)
+            if target in written_by_target:
+                raise ConfigurationError(
+                    f"{written_by_target[target]}와 {label}는 같은 위치에 저장할 수 "
+                    f"없습니다: {store.normalize_uri(uri)}"
+                )
+            written_by_target[target] = label
+
         output_uris = [settings.metrics_uri, settings.predictions_uri]
         if settings.submission_uri is not None:
             output_uris.append(settings.submission_uri)
+        if settings.test_predictions_uri is not None:
+            output_uris.append(settings.test_predictions_uri)
         for uri in output_uris:
             if not settings.overwrite and store.exists(uri):
                 raise ArtifactWriteError(
@@ -514,6 +542,7 @@ def run(config: dict) -> dict:
 
         submission_text: str | None = None
         submission_rows = 0
+        test_predictions: list[dict[str, Any]] | None = None
         if test_group_index is not None:
             # 제외는 test 경로에만 적용합니다. validation 지표에는 보조 class도
             # 남아 있어야 "대회 밖 알약을 알약으로 잡았는가"를 볼 수 있습니다.
@@ -553,6 +582,10 @@ def run(config: dict) -> dict:
             "predictions": [_public_prediction(prediction) for prediction in predictions],
         }
         submission_uri: str | None = None
+        # 네 출력 모두 쓴 **뒤에** 정리 목록에 넣습니다. 쓰기 전에 넣으면 `exists()`와
+        # 쓰기 사이에 다른 실행이 만든 파일까지 이 실행이 지웁니다. 그 대신 쓰다가
+        # 끊기면 반쯤 쓰인 파일이 남는데, 이는 이 pipeline이 처음부터 갖고 있던 성질이고
+        # 고치려면 저장 계층을 원자적으로 바꿔야 해서 따로 다룹니다.
         if settings.submission_uri is not None and submission_text is not None:
             submission_existed = store.exists(settings.submission_uri)
             submission_uri = store.write_text(
@@ -561,6 +594,38 @@ def run(config: dict) -> dict:
             if not submission_existed:
                 created_uris.append(settings.submission_uri)
             progress.emit("submission_written", rows=submission_rows)
+
+        test_predictions_uri: str | None = None
+        if settings.test_predictions_uri is not None and test_predictions is not None:
+            test_predictions_document = {
+                **common_fields,
+                # 어느 test manifest를 본 예측인지 적습니다. 이것이 없으면 서로 다른
+                # dataset 판의 예측을 image_id만 보고 섞어도 조용히 지나갑니다.
+                "test_manifest_uri": settings.test_manifest_uri,
+                # test 예측은 **언제나** checkpoint 추론으로 만듭니다. validation이
+                # 저장된 예측을 읽었더라도 그렇습니다. common_fields의 출처를 그대로
+                # 두면 이 파일이 "저장된 예측에서 왔다"고 잘못 말합니다.
+                "prediction_source": "checkpoint",
+                "predictions_input_uri": None,
+                "bbox_format": "xywh",
+                # 제출에서 뺀 class가 있으면 이 파일에도 없습니다. 무엇이 빠졌는지
+                # 적어 두지 않으면 나중에 읽는 쪽이 모델이 못 맞힌 것으로 읽습니다.
+                "submission_excluded_category_ids": sorted(
+                    settings.submission_excluded_category_ids
+                ),
+                "prediction_count": len(test_predictions),
+                "predictions": [
+                    _public_prediction(prediction) for prediction in test_predictions
+                ],
+            }
+            test_predictions_existed = store.exists(settings.test_predictions_uri)
+            test_predictions_uri = store.write_json(
+                settings.test_predictions_uri,
+                test_predictions_document,
+                overwrite=settings.overwrite,
+            )
+            if not test_predictions_existed:
+                created_uris.append(settings.test_predictions_uri)
 
         predictions_existed = store.exists(settings.predictions_uri)
         predictions_uri = store.write_json(
@@ -595,6 +660,8 @@ def run(config: dict) -> dict:
     }
     if submission_uri is not None:
         artifacts["submission_uri"] = submission_uri
+    if test_predictions_uri is not None:
+        artifacts["test_predictions_uri"] = test_predictions_uri
 
     return {
         "status": "ok",
