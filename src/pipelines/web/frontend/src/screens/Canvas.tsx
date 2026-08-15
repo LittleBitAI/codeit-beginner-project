@@ -217,9 +217,20 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
     (item) =>
       new Map((item.per_class_summary?.weak ?? []).map((row) => [row.category_id, row.ap])),
   );
-  const ids = [...names.keys()].sort(
-    (left, right) => (byRun[0]?.get(left) ?? 1) - (byRun[0]?.get(right) ?? 1),
-  );
+  /**
+   * 모든 실행 중 가장 낮은 AP를 기준으로 세웁니다.
+   *
+   * 첫 실행만 보고 세우면 고른 순서를 바꿨을 뿐인데 표의 줄 순서가 달라집니다.
+   * 어느 실행에서도 재지 못한 class는 뒤로 보내고, 그다음은 category_id로 갈라
+   * 같은 입력이면 늘 같은 순서가 나오게 합니다.
+   */
+  const worst = (id: number): number => {
+    const values = byRun
+      .map((run) => run.get(id))
+      .filter((value): value is number => typeof value === 'number');
+    return values.length > 0 ? Math.min(...values) : Number.POSITIVE_INFINITY;
+  };
+  const ids = [...names.keys()].sort((left, right) => worst(left) - worst(right) || left - right);
   const columns = `170px repeat(${experiments.length}, minmax(150px, 1fr))`;
 
   return (
@@ -249,9 +260,14 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
               {byRun.map((values, index) => (
                 <span
                   key={experiments[index]?.experiment_id ?? index}
-                  style={{ ...type.monoSpec, color: values.has(id) ? color.text : color.textFaint }}
+                  style={{
+                    ...type.monoSpec,
+                    color: typeof values.get(id) === 'number' ? color.text : color.textFaint,
+                  }}
                 >
-                  {values.has(id) ? (values.get(id) ?? 0).toFixed(3) : '-'}
+                  {/* 재지 못한 AP는 null입니다. 0으로 읽으면 "AP가 0"이라고
+                      말하는 셈이라, 이 실행에서 약하지 않았을 때와 같은 -로 둡니다. */}
+                  {typeof values.get(id) === 'number' ? (values.get(id) as number).toFixed(3) : '-'}
                 </span>
               ))}
             </div>
@@ -558,6 +574,18 @@ export function Canvas({
   const selectable = useMemo(() => records.filter((item) => item.registered), [records]);
   const unregistered = records.length - selectable.length;
   const picked = useMemo(() => params.getAll('run'), [params]);
+  /**
+   * 하나만 골랐고 그것을 이 컴퓨터가 돌렸다면 그 job의 id입니다.
+   *
+   * 여러 개를 겹쳐 놓았을 때는 어느 실행의 로그인지 말할 수 없어 내지 않습니다.
+   */
+  const localJobId = useMemo(
+    () =>
+      picked.length === 1
+        ? (records.find((item) => item.runId === picked[0])?.jobId ?? null)
+        : null,
+    [picked, records],
+  );
 
   /**
    * 선택을 **값**으로 굳혀 effect의 의존성으로 씁니다.
@@ -804,7 +832,15 @@ export function Canvas({
               />
             )}
           </div>
-          <div style={{ display: 'flex', gap: 10, flex: 'none' }}>
+          <div style={{ display: 'flex', gap: 10, flex: 'none', alignItems: 'center' }}>
+            {/* 이 컴퓨터가 돌린 실행이면 로그와 산출물이 남아 있습니다. 기록에서
+                누르면 이제 이 화면으로 오므로, 그 화면으로 가는 길을 여기 둡니다.
+                주소를 직접 치게 두면 있는 것을 없는 것처럼 만듭니다. */}
+            {localJobId && (
+              <LinkAction onClick={() => navigate(`/monitor/${localJobId}`)}>
+                로그 보기
+              </LinkAction>
+            )}
             {/* 하나만 골랐을 때만 냅니다. 여러 개를 겹쳐 놓고 누르면 어느 설정이
                 실렸는지 화면이 말해 주지 못합니다. */}
             {compared.length === 1 && compared[0] && (
@@ -897,13 +933,19 @@ export function Canvas({
               {compared.length === 0 ? (
                 <EmptyState message="고른 실행의 기록을 불러오고 있습니다." />
               ) : compared.length === 1 ? (
-                <SingleView
-                  item={compared[0] as ExperimentSummary}
-                  onSaved={() => {
-                    setReloadKey((value) => value + 1);
-                    onScoreSaved();
-                  }}
-                />
+                <>
+                  <SingleView
+                    item={compared[0] as ExperimentSummary}
+                    onSaved={() => {
+                      setReloadKey((value) => value + 1);
+                      onScoreSaved();
+                    }}
+                  />
+                  {/* 하나만 골랐을 때가 오히려 약한 class를 가장 보고 싶은 자리입니다.
+                      여럿을 겹쳤을 때만 내면, 기록에서 실행 하나를 눌러 들어온 사람은
+                      끝내 못 봅니다. */}
+                  <WeakClassTable experiments={compared} />
+                </>
               ) : (
                 <div style={{ paddingTop: 26, borderTop: `1px solid ${color.border}` }}>
                   <div
