@@ -253,8 +253,8 @@ def _load_fusion_inputs(
     **같은 시험지를 봤는가.** 예측에 나온 image id만 보면 안 됩니다. 아무것도 검출하지
     못한 이미지는 목록에 없는 것이 정상이라 멀쩡한 입력을 거절하고, 같은 id를 쓰는
     다른 시험지는 그대로 지나갑니다. 각 파일이 적어 둔 test manifest를 **실제로 읽어**
-    내용을 견줍니다. id만으로는 부족합니다 — 같은 id에 다른 사진, 다른 크기, 다른
-    category를 담은 시험지가 있을 수 있어 **그것까지 함께** 봅니다.
+    image id와 크기와 category를 견줍니다. 사진의 위치는 보지 않습니다 — 같은 시험지가
+    dataset 판마다 다른 prefix에 복사돼 있어 위치를 견주면 정당한 조합을 막습니다.
 
     **서로 다른 실행인가.** 그 예측을 만든 **checkpoint**로 봅니다. 그것이 모델의
     신원이고, 같은 checkpoint는 몇 번을 넣어도 한 실행입니다. 표기가 달라도 같은
@@ -266,14 +266,13 @@ def _load_fusion_inputs(
     ) -> tuple[Any, ...]:
         """시험지의 내용을 견줄 수 있는 값으로 만듭니다."""
 
+        # 사진의 **위치**는 견주지 않습니다. 같은 시험지가 dataset 판마다 다른
+        # prefix에 복사돼 있어(`raw/v5/...`와 `raw/v6/...`, 바이트까지 동일함을
+        # 확인했습니다) 위치를 견주면 정당한 조합을 막습니다. 위치가 다르다고 다른
+        # 사진인지도 알 수 없고, 알려면 842장을 내려받아야 합니다.
         return (
             frozenset(
-                (
-                    record["image_id"],
-                    store.artifact_identity(record["image_uri"]),
-                    record["width"],
-                    record["height"],
-                )
+                (record["image_id"], record["width"], record["height"])
                 for record in records
             ),
             category_ids,

@@ -1368,32 +1368,24 @@ def test_a_fusion_result_cannot_be_fused_again(
     assert "합친 결과를 다시 합칠 수는 없습니다" in result["message"]
 
 
-def test_two_manifests_pointing_at_one_image_file_are_the_same_test_set(
+def test_the_same_test_set_copied_to_another_place_is_still_the_same(
     base_config: dict, repository_root: Path
 ):
-    """서로 다른 경로가 같은 사진을 가리키면 같은 시험지입니다.
+    """같은 시험지가 다른 곳에 복사돼 있어도 같은 시험지입니다.
 
-    경로 문자열은 이미 정규화되어 나오므로 표기 차이로는 갈리지 않습니다. 남는 것은
-    hard link처럼 **다른 경로가 같은 파일인** 경우이고, 그것은 저장 계층에 물어야
-    알 수 있습니다. 글자로만 견주면 멀쩡한 조합을 거절합니다.
+    dataset 판마다 같은 사진을 자기 prefix로 복사해 둡니다(`raw/v5/...`와
+    `raw/v6/...`). 사진의 **위치**를 견주면 그 둘로 만든 예측을 합칠 수 없게 됩니다 —
+    실제로 합치려던 일곱 개 중 둘이 그렇게 막혔습니다.
+
+    위치가 다르다고 다른 사진인지도 알 수 없습니다. 알려면 842장을 내려받아야 합니다.
     """
-    import os
-
     _add_test_manifest(base_config, repository_root)
     base_config["inputs"]["train"].pop("best_checkpoint_uri")
 
-    first_dir = repository_root / "data/test"
-    second_dir = repository_root / "data/test_copy"
-    second_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("0010.jpg", "0020.jpg"):
-        (first_dir / name).write_bytes(b"pill")
-        try:
-            os.link(first_dir / name, second_dir / name)
-        except (OSError, NotImplementedError, AttributeError) as error:
-            pytest.skip(f"이 filesystem은 hard link를 만들 수 없습니다: {error}")
-
+    copied = repository_root / "data/test_copy"
+    copied.mkdir(parents=True, exist_ok=True)
     write_json(
-        second_dir / "instances.json",
+        copied / "instances.json",
         {
             "images": [
                 {"id": 20, "file_name": "0020.jpg", "width": 100, "height": 100},
@@ -1415,8 +1407,6 @@ def test_two_manifests_pointing_at_one_image_file_are_the_same_test_set(
     result = run(base_config)
 
     assert result["status"] == "ok", result["message"]
-
-
 def test_a_fusion_result_is_refused_even_when_it_names_a_checkpoint(
     base_config: dict, repository_root: Path
 ):
@@ -1537,3 +1527,37 @@ def test_a_file_carrying_fused_from_is_refused_on_that_alone(
 
     assert result["status"] == "error"
     assert "합친 결과를 다시 합칠 수는 없습니다" in result["message"]
+
+
+def test_a_test_set_with_other_categories_is_refused(
+    base_config: dict, repository_root: Path
+):
+    """이미지가 같아도 class 목록이 다르면 다른 시험지입니다.
+
+    같은 사진에 다른 정답 체계를 씌운 것이라 예측의 category id가 다른 뜻을 갖습니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    write_json(
+        repository_root / "data/test/other_categories.json",
+        {
+            "images": [
+                {"id": 20, "file_name": "0020.jpg", "width": 100, "height": 100},
+                {"id": 10, "file_name": "0010.jpg", "width": 100, "height": 100},
+            ],
+            "annotations": [],
+            "categories": [{"id": 3, "name": "pill-a"}, {"id": 9, "name": "pill-c"}],
+        },
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        _write_fusion_input(repository_root, "std", [10, 20], checkpoint="ckpt/s3.pt"),
+        _write_fusion_input(
+            repository_root, "othercat", [10, 20],
+            checkpoint="ckpt/o3.pt",
+            manifest_uri="data/test/other_categories.json",
+        ),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "다른 시험지" in result["message"]
