@@ -163,10 +163,10 @@ def test_run_writes_an_index_entry_next_to_the_record(local_run):
     assert summary_uri == "artifacts/registry/index/exp-0001.json"
 
     summary = json.loads((repo_root / summary_uri).read_text(encoding="utf-8"))
-    assert summary["summary_version"] == "3"
+    assert summary["summary_version"] == "4"
     assert summary["run_id"] == "exp-0001"
     assert summary["seed"] == 42
-    assert summary["schema_version"] == "1.2"
+    assert summary["schema_version"] == "1.3"
     assert summary["experiment_record_uri"] == (
         result["artifacts"]["experiment_record_uri"]
     )
@@ -330,7 +330,7 @@ def test_training_block_is_filled_from_the_config_snapshot(local_run):
 
     summary = read_summary(repo_root, registry.run(config))
 
-    assert summary["summary_version"] == "3"
+    assert summary["summary_version"] == "4"
     assert summary["training_source"] == "config_snapshot"
     assert summary["training"] == {
         "architecture": "retinanet_resnet50_fpn_v2",

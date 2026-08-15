@@ -84,7 +84,7 @@ def test_smoke_test_registers_and_reads_back_record():
 
     stored = objects[expected_uri]
     assert stored["run_id"] == "smoke-fixed-id"
-    assert stored["schema_version"] == "1.2"
+    assert stored["schema_version"] == "1.3"
     storage.read_json.assert_called_once_with(expected_uri)
     storage.list.assert_called_once_with(smoke_s3.SMOKE_PREFIX)
 

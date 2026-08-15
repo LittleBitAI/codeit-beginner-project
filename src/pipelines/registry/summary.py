@@ -33,7 +33,7 @@ from .record import (
 # "2" -> "3": training이 precision·checkpoint_every·gradient_accumulation_steps·
 #   input_size와 중첩 설정 셋(augmentation·lr_scheduler·early_stopping)을 함께 담고,
 #   per_class_summary가 생겼습니다. 기존 key는 이름도 뜻도 그대로입니다.
-SUMMARY_VERSION = "3"
+SUMMARY_VERSION = "4"
 
 # Evaluate가 metrics.json에 쓰는 이름을 그대로 씁니다. 이름을 한 번 더 번역하면
 # 어느 쪽이 진짜인지 알기 어려워집니다.

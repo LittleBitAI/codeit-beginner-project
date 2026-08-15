@@ -61,7 +61,7 @@ def test_required_keys_match_the_artifact_contract():
 def test_optional_keys_match_the_competition_artifact_contract():
     assert OPTIONAL_ARTIFACT_KEYS == {
         "data": ("test_manifest_uri",),
-        "evaluate": ("submission_uri",),
+        "evaluate": ("submission_uri", "test_predictions_uri"),
     }
 
 

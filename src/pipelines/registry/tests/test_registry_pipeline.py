@@ -54,11 +54,14 @@ def materialize_local_artifacts(inputs: dict, repo_root: Path) -> None:
 
 
 def add_competition_artifacts(inputs: dict) -> None:
-    """Schema 1.1의 선택 competition artifact URI를 입력에 추가합니다."""
+    """Schema 1.3의 선택 competition artifact URI를 입력에 추가합니다."""
 
     inputs["data"]["test_manifest_uri"] = "artifacts/data/test_manifest.json"
     inputs["evaluate"]["submission_uri"] = (
         "artifacts/evaluate/exp-0001/submission.csv"
+    )
+    inputs["evaluate"]["test_predictions_uri"] = (
+        "artifacts/evaluate/exp-0001/test_predictions.json"
     )
 
 
@@ -134,7 +137,7 @@ def test_legacy_run_without_optional_artifacts_still_succeeds(local_run):
     assert record_uri == "artifacts/registry/exp-0001/experiment_record.json"
 
     record = json.loads((repo_root / record_uri).read_text(encoding="utf-8"))
-    assert record["schema_version"] == "1.2"
+    assert record["schema_version"] == "1.3"
     assert record["run_id"] == "exp-0001"
     assert record["seed"] == 42
     assert set(record["pipelines"]) == {"data", "train", "evaluate"}
@@ -182,10 +185,12 @@ def test_records_and_hashes_optional_artifacts_deterministically(tmp_path: Path)
         "metrics_uri",
         "predictions_uri",
         "submission_uri",
+        "test_predictions_uri",
     ]
     for pipeline, key in (
         ("data", "test_manifest_uri"),
         ("evaluate", "submission_uri"),
+        ("evaluate", "test_predictions_uri"),
     ):
         entry = record["pipelines"][pipeline][key]
         expected = hashlib.sha256(
@@ -195,8 +200,8 @@ def test_records_and_hashes_optional_artifacts_deterministically(tmp_path: Path)
         assert entry["sha256"] == expected
         assert entry["size_bytes"] == (tmp_path / inputs[pipeline][key]).stat().st_size
         assert entry["verified"] is True
-    assert record["verification"]["artifacts_checked"] == 11
-    assert record["verification"]["artifacts_hashed"] == 11
+    assert record["verification"]["artifacts_checked"] == 12
+    assert record["verification"]["artifacts_hashed"] == 12
 
 
 def test_record_uri_is_repository_relative(local_run):

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 
 # 각 pipeline이 registry에 넘겨야 하는 artifact key입니다. 값은 모두 str이며,
 # `*_uri`로 끝나는 key만 실제 artifact 파일을 가리킵니다.
@@ -44,7 +44,9 @@ REQUIRED_ARTIFACT_KEYS: dict[str, tuple[str, ...]] = {
 # 없어도 되며, 있으면 선언 순서대로 검증하고 record에 기록합니다.
 OPTIONAL_ARTIFACT_KEYS: dict[str, tuple[str, ...]] = {
     "data": ("test_manifest_uri",),
-    "evaluate": ("submission_uri",),
+    # `test_predictions_uri`는 제출한 것과 같은 예측을 담은 JSON입니다. 여러 실행의
+    # 예측을 합칠 때 무엇을 합쳤는지 기록에 남아 있어야 결과를 재현할 수 있습니다.
+    "evaluate": ("submission_uri", "test_predictions_uri"),
 }
 
 # config snapshot에 그대로 남기면 안 되는 값의 key 조각입니다.
