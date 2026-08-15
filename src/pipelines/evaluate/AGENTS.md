@@ -12,7 +12,7 @@ You own `src/pipelines/evaluate/`. Never edit or import another pipeline; `src/c
 
 ## Interface
 
-`run(config) -> dict` is the only public symbol. On success `artifacts` carries exactly `run_id`, `metrics_uri`, `predictions_uri`, plus `submission_uri` and `test_predictions_uri` when `test_manifest_uri` is present. On failure, `status="error"` and `artifacts={}` — a partial success is never `ok`.
+`run(config) -> dict` is the only public symbol. On success `artifacts` carries exactly `run_id`, `metrics_uri`, `predictions_uri`, plus `submission_uri` and `test_predictions_uri` when `test_manifest_uri` is set. On failure, `status="error"` and `artifacts={}` — a partial success is never `ok`.
 
 Settings come from `config["evaluate"]`, falling back to `config["inputs"]`. `predictions_input_uri` skips validation inference; `test_predictions_input_uris` fuses saved test predictions instead of inferring them and is the one path needing no checkpoint. In dummy mode with no `config["evaluate"]`, evaluation is skipped.
 
@@ -24,7 +24,7 @@ A metrics file and a predictions file under the output directory, plus `submissi
 
 Two rules are easy to undo by accident:
 - Stored boxes and scores are **not rounded**. Rounding would make a re-run over the saved predictions give different numbers.
-- A metric that was not computed is `null`, never `0.0`, so "not measured" stays distinct from "zero".
+- A metric that was not computed is `null`, never `0.0`, keeping "not measured" distinct from "zero".
 
 ## Run and Test
 
@@ -43,19 +43,19 @@ Fixtures are contract-shaped with no upstream pipeline; inference on CPU.
 - Progress goes to stderr as `evaluate.progress/1` JSON Lines; the emitter never raises nor writes stdout.
 - `precision50`/`recall50` are aggregate counts at `score >= 0.5`, not the last PR-curve point. A GUI label change is requested in `contracts/proposals/`.
 - `analysis.py` diagnoses: threshold sweep, best F1, confusion matrix, per-class summary, per-image failures, false-positive causes. All from `evalImgs`; extra IoU from `maskUtils.iou`. Four traps:
-  - `gtMatches` reflects matching **before** the score filter, so judging misses with it erases ground truth a low-score detection touched. Use the ids surviving detections claimed.
+  - `gtMatches` reflects matching **before** the score filter, so judging misses with it erases ground truth a low-score detection touched. Use ids surviving detections claimed.
   - The confusion matrix needs the `useCats = 0` pass; the default pass matches within a class and cannot show a mix-up.
   - False positives bucket strongest-overlap-first: `duplicate`, `classification`, `localization`, `background`; `duplicate` would otherwise inflate another. `LOCALIZATION_IOU_FLOOR` keeps far-off boxes out of `localization`.
   - `per_class_summary` only re-sorts `per_class`: `truth_count` splits the groups, `ap = null` is never read as 0, and it is not IoU-keyed.
-- Competition runs use the same validation IoU thresholds; test labels and metrics are never accepted or produced.
-- `test_predictions.json` carries the **same rows as the submission CSV**, so a later stage reads boxes as numbers instead of re-parsing CSV. Written whenever a test manifest is given. For more fusion candidates than the four a submission keeps, raise `max_detections_per_image`; that run's CSV is then unsubmittable, which is the point. It records the excluded ids, or a reader takes a dropped class for a miss.
-- `evaluate.test_predictions_input_uris` fuses runs' `test_predictions.json` into one submission (`fusion.py`), then filters it like an inferred one. Inputs must name a file once and cover the **same images** — an id check alone lets another test set with matching ids through. Scores scale by how many runs agreed, each counted once at its best box. `fused_from` records the inputs.
+- Competition runs use the validation IoU thresholds; test labels and metrics are never accepted or produced.
+- `test_predictions.json` carries the **same rows as the submission CSV**, so a later stage reads boxes as numbers instead of re-parsing CSV. Written whenever a test manifest is given. For more fusion candidates than the four a submission keeps, raise `max_detections_per_image`; that CSV is then unsubmittable, which is the point. It records the excluded ids, or a reader takes a dropped class for a miss.
+- `evaluate.test_predictions_input_uris` fuses runs' `test_predictions.json` into one submission (`fusion.py`), then filters it like an inferred one. Each input names a **checkpoint** and a manifest matching this run's, by storage identity. **A fusion result cannot be an input** — re-fusing would count runs as files. Scores scale by how many runs agreed, each counted once at its best box. `fused_from` records them.
 - `evaluate.submission_excluded_category_ids` drops those categories from the **submission CSV only**, inside `filter_predictions` *before* the cap so the 4 slots go to scorable rows. Test call only. Default empty changes nothing.
 - `evaluate.metrics_excluded_category_ids` drops them from **validation scoring only**, so local mAP averages the classes the competition scores. It also filters *before* the cap. Ground-truth images stay — dropping one turns its predictions into false positives — and saved predictions keep every row. Default empty changes nothing.
 - Identical output names are rejected before anything runs.
 - If a later write fails, only files **this run created** go; S3 objects are never auto-deleted.
 - Every failure is an `EvaluateError` subclass returned as `status="error"`, never raised out of `run()`.
-- The checkpoint payload is a contract with train. If it does not match, stop with a clear error, never guess.
+- The checkpoint payload is a contract with train. If it does not match, stop with a clear error.
 - `mmdetection_backend.py` reads `backend="mmdetection"` checkpoints; no `backend` key still means torchvision, and any other value stops. Contract: `contracts/proposals/012-mmdetection-checkpoint-inference.md`. Five traps:
   - Detector settings are **copied** from train — the boundary forbids importing it. A changed module layout fails loudly on `state_dict`, but a drift in **values only** (thresholds, normalization constants) still loads and only lowers the score. `model_config.schema_version` covers that; raising it is train's duty.
   - MMDetection gets `num_classes - 1`. Predicted labels `0..N-1` get 1 added back to repository labels `1..N` before the `category_ids` lookup, so `category_ids[0]` stays the background slot.

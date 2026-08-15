@@ -1325,18 +1325,25 @@ def test_fusion_refuses_a_prediction_that_does_not_say_which_test_set_it_saw(
     assert "어느 test manifest를 본 예측인지" in result["message"]
 
 
-def _write_fused_input(
-    repository_root: Path, name: str, checkpoints: list[str | None]
-) -> str:
-    """합친 결과처럼 생긴 입력을 만듭니다."""
+def test_a_fusion_result_cannot_be_fused_again(
+    base_config: dict, repository_root: Path
+):
+    """합친 결과를 다시 합치지 않습니다.
+
+    그러면 실행 수를 **입력 파일 수**로 세게 되어, 안에 다섯 실행이 들어 있는 파일과
+    한 실행짜리 파일이 같은 한 표가 됩니다. 확신도가 어긋나 제출이 조용히 달라집니다.
+    평평하게 합치려면 원본 예측들을 한 번에 주면 됩니다.
+    """
+    _add_test_manifest(base_config, repository_root)
     write_json(
-        repository_root / f"data/test/{name}.json",
+        repository_root / "data/test/already_fused.json",
         {
             "test_manifest_uri": "data/test/instances.json",
             "checkpoint_uri": None,
+            "prediction_source": "fusion",
             "fused_from": [
-                {"uri": f"{name}-{index}.json", "checkpoint_uri": checkpoint}
-                for index, checkpoint in enumerate(checkpoints)
+                {"uri": "x.json", "checkpoint_uri": "ckpt/one.pt"},
+                {"uri": "y.json", "checkpoint_uri": "ckpt/two.pt"},
             ],
             "predictions": [
                 {"image_id": 10, "category_id": 7,
@@ -1344,119 +1351,15 @@ def _write_fused_input(
             ],
         },
     )
-    return f"data/test/{name}.json"
-
-
-@pytest.mark.parametrize(
-    ("left", "right"),
-    [
-        pytest.param(["ckpt/a.pt", "ckpt/b.pt"], ["ckpt/a.pt", "ckpt/b.pt"],
-                     id="같은-것들을-합친-둘"),
-        pytest.param(["ckpt/a.pt", "ckpt/b.pt"], ["ckpt/b.pt", "ckpt/c.pt"],
-                     id="일부만-겹치는-둘"),
-        pytest.param(["ckpt/a.pt"], ["./ckpt/a.pt"], id="같은-checkpoint를-다른-표기로"),
-    ],
-)
-def test_fused_inputs_that_share_a_checkpoint_are_refused(
-    base_config: dict, repository_root: Path, left: list[str], right: list[str]
-):
-    """한 checkpoint가 두 표를 갖지 않게 합니다.
-
-    합친 파일끼리는 완전히 같지 않아도 **일부만 겹치면** 그 checkpoint가 두 번
-    세어집니다. 중첩 융합에서 조용히 결과를 왜곡합니다.
-    """
-    _add_test_manifest(base_config, repository_root)
     base_config["evaluate"]["test_predictions_input_uris"] = [
-        _write_fused_input(repository_root, "fused_left", left),
-        _write_fused_input(repository_root, "fused_right", right),
+        "data/test/already_fused.json",
+        _write_fusion_input(repository_root, "plain_one", [10, 20], checkpoint="ckpt/z.pt"),
     ]
 
     result = run(base_config)
 
     assert result["status"] == "error"
-    assert "같은 실행의 예측이 두 번" in result["message"]
-
-
-def test_fused_inputs_that_share_nothing_are_accepted(
-    base_config: dict, repository_root: Path
-):
-    """겹치는 checkpoint가 없으면 합칩니다. 막기만 하면 쓸모가 없습니다."""
-    _add_test_manifest(base_config, repository_root)
-    base_config["inputs"]["train"].pop("best_checkpoint_uri")
-    base_config["evaluate"]["test_predictions_input_uris"] = [
-        _write_fused_input(repository_root, "fused_one", ["ckpt/a.pt", "ckpt/b.pt"]),
-        _write_fused_input(repository_root, "fused_two", ["ckpt/c.pt"]),
-    ]
-
-    result = run(base_config)
-
-    assert result["status"] == "ok", result["message"]
-    document = _read_json(repository_root, result["artifacts"]["test_predictions_uri"])
-    # 안쪽 checkpoint 셋이 모두 계보에 이어져야 다음 융합이 겹침을 볼 수 있습니다.
-    # 이것이 없으면 같은 checkpoint를 두 번 합쳐도 알아채지 못합니다.
-    sources = [entry["source_checkpoint_uris"] for entry in document["fused_from"]]
-    assert [len(entry) for entry in sources] == [2, 1]
-    assert len({source for entry in sources for source in entry}) == 3
-
-
-@pytest.mark.parametrize(
-    "broken",
-    [
-        pytest.param([], id="빈-lineage"),
-        pytest.param([None], id="checkpoint-없는-항목"),
-    ],
-)
-def test_a_fused_input_that_cannot_say_its_sources_is_refused(
-    base_config: dict, repository_root: Path, broken: list
-):
-    """무엇의 증거인지 말하지 못하는 파일은 거절합니다.
-
-    저장 위치로 대신하면 복사본이 서로 다른 증거로 지나갑니다.
-    """
-    _add_test_manifest(base_config, repository_root)
-    base_config["evaluate"]["test_predictions_input_uris"] = [
-        _write_fused_input(repository_root, "broken", broken),
-    ]
-
-    result = run(base_config)
-
-    assert result["status"] == "error"
-    assert "증거" in result["message"]
-
-
-def test_the_same_test_set_spelled_differently_is_still_the_same(
-    base_config: dict, repository_root: Path
-):
-    """사진을 다른 표기로 가리켜도 같은 시험지입니다.
-
-    경로를 글자로만 견주면 `./0010.jpg`와 `0010.jpg`가 다른 시험지로 보여 멀쩡한
-    조합을 거절합니다. 저장 계층에 물어봐야 합니다.
-    """
-    _add_test_manifest(base_config, repository_root)
-    base_config["inputs"]["train"].pop("best_checkpoint_uri")
-    write_json(
-        repository_root / "data/test/alias_instances.json",
-        {
-            "images": [
-                {"id": 20, "file_name": "./0020.jpg", "width": 100, "height": 100},
-                {"id": 10, "file_name": "./0010.jpg", "width": 100, "height": 100},
-            ],
-            "annotations": [],
-            "categories": [{"id": 3, "name": "pill-a"}, {"id": 7, "name": "pill-b"}],
-        },
-    )
-    base_config["evaluate"]["test_predictions_input_uris"] = [
-        _write_fusion_input(repository_root, "plain", [10, 20], checkpoint="ckpt/p.pt"),
-        _write_fusion_input(
-            repository_root, "aliased", [10, 20],
-            checkpoint="ckpt/q.pt",
-            manifest_uri="data/test/alias_instances.json",
-        ),
-    ]
-
-    result = run(base_config)
-
-    assert result["status"] == "ok", result["message"]
+    assert "합친 결과를 다시 합칠 수는 없습니다" in result["message"]
 
 
 def test_two_manifests_pointing_at_one_image_file_are_the_same_test_set(
