@@ -183,6 +183,7 @@ def test_run_writes_an_index_entry_next_to_the_record(local_run):
     assert summary["artifacts"]["metrics_uri"] == inputs["evaluate"]["metrics_uri"]
     assert summary["artifacts"]["submission_uri"] is None
     assert summary["artifacts"]["test_manifest_uri"] is None
+    assert summary["artifacts"]["test_predictions_uri"] is None
 
 
 def test_unreadable_metrics_file_does_not_fail_the_run(tmp_path: Path):
