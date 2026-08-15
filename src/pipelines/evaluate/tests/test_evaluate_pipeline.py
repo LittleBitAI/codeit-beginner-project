@@ -1173,6 +1173,7 @@ def _write_fusion_input(
     [
         pytest.param("same-path", id="같은-파일을-두-번"),
         pytest.param("copy", id="같은-실행을-다른-경로로"),
+        pytest.param("alias", id="같은-checkpoint를-다른-표기로"),
     ],
 )
 def test_the_same_run_cannot_be_fused_with_itself(
@@ -1186,11 +1187,14 @@ def test_the_same_run_cannot_be_fused_with_itself(
     """
     _add_test_manifest(base_config, repository_root)
     first = _write_fusion_input(repository_root, "one", [10, 20], checkpoint="ckpt/a.pt")
-    other = (
-        f"./{first}"
-        if second == "same-path"
-        else _write_fusion_input(repository_root, "copy", [10, 20], checkpoint="ckpt/a.pt")
-    )
+    if second == "same-path":
+        other = f"./{first}"
+    else:
+        # `alias`는 같은 checkpoint를 다른 표기로 적습니다. 글자만 견주면 놓칩니다.
+        checkpoint = "./ckpt/a.pt" if second == "alias" else "ckpt/a.pt"
+        other = _write_fusion_input(
+            repository_root, second, [10, 20], checkpoint=checkpoint
+        )
     base_config["evaluate"]["test_predictions_input_uris"] = [first, other]
 
     result = run(base_config)
@@ -1208,18 +1212,23 @@ def test_fusion_refuses_a_prediction_from_another_test_set(
     각 파일이 적어 둔 manifest를 실제로 읽어 견줍니다.
     """
     _add_test_manifest(base_config, repository_root)
+    # **id는 같고 사진 크기만 다른** 시험지입니다. id 집합만 견주면 통과합니다.
     write_json(
         repository_root / "data/test/other_instances.json",
         {
-            "images": [{"id": 10, "file_name": "10.png", "width": 100, "height": 100}],
+            "images": [
+                {"id": 20, "file_name": "20.jpg", "width": 640, "height": 480},
+                {"id": 10, "file_name": "10.jpg", "width": 640, "height": 480},
+            ],
             "annotations": [],
-            "categories": [{"id": 7, "name": "pill-b"}],
+            "categories": [{"id": 3, "name": "pill-a"}, {"id": 7, "name": "pill-b"}],
         },
     )
     base_config["evaluate"]["test_predictions_input_uris"] = [
         _write_fusion_input(repository_root, "ours", [10, 20]),
         _write_fusion_input(
-            repository_root, "theirs", [10], manifest_uri="data/test/other_instances.json"
+            repository_root, "theirs", [10, 20],
+            manifest_uri="data/test/other_instances.json",
         ),
     ]
 
@@ -1264,7 +1273,8 @@ def test_a_fused_file_records_what_it_was_fused_from(
     앙상블인지 되짚을 수 없습니다.
     """
     _add_test_manifest(base_config, repository_root)
-    base_config["inputs"]["train"].pop("best_checkpoint_uri")
+    # checkpoint 설정을 **남겨 둡니다.** 지우면 합친 결과가 무관한 checkpoint를
+    # 물려받는지 확인할 수 없습니다.
     uris = [
         _write_fusion_input(repository_root, "left", [10, 20]),
         _write_fusion_input(repository_root, "right", [10, 20]),
@@ -1284,6 +1294,9 @@ def test_a_fused_file_records_what_it_was_fused_from(
         "checkpoints/right.pt",
     ]
     assert document["fusion_iou_threshold"] is not None
+    # 합친 결과는 어느 checkpoint의 것도 아닙니다. 설정에 있던 값을 물려받으면 다음
+    # 융합이 그것을 모델 신원으로 써서 서로 다른 증거를 하나로 셉니다.
+    assert document["checkpoint_uri"] is None
 
 
 def test_fusion_refuses_a_prediction_that_does_not_say_which_test_set_it_saw(
@@ -1310,3 +1323,39 @@ def test_fusion_refuses_a_prediction_that_does_not_say_which_test_set_it_saw(
 
     assert result["status"] == "error"
     assert "어느 test manifest를 본 예측인지" in result["message"]
+
+
+def test_two_copies_of_one_fusion_result_are_not_two_runs(
+    base_config: dict, repository_root: Path
+):
+    """같은 것들을 합친 두 파일은 같은 증거입니다.
+
+    합친 파일에는 checkpoint가 없어 저장 위치로 보면 복사본이 서로 다른 실행으로
+    세어집니다. 무엇을 합쳤는지로 봐야 걸립니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    for name in ("fused_a", "fused_b"):
+        write_json(
+            repository_root / f"data/test/{name}.json",
+            {
+                "test_manifest_uri": "data/test/instances.json",
+                "checkpoint_uri": None,
+                "fused_from": [
+                    {"uri": "x.json", "checkpoint_uri": "ckpt/one.pt"},
+                    {"uri": "y.json", "checkpoint_uri": "ckpt/two.pt"},
+                ],
+                "predictions": [
+                    {"image_id": 10, "category_id": 7,
+                     "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}
+                ],
+            },
+        )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/fused_a.json",
+        "data/test/fused_b.json",
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "같은 실행의 예측이 두 번" in result["message"]

@@ -209,6 +209,7 @@ def _load_fusion_inputs(
     uris: Sequence[str],
     *,
     test_records: Sequence[Mapping[str, Any]],
+    test_category_ids: frozenset[int],
     test_manifest_uri: str,
 ) -> tuple[list[list[dict[str, Any]]], list[dict[str, Any]]]:
     """합칠 예측을 읽고, 합쳐도 되는 것들인지 확인합니다.
@@ -218,15 +219,29 @@ def _load_fusion_inputs(
     **같은 시험지를 봤는가.** 예측에 나온 image id만 보면 안 됩니다. 아무것도 검출하지
     못한 이미지는 목록에 없는 것이 정상이라 멀쩡한 입력을 거절하고, 같은 id를 쓰는
     다른 시험지는 그대로 지나갑니다. 각 파일이 적어 둔 test manifest를 **실제로 읽어**
-    image id 집합을 견줍니다. manifest 검증이 `file_name`의 숫자와 image id가 같음을
-    이미 강제하므로, 그 집합이 곧 내용입니다.
+    내용을 견줍니다. id만으로는 부족합니다 — 같은 id에 다른 사진, 다른 크기, 다른
+    category를 담은 시험지가 있을 수 있어 **그것까지 함께** 봅니다.
 
-    **서로 다른 실행인가.** 같은 파일을 두 곳에 복사해 넣으면 저장 위치만으로는
-    갈라내지 못합니다. 그 예측을 만든 **checkpoint**로 봅니다. 그것이 모델의 신원이고,
-    같은 checkpoint는 몇 번을 넣어도 한 실행입니다.
+    **서로 다른 실행인가.** 그 예측을 만든 **checkpoint**로 봅니다. 그것이 모델의
+    신원이고, 같은 checkpoint는 몇 번을 넣어도 한 실행입니다. 표기가 달라도 같은
+    파일이면 걸리도록 저장 계층에 물어봅니다. 합친 파일에는 checkpoint가 없으므로
+    **무엇을 합쳤는지**로 봅니다 — 같은 것들을 합친 둘은 같은 증거입니다.
     """
 
-    own_images = {record["image_id"] for record in test_records}
+    def manifest_content(
+        records: Sequence[Mapping[str, Any]], category_ids: frozenset[int]
+    ) -> tuple[Any, ...]:
+        """시험지의 내용을 견줄 수 있는 값으로 만듭니다."""
+
+        return (
+            frozenset(
+                (record["image_id"], record["image_uri"], record["width"], record["height"])
+                for record in records
+            ),
+            category_ids,
+        )
+
+    own_content = manifest_content(test_records, test_category_ids)
     own_manifest = store.artifact_identity(test_manifest_uri)
     checked_manifests: set[tuple[str, ...]] = {own_manifest}
 
@@ -248,17 +263,31 @@ def _load_fusion_inputs(
             )
         declared_target = store.artifact_identity(declared)
         if declared_target not in checked_manifests:
-            other_records, _ = load_test_manifest(store, declared)
-            if {record["image_id"] for record in other_records} != own_images:
+            other_records, other_categories = load_test_manifest(store, declared)
+            if manifest_content(other_records, other_categories) != own_content:
                 raise ConfigurationError(
                     f"{uri}는 다른 시험지를 본 예측입니다: {declared}"
                 )
             checked_manifests.add(declared_target)
 
-        # checkpoint가 모델의 신원입니다. 합친 파일을 다시 합치는 경우에는 없으므로
-        # 그때는 저장 위치로 갈라냅니다.
+        # checkpoint가 모델의 신원입니다. 표기가 달라도 같은 파일이면 한 실행이므로
+        # 저장 계층에 물어봅니다. 합친 파일에는 checkpoint가 없으니 그때는 **무엇을
+        # 합쳤는지**로 봅니다 — 같은 것들을 합친 둘은 같은 증거입니다.
         checkpoint = document.get("checkpoint_uri")
-        model = str(checkpoint) if checkpoint else str(store.artifact_identity(uri))
+        if checkpoint:
+            model = str(store.artifact_identity(str(checkpoint)))
+        else:
+            sources = document.get("fused_from")
+            if isinstance(sources, Sequence) and not isinstance(sources, (str, bytes)):
+                model = str(
+                    sorted(
+                        str(entry.get("checkpoint_uri"))
+                        for entry in sources
+                        if isinstance(entry, Mapping)
+                    )
+                )
+            else:
+                model = str(store.artifact_identity(uri))
         if model in seen_models:
             raise ConfigurationError(
                 f"같은 실행의 예측이 두 번 있습니다: {seen_models[model]}와 {uri}"
@@ -607,6 +636,7 @@ def run(config: dict) -> dict:
                 store,
                 settings.test_predictions_input_uris,
                 test_records=test_records,
+                test_category_ids=test_category_ids,
                 test_manifest_uri=str(settings.test_manifest_uri),
             )
             fused_test_predictions = fuse_predictions(groups)
@@ -758,6 +788,9 @@ def run(config: dict) -> dict:
                 "prediction_source": (
                     "fusion" if fused_test_predictions is not None else "checkpoint"
                 ),
+                # 합친 결과는 어느 checkpoint의 것도 아닙니다. 설정에 있던 값을 그대로
+                # 남기면 다음 융합이 그 무관한 checkpoint를 모델 신원으로 씁니다.
+                **({"checkpoint_uri": None} if fused_test_predictions is not None else {}),
                 "predictions_input_uri": None,
                 "fused_from": fusion_lineage or None,
                 "fusion_iou_threshold": (
