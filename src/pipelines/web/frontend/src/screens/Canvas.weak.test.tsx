@@ -407,6 +407,73 @@ describe('약한 class 표', () => {
     expect(screen.queryByText('약하지 않음')).toBeNull();
   });
 
+  it('그 실행의 class 목록에 아예 없는 것을 약하지 않다고 적지 않는다', async () => {
+    // run-b는 요약이 있고 잘리지도 않았는데 가바토파정이 어느 목록에도 없습니다.
+    // class map이 다른 dataset을 같은 이름으로 다시 만든 경우입니다.
+    const other = {
+      ...experiment(),
+      experiment_id: 'run-b',
+      run_id: 'run-b',
+      per_class_summary: {
+        min_truth_count: 5,
+        top_n: 10,
+        counts: { weak: 1, sparse: 0, unmeasured: 0 },
+        weak: [{ category_id: 99999, name: '다른 알약', ap: 0.7 }],
+        sparse: [],
+        unmeasured: [],
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ experiments: [experiment(), other], missing: [], curves: {} }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    show([record(), record({ runId: 'run-b' })], ['run-a', 'run-b']);
+
+    expect(await screen.findByText('가바토파정 100mg')).toBeTruthy();
+    // 두 실행이 서로의 class를 모르므로 여러 칸이 그렇게 적힙니다.
+    expect(screen.getAllByText('분류 없음').length).toBeGreaterThan(0);
+    expect(screen.queryByText('약하지 않음')).toBeNull();
+  });
+
+  it('여러 실행의 표본 부족 수를 고유 class 수인 것처럼 적지 않는다', async () => {
+    // 같은 class가 두 실행에서 sparse면 합계는 2건입니다. "class 2개"라고 적으면
+    // 서로 다른 알약 둘이 있는 것처럼 읽힙니다.
+    const sparseOnly = (runId: string) => ({
+      ...experiment(),
+      experiment_id: runId,
+      run_id: runId,
+      per_class_summary: {
+        min_truth_count: 5,
+        top_n: 10,
+        counts: { weak: 0, sparse: 1, unmeasured: 0 },
+        weak: [],
+        sparse: [{ category_id: 16548, name: '가바토파정 100mg', ap: 0.4 }],
+        unmeasured: [],
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            experiments: [sparseOnly('run-a'), sparseOnly('run-b')],
+            missing: [],
+            curves: {},
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    );
+    show([record(), record({ runId: 'run-b' })], ['run-a', 'run-b']);
+
+    expect(await screen.findByText(/실행별 합계 2건/)).toBeTruthy();
+  });
+
   it('팀원이 돌린 실행에는 로그 링크를 내지 않는다', async () => {
     show([record({ jobId: null })]);
 
