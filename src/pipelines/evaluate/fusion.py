@@ -34,29 +34,34 @@ def _iou(first: Sequence[float], second: Sequence[float]) -> float:
 
 
 class _Cluster:
-    """같은 알약을 가리킨다고 본 상자들입니다."""
+    """같은 알약을 가리킨다고 본 상자들입니다.
+
+    **실행 하나가 한 자리를 여러 번 찾아도 한 번만 셉니다.** 그러지 않으면 그 실행이
+    좌표와 평균 확신도를 여러 표로 끌어당겨 융합을 지배하고, 자기 자신과 동의한
+    것처럼 보입니다. 같은 실행이 겹쳐 낸 것 중에서는 가장 확신한 상자만 남깁니다.
+    """
 
     def __init__(self) -> None:
-        self.boxes: list[tuple[Sequence[float], float]] = []
-        # 어느 실행이 이 자리를 찾았는지입니다. 한 실행이 두 번 찾아도 한 번으로
-        # 셉니다 — 그러지 않으면 자기 자신과 동의해 확신도가 올라갑니다.
-        self.sources: set[int] = set()
+        self.best_by_source: dict[int, tuple[Sequence[float], float]] = {}
 
     def add(self, bbox: Sequence[float], score: float, source: int) -> None:
-        self.boxes.append((bbox, score))
-        self.sources.add(source)
+        current = self.best_by_source.get(source)
+        if current is None or score > current[1]:
+            self.best_by_source[source] = (bbox, score)
+
+    @property
+    def _members(self) -> list[tuple[Sequence[float], float]]:
+        return list(self.best_by_source.values())
 
     @property
     def box(self) -> list[float]:
         """확신도로 가중 평균한 상자입니다."""
 
-        total = sum(score for _, score in self.boxes)
+        members = self._members
+        total = sum(score for _, score in members)
         if total <= 0.0:
-            count = len(self.boxes)
-            return [sum(bbox[i] for bbox, _ in self.boxes) / count for i in range(4)]
-        return [
-            sum(bbox[i] * score for bbox, score in self.boxes) / total for i in range(4)
-        ]
+            return [sum(bbox[i] for bbox, _ in members) / len(members) for i in range(4)]
+        return [sum(bbox[i] * score for bbox, score in members) / total for i in range(4)]
 
     def score(self, source_count: int) -> float:
         """평균 확신도를 **동의한 실행 수**로 깎습니다.
@@ -65,8 +70,9 @@ class _Cluster:
         그대로 올라옵니다.
         """
 
-        average = sum(score for _, score in self.boxes) / len(self.boxes)
-        return average * min(len(self.sources), source_count) / source_count
+        members = self._members
+        average = sum(score for _, score in members) / len(members)
+        return average * min(len(members), source_count) / source_count
 
 
 def fuse_predictions(
@@ -105,14 +111,19 @@ def fuse_predictions(
         entries.sort(key=lambda entry: -entry[0])
         clusters: list[_Cluster] = []
         for score, source, bbox in entries:
+            # 임계치를 넘는 **첫** cluster가 아니라 **가장 많이 겹치는** cluster에
+            # 붙입니다. 먼저 만들어졌다는 이유로 덜 가까운 자리에 묶이면 좌표와
+            # 확신도가 달라지고, 상위 4개가 뒤바뀝니다.
+            best: _Cluster | None = None
+            best_overlap = iou_threshold
             for cluster in clusters:
-                if _iou(cluster.box, bbox) > iou_threshold:
-                    cluster.add(bbox, score, source)
-                    break
-            else:
-                cluster = _Cluster()
-                cluster.add(bbox, score, source)
-                clusters.append(cluster)
+                overlap = _iou(cluster.box, bbox)
+                if overlap > best_overlap:
+                    best, best_overlap = cluster, overlap
+            if best is None:
+                best = _Cluster()
+                clusters.append(best)
+            best.add(bbox, score, source)
 
         for cluster in clusters:
             fused.append(

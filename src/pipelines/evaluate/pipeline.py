@@ -520,13 +520,36 @@ def run(config: dict) -> dict:
         # 섞으면 거기서 걸립니다.
         fused_test_predictions: list[dict[str, Any]] | None = None
         if test_records is not None and settings.test_predictions_input_uris:
+            # 같은 파일을 두 번 주면 서로 다른 실행으로 세어 **자기 자신과 동의**하게
+            # 됩니다. 표기가 달라도 같은 파일이면 걸리도록 저장 계층에 물어봅니다.
+            seen_targets: dict[tuple[str, ...], str] = {}
+            for uri in settings.test_predictions_input_uris:
+                target = store.artifact_identity(uri)
+                if target in seen_targets:
+                    raise ConfigurationError(
+                        "합칠 예측에 같은 파일이 두 번 있습니다: "
+                        f"{seen_targets[target]}와 {uri}"
+                    )
+                seen_targets[target] = uri
+
             test_image_keys = {record["image_key"] for record in test_records}
-            fused_test_predictions = fuse_predictions(
-                [
-                    load_predictions(store, uri, known_image_keys=test_image_keys)
-                    for uri in settings.test_predictions_input_uris
-                ]
-            )
+            groups = [
+                load_predictions(store, uri, known_image_keys=test_image_keys)
+                for uri in settings.test_predictions_input_uris
+            ]
+            # 각 파일이 **같은 이미지들**을 봤는지 확인합니다. `load_predictions`는
+            # manifest에 없는 id만 막을 뿐이라, 다른 시험지가 같은 id를 쓰거나 일부만
+            # 담고 있으면 그대로 지나갑니다.
+            covered = [
+                {str(prediction["image_key"]) for prediction in group} for group in groups
+            ]
+            for uri, keys in zip(settings.test_predictions_input_uris, covered):
+                if keys != covered[0]:
+                    raise ConfigurationError(
+                        "합칠 예측이 서로 다른 이미지를 담고 있습니다. 같은 시험지를 "
+                        f"본 예측만 합칠 수 있습니다: {settings.test_predictions_input_uris[0]}와 {uri}"
+                    )
+            fused_test_predictions = fuse_predictions(groups)
             progress.emit(
                 "test_predictions_fused",
                 sources=len(settings.test_predictions_input_uris),
@@ -668,11 +691,15 @@ def run(config: dict) -> dict:
                 # 어느 test manifest를 본 예측인지 적습니다. 이것이 없으면 서로 다른
                 # dataset 판의 예측을 image_id만 보고 섞어도 조용히 지나갑니다.
                 "test_manifest_uri": settings.test_manifest_uri,
-                # test 예측은 **언제나** checkpoint 추론으로 만듭니다. validation이
-                # 저장된 예측을 읽었더라도 그렇습니다. common_fields의 출처를 그대로
-                # 두면 이 파일이 "저장된 예측에서 왔다"고 잘못 말합니다.
-                "prediction_source": "checkpoint",
+                # 이 파일이 어디서 왔는지 적습니다. validation이 저장된 예측을
+                # 읽었더라도 추론한 test 예측은 checkpoint에서 옵니다. 합친 것이면
+                # 무엇을 합쳤는지까지 남겨야 재현할 수 있습니다 — 그것이 없으면
+                # 어느 실행들의 앙상블인지 되짚을 방법이 없습니다.
+                "prediction_source": (
+                    "fusion" if fused_test_predictions is not None else "checkpoint"
+                ),
                 "predictions_input_uri": None,
+                "fused_from": list(settings.test_predictions_input_uris) or None,
                 "bbox_format": "xywh",
                 # 제출에서 뺀 class가 있으면 이 파일에도 없습니다. 무엇이 빠졌는지
                 # 적어 두지 않으면 나중에 읽는 쪽이 모델이 못 맞힌 것으로 읽습니다.

@@ -1129,3 +1129,79 @@ def test_fusion_refuses_predictions_from_another_test_set(
 
     assert result["status"] == "error"
     assert "manifest에 없는 image_id" in result["message"]
+
+
+def _write_fusion_input(repository_root: Path, name: str, image_ids: list[int]) -> str:
+    write_json(
+        repository_root / f"data/test/{name}.json",
+        {
+            "predictions": [
+                {"image_id": image_id, "category_id": 7,
+                 "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}
+                for image_id in image_ids
+            ]
+        },
+    )
+    return f"data/test/{name}.json"
+
+
+def test_the_same_prediction_file_cannot_be_fused_with_itself(
+    base_config: dict, repository_root: Path
+):
+    """같은 파일을 두 번 주면 막습니다.
+
+    그대로 두면 서로 다른 실행으로 세어 자기 자신과 동의하고, 확신도가 근거 없이
+    올라갑니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    uri = _write_fusion_input(repository_root, "one", [10, 20])
+    base_config["evaluate"]["test_predictions_input_uris"] = [uri, f"./{uri}"]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "같은 파일이 두 번" in result["message"]
+
+
+def test_fusion_refuses_inputs_that_cover_different_images(
+    base_config: dict, repository_root: Path
+):
+    """서로 다른 이미지를 담은 예측은 합치지 않습니다.
+
+    manifest에 있는 id인지만 보면, 다른 시험지가 같은 id를 쓰거나 일부만 담고 있을 때
+    그대로 지나갑니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        _write_fusion_input(repository_root, "full", [10, 20]),
+        _write_fusion_input(repository_root, "partial", [10]),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "서로 다른 이미지" in result["message"]
+
+
+def test_a_fused_file_records_what_it_was_fused_from(
+    base_config: dict, repository_root: Path
+):
+    """합친 결과는 무엇을 합쳤는지 남깁니다.
+
+    `checkpoint`라고 적으면 checkpoint 없이 만든 실행과 모순되고, 어느 실행들의
+    앙상블인지 되짚을 수 없습니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    base_config["inputs"]["train"].pop("best_checkpoint_uri")
+    uris = [
+        _write_fusion_input(repository_root, "left", [10, 20]),
+        _write_fusion_input(repository_root, "right", [10, 20]),
+    ]
+    base_config["evaluate"]["test_predictions_input_uris"] = uris
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    document = _read_json(repository_root, result["artifacts"]["test_predictions_uri"])
+    assert document["prediction_source"] == "fusion"
+    assert document["fused_from"] == uris

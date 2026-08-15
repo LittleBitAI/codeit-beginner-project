@@ -12,7 +12,7 @@ You own `src/pipelines/evaluate/`. Never edit or import another pipeline; `src/c
 
 ## Interface
 
-`run(config) -> dict` is the only public symbol. On success `artifacts` carries exactly `run_id`, `metrics_uri`, and `predictions_uri`, plus `submission_uri` and `test_predictions_uri` when `test_manifest_uri` is present. On failure, `status="error"` and `artifacts={}` — a partial success is never reported as `ok`.
+`run(config) -> dict` is the only public symbol. On success `artifacts` carries exactly `run_id`, `metrics_uri`, `predictions_uri`, plus `submission_uri` and `test_predictions_uri` when `test_manifest_uri` is present. On failure, `status="error"` and `artifacts={}` — a partial success is never `ok`.
 
 Settings come from `config["evaluate"]`, falling back to `config["inputs"]`. `predictions_input_uri` skips validation inference; `test_predictions_input_uris` fuses saved test predictions instead of inferring them and is the one path needing no checkpoint. In dummy mode with no `config["evaluate"]`, evaluation is skipped.
 
@@ -48,9 +48,9 @@ Fixtures are contract-shaped with no upstream pipeline; inference on CPU.
   - False positives bucket strongest-overlap-first: `duplicate`, `classification`, `localization`, `background`; `duplicate` would otherwise inflate another. `LOCALIZATION_IOU_FLOOR` keeps far-off boxes out of `localization`.
   - `per_class_summary` only re-sorts `per_class`: `truth_count` splits the groups, `ap = null` is never read as 0, and it is not IoU-keyed.
 - Competition runs use the same validation IoU thresholds; test labels and metrics are never accepted or produced.
-- `test_predictions.json` carries the **same rows as the submission CSV**, so a later stage reads boxes as numbers instead of re-parsing CSV. Written whenever a test manifest is given. For more fusion candidates than the four a submission keeps, raise `max_detections_per_image`; that run's CSV is then unsubmittable, which is the point. It records the excluded ids, or a reader takes a dropped class for one the model missed.
-- `evaluate.test_predictions_input_uris` fuses runs' `test_predictions.json` into one submission (`fusion.py`), then filters it like an inferred one. Files go through `load_predictions`, so an image this manifest lacks is refused — that check, not a URI string, keeps test sets apart. Merged scores scale by **how many runs agreed**, a run counting once.
-- `evaluate.submission_excluded_category_ids` drops those categories from the **submission CSV only**, inside `filter_predictions` *before* the per-image cap so the 4 slots go to scorable rows. Test call only. Default empty changes nothing.
+- `test_predictions.json` carries the **same rows as the submission CSV**, so a later stage reads boxes as numbers instead of re-parsing CSV. Written whenever a test manifest is given. For more fusion candidates than the four a submission keeps, raise `max_detections_per_image`; that run's CSV is then unsubmittable, which is the point. It records the excluded ids, or a reader takes a dropped class for a miss.
+- `evaluate.test_predictions_input_uris` fuses runs' `test_predictions.json` into one submission (`fusion.py`), then filters it like an inferred one. Inputs must name a file once and cover the **same images** — an id check alone lets another test set with matching ids through. Scores scale by how many runs agreed, each counted once at its best box. `fused_from` records the inputs.
+- `evaluate.submission_excluded_category_ids` drops those categories from the **submission CSV only**, inside `filter_predictions` *before* the cap so the 4 slots go to scorable rows. Test call only. Default empty changes nothing.
 - `evaluate.metrics_excluded_category_ids` drops them from **validation scoring only**, so local mAP averages the classes the competition scores. It also filters *before* the cap. Ground-truth images stay — dropping one turns its predictions into false positives — and saved predictions keep every row. Default empty changes nothing.
 - Identical output names are rejected before anything runs.
 - If a later write fails, only files **this run created** go; S3 objects are never auto-deleted.
