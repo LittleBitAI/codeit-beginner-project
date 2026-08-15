@@ -153,7 +153,7 @@ describe('약한 class 표', () => {
     expect(screen.getByText('0.120')).toBeTruthy();
     expect(screen.queryByText('0.000')).toBeNull();
     // 그 자리에 무엇이 적히는지까지 봅니다. 안 적히는 것만 보면 빈 칸도 통과합니다.
-    expect(screen.getByText('못 잼')).toBeTruthy();
+    expect(screen.getByText('미측정')).toBeTruthy();
   });
 
   it('이 컴퓨터가 돌린 실행이면 그 job의 로그 화면으로 보낸다', async () => {
@@ -182,12 +182,18 @@ describe('약한 class 표', () => {
     };
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () =>
-        new Response(
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        // 두 실행을 실제로 요청했는지 봅니다. 하나만 보내도 통과하면 이 test는
+        // 비교가 아니라 fixture를 재는 것이 됩니다.
+        const body = String(init?.body ?? '');
+        if (!body.includes('run-a') || !body.includes('run-b')) {
+          throw new Error(`두 실행을 요청하지 않았습니다: ${body}`);
+        }
+        return new Response(
           JSON.stringify({ experiments: [experiment(), other], missing: [], curves: {} }),
           { status: 200, headers: { 'Content-Type': 'application/json' } },
-        ),
-      ),
+        );
+      }),
     );
     show([record(), record({ runId: 'run-b' })], ['run-a', 'run-b']);
 
@@ -196,9 +202,16 @@ describe('약한 class 표', () => {
     expect(screen.getAllByText('순위 밖').length).toBeGreaterThan(0);
   });
 
-  it('평가를 안 돌린 실행을 약하지 않다고 적지 않는다', async () => {
-    // per_class_summary가 아예 없는 실행입니다. 약한지 아닌지 말할 자료가 없습니다.
-    const notEvaluated = { ...experiment(), experiment_id: 'run-b', run_id: 'run-b' };
+  it('class 요약이 없는 실행을 약하지 않다고 적지 않는다', async () => {
+    // per_class_summary가 없는 실행입니다. 평가 전일 수도 있고, 평가는 했지만 이
+    // 요약이 생기기 전에 등록된 기록일 수도 있습니다. 여기서는 후자를 씁니다 —
+    // mAP는 있는데 "평가 없음"이라고 적으면 같은 화면이 서로 다른 말을 합니다.
+    const notEvaluated = {
+      ...experiment(),
+      experiment_id: 'run-b',
+      run_id: 'run-b',
+      metrics: { ...experiment().metrics, map: 0.51 },
+    };
     delete (notEvaluated as { per_class_summary?: unknown }).per_class_summary;
     vi.stubGlobal(
       'fetch',
@@ -213,7 +226,9 @@ describe('약한 class 표', () => {
 
     expect(await screen.findByText('가바토파정 100mg')).toBeTruthy();
     // 안 돌린 실행이 "약하지 않음"으로 보이면 그 실행이 가장 좋아 보입니다.
-    expect(screen.getAllByText('평가 없음').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('class 요약 없음').length).toBeGreaterThan(0);
+    // 평가를 안 했다고 단정하면 안 됩니다. mAP가 있는 옛 기록도 여기 걸립니다.
+    expect(screen.queryByText('평가 없음')).toBeNull();
     expect(screen.queryByText('약하지 않음')).toBeNull();
   });
 
