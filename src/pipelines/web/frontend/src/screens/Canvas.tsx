@@ -199,12 +199,14 @@ function settingRows(experiments: ExperimentSummary[]): Row[] {
  * class를 세로로 두고 실행을 가로로 두어, 어느 실행이 어느 알약을 개선했는지 한 줄로
  * 읽힙니다.
  *
- * 값이 없는 칸은 세 가지 뜻이 있고 **셋을 구분해서 적습니다.** evaluate가 주는 목록은
- * 상위 `top_n`개로 잘려 있어서, 목록에 없다고 "약하지 않다"고 말할 수 없기 때문입니다.
- * 그렇게 말해 버리면 실제로는 약한데 순위 밖인 class가 괜찮은 것으로 읽힙니다.
+ * 값이 없는 칸은 뜻이 여럿이라 **하나하나 구분해서 적습니다.** evaluate가 주는
+ * `weak`는 AP가 낮은 목록이 아니라 **정답이 충분한** class를 AP 순으로 자른 것이라,
+ * 거기 없다고 "약하지 않다"고 말할 수 없기 때문입니다. 그렇게 말해 버리면 잴 만하지
+ * 않았던 class가 괜찮은 것으로 읽힙니다.
  *
  * - 숫자: 그 실행에서 약했고 AP를 쟀습니다.
  * - `미측정`: 약한 목록에 있는데 AP를 재지 못했습니다.
+ * - `표본 부족`: 정답이 적어 AP를 믿을 수 없다고 evaluate가 따로 세어 둔 class입니다.
  * - `순위 밖`: 목록이 잘려 있어 약한지 아닌지 이 화면이 알 수 없습니다.
  * - `class 요약 없음`: 그 실행에는 class별 요약이 없어 말할 자료가 없습니다.
  *   평가 전일 수도, 이 요약이 생기기 전에 등록된 기록일 수도 있습니다.
@@ -225,11 +227,18 @@ function settingRows(experiments: ExperimentSummary[]): Row[] {
 function cell(
   values: Map<number, number | null>,
   id: number,
-  { truncated, summarized }: { truncated: boolean; summarized: boolean },
+  {
+    truncated,
+    summarized,
+    sparse,
+  }: { truncated: boolean; summarized: boolean; sparse: boolean },
 ): string {
   const value = values.get(id);
   if (typeof value === 'number') return value.toFixed(3);
   if (values.has(id)) return '미측정';
+  // 정답이 적어 AP를 믿을 수 없는 class입니다. evaluate가 weak와 따로 세어 둡니다.
+  // 이것을 "약하지 않음"으로 적으면 표본 부족을 성능 양호로 읽습니다.
+  if (sparse) return '표본 부족';
   // class 요약이 없으면 약한지 아닌지 말할 자료가 없습니다. "평가 없음"이라고는
   // 하지 않습니다 — 이 요약은 나중에 생긴 값이라, 평가는 했지만 그 전에 등록된
   // 기록도 여기 걸립니다. 같은 화면이 mAP를 보여 주면서 평가를 안 했다고 말하면
@@ -253,12 +262,20 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
    */
   if (names.size === 0) {
     const unsummarized = experiments.filter((item) => !item.per_class_summary);
+    const sparseTotal = measured.reduce(
+      (total, item) => total + (item.per_class_summary?.counts.sparse ?? 0),
+      0,
+    );
     return (
       <div style={{ marginTop: 34 }}>
         <div style={{ ...type.subTitle, color: color.text }}>약한 class</div>
         <div style={{ ...type.note, color: color.textMuted, marginTop: 6, maxWidth: '46em' }}>
+          {/* 여기 왔다는 것은 잰 실행 모두 weak가 비었다는 뜻입니다. weak는 AP가
+              낮은 목록이 아니라 **정답이 충분한** 목록이라, 비었으면 좋은 것이 아니라
+              잴 만한 class가 없었던 것입니다. */}
           {measured.length > 0 &&
-            `정답이 ${measured[0]?.per_class_summary?.min_truth_count}개 이상인 class 중 AP가 낮은 것이 없습니다.`}
+            `정답이 ${measured[0]?.per_class_summary?.min_truth_count}개 이상인 class가 없어 약한지 판단할 수 없습니다.`}
+          {sparseTotal > 0 && ` 정답이 적어 AP를 믿을 수 없는 class가 ${sparseTotal}개 있습니다.`}
           {unsummarized.length > 0 &&
             ` ${unsummarized.map((item) => item.run_id).join(', ')}에는 class별 요약이 없어 약한지 아닌지 알 수 없습니다. 평가를 다시 실행해 등록하면 채워집니다 — 등록만으로는 생기지 않습니다.`}
         </div>
@@ -283,6 +300,15 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
   /** 그 실행에 class별 요약이 있는지. 없으면 약한지 아닌지 말할 자료가 없습니다. */
   const summarized = experiments.map((item) => Boolean(item.per_class_summary));
   /**
+   * 정답이 적어 AP를 믿을 수 없다고 evaluate가 따로 세어 둔 class들입니다.
+   *
+   * `weak`에는 AP 임계값이 없습니다. 정답이 충분한 class를 AP 순으로 자른 목록이라,
+   * 거기 없다고 좋은 것이 아니라 **잴 만하지 않았을** 수도 있습니다.
+   */
+  const sparseByRun = experiments.map(
+    (item) => new Set((item.per_class_summary?.sparse ?? []).map((row) => row.category_id)),
+  );
+  /**
    * 모든 실행 중 가장 낮은 AP를 기준으로 세웁니다.
    *
    * 첫 실행만 보고 세우면 고른 순서를 바꿨을 뿐인데 표의 줄 순서가 달라집니다.
@@ -304,7 +330,7 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
       <div style={{ ...type.note, color: color.textMuted, marginTop: 6, maxWidth: '46em' }}>
         정답이 {measured[0]?.per_class_summary?.min_truth_count}개 이상인데 AP가 낮은 class입니다.
         표본이 적어 AP를 믿을 수 없는 class는 evaluate가 따로 세어 두므로 여기 넣지 않습니다.
-        {' 잰 AP가 없으면 그 이유를 그대로 적습니다: 미측정, 순위 밖(목록이 잘려 알 수 없음), class 요약 없음, 약하지 않음.'}
+        {' 잰 AP가 없으면 그 이유를 그대로 적습니다: 미측정, 표본 부족, 순위 밖(목록이 잘려 알 수 없음), class 요약 없음, 약하지 않음.'}
       </div>
       <div style={{ overflowX: 'auto', marginTop: 14 }}>
         <div style={{ minWidth: 170 + experiments.length * 150 }}>
@@ -371,6 +397,7 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
                   {cell(values, id, {
                     truncated: truncated[index] ?? false,
                     summarized: summarized[index] ?? false,
+                    sparse: sparseByRun[index]?.has(id) ?? false,
                   })}
                 </span>
               ))}

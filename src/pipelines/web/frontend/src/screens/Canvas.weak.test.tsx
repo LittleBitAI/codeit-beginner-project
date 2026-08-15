@@ -238,9 +238,9 @@ describe('약한 class 표', () => {
     expect(within(table).getAllByText('run-a').length).toBeGreaterThan(0);
   });
 
-  it('약한 class가 하나도 없으면 그렇게 적는다', async () => {
-    // 요약은 있는데 목록이 빈 것은 좋은 결과입니다. 표가 사라지면 "요약이 없다"와
-    // 구별되지 않습니다.
+  it('잴 만한 class가 없었던 것을 좋은 결과로 적지 않는다', async () => {
+    // weak는 AP가 낮은 목록이 아니라 정답이 충분한 목록입니다. 비었다는 것은
+    // 잴 만한 class가 없었다는 뜻이지 좋다는 뜻이 아닙니다.
     const clean = {
       ...experiment(),
       per_class_summary: {
@@ -262,7 +262,7 @@ describe('약한 class 표', () => {
     );
     show([record()]);
 
-    expect(await screen.findByText(/AP가 낮은\s*것이 없습니다/)).toBeTruthy();
+    expect(await screen.findByText(/class가 없어 약한지 판단할 수 없습니다/)).toBeTruthy();
   });
 
   it('요약이 아예 없으면 평가부터 다시 하라고 안내한다', async () => {
@@ -309,7 +309,42 @@ describe('약한 class 표', () => {
     );
     show([record(), record({ runId: 'run-b' })], ['run-a', 'run-b']);
 
-    expect(await screen.findByText(/run-b에는 class별 요약이 없어/)).toBeTruthy();
+    // 두 문장이 **같은 렌더에** 다 있어야 합니다. 하나만 보면 다른 하나가
+    // 사라져도 통과합니다.
+    expect(await screen.findByText(/class가 없어 약한지 판단할 수 없습니다/)).toBeTruthy();
+    expect(screen.getByText(/run-b에는 class별 요약이 없어/)).toBeTruthy();
+  });
+
+  it('다른 실행에서 표본이 부족한 class를 약하지 않다고 적지 않는다', async () => {
+    // run-b에서 가바토파정은 정답이 적어 sparse로 분류됐습니다. weak에 없다는
+    // 이유로 "약하지 않음"이라고 적으면 표본 부족을 성능 양호로 읽습니다.
+    const other = {
+      ...experiment(),
+      experiment_id: 'run-b',
+      run_id: 'run-b',
+      per_class_summary: {
+        min_truth_count: 5,
+        top_n: 10,
+        counts: { weak: 0, sparse: 1, unmeasured: 0 },
+        weak: [],
+        sparse: [{ category_id: 16548, name: '가바토파정 100mg', ap: 0.4 }],
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ experiments: [experiment(), other], missing: [], curves: {} }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    show([record(), record({ runId: 'run-b' })], ['run-a', 'run-b']);
+
+    expect(await screen.findByText('가바토파정 100mg')).toBeTruthy();
+    // 가바토파정 칸이 "표본 부족"이어야 합니다. 다른 class(리피토정)는 run-b에서
+    // 정말로 약하지 않으므로 그 표기가 남는 것이 맞습니다.
+    expect(screen.getByText('표본 부족')).toBeTruthy();
   });
 
   it('팀원이 돌린 실행에는 로그 링크를 내지 않는다', async () => {
