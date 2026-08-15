@@ -174,6 +174,8 @@ function settingRows(experiments: ExperimentSummary[]): Row[] {
     },
     { label: '입력 크기', values: experiments.map((item) => shown(item.training.input_size)) },
     { label: 'CHECKPOINT 주기', values: experiments.map((item) => shown(item.training.checkpoint_every)) },
+    // 설정이 같아 보여도 한쪽만 남의 checkpoint에서 출발했으면 다른 실험입니다.
+    { label: '이어서 학습', values: experiments.map((item) => shown(item.training.resume_from)) },
     { label: 'SEED', values: experiments.map((item) => shown(item.training.seed)) },
     { label: 'LR SCHEDULE', values: experiments.map((item) => shown(inline(item.training.lr_scheduler))) },
     { label: '조기 종료', values: experiments.map((item) => shown(inline(item.training.early_stopping))) },

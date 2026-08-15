@@ -254,6 +254,8 @@ export interface ExperimentSummary {
     input_size: number | null;
     precision?: string | null;
     checkpoint_every?: number | null;
+    /** 무엇에서 이어 학습했는지. 처음부터 학습한 실행은 null입니다. */
+    resume_from?: string | null;
     /**
      * 아래 셋은 train이 받는 모양 그대로입니다.
      *

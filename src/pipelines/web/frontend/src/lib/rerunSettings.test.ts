@@ -58,6 +58,20 @@ describe('rerunSettings', () => {
     }
   });
 
+  it('이어서 학습한 실행이어도 그 checkpoint를 물려주지 않는다', () => {
+    // registry는 `resume_from`을 담습니다. 무엇에서 이어 학습했는지가 설정이기
+    // 때문입니다. 그러나 그 값을 새 실험에 채우면 남의 checkpoint에서 출발하는
+    // 학습이 만들어집니다. 이어서 하기는 화면에 따로 있는 버튼입니다.
+    const values = rerunSettings(
+      summary({
+        resume_from: 'artifacts/experiments/exp-0000/last_checkpoint.pt',
+      } as Partial<ExperimentSummary['training']>),
+    );
+
+    expect('resume_from' in values).toBe(false);
+    expect(values.epochs).toBe('24');
+  });
+
   it('그 실행이 쓰지 않은 설정은 칸을 비워 둔다', () => {
     const values = rerunSettings(
       summary({ lr_scheduler: null, early_stopping: null, augmentation: null, input_size: null }),
