@@ -56,6 +56,12 @@ def _integer(value: Any) -> int | None:
     return value
 
 
+def _object(value: Any) -> dict[str, Any] | None:
+    """중첩 설정을 그대로 넘깁니다. object가 아니면 없는 것으로 둡니다."""
+
+    return dict(value) if isinstance(value, Mapping) else None
+
+
 def _boolean(value: Any) -> bool | None:
     return value if isinstance(value, bool) else None
 
@@ -224,6 +230,14 @@ def _training_blocks(
                 settings.get("gradient_accumulation_steps")
             ),
             "input_size": _integer(settings.get("input_size")),
+            "precision": _text(settings.get("precision")),
+            "checkpoint_every": _integer(settings.get("checkpoint_every")),
+            # 중첩 설정은 train이 받는 모양 그대로 넘깁니다. 화면이 이 값으로 새
+            # 실험을 다시 채우므로, 여기서 펴면 되살릴 수 없습니다. 모르던 옛 기록은
+            # None이라 화면에 -로 남습니다.
+            "augmentation": _object(settings.get("augmentation")),
+            "lr_scheduler": _object(settings.get("lr_scheduler")),
+            "early_stopping": _object(settings.get("early_stopping")),
             "seed": seed if seed is not None else fallback_seed,
         },
     }
@@ -255,6 +269,11 @@ def _unknown_blocks(fallback_seed: int | None) -> dict[str, Any]:
             "num_workers": None,
             "gradient_accumulation_steps": None,
             "input_size": None,
+            "precision": None,
+            "checkpoint_every": None,
+            "augmentation": None,
+            "lr_scheduler": None,
+            "early_stopping": None,
             "seed": fallback_seed,
         },
     }
@@ -326,6 +345,9 @@ def _summary_base(
         "optimizer": blocks["optimizer"],
         "training": blocks["training"],
         "metrics": _metrics_block(summary, kaggle_score),
+        # evaluate가 간추린 약한 class입니다. registry가 그대로 옮겨 두었으므로 여기서도
+        # 그대로 넘깁니다. 이 key가 없던 옛 summary는 None이라 화면이 그 줄을 감춥니다.
+        "per_class_summary": _object(summary.get("per_class_summary")),
         "completion": _completion_block(summary, kaggle_score),
     }
 

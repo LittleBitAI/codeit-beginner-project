@@ -57,7 +57,7 @@ function Shell() {
   const settings = usePolling<AppSettings>(() => api.settings(), 0);
   // 팀원이 지금 돌리는 학습. 목록을 한 번 읽고 그 뒤 변화는 구독으로 받습니다.
   const team = useTeamRuns();
-  const { draft, setDataFields } = useDraft();
+  const { draft, setDataFields, setTrainFields } = useDraft();
 
   const [sheet, setSheet] = useState<SheetKey>(null);
   // 기록 화면에서 사람이 고른 dataset. 아직 안 골랐으면 기록이 가장 많은 것을 씁니다.
@@ -190,6 +190,10 @@ function Shell() {
               records={shownRecords}
               loading={experiments.loading}
               onScoreSaved={experiments.refresh}
+              onNewExperiment={(settings) => {
+                setTrainFields(settings);
+                setSheet('new');
+              }}
             />
           }
         />

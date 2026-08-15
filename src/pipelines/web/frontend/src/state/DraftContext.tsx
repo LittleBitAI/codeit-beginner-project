@@ -17,6 +17,13 @@ const STORAGE_KEY = 'pill-training-draft';
 interface DraftContextValue {
   draft: Draft;
   setTrainField: (name: string, value: string) => void;
+  /**
+   * 끝난 실행의 설정을 한 번에 덮어씁니다. `data`는 건드리지 않습니다.
+   *
+   * 앞선 초안에 남아 있던 학습 칸을 그대로 두면 이번 실행에 없던 설정이 섞여
+   * 화면이 말하는 것과 다른 학습이 돕니다. 그래서 `train`만 통째로 바꿉니다.
+   */
+  setTrainFields: (values: Record<string, string>) => void;
   setDataField: (name: string, value: string) => void;
   /** 전처리 데이터셋을 고르면 필수 4개와 선택 test manifest를 함께 채웁니다. */
   setDataFields: (values: Record<string, string>, sourceKey?: string | null) => void;
@@ -64,6 +71,13 @@ export function DraftProvider({ children }: { children: ReactNode }) {
     [draft, update],
   );
 
+  const setTrainFields = useCallback(
+    (values: Record<string, string>) => {
+      update({ ...draft, train: { ...values } });
+    },
+    [draft, update],
+  );
+
   const setDataField = useCallback(
     (name: string, value: string) => {
       update({ ...draft, data: { ...draft.data, [name]: value } });
@@ -85,8 +99,8 @@ export function DraftProvider({ children }: { children: ReactNode }) {
   const resetDraft = useCallback(() => update(EMPTY_DRAFT), [update]);
 
   const value = useMemo(
-    () => ({ draft, setTrainField, setDataField, setDataFields, resetDraft, saved, setSaved }),
-    [draft, setTrainField, setDataField, setDataFields, resetDraft, saved],
+    () => ({ draft, setTrainField, setTrainFields, setDataField, setDataFields, resetDraft, saved, setSaved }),
+    [draft, setTrainField, setTrainFields, setDataField, setDataFields, resetDraft, saved],
   );
 
   return <DraftContext.Provider value={value}>{children}</DraftContext.Provider>;

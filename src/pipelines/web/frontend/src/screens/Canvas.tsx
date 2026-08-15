@@ -28,6 +28,7 @@ import {
   controlStyle,
 } from '../components/primitives';
 import { color, font, seriesColor, type } from '../design/tokens';
+import { rerunSettings } from '../lib/rerunSettings';
 import { datasetRelationship } from '../lib/experiments';
 import { duration, loss, startedAt } from '../lib/format';
 import type { RunRecord } from '../lib/records';
@@ -36,8 +37,8 @@ import type { RunRecord } from '../lib/records';
 // mAP@0.5로 읽혀 값이 낮아 보입니다. 다른 화면과 같은 label을 씁니다.
 const MAP_LABEL = 'mAP@[0.75:0.95]';
 
-function shown(value: string | number | boolean | null): string {
-  if (value === null || value === '') return '-';
+function shown(value: string | number | boolean | null | undefined): string {
+  if (value === null || value === undefined || value === '') return '-';
   if (typeof value === 'boolean') return value ? '사용' : '미사용';
   return String(value);
 }
@@ -129,6 +130,21 @@ function resultRows(experiments: ExperimentSummary[]): Row[] {
   ];
 }
 
+/**
+ * 중첩 설정을 한 줄로 폅니다. `cosine · warmup 1000 · min_lr_factor 0.01`처럼요.
+ *
+ * 안쪽 key를 골라 적지 않고 있는 대로 다 폅니다. 고르면 그때 몰랐던 값이 화면에서
+ * 사라지는데, 이 화면이 고치려는 문제가 바로 그것입니다.
+ */
+function inline(settings: Record<string, unknown> | null | undefined): string | null {
+  if (!settings) return null;
+  const name = typeof settings.name === 'string' ? settings.name : null;
+  const rest = Object.entries(settings)
+    .filter(([key]) => key !== 'name')
+    .map(([key, value]) => `${key} ${value}`);
+  return [name, ...rest].filter(Boolean).join(' · ') || null;
+}
+
 function settingRows(experiments: ExperimentSummary[]): Row[] {
   return [
     {
@@ -147,10 +163,22 @@ function settingRows(experiments: ExperimentSummary[]): Row[] {
       label: 'OPTIMIZER',
       values: experiments.map((item) => capabilityValue(item.optimizer.name, item.optimizer.source)),
     },
+    { label: '증강 preset', values: experiments.map((item) => shown(item.training.augmentation?.preset)) },
     { label: 'DEVICE', values: experiments.map((item) => shown(item.training.device)) },
+    { label: '정밀도', values: experiments.map((item) => shown(item.training.precision)) },
     { label: 'EPOCHS', values: experiments.map((item) => shown(item.training.epochs)) },
     { label: 'BATCH SIZE', values: experiments.map((item) => shown(item.training.batch_size)) },
+    {
+      label: 'ACCUMULATION',
+      values: experiments.map((item) => shown(item.training.gradient_accumulation_steps)),
+    },
+    { label: '입력 크기', values: experiments.map((item) => shown(item.training.input_size)) },
+    { label: 'CHECKPOINT 주기', values: experiments.map((item) => shown(item.training.checkpoint_every)) },
+    // 설정이 같아 보여도 한쪽만 남의 checkpoint에서 출발했으면 다른 실험입니다.
+    { label: '이어서 학습', values: experiments.map((item) => shown(item.training.resume_from)) },
     { label: 'SEED', values: experiments.map((item) => shown(item.training.seed)) },
+    { label: 'LR SCHEDULE', values: experiments.map((item) => shown(inline(item.training.lr_scheduler))) },
+    { label: '조기 종료', values: experiments.map((item) => shown(inline(item.training.early_stopping))) },
     { label: 'LEARNING RATE', values: experiments.map((item) => shown(item.optimizer.learning_rate)) },
     { label: 'MOMENTUM', values: experiments.map((item) => shown(item.optimizer.momentum)) },
     { label: 'WEIGHT DECAY', values: experiments.map((item) => shown(item.optimizer.weight_decay)) },
@@ -163,6 +191,248 @@ function settingRows(experiments: ExperimentSummary[]): Row[] {
       values: experiments.map((item) => startedAt(item.started_at ?? item.created_at)),
     },
   ];
+}
+
+/**
+ * 고른 실행들의 약한 class를 한 표에 나란히 놓습니다.
+ *
+ * class를 세로로 두고 실행을 가로로 두어, 어느 실행이 어느 알약을 개선했는지 한 줄로
+ * 읽힙니다.
+ *
+ * 값이 없는 칸은 뜻이 여럿이라 **하나하나 구분해서 적습니다.** evaluate가 주는
+ * `weak`는 AP가 낮은 목록이 아니라 **정답이 충분한** class를 AP 순으로 자른 것이라,
+ * 거기 없다고 "약하지 않다"고 말할 수 없기 때문입니다. 그렇게 말해 버리면 잴 만하지
+ * 않았던 class가 괜찮은 것으로 읽힙니다.
+ *
+ * - 숫자: 그 실행에서 약했고 AP를 쟀습니다.
+ * - `미측정`: 약한 목록에 있는데 AP를 재지 못했습니다.
+ * - `표본 부족`: 정답이 적어 AP를 믿을 수 없다고 evaluate가 따로 세어 둔 class입니다.
+ * - `순위 밖`: 목록이 잘려 있어 약한지 아닌지 이 화면이 알 수 없습니다.
+ * - `class 요약 없음`: 그 실행에는 class별 요약이 없어 말할 자료가 없습니다.
+ *   평가 전일 수도, 이 요약이 생기기 전에 등록된 기록일 수도 있습니다.
+ * - `정답 없음`: 정답이 하나도 없어 잴 수 없었던 class입니다.
+ * - `분류 없음`: 그 실행의 어느 목록에도 없습니다. 좋았다는 뜻이 아닙니다.
+ *
+ * 기호 대신 글자로 적습니다. `-`나 `?`는 표 위 설명을 읽지 않으면 뜻을 알 수 없고,
+ * 이 표에서 가장 위험한 오해가 "말할 수 없는 것"을 "괜찮다"로 읽는 것입니다.
+ *
+ * 약한지 아닌지는 evaluate가 이미 정해 둔 것을 그대로 씁니다. 여기서 다시 세면 이
+ * 화면과 evaluate가 서로 다른 답을 말합니다.
+ */
+/**
+ * 한 칸에 무엇을 적을지. 값이 없는 세 경우를 서로 다르게 적습니다.
+ *
+ * 잘린 목록에 없는 것을 `-`로 적으면 "약하지 않다"고 단정하는 셈인데, 그 말을 할
+ * 근거가 화면에 없습니다.
+ */
+interface CellState {
+  /** weak나 sparse 목록이 상위 몇 개로 잘렸는지. */
+  truncated: boolean;
+  /** 그 실행에 class별 요약이 있는지. */
+  summarized: boolean;
+  sparse: boolean;
+  /** 정답이 하나도 없어 잴 수 없었던 class인지. */
+  unmeasured: boolean;
+}
+
+function cell(values: Map<number, number | null>, id: number, state: CellState): string {
+  const value = values.get(id);
+  if (typeof value === 'number') return value.toFixed(3);
+  if (values.has(id)) return '미측정';
+  // 정답이 적어 AP를 믿을 수 없는 class입니다. evaluate가 weak와 따로 세어 둡니다.
+  // 이것을 "약하지 않음"으로 적으면 표본 부족을 성능 양호로 읽습니다.
+  if (state.sparse) return '표본 부족';
+  if (state.unmeasured) return '정답 없음';
+  // class 요약이 없으면 약한지 아닌지 말할 자료가 없습니다. "평가 없음"이라고는
+  // 하지 않습니다 — 이 요약은 나중에 생긴 값이라, 평가는 했지만 그 전에 등록된
+  // 기록도 여기 걸립니다. 같은 화면이 mAP를 보여 주면서 평가를 안 했다고 말하면
+  // 둘 중 하나는 거짓말입니다.
+  if (!state.summarized) return 'class 요약 없음';
+  if (state.truncated) return '순위 밖';
+  /**
+   * 여기까지 왔다는 것은 그 실행의 어느 목록에도 없다는 뜻입니다.
+   *
+   * "약하지 않음"이라고 적지 않습니다. evaluate는 `per_class`의 모든 class를 셋 중
+   * 하나에 넣으므로, 잘리지도 않았는데 어디에도 없다면 **그 실행의 class 목록에
+   * 아예 없는 것**입니다(class map이 다른 dataset 등). 성능이 좋았다는 뜻이 아닙니다.
+   */
+  return '분류 없음';
+}
+
+function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
+  const measured = experiments.filter((item) => item.per_class_summary);
+
+  const names = new Map<number, string>();
+  for (const item of measured) {
+    for (const row of item.per_class_summary?.weak ?? []) names.set(row.category_id, row.name);
+  }
+  /**
+   * 그릴 줄이 없을 때. 표를 감추지 않고 **왜** 비었는지 적습니다.
+   *
+   * 요약이 있는 실행과 없는 실행이 섞이면 두 문장이 다 나와야 합니다. "약한 class가
+   * 없다"만 적으면 요약이 없어 판단조차 못 한 실행이 좋은 결과로 읽힙니다.
+   */
+  if (names.size === 0) {
+    const unsummarized = experiments.filter((item) => !item.per_class_summary);
+    const sparseTotal = measured.reduce(
+      (total, item) => total + (item.per_class_summary?.counts.sparse ?? 0),
+      0,
+    );
+    return (
+      <div style={{ marginTop: 34 }}>
+        <div style={{ ...type.subTitle, color: color.text }}>약한 class</div>
+        <div style={{ ...type.note, color: color.textMuted, marginTop: 6, maxWidth: '46em' }}>
+          {/* 여기 왔다는 것은 잰 실행 모두 weak가 비었다는 뜻입니다. weak는 AP가
+              낮은 목록이 아니라 **정답이 충분한** 목록이라, 비었으면 좋은 것이 아니라
+              잴 만한 class가 없었던 것입니다. */}
+          {measured.length > 0 &&
+            `정답이 ${measured[0]?.per_class_summary?.min_truth_count}개 이상인 class가 없어 약한지 판단할 수 없습니다.`}
+          {/* 실행마다 센 것을 더한 값입니다. 같은 class가 여러 실행에서 sparse면
+              두 번 세어지므로 "고유 class 수"라고 적으면 안 됩니다. */}
+          {sparseTotal > 0 &&
+            ` 정답이 적어 AP를 믿을 수 없는 class가 실행별 합계 ${sparseTotal}건 있습니다.`}
+          {unsummarized.length > 0 &&
+            ` ${unsummarized.map((item) => item.run_id).join(', ')}에는 class별 요약이 없어 약한지 아닌지 알 수 없습니다. 평가를 다시 실행해 등록하면 채워집니다 — 등록만으로는 생기지 않습니다.`}
+        </div>
+      </div>
+    );
+  }
+
+  const byRun = experiments.map(
+    (item) =>
+      new Map((item.per_class_summary?.weak ?? []).map((row) => [row.category_id, row.ap])),
+  );
+  /**
+   * 그 실행의 약한 class 목록이 잘려 있는지.
+   *
+   * `counts.weak`는 자르기 전 개수라, 목록 길이보다 크면 상위 몇 개만 온 것입니다.
+   * 그때는 목록에 없다는 것이 "약하지 않다"는 뜻이 되지 못합니다.
+   */
+  const truncated = experiments.map((item) => {
+    const summary = item.per_class_summary;
+    if (!summary) return false;
+    // sparse도 함께 봅니다. sparse가 잘려 있으면 그 밖의 class를 "약하지 않음"으로
+    // 읽게 되는데, 실제로는 표본이 부족했을 수 있습니다.
+    return (
+      summary.counts.weak > summary.weak.length ||
+      summary.counts.sparse > summary.sparse.length
+    );
+  });
+  /** 그 실행에 class별 요약이 있는지. 없으면 약한지 아닌지 말할 자료가 없습니다. */
+  const summarized = experiments.map((item) => Boolean(item.per_class_summary));
+  /**
+   * 정답이 적어 AP를 믿을 수 없다고 evaluate가 따로 세어 둔 class들입니다.
+   *
+   * `weak`에는 AP 임계값이 없습니다. 정답이 충분한 class를 AP 순으로 자른 목록이라,
+   * 거기 없다고 좋은 것이 아니라 **잴 만하지 않았을** 수도 있습니다.
+   */
+  const sparseByRun = experiments.map(
+    (item) => new Set((item.per_class_summary?.sparse ?? []).map((row) => row.category_id)),
+  );
+  /** 정답이 0이라 잴 수 없었던 class입니다. evaluate는 이 목록만 자르지 않습니다. */
+  const unmeasuredByRun = experiments.map(
+    (item) => new Set((item.per_class_summary?.unmeasured ?? []).map((row) => row.category_id)),
+  );
+  /**
+   * 모든 실행 중 가장 낮은 AP를 기준으로 세웁니다.
+   *
+   * 첫 실행만 보고 세우면 고른 순서를 바꿨을 뿐인데 표의 줄 순서가 달라집니다.
+   * 어느 실행에서도 재지 못한 class는 뒤로 보내고, 그다음은 category_id로 갈라
+   * 같은 입력이면 늘 같은 순서가 나오게 합니다.
+   */
+  const worst = (id: number): number => {
+    const values = byRun
+      .map((run) => run.get(id))
+      .filter((value): value is number => typeof value === 'number');
+    return values.length > 0 ? Math.min(...values) : Number.POSITIVE_INFINITY;
+  };
+  const ids = [...names.keys()].sort((left, right) => worst(left) - worst(right) || left - right);
+  const columns = `170px repeat(${experiments.length}, minmax(150px, 1fr))`;
+
+  return (
+    <div style={{ marginTop: 34 }}>
+      <div style={{ ...type.subTitle, color: color.text }}>약한 class</div>
+      <div style={{ ...type.note, color: color.textMuted, marginTop: 6, maxWidth: '46em' }}>
+        정답이 {measured[0]?.per_class_summary?.min_truth_count}개 이상인데 AP가 낮은 class입니다.
+        표본이 적어 AP를 믿을 수 없는 class는 evaluate가 따로 세어 두므로 여기 넣지 않습니다.
+        {' 잰 AP가 없으면 그 이유를 그대로 적습니다: 미측정, 표본 부족, 정답 없음, 순위 밖(목록이 잘려 알 수 없음), class 요약 없음, 분류 없음.'}
+      </div>
+      <div style={{ overflowX: 'auto', marginTop: 14 }}>
+        <div style={{ minWidth: 170 + experiments.length * 150 }}>
+          {/* 어느 칸이 어느 실행인지. 가로로 밀면 이름 없이는 알 수 없습니다. */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: columns,
+              gap: '0 18px',
+              paddingBottom: 12,
+              borderBottom: `1px solid ${color.border}`,
+            }}
+          >
+            <span />
+            {experiments.map((item, index) => (
+              <span
+                key={item.experiment_id}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}
+              >
+                <span
+                  style={{
+                    width: 18,
+                    height: 2,
+                    flex: 'none',
+                    background: seriesColor[index % seriesColor.length] as string,
+                  }}
+                />
+                <span
+                  style={{
+                    ...type.monoSpec,
+                    color: color.textMuted,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {item.run_id}
+                </span>
+              </span>
+            ))}
+          </div>
+          {ids.map((id) => (
+            <div
+              key={id}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: columns,
+                gap: '0 18px',
+                padding: '12px 0',
+                borderBottom: `1px solid ${color.borderRow}`,
+              }}
+            >
+              <span style={{ ...type.note, color: color.textMuted, overflowWrap: 'break-word' }}>
+                {names.get(id)}
+              </span>
+              {byRun.map((values, index) => (
+                <span
+                  key={experiments[index]?.experiment_id ?? index}
+                  style={{
+                    ...type.monoSpec,
+                    color: typeof values.get(id) === 'number' ? color.text : color.textFaint,
+                  }}
+                >
+                  {cell(values, id, {
+                    truncated: truncated[index] ?? false,
+                    summarized: summarized[index] ?? false,
+                    sparse: sparseByRun[index]?.has(id) ?? false,
+                    unmeasured: unmeasuredByRun[index]?.has(id) ?? false,
+                  })}
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function CompareTable({ experiments }: { experiments: ExperimentSummary[] }) {
@@ -423,6 +693,7 @@ export function Canvas({
   records,
   loading,
   onScoreSaved,
+  onNewExperiment,
 }: {
   datasetKey: string | null;
   /** 왼쪽에서 고른 dataset의 기록만 넘어옵니다. */
@@ -435,6 +706,13 @@ export function Canvas({
    * 옛 값으로 남습니다. 방금 적은 점수가 목록에서 `-`로 보이면 저장이 안 된 줄 압니다.
    */
   onScoreSaved: () => void;
+  /**
+   * '이 세팅으로 학습하기'가 그 실행의 설정을 담아 새 실험 화면을 엽니다.
+   *
+   * 초안은 App이 들고 있으므로 이 화면은 값을 만들어 넘기기만 합니다. 화면이
+   * 초안을 직접 만지면 이 화면만 따로 그려 보는 것도 못 하게 됩니다.
+   */
+  onNewExperiment: (settings: Record<string, string>) => void;
 }) {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -453,6 +731,18 @@ export function Canvas({
   const selectable = useMemo(() => records.filter((item) => item.registered), [records]);
   const unregistered = records.length - selectable.length;
   const picked = useMemo(() => params.getAll('run'), [params]);
+  /**
+   * 하나만 골랐고 그것을 이 컴퓨터가 돌렸다면 그 job의 id입니다.
+   *
+   * 여러 개를 겹쳐 놓았을 때는 어느 실행의 로그인지 말할 수 없어 내지 않습니다.
+   */
+  const localJobId = useMemo(
+    () =>
+      picked.length === 1
+        ? (records.find((item) => item.runId === picked[0])?.jobId ?? null)
+        : null,
+    [picked, records],
+  );
 
   /**
    * 선택을 **값**으로 굳혀 effect의 의존성으로 씁니다.
@@ -699,9 +989,29 @@ export function Canvas({
               />
             )}
           </div>
-          <Button kind="ghost" onClick={() => setShowDev((value) => !value)} style={{ flex: 'none' }}>
-            개발자 모드
-          </Button>
+          <div style={{ display: 'flex', gap: 10, flex: 'none', alignItems: 'center' }}>
+            {/* 이 컴퓨터가 돌린 실행이면 로그와 산출물이 남아 있습니다. 기록에서
+                누르면 이제 이 화면으로 오므로, 그 화면으로 가는 길을 여기 둡니다.
+                주소를 직접 치게 두면 있는 것을 없는 것처럼 만듭니다. */}
+            {localJobId && (
+              <LinkAction onClick={() => navigate(`/monitor/${localJobId}`)}>
+                로그 보기
+              </LinkAction>
+            )}
+            {/* 하나만 골랐을 때만 냅니다. 여러 개를 겹쳐 놓고 누르면 어느 설정이
+                실렸는지 화면이 말해 주지 못합니다. */}
+            {compared.length === 1 && compared[0] && (
+              <Button
+                kind="secondary"
+                onClick={() => onNewExperiment(rerunSettings(compared[0] as ExperimentSummary))}
+              >
+                이 세팅으로 학습하기
+              </Button>
+            )}
+            <Button kind="ghost" onClick={() => setShowDev((value) => !value)}>
+              개발자 모드
+            </Button>
+          </div>
         </div>
 
         {error && (
@@ -780,13 +1090,19 @@ export function Canvas({
               {compared.length === 0 ? (
                 <EmptyState message="고른 실행의 기록을 불러오고 있습니다." />
               ) : compared.length === 1 ? (
-                <SingleView
-                  item={compared[0] as ExperimentSummary}
-                  onSaved={() => {
-                    setReloadKey((value) => value + 1);
-                    onScoreSaved();
-                  }}
-                />
+                <>
+                  <SingleView
+                    item={compared[0] as ExperimentSummary}
+                    onSaved={() => {
+                      setReloadKey((value) => value + 1);
+                      onScoreSaved();
+                    }}
+                  />
+                  {/* 하나만 골랐을 때가 오히려 약한 class를 가장 보고 싶은 자리입니다.
+                      여럿을 겹쳤을 때만 내면, 기록에서 실행 하나를 눌러 들어온 사람은
+                      끝내 못 봅니다. */}
+                  <WeakClassTable experiments={compared} />
+                </>
               ) : (
                 <div style={{ paddingTop: 26, borderTop: `1px solid ${color.border}` }}>
                   <div
@@ -819,6 +1135,7 @@ export function Canvas({
                     표식이 붙은 칸은 이 비교 안에서 가장 좋은 값입니다. 값이 하나뿐이거나 모두
                     같으면 아무 칸도 고르지 않습니다 — 비교 대상이 없을 때의 1등은 뜻이 없습니다.
                   </div>
+                  <WeakClassTable experiments={compared} />
                 </div>
               )}
             </div>

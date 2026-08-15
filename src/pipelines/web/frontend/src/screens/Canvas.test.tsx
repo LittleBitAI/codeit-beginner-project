@@ -39,7 +39,7 @@ function record(overrides: Partial<RunRecord> = {}): RunRecord {
 function show(records: RunRecord[], datasetKey: string | null = 'v4-seed42-8020-group') {
   return render(
     <MemoryRouter>
-      <Canvas datasetKey={datasetKey} records={records} loading={false} onScoreSaved={() => {}} />
+      <Canvas datasetKey={datasetKey} records={records} loading={false} onScoreSaved={() => {}} onNewExperiment={() => {}} />
     </MemoryRouter>,
   );
 }
