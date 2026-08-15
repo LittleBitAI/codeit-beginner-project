@@ -109,15 +109,21 @@ class Storage(ABC):
 
     @abstractmethod
     def identity(self, location: str | Path) -> tuple[str, ...]:
-        """이 backend가 실제로 읽고 쓸 대상을 나타내는 값을 돌려줍니다.
+        """이 backend가 **위치 표기를 해석한 결과**를 돌려줍니다.
 
-        표기만 다르고 같은 대상을 가리키는 위치는 **같은 값**이 되어야 합니다.
         쓰기 전에 "두 산출물이 같은 곳에 저장되는가"를 판정하려는 쪽이, 스스로
-        규칙을 지어내는 대신 이것을 물어보게 하려는 것입니다. 규칙을 밖에서
-        다시 만들면 backend가 실제로 하는 해석과 어긋납니다.
+        규칙을 지어내는 대신 이것을 물어보게 하려는 것입니다. 규칙을 밖에서 다시
+        만들면 backend가 실제로 하는 해석과 어긋납니다.
 
-        같은 대상이면 같은 값이라는 것만 약속합니다. 값의 모양은 backend마다
-        다르고, 사람에게 보여 줄 이름이 아닙니다.
+        **약속하는 것:** 읽고 쓸 때와 같은 해석을 거친 뒤에도 같은 자리를 가리키는
+        표기는 같은 값이 됩니다. backend가 다르면 절대 겹치지 않습니다.
+
+        **약속하지 않는 것:** 파일 시스템에 물어보지 않습니다. 판정은 파일이 생기기
+        **전에** 필요하므로 그럴 수가 없습니다. 그래서 hard link와 symlink로 이어진
+        두 경로, volume마다 다르게 설정된 대소문자 규칙은 가리지 못합니다. 대소문자는
+        그 platform의 기본 규칙(`os.path.normcase`)만 따릅니다.
+
+        값의 모양도 약속하지 않습니다. 사람에게 보여 줄 이름이 아닙니다.
         """
 
 
@@ -237,9 +243,9 @@ class LocalStorage(Storage):
         return self._resolve(location).is_file()
 
     def identity(self, location: str | Path) -> tuple[str, ...]:
-        # 읽고 쓸 때와 **같은** `_resolve`를 씁니다. `normcase`는 대소문자를 가리지
-        # 않는 filesystem(Windows)에서 같은 파일을 같은 값으로 만들고, POSIX에서는
-        # 아무것도 바꾸지 않습니다.
+        # 읽고 쓸 때와 **같은** `_resolve`를 씁니다. `normcase`는 그 platform의 기본
+        # 대소문자 규칙입니다. volume마다 다르게 설정한 경우까지는 가리지 못하는데,
+        # 파일이 생기기 전에 판정해야 해서 filesystem에 물어볼 수가 없습니다.
         return ("local", os.path.normcase(str(self._resolve(location))))
 
     def list(self, prefix: str | Path = "") -> list[str]:

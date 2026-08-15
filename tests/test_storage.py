@@ -1,5 +1,6 @@
 import io
 import json
+import os
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -262,18 +263,37 @@ def test_s3_and_local_identities_never_collide(tmp_path):
     assert local.identity("metrics.json") != s3.identity("metrics.json")
 
 
-def test_local_identity_follows_the_filesystem_on_letter_case(tmp_path):
-    """대소문자를 가리는지는 filesystem이 정합니다.
+def test_local_identity_follows_the_platform_case_rule(tmp_path):
+    """대소문자는 그 platform의 기본 규칙을 따릅니다.
 
-    Windows에서는 `Metrics.json`과 `metrics.json`이 같은 파일이고, POSIX에서는 다른
-    파일입니다. identity가 그 규칙을 따라야 판정이 실제 저장과 어긋나지 않습니다.
-    이 단언은 대소문자를 가리지 않는 filesystem에서만 실제로 무언가를 막습니다.
+    구현이 쓰는 `os.path.normcase`로 기대값을 만들면 구현을 구현으로 재는 셈이라,
+    platform 자체로 기대를 정합니다. Windows는 같은 파일로, POSIX는 다른 파일로
+    봅니다.
+
+    volume마다 다르게 설정한 대소문자 규칙까지는 가리지 못합니다. 판정이 파일이
+    생기기 전에 필요해 filesystem에 물어볼 수 없기 때문이고, `identity`의 계약도
+    그렇게 적혀 있습니다.
     """
-    import os
-
     storage = LocalStorage(tmp_path / "storage")
-    filesystem_ignores_case = os.path.normcase("A") == os.path.normcase("a")
 
     same_identity = storage.identity("Metrics.json") == storage.identity("metrics.json")
 
-    assert same_identity is filesystem_ignores_case
+    assert same_identity is (os.name == "nt")
+
+
+def test_s3_identity_keeps_keys_that_s3_treats_as_different(tmp_path):
+    """S3 key는 글자 그대로입니다. 표기를 정리해 합치면 안 됩니다.
+
+    `a//b`와 `a/b`는 S3에서 서로 다른 object입니다. 여기에 경로 정규화를 더하면
+    다른 대상을 같다고 판정해 쓸 수 있는 설정을 거절하게 됩니다.
+    """
+    storage = S3Storage(bucket="example-bucket")
+
+    assert storage.identity("run/a//b") != storage.identity("run/a/b")
+
+
+def test_s3_identity_refuses_an_empty_key_like_reading_and_writing_do(tmp_path):
+    storage = S3Storage(bucket="example-bucket")
+
+    with pytest.raises(StorageConfigurationError):
+        storage.identity("")
