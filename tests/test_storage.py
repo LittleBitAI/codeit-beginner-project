@@ -327,3 +327,48 @@ def test_local_identity_of_a_missing_file_never_matches_an_existing_one(tmp_path
     storage = LocalStorage(root)
 
     assert storage.identity("metrics.json") != storage.identity("predictions.json")
+
+
+def test_local_identity_does_not_read_an_access_error_as_a_missing_file(tmp_path, monkeypatch):
+    """권한 오류를 "없는 파일"로 읽지 않습니다.
+
+    그렇게 읽으면 이미 있는 파일의 hard link 겹침을 놓치고, 진짜 오류도 조용히
+    숨깁니다. 읽기·쓰기와 같은 typed error로 올립니다.
+    """
+    root = tmp_path / "storage"
+    root.mkdir(parents=True)
+    (root / "metrics.json").write_text("{}", encoding="utf-8", newline="\n")
+    storage = LocalStorage(root)
+
+    def deny(self, *args, **kwargs):
+        raise PermissionError("의도한 권한 오류")
+
+    monkeypatch.setattr(Path, "stat", deny)
+
+    with pytest.raises(StorageAccessDeniedError):
+        storage.identity("metrics.json")
+
+
+def test_local_identity_ignores_an_inode_that_the_filesystem_does_not_give(
+    tmp_path, monkeypatch
+):
+    """`st_ino`가 0이면 그것을 identity로 쓰지 않습니다.
+
+    그대로 쓰면 같은 device의 **모든** 파일이 한 값이 되어, 쓸 수 있는 조합을
+    겹친다고 거절합니다.
+    """
+    root = tmp_path / "storage"
+    root.mkdir(parents=True)
+    (root / "metrics.json").write_text("{}", encoding="utf-8", newline="\n")
+    (root / "predictions.json").write_text("{}", encoding="utf-8", newline="\n")
+    storage = LocalStorage(root)
+
+    real_stat = Path.stat
+
+    def without_inode(self, *args, **kwargs):
+        status = real_stat(self, *args, **kwargs)
+        return os.stat_result((status.st_mode, 0, status.st_dev) + tuple(status)[3:])
+
+    monkeypatch.setattr(Path, "stat", without_inode)
+
+    assert storage.identity("metrics.json") != storage.identity("predictions.json")

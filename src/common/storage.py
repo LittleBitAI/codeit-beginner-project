@@ -124,7 +124,12 @@ class Storage(ABC):
 
         **아직 없는 파일**은 물어볼 대상이 없어 표기로만 판정합니다. 대소문자는 그
         platform의 기본 규칙(`os.path.normcase`)만 따르므로, volume 설정이 다르면
-        가리지 못합니다.
+        가리지 못합니다. inode를 주지 않는 filesystem(`st_ino == 0`)도 같습니다.
+
+        **이 값은 부른 그 순간의 답입니다.** 비교와 실제 쓰기 사이를 묶어 주지
+        않습니다. 두 번 부르는 사이에 파일이 생기거나 지워지면 같은 자리라도 답이
+        갈릴 수 있습니다. 부르는 쪽은 바로 이어서 비교하고, 실제 보호는 덮어쓰기
+        기본 금지에 맡겨야 합니다.
 
         값의 모양은 약속하지 않습니다. 사람에게 보여 줄 이름이 아닙니다.
         """
@@ -249,15 +254,25 @@ class LocalStorage(Storage):
         # 읽고 쓸 때와 **같은** `_resolve`를 씁니다.
         path = self._resolve(location)
         try:
-            status = path.stat()
-        except OSError:
-            # 아직 없는 파일은 물어볼 대상이 없어 표기로만 판정합니다. `normcase`는
-            # 그 platform의 기본 대소문자 규칙입니다.
-            return ("local-path", os.path.normcase(str(path)))
+            status: os.stat_result | None = path.stat()
+        except FileNotFoundError:
+            # 없는 파일만 표기로 내려갑니다. 권한 없음이나 I/O 오류를 "없다"로 읽으면
+            # 이미 있는 파일의 hard link 겹침을 놓치고, 진짜 오류도 숨깁니다.
+            status = None
+        except OSError as error:
+            self._raise_local_error(error, path)
+            raise  # `_raise_local_error`가 반드시 던집니다. 흐름을 분명히 둡니다.
+
         # 이미 있는 파일은 filesystem에 직접 묻습니다. hard link로 이어진 두 경로와
         # volume마다 다르게 설정된 대소문자 규칙은 여기서만 가릴 수 있습니다.
         # `overwrite`를 켠 실행은 이미 있는 파일에 쓰므로 이 갈래로 들어옵니다.
-        return ("local-file", str(status.st_dev), str(status.st_ino))
+        #
+        # `st_ino`가 0인 filesystem이 있습니다. 그대로 쓰면 같은 device의 **모든**
+        # 파일이 한 값이 되어, 쓸 수 있는 조합을 겹친다고 거절합니다. 표기로 내립니다.
+        if status is not None and status.st_ino:
+            return ("local-file", str(status.st_dev), str(status.st_ino))
+        # `normcase`는 그 platform의 기본 대소문자 규칙입니다.
+        return ("local-path", os.path.normcase(str(path)))
 
     def list(self, prefix: str | Path = "") -> list[str]:
         prefix_path = self._resolve(prefix)
