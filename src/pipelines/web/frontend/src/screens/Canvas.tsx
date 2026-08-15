@@ -197,12 +197,33 @@ function settingRows(experiments: ExperimentSummary[]): Row[] {
  * 고른 실행들의 약한 class를 한 표에 나란히 놓습니다.
  *
  * class를 세로로 두고 실행을 가로로 두어, 어느 실행이 어느 알약을 개선했는지 한 줄로
- * 읽힙니다. 어느 한쪽에서만 약한 class도 줄을 만들고, 그 실행에서 약하지 않았으면
- * `-`입니다 — 값이 없는 것과 약하지 않은 것을 같은 칸에 두면 표를 믿을 수 없습니다.
+ * 읽힙니다.
+ *
+ * 값이 없는 칸은 세 가지 뜻이 있고 **셋을 구분해서 적습니다.** evaluate가 주는 목록은
+ * 상위 `top_n`개로 잘려 있어서, 목록에 없다고 "약하지 않다"고 말할 수 없기 때문입니다.
+ * 그렇게 말해 버리면 실제로는 약한데 순위 밖인 class가 괜찮은 것으로 읽힙니다.
+ *
+ * - 숫자: 그 실행에서 약했고 AP를 쟀습니다.
+ * - `?`: 약한 목록에 있는데 AP를 재지 못했습니다.
+ * - `순위 밖`: 목록이 잘려 있어 약한지 아닌지 이 화면이 알 수 없습니다.
+ * - `-`: 목록이 잘리지 않았고 거기 없으므로 약하지 않았습니다.
  *
  * 약한지 아닌지는 evaluate가 이미 정해 둔 것을 그대로 씁니다. 여기서 다시 세면 이
  * 화면과 evaluate가 서로 다른 답을 말합니다.
  */
+/**
+ * 한 칸에 무엇을 적을지. 값이 없는 세 경우를 서로 다르게 적습니다.
+ *
+ * 잘린 목록에 없는 것을 `-`로 적으면 "약하지 않다"고 단정하는 셈인데, 그 말을 할
+ * 근거가 화면에 없습니다.
+ */
+function cell(values: Map<number, number | null>, id: number, truncated: boolean): string {
+  const value = values.get(id);
+  if (typeof value === 'number') return value.toFixed(3);
+  if (values.has(id)) return '?';
+  return truncated ? '순위 밖' : '-';
+}
+
 function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
   const measured = experiments.filter((item) => item.per_class_summary);
   if (measured.length === 0) return null;
@@ -217,6 +238,16 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
     (item) =>
       new Map((item.per_class_summary?.weak ?? []).map((row) => [row.category_id, row.ap])),
   );
+  /**
+   * 그 실행의 약한 class 목록이 잘려 있는지.
+   *
+   * `counts.weak`는 자르기 전 개수라, 목록 길이보다 크면 상위 몇 개만 온 것입니다.
+   * 그때는 목록에 없다는 것이 "약하지 않다"는 뜻이 되지 못합니다.
+   */
+  const truncated = experiments.map((item) => {
+    const summary = item.per_class_summary;
+    return summary ? summary.counts.weak > summary.weak.length : false;
+  });
   /**
    * 모든 실행 중 가장 낮은 AP를 기준으로 세웁니다.
    *
@@ -239,10 +270,49 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
       <div style={{ ...type.note, color: color.textMuted, marginTop: 6, maxWidth: '46em' }}>
         정답이 {measured[0]?.per_class_summary?.min_truth_count}개 이상인데 AP가 낮은 class입니다.
         표본이 적어 AP를 믿을 수 없는 class는 evaluate가 따로 세어 두므로 여기 넣지 않습니다.
+        {' 값 대신 적히는 것: "?"는 재지 못함, "순위 밖"은 목록이 잘려 알 수 없음, "-"는 약하지 않음입니다.'}
         {experiments.length > measured.length && ' 평가 결과가 없는 실행은 칸이 비어 있습니다.'}
       </div>
       <div style={{ overflowX: 'auto', marginTop: 14 }}>
         <div style={{ minWidth: 170 + experiments.length * 150 }}>
+          {/* 어느 칸이 어느 실행인지. 가로로 밀면 이름 없이는 알 수 없습니다. */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: columns,
+              gap: '0 18px',
+              paddingBottom: 12,
+              borderBottom: `1px solid ${color.border}`,
+            }}
+          >
+            <span />
+            {experiments.map((item, index) => (
+              <span
+                key={item.experiment_id}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}
+              >
+                <span
+                  style={{
+                    width: 18,
+                    height: 2,
+                    flex: 'none',
+                    background: seriesColor[index % seriesColor.length] as string,
+                  }}
+                />
+                <span
+                  style={{
+                    ...type.monoSpec,
+                    color: color.textMuted,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {item.run_id}
+                </span>
+              </span>
+            ))}
+          </div>
           {ids.map((id) => (
             <div
               key={id}
@@ -265,9 +335,7 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
                     color: typeof values.get(id) === 'number' ? color.text : color.textFaint,
                   }}
                 >
-                  {/* 재지 못한 AP는 null입니다. 0으로 읽으면 "AP가 0"이라고
-                      말하는 셈이라, 이 실행에서 약하지 않았을 때와 같은 -로 둡니다. */}
-                  {typeof values.get(id) === 'number' ? (values.get(id) as number).toFixed(3) : '-'}
+                  {cell(values, id, truncated[index] ?? false)}
                 </span>
               ))}
             </div>

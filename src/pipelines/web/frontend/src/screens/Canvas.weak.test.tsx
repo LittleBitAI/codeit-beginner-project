@@ -5,9 +5,9 @@
  * 이 화면으로 오므로, 이 컴퓨터가 돌린 실행의 로그로 가는 길이 여기 있어야 합니다.
  */
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import type { ExperimentSummary } from '../api/types';
 import type { RunRecord } from '../lib/records';
@@ -45,7 +45,7 @@ function record(overrides: Partial<RunRecord> = {}): RunRecord {
 }
 
 /** 재지 못한 AP(null)를 담은 약한 class 하나를 든 실험입니다. */
-function experiment(): ExperimentSummary {
+function experiment(weakCount = 2): ExperimentSummary {
   return {
     experiment_id: 'run-a',
     run_id: 'run-a',
@@ -79,7 +79,7 @@ function experiment(): ExperimentSummary {
     per_class_summary: {
       min_truth_count: 5,
       top_n: 10,
-      counts: { weak: 2, sparse: 0, unmeasured: 0 },
+      counts: { weak: weakCount, sparse: 0, unmeasured: 0 },
       weak: [
         { category_id: 16548, name: '가바토파정 100mg', ap: 0.12 },
         // 표본은 충분한데 AP를 재지 못한 줄입니다. evaluate가 허용하는 모양입니다.
@@ -105,13 +105,22 @@ function experiment(): ExperimentSummary {
 function show(records: RunRecord[]) {
   return render(
     <MemoryRouter initialEntries={['/canvas?run=run-a']}>
-      <Canvas
-        datasetKey="v6"
-        records={records}
-        loading={false}
-        onScoreSaved={() => {}}
-        onNewExperiment={() => {}}
-      />
+      <Routes>
+        <Route
+          path="/canvas"
+          element={
+            <Canvas
+              datasetKey="v6"
+              records={records}
+              loading={false}
+              onScoreSaved={() => {}}
+              onNewExperiment={() => {}}
+            />
+          }
+        />
+        {/* 링크가 있는 것만으로는 부족합니다. 어디로 가는지까지 봅니다. */}
+        <Route path="/monitor/:jobId" element={<div>모니터 화면</div>} />
+      </Routes>
     </MemoryRouter>,
   );
 }
@@ -140,10 +149,51 @@ describe('약한 class 표', () => {
     expect(screen.queryByText('0.000')).toBeNull();
   });
 
-  it('이 컴퓨터가 돌린 실행이면 로그로 가는 길을 낸다', async () => {
+  it('이 컴퓨터가 돌린 실행이면 그 job의 로그 화면으로 보낸다', async () => {
     show([record({ jobId: 'job-77' })]);
 
-    expect(await screen.findByText('로그 보기')).toBeTruthy();
+    fireEvent.click(await screen.findByText('로그 보기'));
+
+    expect(await screen.findByText('모니터 화면')).toBeTruthy();
+  });
+
+  it('목록이 잘려 있으면 없는 class를 약하지 않다고 적지 않는다', async () => {
+    // run-b는 상위 1개만 받았고(counts 9 > 목록 1) 그 안에 가바토파정이 없습니다.
+    // 실제로 약한데 순위 밖일 수 있으므로 "-"(약하지 않음)라고 말하면 안 됩니다.
+    const other = {
+      ...experiment(9),
+      experiment_id: 'run-b',
+      run_id: 'run-b',
+      per_class_summary: {
+        min_truth_count: 5,
+        top_n: 1,
+        counts: { weak: 9, sparse: 0, unmeasured: 0 },
+        weak: [{ category_id: 99999, name: '다른 알약', ap: 0.05 }],
+        sparse: [],
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({ experiments: [experiment(), other], missing: [], curves: {} }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    );
+    show([record(), record({ runId: 'run-b' })]);
+
+    expect(await screen.findByText('가바토파정 100mg')).toBeTruthy();
+    // run-b 칸이 "순위 밖"이어야 합니다. "-"로 적으면 약하지 않다고 단정하는 것입니다.
+    expect(screen.getAllByText('순위 밖').length).toBeGreaterThan(0);
+  });
+
+  it('어느 칸이 어느 실행인지 머리글로 밝힌다', async () => {
+    show([record()]);
+
+    // 실행 이름은 곡선 범례에도 있습니다. 표 안에서 찾아야 머리글을 지킵니다.
+    const table = (await screen.findByText('약한 class')).parentElement as HTMLElement;
+    expect(within(table).getAllByText('run-a').length).toBeGreaterThan(0);
   });
 
   it('팀원이 돌린 실행에는 로그 링크를 내지 않는다', async () => {
