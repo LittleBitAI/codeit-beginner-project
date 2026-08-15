@@ -2391,6 +2391,35 @@ def test_pill_geometric_crop_keeps_the_whole_image_when_no_pill_survives(monkeyp
     assert torch.equal(target["boxes"], original["boxes"])
 
 
+def test_pill_geometric_noise_changes_pixels_and_keeps_them_in_range(monkeypatch):
+    """잡음은 그림을 실제로 바꾸되 값 범위는 [0, 1]로 되돌려 놓아야 합니다.
+
+    뒤따르는 정규화가 그 범위를 전제합니다. 0과 1로만 채운 그림을 넣어 위아래
+    양쪽에서 잘리는지 함께 봅니다.
+    """
+
+    # 회전, 좌우 뒤집기, 자르기, 색은 모두 건너뛰고 잡음만 걸리게 합니다.
+    draws = iter((1.0, 1.0, 1.0, 1.0, 0.0))
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
+    image = torch.zeros(3, 4, 6)
+    image[:, :, 3:] = 1.0
+    target = {
+        "boxes": torch.tensor([[1.0, 1.0, 4.0, 3.0]]),
+        "labels": torch.tensor([1]),
+    }
+    augmentation = DetectionAugmentation(
+        dict(pipeline.AUGMENTATION_PRESETS["pill_geometric"])
+    )
+
+    torch.manual_seed(17)
+    augmented_image, augmented_target = augmentation(image, target)
+
+    assert not torch.equal(augmented_image, image)
+    assert float(augmented_image.min()) >= 0.0
+    assert float(augmented_image.max()) <= 1.0
+    assert torch.equal(augmented_target["boxes"], target["boxes"])
+
+
 def test_faster_rcnn_cpu_forward_and_backward_smoke():
     torch.manual_seed(17)
     model = build_model(2, pretrained=False).cpu().train()
