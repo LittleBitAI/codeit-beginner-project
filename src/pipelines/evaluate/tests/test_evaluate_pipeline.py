@@ -1501,3 +1501,39 @@ def test_a_checkpoint_that_is_not_a_name_is_refused(
 
     assert result["status"] == "error"
     assert "어느 checkpoint의 증거인지" in result["message"]
+
+
+@pytest.mark.parametrize(
+    "fused_from",
+    [pytest.param([], id="빈-목록"), pytest.param([{"uri": "x.json"}], id="항목-있음")],
+)
+def test_a_file_carrying_fused_from_is_refused_on_that_alone(
+    base_config: dict, repository_root: Path, fused_from: list
+):
+    """`fused_from`이 있으면 그것만으로 거절합니다.
+
+    `prediction_source` 표식이 없어도, 빈 목록이어도 합친 결과라는 뜻입니다. 진릿값
+    으로 보면 `fused_from: []`에 checkpoint를 붙인 파일이 통과합니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    write_json(
+        repository_root / "data/test/has_lineage.json",
+        {
+            "test_manifest_uri": "data/test/instances.json",
+            "checkpoint_uri": "ckpt/real.pt",
+            "fused_from": fused_from,
+            "predictions": [
+                {"image_id": 10, "category_id": 7,
+                 "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}
+            ],
+        },
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/has_lineage.json",
+        _write_fusion_input(repository_root, "clean", [10, 20], checkpoint="ckpt/c2.pt"),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "합친 결과를 다시 합칠 수는 없습니다" in result["message"]

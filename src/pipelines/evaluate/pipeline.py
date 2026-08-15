@@ -219,8 +219,12 @@ def _prediction_source(
 
     # 합친 결과라고 스스로 밝힌 파일은 checkpoint가 채워져 있어도 거부합니다.
     # 없는 것만 보면 표식과 checkpoint를 함께 담아 우회할 수 있습니다.
-    fused_from = document.get("fused_from")
-    if document.get("prediction_source") == "fusion" or fused_from:
+    # 빈 목록도 "합친 결과"라는 표식입니다. 진릿값으로 보면 `fused_from: []`에
+    # checkpoint를 붙인 파일이 통과합니다.
+    if (
+        document.get("prediction_source") == "fusion"
+        or document.get("fused_from") is not None
+    ):
         raise InputArtifactError(
             f"{uri}: 합친 결과를 다시 합칠 수는 없습니다 — 원본 예측들을 한 번에 "
             "주세요."
