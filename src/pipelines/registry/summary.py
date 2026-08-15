@@ -58,10 +58,14 @@ LOSS_KEYS: tuple[str, ...] = (
 # key 이름과 함께 적어 둡니다.
 #
 # 계약(`src/common/train_contract.py`의 SETTING_KEYS)이 정한 이름 중 여기 없는 것은
-# 넷뿐이고, test가 그 넷 말고는 빠질 수 없게 지킵니다. seed는 summary 최상위에 이미
-# 있고, run_id·output_dir·output_prefix는 결과를 어디에 두는지일 뿐 무엇을 학습했는지가
-# 아닙니다. `resume_from`은 경로지만 **무엇에서 이어 학습했는지**라서 담습니다 —
-# 없으면 이어서 한 실행이 처음부터 한 실행과 구별되지 않습니다.
+# 셋뿐이고, test가 그 셋 말고는 빠질 수 없게 지킵니다. run_id·output_dir·output_prefix는
+# 결과를 어디에 두는지일 뿐 무엇을 학습했는지가 아닙니다.
+#
+# `seed`는 summary 최상위에도 있지만 그것과 별개로 담습니다. 최상위 값은
+# `registry._resolve_seed`가 정하는 **registry 자신의 seed**이고, 지금은 web이 거기에
+# 학습 seed를 넣어 주어 우연히 같을 뿐입니다. 다른 경로로 등록하면 갈립니다.
+# `resume_from`은 경로지만 **무엇에서 이어 학습했는지**라서 담습니다 — 없으면 이어서
+# 한 실행이 처음부터 한 실행과 구별되지 않습니다.
 TRAINING_KEYS: tuple[tuple[str, str], ...] = (
     ("architecture", "text"),
     ("pretrained", "bool"),
@@ -79,6 +83,7 @@ TRAINING_KEYS: tuple[tuple[str, str], ...] = (
     ("precision", "text"),
     ("checkpoint_every", "integer"),
     ("resume_from", "text"),
+    ("seed", "integer"),
     ("gradient_accumulation_steps", "integer"),
     ("input_size", "integer"),
     # 중첩 object는 모양 그대로 옮깁니다. `augmentation`의 확률이나 `lr_scheduler`의
