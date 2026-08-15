@@ -240,34 +240,27 @@ function cell(
 
 function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
   const measured = experiments.filter((item) => item.per_class_summary);
-  // 요약이 하나도 없으면 표를 통째로 감추지 않고 왜 비었는지 적습니다. 조용히
-  // 사라지면 "약한 class가 없다"로 읽힙니다.
-  if (measured.length === 0) {
-    return (
-      <div style={{ marginTop: 34 }}>
-        <div style={{ ...type.subTitle, color: color.text }}>약한 class</div>
-        <div style={{ ...type.note, color: color.textFaint, marginTop: 6, maxWidth: '46em' }}>
-          고른 실행에 class별 요약이 없습니다. 평가 전이거나, 이 요약이 생기기 전에
-          등록된 기록입니다. 평가를 다시 실행해 등록하면 채워집니다 — 등록만으로는
-          생기지 않습니다.
-        </div>
-      </div>
-    );
-  }
 
   const names = new Map<number, string>();
   for (const item of measured) {
     for (const row of item.per_class_summary?.weak ?? []) names.set(row.category_id, row.name);
   }
-  // 요약은 있는데 약한 class가 하나도 없는 것은 **좋은 결과**입니다. 표를 감추면
-  // 위의 "요약이 없다"와 구별되지 않습니다.
+  /**
+   * 그릴 줄이 없을 때. 표를 감추지 않고 **왜** 비었는지 적습니다.
+   *
+   * 요약이 있는 실행과 없는 실행이 섞이면 두 문장이 다 나와야 합니다. "약한 class가
+   * 없다"만 적으면 요약이 없어 판단조차 못 한 실행이 좋은 결과로 읽힙니다.
+   */
   if (names.size === 0) {
+    const unsummarized = experiments.filter((item) => !item.per_class_summary);
     return (
       <div style={{ marginTop: 34 }}>
         <div style={{ ...type.subTitle, color: color.text }}>약한 class</div>
         <div style={{ ...type.note, color: color.textMuted, marginTop: 6, maxWidth: '46em' }}>
-          정답이 {measured[0]?.per_class_summary?.min_truth_count}개 이상인 class 중 AP가 낮은
-          것이 없습니다.
+          {measured.length > 0 &&
+            `정답이 ${measured[0]?.per_class_summary?.min_truth_count}개 이상인 class 중 AP가 낮은 것이 없습니다.`}
+          {unsummarized.length > 0 &&
+            ` ${unsummarized.map((item) => item.run_id).join(', ')}에는 class별 요약이 없어 약한지 아닌지 알 수 없습니다. 평가를 다시 실행해 등록하면 채워집니다 — 등록만으로는 생기지 않습니다.`}
         </div>
       </div>
     );

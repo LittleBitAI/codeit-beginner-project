@@ -283,6 +283,35 @@ describe('약한 class 표', () => {
     expect(await screen.findByText(/평가를 다시 실행해 등록하면/)).toBeTruthy();
   });
 
+  it('요약이 있는 실행과 없는 실행이 섞이면 둘 다 말한다', async () => {
+    // run-a는 요약이 있고 약한 class가 0개(좋은 결과), run-b는 요약이 아예 없습니다.
+    // "AP가 낮은 것이 없습니다"만 적으면 run-b가 좋은 결과로 읽힙니다.
+    const clean = {
+      ...experiment(),
+      per_class_summary: {
+        min_truth_count: 5,
+        top_n: 10,
+        counts: { weak: 0, sparse: 0, unmeasured: 0 },
+        weak: [],
+        sparse: [],
+      },
+    };
+    const bare = { ...experiment(), experiment_id: 'run-b', run_id: 'run-b' };
+    delete (bare as { per_class_summary?: unknown }).per_class_summary;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ experiments: [clean, bare], missing: [], curves: {} }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    show([record(), record({ runId: 'run-b' })], ['run-a', 'run-b']);
+
+    expect(await screen.findByText(/run-b에는 class별 요약이 없어/)).toBeTruthy();
+  });
+
   it('팀원이 돌린 실행에는 로그 링크를 내지 않는다', async () => {
     show([record({ jobId: null })]);
 
