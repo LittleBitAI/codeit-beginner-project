@@ -18,7 +18,7 @@ from .manifest import load_class_map, load_manifest, load_test_manifest
 from .metrics import DEFAULT_IOU_THRESHOLDS, evaluate_detections, filter_predictions
 from .predictor import load_predictions, predict_record_groups_with_checkpoint
 from .progress import ProgressEmitter
-from .storage_io import ArtifactStore, join_uri
+from .storage_io import ArtifactStore, is_remote_uri, join_uri
 from .submission import render_submission_csv
 
 
@@ -199,11 +199,11 @@ def _same_file_key(uri: str) -> str:
     나중에 쓰는 쪽이 먼저 쓴 파일을 덮습니다.
     """
 
-    normalized = uri.replace("\\", "/")
-    scheme, separator, rest = normalized.partition("://")
-    if separator:
-        return f"{scheme}://{posixpath.normpath(rest)}"
-    return posixpath.normpath(normalized)
+    if is_remote_uri(uri):
+        # S3 key는 글자 그대로입니다. `a//b`와 `a/b`, `./a`와 `a`가 서로 **다른**
+        # object이므로 정규화하면 다른 것을 같다고 잘못 막습니다.
+        return uri
+    return posixpath.normpath(uri.replace("\\", "/"))
 
 
 def _resolve_max_detections(value: Any) -> int | None:
@@ -593,15 +593,16 @@ def run(config: dict) -> dict:
             "predictions": [_public_prediction(prediction) for prediction in predictions],
         }
         submission_uri: str | None = None
-        # 쓰기 **전에** 정리 목록에 넣습니다. 쓰다가 실패하면 반쯤 쓰인 파일이 남는데,
-        # 쓴 뒤에 넣으면 그 파일이 목록에 없어 지워지지 않습니다. 이미 있던 파일은
-        # 여전히 목록에 넣지 않으므로 남의 결과를 지우지 않습니다.
+        # 쓴 **뒤에** 목록에 넣습니다. 쓰기 전에 넣으면, `exists()`와 쓰기 사이에 다른
+        # 실행이 만든 파일을 이 실행이 지우게 됩니다. 반쯤 쓰인 파일은 `storage_io`의
+        # 원자적 쓰기가 막습니다.
         if settings.submission_uri is not None and submission_text is not None:
-            if not store.exists(settings.submission_uri):
-                created_uris.append(settings.submission_uri)
+            submission_existed = store.exists(settings.submission_uri)
             submission_uri = store.write_text(
                 settings.submission_uri, submission_text, overwrite=settings.overwrite
             )
+            if not submission_existed:
+                created_uris.append(settings.submission_uri)
             progress.emit("submission_written", rows=submission_rows)
 
         test_predictions_uri: str | None = None
@@ -622,26 +623,29 @@ def run(config: dict) -> dict:
                     _public_prediction(prediction) for prediction in test_predictions
                 ],
             }
-            if not store.exists(settings.test_predictions_uri):
-                created_uris.append(settings.test_predictions_uri)
+            test_predictions_existed = store.exists(settings.test_predictions_uri)
             test_predictions_uri = store.write_json(
                 settings.test_predictions_uri,
                 test_predictions_document,
                 overwrite=settings.overwrite,
             )
+            if not test_predictions_existed:
+                created_uris.append(settings.test_predictions_uri)
 
-        if not store.exists(settings.predictions_uri):
-            created_uris.append(settings.predictions_uri)
+        predictions_existed = store.exists(settings.predictions_uri)
         predictions_uri = store.write_json(
             settings.predictions_uri, predictions_document, overwrite=settings.overwrite
         )
+        if not predictions_existed:
+            created_uris.append(settings.predictions_uri)
 
         metrics_document = {**common_fields, **report}
-        if not store.exists(settings.metrics_uri):
-            created_uris.append(settings.metrics_uri)
+        metrics_existed = store.exists(settings.metrics_uri)
         metrics_uri = store.write_json(
             settings.metrics_uri, metrics_document, overwrite=settings.overwrite
         )
+        if not metrics_existed:
+            created_uris.append(settings.metrics_uri)
 
         progress.emit(
             "evaluate_completed",

@@ -377,40 +377,6 @@ def test_output_paths_that_spell_the_same_file_are_rejected(
     assert "같은 위치에 저장할 수 없습니다" in result["message"]
 
 
-def test_partly_written_test_predictions_are_removed(
-    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """쓰다가 실패해도 반쯤 쓰인 파일을 남기지 않습니다."""
-    from src.pipelines.evaluate import pipeline, storage_io
-
-    _add_test_manifest(base_config, repository_root)
-    # 이것을 두면 validation 예측을 파일에서 읽어 추론 group이 하나만 만들어지고,
-    # 아래 대역이 돌려주는 두 group과 어긋나 test 예측을 쓰기 전에 실패합니다.
-    # 그러면 "파일이 없다"가 언제나 참이 되어 아무것도 재지 않습니다.
-    base_config["evaluate"].pop("predictions_input_uri")
-    monkeypatch.setattr(
-        pipeline,
-        "predict_record_groups_with_checkpoint",
-        lambda *args, **kwargs: [_normalised_validation_predictions(), []],
-    )
-    original_write_json = storage_io.ArtifactStore.write_json
-    target = repository_root / "artifacts/evaluate/evaluate-0001/test_predictions.json"
-
-    def fail_midway(self, uri, value, *, overwrite=False):
-        if uri.endswith("test_predictions.json"):
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text('{"predi', encoding="utf-8", newline="\n")
-            raise storage_io.ArtifactWriteError("쓰다가 끊김")
-        return original_write_json(self, uri, value, overwrite=overwrite)
-
-    monkeypatch.setattr(storage_io.ArtifactStore, "write_json", fail_midway)
-
-    result = run(base_config)
-
-    assert result["status"] == "error"
-    assert not target.exists()
-
-
 def test_existing_submission_stops_before_inference(
     base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -723,6 +689,16 @@ def test_excluded_categories_leave_the_submission_but_stay_in_validation(
     assert metrics["metrics"]["mAP"] is not None
     # 무엇을 뺐는지 실행 기록에 남습니다. JSON으로 직렬화할 수 있는 list여야 합니다.
     assert result["summary"]["submission_excluded_category_ids"] == [1, 3]
+
+    # test 예측 파일도 제출과 같아야 합니다. 뺀 class가 여기 다시 들어오면 앙상블이
+    # 올리지 않은 예측으로 융합하고, 뺀 목록을 안 적으면 읽는 쪽이 그 class를 모델이
+    # 못 맞힌 것으로 읽습니다.
+    test_predictions = _read_json(
+        repository_root, result["artifacts"]["test_predictions_uri"]
+    )
+    assert test_predictions["submission_excluded_category_ids"] == [1, 3]
+    assert {entry["category_id"] for entry in test_predictions["predictions"]} == {7}
+    assert test_predictions["prediction_count"] == 2
     assert validate_pipeline_result(result, pipeline_name="evaluate") is result
 
 
@@ -1024,3 +1000,20 @@ def test_metrics_exclusion_applies_before_the_per_image_cap(
     [entry] = metrics["per_class"]
     assert entry["prediction_count"] == 1
     assert entry["ap"] is not None and entry["ap"] > 0.0
+
+
+def test_s3_output_paths_are_compared_letter_by_letter(base_config: dict, repository_root: Path):
+    """S3 key는 글자 그대로입니다. 정규화해서 같다고 막으면 안 됩니다.
+
+    `out/./m.json`과 `out/m.json`은 local에서는 같은 파일이지만 S3에서는 서로 다른
+    object입니다. local 규칙을 그대로 적용하면 쓸 수 있는 조합을 거절합니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"]["output_dir"] = "s3://bucket/out"
+    base_config["evaluate"]["metrics_filename"] = "m.json"
+    base_config["evaluate"]["test_predictions_filename"] = "./m.json"
+
+    settings = resolve_settings(base_config)
+
+    assert settings.metrics_uri == "s3://bucket/out/m.json"
+    assert settings.test_predictions_uri == "s3://bucket/out/./m.json"

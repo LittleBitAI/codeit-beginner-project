@@ -146,11 +146,12 @@ class ArtifactStore:
             raise ArtifactWriteError(
                 f"artifact가 이미 있습니다. overwrite를 허용해야 덮어씁니다: {self.normalize_uri(uri)}"
             )
+        def render(output: Any) -> None:
+            json.dump(value, output, ensure_ascii=False, indent=2)
+            output.write("\n")
+
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("w", encoding="utf-8", newline="\n") as output:
-                json.dump(value, output, ensure_ascii=False, indent=2)
-                output.write("\n")
+            self._write_local_atomically(path, render)
         except OSError as error:
             raise ArtifactWriteError(f"artifact를 저장하지 못했습니다 ({uri}): {error}") from error
         return self.normalize_uri(path)
@@ -173,19 +174,39 @@ class ArtifactStore:
                     ) from error
 
         path = self.local_path(uri)
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            mode = "w" if overwrite else "x"
-            with path.open(mode, encoding="utf-8", newline="\n") as output:
-                output.write(value)
-        except FileExistsError as error:
+        # 예전에는 mode "x"가 존재 확인과 만들기를 한 번에 했습니다. 원자적 쓰기로
+        # 바뀌면서 확인을 따로 합니다. 메시지는 그대로 둡니다.
+        if path.exists() and not overwrite:
             raise ArtifactWriteError(
                 "artifact가 이미 있습니다. overwrite를 허용해야 덮어씁니다: "
                 f"{self.normalize_uri(uri)}"
-            ) from error
+            )
+        try:
+            self._write_local_atomically(path, lambda output: output.write(value))
         except OSError as error:
             raise ArtifactWriteError(f"artifact를 저장하지 못했습니다 ({uri}): {error}") from error
         return self.normalize_uri(path)
+
+    def _write_local_atomically(self, path: Path, render: Any) -> None:
+        """같은 directory의 임시 파일에 쓰고 제자리로 옮깁니다.
+
+        대상 파일을 직접 열면 쓰다가 끊겼을 때 반쯤 쓰인 artifact가 남습니다. 그것을
+        "이번 실행이 만들었으니 지우자"로 해결하려 하면, `exists()`와 쓰기 사이에 다른
+        실행이 만든 파일까지 지우게 됩니다. 아예 반쯤 쓰인 파일이 생기지 않게 합니다.
+        """
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle, temporary_name = tempfile.mkstemp(
+            dir=str(path.parent), prefix=f".{path.name}.", suffix=".partial"
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as output:
+                render(output)
+            os.replace(temporary, path)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
 
     def remove_local(self, uri: str) -> None:
         """이번 실행에서 만든 local artifact만 정리합니다. S3 object는 삭제하지 않습니다."""
