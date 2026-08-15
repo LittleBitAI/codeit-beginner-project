@@ -193,7 +193,7 @@ def test_lists_registered_experiments_newest_first(tmp_path):
     summaries = list_experiment_summaries(config)
 
     assert [summary["run_id"] for summary in summaries] == ["exp-b", "exp-a"]
-    assert summaries[0]["summary_version"] == "2"
+    assert summaries[0]["summary_version"] == "3"
 
 
 def test_search_filters_by_run_id_and_submission(tmp_path):

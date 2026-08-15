@@ -33,6 +33,17 @@ METRICS_DOCUMENT = {
         "precision50": 0.61,
         "recall50": 0.48,
     },
+    # Evaluate가 어디가 약한 class인지 이미 간추려 둔 자리입니다. registry는 세지
+    # 않고 그대로 옮기기만 합니다.
+    "analysis": {
+        "per_class_summary": {
+            "min_truth_count": 5,
+            "top_n": 10,
+            "counts": {"weak": 1, "sparse": 0, "unmeasured": 0},
+            "weak": [{"category_id": 16548, "name": "가바토파정 100mg", "ap": 0.12}],
+            "sparse": [],
+        }
+    },
 }
 
 # Train이 training_history.json에 쓰는 모양 그대로입니다. epoch 2가 validation
@@ -151,7 +162,7 @@ def test_run_writes_an_index_entry_next_to_the_record(local_run):
     assert summary_uri == "artifacts/registry/index/exp-0001.json"
 
     summary = json.loads((repo_root / summary_uri).read_text(encoding="utf-8"))
-    assert summary["summary_version"] == "2"
+    assert summary["summary_version"] == "3"
     assert summary["run_id"] == "exp-0001"
     assert summary["seed"] == 42
     assert summary["schema_version"] == "1.2"
@@ -161,6 +172,10 @@ def test_run_writes_an_index_entry_next_to_the_record(local_run):
     assert summary["metrics_source"] == "metrics_file"
     assert summary["metrics"]["mAP"] == pytest.approx(0.31)
     assert summary["metrics"]["mAP50"] == pytest.approx(0.55)
+    # evaluate가 간추린 약한 class를 그대로 옮깁니다. 여기서 다시 세면 화면과
+    # evaluate의 판정이 갈립니다.
+    assert summary["per_class"]["counts"]["weak"] == 1
+    assert summary["per_class"]["weak"][0]["category_id"] == 16548
     assert summary["submission_check"]["checked"] is False
 
     # 선언된 artifact key는 없더라도 null로 자리를 채워 소비자가 분기하지 않게 합니다.
@@ -298,6 +313,13 @@ def test_training_block_is_filled_from_the_config_snapshot(local_run):
         "epochs": 50,
         "batch_size": 4,
         "num_workers": 0,
+        "precision": "amp",
+        "checkpoint_every": 2,
+        "gradient_accumulation_steps": 8,
+        "input_size": 640,
+        "augmentation": {"preset": "pill_geometric"},
+        "lr_scheduler": {"name": "cosine", "warmup_steps": 500},
+        "early_stopping": {"patience": 4, "min_delta": 0.0},
         # 경로와 seed는 summary에 옮기지 않습니다.
         "output_dir": "artifacts/train",
         "seed": 7,
@@ -305,7 +327,7 @@ def test_training_block_is_filled_from_the_config_snapshot(local_run):
 
     summary = read_summary(repo_root, registry.run(config))
 
-    assert summary["summary_version"] == "2"
+    assert summary["summary_version"] == "3"
     assert summary["training_source"] == "config_snapshot"
     assert summary["training"] == {
         "architecture": "retinanet_resnet50_fpn_v2",
@@ -322,6 +344,15 @@ def test_training_block_is_filled_from_the_config_snapshot(local_run):
         "epochs": 50,
         "batch_size": 4,
         "num_workers": 0,
+        "precision": "amp",
+        "checkpoint_every": 2,
+        "gradient_accumulation_steps": 8,
+        "input_size": 640,
+        # 중첩 설정은 모양 그대로 옮깁니다. 평평하게 펴면 화면이 그 값으로 새 실험을
+        # 다시 채울 때 원래 모양을 되살릴 수 없습니다.
+        "augmentation": {"preset": "pill_geometric"},
+        "lr_scheduler": {"name": "cosine", "warmup_steps": 500},
+        "early_stopping": {"patience": 4, "min_delta": 0.0},
     }
 
 
