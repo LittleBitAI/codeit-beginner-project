@@ -218,3 +218,62 @@ def test_s3_uri_must_match_configured_bucket():
 
     with pytest.raises(StorageConfigurationError, match="bucket이 다릅니다"):
         storage.exists("s3://other-bucket/datasets/item.jpg")
+
+
+def test_local_identity_is_the_same_for_paths_that_name_one_file(tmp_path):
+    """표기가 달라도 같은 파일이면 같은 identity입니다.
+
+    쓰기 전에 "두 산출물이 같은 파일을 가리키는가"를 판정하려면, 부르는 쪽이 규칙을
+    지어내지 않고 저장 계층이 실제로 쓰는 대상을 물어볼 수 있어야 합니다.
+    """
+    storage = LocalStorage(tmp_path / "storage")
+
+    same = storage.identity("run/metrics.json")
+    assert storage.identity("./run/metrics.json") == same
+    assert storage.identity("run/./metrics.json") == same
+    assert storage.identity("run/other/../metrics.json") == same
+    assert storage.identity("run/predictions.json") != same
+
+
+def test_local_identity_refuses_paths_outside_the_root(tmp_path):
+    storage = LocalStorage(tmp_path / "storage")
+
+    with pytest.raises(StorageConfigurationError):
+        storage.identity("../바깥/metrics.json")
+
+
+def test_s3_identity_is_the_same_for_uris_that_name_one_object():
+    """S3 URI의 표기 차이(scheme 대소문자, percent encoding)를 가립니다."""
+    storage = S3Storage(bucket="example-bucket", prefix="run")
+
+    same = storage.identity("s3://example-bucket/run/metrics.json")
+    assert storage.identity("S3://example-bucket/run/metrics.json") == same
+    assert storage.identity("s3://example-bucket/run/metrics%2Ejson") == same
+    # prefix를 붙이는 상대 key도 같은 object를 가리킵니다.
+    assert storage.identity("metrics.json") == same
+    assert storage.identity("s3://example-bucket/run/predictions.json") != same
+
+
+def test_s3_and_local_identities_never_collide(tmp_path):
+    """backend가 다르면 같은 이름이라도 다른 대상입니다."""
+    local = LocalStorage(tmp_path / "storage")
+    s3 = S3Storage(bucket="example-bucket")
+
+    assert local.identity("metrics.json") != s3.identity("metrics.json")
+
+
+def test_local_identity_follows_the_filesystem_on_letter_case(tmp_path):
+    """대소문자를 가리는지는 filesystem이 정합니다.
+
+    Windows에서는 `Metrics.json`과 `metrics.json`이 같은 파일이고, POSIX에서는 다른
+    파일입니다. identity가 그 규칙을 따라야 판정이 실제 저장과 어긋나지 않습니다.
+    이 단언은 대소문자를 가리지 않는 filesystem에서만 실제로 무언가를 막습니다.
+    """
+    import os
+
+    storage = LocalStorage(tmp_path / "storage")
+    filesystem_ignores_case = os.path.normcase("A") == os.path.normcase("a")
+
+    same_identity = storage.identity("Metrics.json") == storage.identity("metrics.json")
+
+    assert same_identity is filesystem_ignores_case

@@ -107,6 +107,19 @@ class Storage(ABC):
     def list(self, prefix: str | Path = "") -> list[str]:
         """Prefix 아래 object URI/path를 반환합니다."""
 
+    @abstractmethod
+    def identity(self, location: str | Path) -> tuple[str, ...]:
+        """이 backend가 실제로 읽고 쓸 대상을 나타내는 값을 돌려줍니다.
+
+        표기만 다르고 같은 대상을 가리키는 위치는 **같은 값**이 되어야 합니다.
+        쓰기 전에 "두 산출물이 같은 곳에 저장되는가"를 판정하려는 쪽이, 스스로
+        규칙을 지어내는 대신 이것을 물어보게 하려는 것입니다. 규칙을 밖에서
+        다시 만들면 backend가 실제로 하는 해석과 어긋납니다.
+
+        같은 대상이면 같은 값이라는 것만 약속합니다. 값의 모양은 backend마다
+        다르고, 사람에게 보여 줄 이름이 아닙니다.
+        """
+
 
 class LocalStorage(Storage):
     """설정된 root 안에서 동작하는 local filesystem storage입니다."""
@@ -222,6 +235,12 @@ class LocalStorage(Storage):
 
     def exists(self, location: str | Path) -> bool:
         return self._resolve(location).is_file()
+
+    def identity(self, location: str | Path) -> tuple[str, ...]:
+        # 읽고 쓸 때와 **같은** `_resolve`를 씁니다. `normcase`는 대소문자를 가리지
+        # 않는 filesystem(Windows)에서 같은 파일을 같은 값으로 만들고, POSIX에서는
+        # 아무것도 바꾸지 않습니다.
+        return ("local", os.path.normcase(str(self._resolve(location))))
 
     def list(self, prefix: str | Path = "") -> list[str]:
         prefix_path = self._resolve(prefix)
@@ -433,6 +452,12 @@ class S3Storage(Storage):
         except (ClientError, NoCredentialsError, PartialCredentialsError, ProfileNotFound) as error:
             self._raise_s3_error(error, bucket=bucket, key=key)
         return self._uri(bucket, key)
+
+    def identity(self, location: str | Path) -> tuple[str, ...]:
+        # 읽고 쓸 때와 **같은** `_resolve`를 씁니다. scheme 대소문자, percent
+        # encoding, prefix 붙이기가 거기서 이미 정리되므로 여기서 다시 규칙을
+        # 만들지 않습니다. `//`처럼 S3에서 실제로 다른 key는 다르게 남습니다.
+        return ("s3", *self._resolve(location))
 
     def exists(self, location: str | Path) -> bool:
         bucket, key = self._resolve(location)
