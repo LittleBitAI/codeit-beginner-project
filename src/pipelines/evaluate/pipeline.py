@@ -204,6 +204,45 @@ def _without_categories(
     ]
 
 
+def _prediction_sources(
+    store: ArtifactStore, document: Mapping[str, Any], uri: str
+) -> frozenset[str]:
+    """이 예측이 **어느 checkpoint들의 증거인지** 돌려줍니다.
+
+    추론한 파일은 checkpoint 하나, 합친 파일은 합친 것들 전부입니다. 둘을 같은 값으로
+    다루면 겹침을 한 번에 셀 수 있습니다 — 완전히 같은 것뿐 아니라 **일부만 겹치는**
+    경우도 걸립니다. 중첩 융합에서 그것을 놓치면 한 checkpoint가 두 표를 갖습니다.
+
+    무엇의 증거인지 말하지 못하는 파일은 거절합니다. 저장 위치로 대신하면 복사본이
+    서로 다른 증거로 지나갑니다.
+    """
+
+    checkpoint = document.get("checkpoint_uri")
+    if checkpoint:
+        return frozenset({str(store.artifact_identity(str(checkpoint)))})
+
+    entries = document.get("fused_from")
+    if (
+        not isinstance(entries, Sequence)
+        or isinstance(entries, (str, bytes))
+        or not entries
+    ):
+        raise InputArtifactError(
+            f"{uri}: 무엇의 증거인지 말하지 않아 합칠 수 없습니다. checkpoint_uri나 "
+            "비어 있지 않은 fused_from 중 하나가 있어야 합니다."
+        )
+    sources: set[str] = set()
+    for entry in entries:
+        source = entry.get("checkpoint_uri") if isinstance(entry, Mapping) else None
+        if not source:
+            raise InputArtifactError(
+                f"{uri}: fused_from에 checkpoint가 없는 항목이 있어 무엇의 증거인지 "
+                "알 수 없습니다."
+            )
+        sources.add(str(store.artifact_identity(str(source))))
+    return frozenset(sources)
+
+
 def _load_fusion_inputs(
     store: ArtifactStore,
     uris: Sequence[str],
@@ -235,7 +274,12 @@ def _load_fusion_inputs(
 
         return (
             frozenset(
-                (record["image_id"], record["image_uri"], record["width"], record["height"])
+                (
+                    record["image_id"],
+                    store.artifact_identity(record["image_uri"]),
+                    record["width"],
+                    record["height"],
+                )
                 for record in records
             ),
             category_ids,
@@ -247,7 +291,8 @@ def _load_fusion_inputs(
 
     groups: list[list[dict[str, Any]]] = []
     lineage: list[dict[str, Any]] = []
-    seen_models: dict[str, str] = {}
+    # 어느 checkpoint를 이미 셌는지입니다. 합친 파일은 여러 개를 들고 옵니다.
+    claimed_sources: dict[str, str] = {}
     image_keys = {record["image_key"] for record in test_records}
 
     for uri in uris:
@@ -270,36 +315,25 @@ def _load_fusion_inputs(
                 )
             checked_manifests.add(declared_target)
 
-        # checkpoint가 모델의 신원입니다. 표기가 달라도 같은 파일이면 한 실행이므로
-        # 저장 계층에 물어봅니다. 합친 파일에는 checkpoint가 없으니 그때는 **무엇을
-        # 합쳤는지**로 봅니다 — 같은 것들을 합친 둘은 같은 증거입니다.
-        checkpoint = document.get("checkpoint_uri")
-        if checkpoint:
-            model = str(store.artifact_identity(str(checkpoint)))
-        else:
-            sources = document.get("fused_from")
-            if isinstance(sources, Sequence) and not isinstance(sources, (str, bytes)):
-                model = str(
-                    sorted(
-                        str(entry.get("checkpoint_uri"))
-                        for entry in sources
-                        if isinstance(entry, Mapping)
-                    )
-                )
-            else:
-                model = str(store.artifact_identity(uri))
-        if model in seen_models:
+        sources = _prediction_sources(store, document, uri)
+        overlap = sources & claimed_sources.keys()
+        if overlap:
             raise ConfigurationError(
-                f"같은 실행의 예측이 두 번 있습니다: {seen_models[model]}와 {uri}"
+                "같은 실행의 예측이 두 번 있습니다: "
+                f"{claimed_sources[sorted(overlap)[0]]}와 {uri}"
             )
-        seen_models[model] = uri
+        for source in sources:
+            claimed_sources[source] = uri
 
         groups.append(parse_predictions(document, source=uri, known_image_keys=image_keys))
         lineage.append(
             {
                 "uri": uri,
                 "run_id": document.get("run_id"),
-                "checkpoint_uri": checkpoint,
+                "checkpoint_uri": document.get("checkpoint_uri"),
+                # 합친 파일을 다시 합치면 그 안의 checkpoint들이 계보에 이어져야
+                # 합니다. 그러지 않으면 다음 융합이 겹침을 볼 수 없습니다.
+                "source_checkpoint_uris": sorted(sources),
             }
         )
     return groups, lineage
