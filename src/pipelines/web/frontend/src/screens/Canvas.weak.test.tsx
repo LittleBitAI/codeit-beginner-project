@@ -347,6 +347,66 @@ describe('약한 class 표', () => {
     expect(screen.getByText('표본 부족')).toBeTruthy();
   });
 
+  it('정답이 하나도 없던 class를 약하지 않다고 적지 않는다', async () => {
+    const other = {
+      ...experiment(),
+      experiment_id: 'run-b',
+      run_id: 'run-b',
+      per_class_summary: {
+        min_truth_count: 5,
+        top_n: 10,
+        counts: { weak: 0, sparse: 0, unmeasured: 1 },
+        weak: [],
+        sparse: [],
+        unmeasured: [{ category_id: 16548, name: '가바토파정 100mg', ap: null }],
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ experiments: [experiment(), other], missing: [], curves: {} }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    show([record(), record({ runId: 'run-b' })], ['run-a', 'run-b']);
+
+    expect(await screen.findByText('가바토파정 100mg')).toBeTruthy();
+    expect(screen.getByText('정답 없음')).toBeTruthy();
+  });
+
+  it('sparse 목록이 잘려 있어도 약하지 않다고 단정하지 않는다', async () => {
+    // counts.sparse가 목록 길이보다 큽니다. 그 밖의 class는 표본이 부족했을 수도
+    // 있으므로 "약하지 않음"이라고 말할 근거가 없습니다.
+    const other = {
+      ...experiment(),
+      experiment_id: 'run-b',
+      run_id: 'run-b',
+      per_class_summary: {
+        min_truth_count: 5,
+        top_n: 1,
+        counts: { weak: 0, sparse: 9, unmeasured: 0 },
+        weak: [],
+        sparse: [{ category_id: 99999, name: '다른 알약', ap: 0.3 }],
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ experiments: [experiment(), other], missing: [], curves: {} }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+    show([record(), record({ runId: 'run-b' })], ['run-a', 'run-b']);
+
+    expect(await screen.findByText('가바토파정 100mg')).toBeTruthy();
+    expect(screen.getAllByText('순위 밖').length).toBeGreaterThan(0);
+    expect(screen.queryByText('약하지 않음')).toBeNull();
+  });
+
   it('팀원이 돌린 실행에는 로그 링크를 내지 않는다', async () => {
     show([record({ jobId: null })]);
 

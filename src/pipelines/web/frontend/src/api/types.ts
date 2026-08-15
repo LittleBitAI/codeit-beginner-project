@@ -275,6 +275,8 @@ export interface ExperimentSummary {
     counts: { weak: number; sparse: number; unmeasured: number };
     weak: WeakClassRow[];
     sparse: WeakClassRow[];
+    /** 정답이 하나도 없어 잴 수 없었던 class. evaluate는 이것만 자르지 않습니다. */
+    unmeasured?: WeakClassRow[];
   } | null;
   /** 학습이 남긴 loss와 evaluate가 낸 지표. 기록에 없으면 null이고 화면은 - 로 둡니다. */
   metrics: {

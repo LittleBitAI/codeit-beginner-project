@@ -210,7 +210,8 @@ function settingRows(experiments: ExperimentSummary[]): Row[] {
  * - `순위 밖`: 목록이 잘려 있어 약한지 아닌지 이 화면이 알 수 없습니다.
  * - `class 요약 없음`: 그 실행에는 class별 요약이 없어 말할 자료가 없습니다.
  *   평가 전일 수도, 이 요약이 생기기 전에 등록된 기록일 수도 있습니다.
- * - `약하지 않음`: 목록이 잘리지 않았고 거기 없으므로 약하지 않았습니다.
+ * - `정답 없음`: 정답이 하나도 없어 잴 수 없었던 class입니다.
+ * - `분류 없음`: 그 실행의 어느 목록에도 없습니다. 좋았다는 뜻이 아닙니다.
  *
  * 기호 대신 글자로 적습니다. `-`나 `?`는 표 위 설명을 읽지 않으면 뜻을 알 수 없고,
  * 이 표에서 가장 위험한 오해가 "말할 수 없는 것"을 "괜찮다"로 읽는 것입니다.
@@ -224,27 +225,38 @@ function settingRows(experiments: ExperimentSummary[]): Row[] {
  * 잘린 목록에 없는 것을 `-`로 적으면 "약하지 않다"고 단정하는 셈인데, 그 말을 할
  * 근거가 화면에 없습니다.
  */
-function cell(
-  values: Map<number, number | null>,
-  id: number,
-  {
-    truncated,
-    summarized,
-    sparse,
-  }: { truncated: boolean; summarized: boolean; sparse: boolean },
-): string {
+interface CellState {
+  /** weak나 sparse 목록이 상위 몇 개로 잘렸는지. */
+  truncated: boolean;
+  /** 그 실행에 class별 요약이 있는지. */
+  summarized: boolean;
+  sparse: boolean;
+  /** 정답이 하나도 없어 잴 수 없었던 class인지. */
+  unmeasured: boolean;
+}
+
+function cell(values: Map<number, number | null>, id: number, state: CellState): string {
   const value = values.get(id);
   if (typeof value === 'number') return value.toFixed(3);
   if (values.has(id)) return '미측정';
   // 정답이 적어 AP를 믿을 수 없는 class입니다. evaluate가 weak와 따로 세어 둡니다.
   // 이것을 "약하지 않음"으로 적으면 표본 부족을 성능 양호로 읽습니다.
-  if (sparse) return '표본 부족';
+  if (state.sparse) return '표본 부족';
+  if (state.unmeasured) return '정답 없음';
   // class 요약이 없으면 약한지 아닌지 말할 자료가 없습니다. "평가 없음"이라고는
   // 하지 않습니다 — 이 요약은 나중에 생긴 값이라, 평가는 했지만 그 전에 등록된
   // 기록도 여기 걸립니다. 같은 화면이 mAP를 보여 주면서 평가를 안 했다고 말하면
   // 둘 중 하나는 거짓말입니다.
-  if (!summarized) return 'class 요약 없음';
-  return truncated ? '순위 밖' : '약하지 않음';
+  if (!state.summarized) return 'class 요약 없음';
+  if (state.truncated) return '순위 밖';
+  /**
+   * 여기까지 왔다는 것은 그 실행의 어느 목록에도 없다는 뜻입니다.
+   *
+   * "약하지 않음"이라고 적지 않습니다. evaluate는 `per_class`의 모든 class를 셋 중
+   * 하나에 넣으므로, 잘리지도 않았는데 어디에도 없다면 **그 실행의 class 목록에
+   * 아예 없는 것**입니다(class map이 다른 dataset 등). 성능이 좋았다는 뜻이 아닙니다.
+   */
+  return '분류 없음';
 }
 
 function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
@@ -275,7 +287,10 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
               잴 만한 class가 없었던 것입니다. */}
           {measured.length > 0 &&
             `정답이 ${measured[0]?.per_class_summary?.min_truth_count}개 이상인 class가 없어 약한지 판단할 수 없습니다.`}
-          {sparseTotal > 0 && ` 정답이 적어 AP를 믿을 수 없는 class가 ${sparseTotal}개 있습니다.`}
+          {/* 실행마다 센 것을 더한 값입니다. 같은 class가 여러 실행에서 sparse면
+              두 번 세어지므로 "고유 class 수"라고 적으면 안 됩니다. */}
+          {sparseTotal > 0 &&
+            ` 정답이 적어 AP를 믿을 수 없는 class가 실행별 합계 ${sparseTotal}건 있습니다.`}
           {unsummarized.length > 0 &&
             ` ${unsummarized.map((item) => item.run_id).join(', ')}에는 class별 요약이 없어 약한지 아닌지 알 수 없습니다. 평가를 다시 실행해 등록하면 채워집니다 — 등록만으로는 생기지 않습니다.`}
         </div>
@@ -295,7 +310,13 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
    */
   const truncated = experiments.map((item) => {
     const summary = item.per_class_summary;
-    return summary ? summary.counts.weak > summary.weak.length : false;
+    if (!summary) return false;
+    // sparse도 함께 봅니다. sparse가 잘려 있으면 그 밖의 class를 "약하지 않음"으로
+    // 읽게 되는데, 실제로는 표본이 부족했을 수 있습니다.
+    return (
+      summary.counts.weak > summary.weak.length ||
+      summary.counts.sparse > summary.sparse.length
+    );
   });
   /** 그 실행에 class별 요약이 있는지. 없으면 약한지 아닌지 말할 자료가 없습니다. */
   const summarized = experiments.map((item) => Boolean(item.per_class_summary));
@@ -307,6 +328,10 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
    */
   const sparseByRun = experiments.map(
     (item) => new Set((item.per_class_summary?.sparse ?? []).map((row) => row.category_id)),
+  );
+  /** 정답이 0이라 잴 수 없었던 class입니다. evaluate는 이 목록만 자르지 않습니다. */
+  const unmeasuredByRun = experiments.map(
+    (item) => new Set((item.per_class_summary?.unmeasured ?? []).map((row) => row.category_id)),
   );
   /**
    * 모든 실행 중 가장 낮은 AP를 기준으로 세웁니다.
@@ -330,7 +355,7 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
       <div style={{ ...type.note, color: color.textMuted, marginTop: 6, maxWidth: '46em' }}>
         정답이 {measured[0]?.per_class_summary?.min_truth_count}개 이상인데 AP가 낮은 class입니다.
         표본이 적어 AP를 믿을 수 없는 class는 evaluate가 따로 세어 두므로 여기 넣지 않습니다.
-        {' 잰 AP가 없으면 그 이유를 그대로 적습니다: 미측정, 표본 부족, 순위 밖(목록이 잘려 알 수 없음), class 요약 없음, 약하지 않음.'}
+        {' 잰 AP가 없으면 그 이유를 그대로 적습니다: 미측정, 표본 부족, 정답 없음, 순위 밖(목록이 잘려 알 수 없음), class 요약 없음, 분류 없음.'}
       </div>
       <div style={{ overflowX: 'auto', marginTop: 14 }}>
         <div style={{ minWidth: 170 + experiments.length * 150 }}>
@@ -398,6 +423,7 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
                     truncated: truncated[index] ?? false,
                     summarized: summarized[index] ?? false,
                     sparse: sparseByRun[index]?.has(id) ?? false,
+                    unmeasured: unmeasuredByRun[index]?.has(id) ?? false,
                   })}
                 </span>
               ))}
