@@ -2391,6 +2391,36 @@ def test_pill_geometric_crop_keeps_the_whole_image_when_no_pill_survives(monkeyp
     assert torch.equal(target["boxes"], original["boxes"])
 
 
+def test_pill_geometric_color_actually_changes_the_picture(monkeypatch):
+    """색 변형은 그림을 실제로 바꿔야 합니다.
+
+    EDA가 잰 대로 이 데이터에는 조명 변화가 거의 없고 대회 test와는 전경 색이
+    벌어져 있어, 색이 이 preset에서 가장 세게 거는 변형입니다(확률 0.8). 값만
+    소비하고 그림을 그대로 돌려주면 그 사실을 아무도 눈치채지 못합니다.
+    """
+
+    # 회전·좌우·자르기는 건너뛰고 색만 걸립니다. 그 뒤 넷은 밝기·대비·채도·색조가
+    # 쓰는 값이고, 마지막은 잡음 gate입니다.
+    draws = iter((1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
+    image = torch.zeros(3, 4, 6)
+    image[0], image[1], image[2] = 0.8, 0.4, 0.2
+    target = {
+        "boxes": torch.tensor([[1.0, 1.0, 4.0, 3.0]]),
+        "labels": torch.tensor([1]),
+    }
+    augmentation = DetectionAugmentation(
+        dict(pipeline.AUGMENTATION_PRESETS["pill_geometric"])
+    )
+
+    augmented_image, augmented_target = augmentation(image, target)
+
+    assert not torch.equal(augmented_image, image)
+    assert float(augmented_image.min()) >= 0.0
+    assert float(augmented_image.max()) <= 1.0
+    assert torch.equal(augmented_target["boxes"], target["boxes"])
+
+
 def test_pill_geometric_noise_changes_pixels_and_keeps_them_in_range(monkeypatch):
     """잡음은 그림을 실제로 바꾸되 값 범위는 [0, 1]로 되돌려 놓아야 합니다.
 
