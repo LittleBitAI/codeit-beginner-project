@@ -98,10 +98,19 @@ export function Records({
   const listed = folded.length > 0 ? shown.filter(hasResult) : shown;
   const groups = useMemo(() => groupByModel(listed), [listed]);
 
+  /**
+   * 어디로 갈지는 **누가 돌렸는지가 아니라 그 화면이 보여 줄 수 있는지**로 정합니다.
+   *
+   * 이 컴퓨터가 돌렸다는 이유로 모니터에 보내면, 같은 실험인데 내 것을 누를 때와
+   * 팀원 것을 누를 때 다른 화면이 열립니다. 등록까지 끝난 실행은 캔버스가 곡선과
+   * 약한 class를 함께 보여 주므로 누가 돌렸든 그쪽이 맞습니다. 아직 등록되지 않은
+   * 실행은 캔버스가 목록에 올리지 않아 빈 화면이 되므로, 로그와 취소가 있는
+   * 모니터로 보냅니다.
+   */
   const openRecord = (record: RunRecord) =>
-    record.jobId
-      ? navigate(`/monitor/${record.jobId}`)
-      : navigate(`/canvas?run=${encodeURIComponent(record.runId)}`);
+    record.registered || !record.jobId
+      ? navigate(`/canvas?run=${encodeURIComponent(record.runId)}`)
+      : navigate(`/monitor/${record.jobId}`);
 
   const bestKaggle = records
     .map((record) => record.metrics.kaggle)

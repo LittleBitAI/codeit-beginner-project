@@ -30,8 +30,10 @@ from .record import (
 
 
 # "1" -> "2": metrics를 s3://에서도 읽고 losses와 losses_source를 더했습니다.
-# 기존 key는 이름도 뜻도 그대로입니다.
-SUMMARY_VERSION = "2"
+# "2" -> "3": training이 precision·checkpoint_every·gradient_accumulation_steps·
+#   input_size와 중첩 설정 셋(augmentation·lr_scheduler·early_stopping)을 함께 담고,
+#   per_class_summary가 생겼습니다. 기존 key는 이름도 뜻도 그대로입니다.
+SUMMARY_VERSION = "3"
 
 # Evaluate가 metrics.json에 쓰는 이름을 그대로 씁니다. 이름을 한 번 더 번역하면
 # 어느 쪽이 진짜인지 알기 어려워집니다.
@@ -53,9 +55,17 @@ LOSS_KEYS: tuple[str, ...] = (
 )
 
 # Train이 config에 쓰는 이름을 그대로 씁니다. 값 종류마다 통과시키는 타입이 달라서
-# key 이름과 함께 적어 둡니다. run_id, seed, output_dir, output_prefix는 넣지
-# 않습니다. seed는 summary 최상위에 이미 있고, 나머지 둘은 경로라 기록에 남기지
-# 않습니다.
+# key 이름과 함께 적어 둡니다.
+#
+# 계약(`src/common/train_contract.py`의 SETTING_KEYS)이 정한 이름 중 여기 없는 것은
+# 셋뿐이고, test가 그 셋 말고는 빠질 수 없게 지킵니다. run_id·output_dir·output_prefix는
+# 결과를 어디에 두는지일 뿐 무엇을 학습했는지가 아닙니다.
+#
+# `seed`는 summary 최상위에도 있지만 그것과 별개로 담습니다. 최상위 값은
+# `registry._resolve_seed`가 정하는 **registry 자신의 seed**이고, 지금은 web이 거기에
+# 학습 seed를 넣어 주어 우연히 같을 뿐입니다. 다른 경로로 등록하면 갈립니다.
+# `resume_from`은 경로지만 **무엇에서 이어 학습했는지**라서 담습니다 — 없으면 이어서
+# 한 실행이 처음부터 한 실행과 구별되지 않습니다.
 TRAINING_KEYS: tuple[tuple[str, str], ...] = (
     ("architecture", "text"),
     ("pretrained", "bool"),
@@ -70,6 +80,18 @@ TRAINING_KEYS: tuple[tuple[str, str], ...] = (
     ("epochs", "integer"),
     ("batch_size", "integer"),
     ("num_workers", "integer"),
+    ("precision", "text"),
+    ("checkpoint_every", "integer"),
+    ("resume_from", "text"),
+    ("seed", "integer"),
+    ("gradient_accumulation_steps", "integer"),
+    ("input_size", "integer"),
+    # 중첩 object는 모양 그대로 옮깁니다. `augmentation`의 확률이나 `lr_scheduler`의
+    # warmup처럼 안쪽 값까지 알아야 무엇으로 돌았는지 말할 수 있고, 화면이 그 설정으로
+    # 새 실험을 다시 채우려면 train이 받는 모양 그대로여야 합니다.
+    ("augmentation", "object"),
+    ("lr_scheduler", "object"),
+    ("early_stopping", "object"),
 )
 
 
@@ -146,6 +168,14 @@ def _integer_or_none(value: Any) -> int | None:
     return value
 
 
+def _object_or_none(value: Any) -> dict[str, Any] | None:
+    """중첩 설정을 평범한 dict로 옮깁니다. object가 아니면 None입니다."""
+
+    if not isinstance(value, Mapping):
+        return None
+    return dict(value)
+
+
 def _empty_training() -> dict[str, None]:
     return {key: None for key, _ in TRAINING_KEYS}
 
@@ -174,6 +204,7 @@ def read_training(record: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
         "bool": _bool_or_none,
         "integer": _integer_or_none,
         "number": _number_or_none,
+        "object": _object_or_none,
     }
     return (
         {key: readers[kind](train.get(key)) for key, kind in TRAINING_KEYS},
@@ -226,26 +257,35 @@ def read_metrics(
     repo_root: Path,
     verify: bool,
     storage: Storage | None = None,
-) -> tuple[dict[str, Any], str]:
-    """Evaluate의 metrics.json에서 지표를 방어적으로 읽습니다.
+) -> tuple[dict[str, Any], dict[str, Any] | None, str]:
+    """Evaluate의 metrics.json에서 지표와 class별 요약을 방어적으로 읽습니다.
 
     파일이 없거나 JSON이 깨졌거나 키가 없으면 모든 지표를 None으로 두고
     `"unavailable"`을 함께 돌려줍니다. 지표를 못 읽었다는 이유로 실행이 실패하지는
     않습니다. `s3://`는 `storage`가 있을 때만 읽습니다.
+
+    class별 요약은 evaluate가 이미 `analysis.per_class_summary`에 간추려 둔 것을
+    그대로 옮깁니다. 여기서 다시 세지 않으므로 화면과 evaluate의 판정이 갈리지
+    않고, 전체 class가 아니라 간추린 것이라 index가 커지지도 않습니다. 그 key가
+    없던 옛 평가 결과는 None입니다.
     """
 
     if not metrics_uri or not verify:
-        return _empty_metrics(), "unavailable"
+        return _empty_metrics(), None, "unavailable"
 
     document = _read_json_document(metrics_uri, repo_root=repo_root, storage=storage)
     if not isinstance(document, Mapping):
-        return _empty_metrics(), "unavailable"
+        return _empty_metrics(), None, "unavailable"
     metrics = document.get("metrics")
     if not isinstance(metrics, Mapping):
-        return _empty_metrics(), "unavailable"
+        return _empty_metrics(), None, "unavailable"
+
+    analysis = document.get("analysis")
+    per_class = analysis.get("per_class_summary") if isinstance(analysis, Mapping) else None
 
     return (
         {key: _number_or_none(metrics.get(key)) for key in METRIC_KEYS},
+        _object_or_none(per_class),
         "metrics_file",
     )
 
@@ -323,7 +363,7 @@ def build_summary(
     """
 
     artifacts = _artifact_uris(record)
-    metrics, metrics_source = read_metrics(
+    metrics, per_class, metrics_source = read_metrics(
         artifacts.get("metrics_uri"),
         repo_root=repo_root,
         verify=verify,
@@ -350,6 +390,9 @@ def build_summary(
         "experiment_record_uri": record_uri,
         "metrics": metrics,
         "metrics_source": metrics_source,
+        # 평가를 못 읽었거나 그 key가 없던 옛 결과는 None입니다. 빈 목록으로 두면
+        # 약한 class가 없다는 뜻이 되어 못 읽은 것과 구별되지 않습니다.
+        "per_class_summary": per_class,
         "losses": losses,
         "losses_source": losses_source,
         "training": training,

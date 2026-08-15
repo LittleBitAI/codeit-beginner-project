@@ -12,9 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from src.common import LocalStorage, ObjectNotFoundError, StorageError
+from src.common import LocalStorage, ObjectNotFoundError, StorageError, train_contract
 from src.pipelines import registry
 from src.pipelines.registry import rebuild_index as rebuild_module
+from src.pipelines.registry import summary as summary_module
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -32,6 +33,17 @@ METRICS_DOCUMENT = {
         "mAP75": 0.33,
         "precision50": 0.61,
         "recall50": 0.48,
+    },
+    # Evaluate가 어디가 약한 class인지 이미 간추려 둔 자리입니다. registry는 세지
+    # 않고 그대로 옮기기만 합니다.
+    "analysis": {
+        "per_class_summary": {
+            "min_truth_count": 5,
+            "top_n": 10,
+            "counts": {"weak": 1, "sparse": 0, "unmeasured": 0},
+            "weak": [{"category_id": 16548, "name": "가바토파정 100mg", "ap": 0.12}],
+            "sparse": [],
+        }
     },
 }
 
@@ -151,7 +163,7 @@ def test_run_writes_an_index_entry_next_to_the_record(local_run):
     assert summary_uri == "artifacts/registry/index/exp-0001.json"
 
     summary = json.loads((repo_root / summary_uri).read_text(encoding="utf-8"))
-    assert summary["summary_version"] == "2"
+    assert summary["summary_version"] == "3"
     assert summary["run_id"] == "exp-0001"
     assert summary["seed"] == 42
     assert summary["schema_version"] == "1.2"
@@ -161,6 +173,10 @@ def test_run_writes_an_index_entry_next_to_the_record(local_run):
     assert summary["metrics_source"] == "metrics_file"
     assert summary["metrics"]["mAP"] == pytest.approx(0.31)
     assert summary["metrics"]["mAP50"] == pytest.approx(0.55)
+    # evaluate가 간추린 약한 class를 그대로 옮깁니다. 여기서 다시 세면 화면과
+    # evaluate의 판정이 갈립니다.
+    assert summary["per_class_summary"]["counts"]["weak"] == 1
+    assert summary["per_class_summary"]["weak"][0]["category_id"] == 16548
     assert summary["submission_check"]["checked"] is False
 
     # 선언된 artifact key는 없더라도 null로 자리를 채워 소비자가 분기하지 않게 합니다.
@@ -298,14 +314,23 @@ def test_training_block_is_filled_from_the_config_snapshot(local_run):
         "epochs": 50,
         "batch_size": 4,
         "num_workers": 0,
-        # 경로와 seed는 summary에 옮기지 않습니다.
+        "precision": "amp",
+        "checkpoint_every": 2,
+        "gradient_accumulation_steps": 8,
+        "input_size": 640,
+        "augmentation": {"preset": "pill_geometric"},
+        "lr_scheduler": {"name": "cosine", "warmup_steps": 500},
+        "early_stopping": {"patience": 4, "min_delta": 0.0},
+        # 이어서 학습한 실행인지는 설정이라 옮깁니다.
+        "resume_from": "artifacts/experiments/exp-0000/last_checkpoint.pt",
+        # 결과를 어디에 두는지와 seed는 옮기지 않습니다.
         "output_dir": "artifacts/train",
         "seed": 7,
     }
 
     summary = read_summary(repo_root, registry.run(config))
 
-    assert summary["summary_version"] == "2"
+    assert summary["summary_version"] == "3"
     assert summary["training_source"] == "config_snapshot"
     assert summary["training"] == {
         "architecture": "retinanet_resnet50_fpn_v2",
@@ -322,7 +347,35 @@ def test_training_block_is_filled_from_the_config_snapshot(local_run):
         "epochs": 50,
         "batch_size": 4,
         "num_workers": 0,
+        "precision": "amp",
+        "checkpoint_every": 2,
+        "gradient_accumulation_steps": 8,
+        "input_size": 640,
+        # 중첩 설정은 모양 그대로 옮깁니다. 평평하게 펴면 화면이 그 값으로 새 실험을
+        # 다시 채울 때 원래 모양을 되살릴 수 없습니다.
+        "augmentation": {"preset": "pill_geometric"},
+        "lr_scheduler": {"name": "cosine", "warmup_steps": 500},
+        "early_stopping": {"patience": 4, "min_delta": 0.0},
+        "resume_from": "artifacts/experiments/exp-0000/last_checkpoint.pt",
+        "seed": 7,
     }
+
+
+def test_every_contract_setting_is_summarized_or_deliberately_left_out():
+    """계약이 정한 학습 설정은 summary에 담기거나, 왜 빼는지 여기 적혀 있어야 합니다.
+
+    `TRAINING_KEYS`를 손으로 적는 한 계약에 설정이 늘 때마다 조용히 빠집니다. 실제로
+    `resume_from`이 그렇게 빠져 있었고, 이어서 학습한 실행이 처음부터 학습한 실행과
+    구별되지 않았습니다. 양쪽을 다 대조하므로 계약에서 사라진 이름도 함께 잡힙니다.
+    """
+
+    summarized = {key for key, _ in summary_module.TRAINING_KEYS}
+    # 담지 않는 셋입니다. 결과를 어디에 두는지일 뿐 무엇을 학습했는지가 아닙니다.
+    # seed는 summary 최상위에도 있지만 그쪽은 registry 자신의 seed라 따로 담습니다.
+    left_out = {"run_id", "output_dir", "output_prefix"}
+
+    assert summarized | left_out == set(train_contract.SETTING_KEYS)
+    assert not (summarized & left_out)
 
 
 def test_record_without_a_train_section_stays_successful(local_run):

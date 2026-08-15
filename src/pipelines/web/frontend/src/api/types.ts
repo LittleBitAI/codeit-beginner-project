@@ -252,8 +252,32 @@ export interface ExperimentSummary {
     gradient_accumulation_steps: number | null;
     /** MMDetection 모델만 쓰는 입력 크기. 다른 모델이면 null입니다. */
     input_size: number | null;
+    precision?: string | null;
+    checkpoint_every?: number | null;
+    /** 무엇에서 이어 학습했는지. 처음부터 학습한 실행은 null입니다. */
+    resume_from?: string | null;
+    /**
+     * 아래 셋은 train이 받는 모양 그대로입니다.
+     *
+     * 평평하게 펴지 않는 이유는 '이 세팅으로 학습하기'가 이 값을 그대로 다시
+     * 보내기 때문입니다. 안쪽 key를 모르는 채 펴면 되살릴 수 없습니다. 이 값을
+     * 기록하지 않던 옛 실행은 null이라 화면이 - 로 둡니다.
+     */
+    augmentation?: { preset?: string } | null;
+    lr_scheduler?: Record<string, unknown> | null;
+    early_stopping?: Record<string, unknown> | null;
     seed: number | null;
   };
+  /** evaluate가 간추린 약한 class. 평가 전이거나 옛 기록이면 null입니다. */
+  per_class_summary?: {
+    min_truth_count: number;
+    top_n: number;
+    counts: { weak: number; sparse: number; unmeasured: number };
+    weak: WeakClassRow[];
+    sparse: WeakClassRow[];
+    /** 정답이 하나도 없어 잴 수 없었던 class. evaluate는 이것만 자르지 않습니다. */
+    unmeasured?: WeakClassRow[];
+  } | null;
   /** 학습이 남긴 loss와 evaluate가 낸 지표. 기록에 없으면 null이고 화면은 - 로 둡니다. */
   metrics: {
     best_epoch: number | null;

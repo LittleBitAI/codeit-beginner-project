@@ -243,6 +243,11 @@ def test_experiment_list_fills_training_from_index_summary(client, monkeypatch):
         "num_workers": 0,
         "gradient_accumulation_steps": None,
         "input_size": None,
+        "precision": None,
+        "checkpoint_every": None,
+        "augmentation": None,
+        "lr_scheduler": None,
+        "early_stopping": None,
         "seed": 42,
     }
 
@@ -266,6 +271,11 @@ def test_experiment_list_shows_nothing_for_index_without_training_key(client, mo
         "num_workers": None,
         "gradient_accumulation_steps": None,
         "input_size": None,
+        "precision": None,
+        "checkpoint_every": None,
+        "augmentation": None,
+        "lr_scheduler": None,
+        "early_stopping": None,
         "seed": 42,
     }
 

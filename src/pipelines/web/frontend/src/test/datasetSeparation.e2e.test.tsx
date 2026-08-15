@@ -76,6 +76,12 @@ function experiment(label: string, index: number): ExperimentSummary {
       gradient_accumulation_steps: 1,
       input_size: null,
       seed: 42,
+      // '이 세팅으로 학습하기'가 되살려야 하는 값들입니다.
+      precision: 'amp',
+      checkpoint_every: 2,
+      augmentation: { preset: 'pill_geometric' },
+      lr_scheduler: { name: 'cosine', warmup_steps: 500 },
+      early_stopping: null,
     },
     metrics: {
       best_epoch: 3,
@@ -122,6 +128,13 @@ beforeEach(() => {
       if (path === '/api/data/source') return jsonResponse({ source: source() });
       if (path === '/api/train/jobs') return jsonResponse({ jobs: [], active_job_id: null });
       if (path === '/api/train/queue') return jsonResponse({ entries: [], paused: false });
+      if (path === '/api/train/experiments/compare') {
+        return jsonResponse({
+          experiments: [experiment(PREPARED, 0)],
+          missing: [],
+          curves: {},
+        });
+      }
       if (path === '/api/train/experiments') {
         return jsonResponse({
           experiments: WATCHED.map((label, index) => experiment(label, index)),
@@ -139,7 +152,16 @@ beforeEach(() => {
         return jsonResponse({
           architecture: 'fasterrcnn_mobilenet_v3_large_320_fpn',
           architecture_note: 'E2E fixture',
-          fields: [],
+          // 초안이 payload에 실리려면 그 칸이 선언되어 있어야 합니다. '이 세팅으로
+          // 학습하기'가 되살리는 값 중 대표만 둡니다.
+          fields: [
+            { name: 'architecture', type: 'enum', label: '모델', hint: '', choices: [] },
+            { name: 'epochs', type: 'integer', label: 'Epochs', hint: '' },
+            { name: 'precision', type: 'enum', label: '정밀도', hint: '', choices: [] },
+            { name: 'augmentation', type: 'enum', label: '증강', hint: '', choices: [] },
+            { name: 'lr_scheduler', type: 'enum', label: 'LR schedule', hint: '', choices: [] },
+            { name: 'lr_warmup_steps', type: 'integer', label: 'Warmup', hint: '' },
+          ],
           data_fields: [],
           devices: [],
         });
@@ -217,6 +239,39 @@ describe('보는 dataset과 학습에 쓰는 dataset', () => {
     for (const call of calls.filter((call) => call.path === '/api/train/validate')) {
       const data = (call.body as { inputs?: { data?: Record<string, string> } }).inputs?.data ?? {};
       expect(data).toEqual(source().data);
+    }
+  });
+
+  it("'이 세팅으로 학습하기'는 설정만 물려주고 dataset은 준비된 것을 쓴다", async () => {
+    render(
+      <MemoryRouter initialEntries={['/canvas?run=run-0']}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText('이 세팅으로 학습하기'));
+
+    // 새 실험 시트가 열리고, 서버로 갈 설정에 그 실행의 값이 실려야 합니다.
+    await waitFor(() =>
+      expect(calls.some((call) => call.path === '/api/train/validate')).toBe(true),
+    );
+    const sent = calls.filter((call) => call.path === '/api/train/validate');
+    for (const call of sent) {
+      const body = call.body as { train?: Record<string, unknown>; inputs?: { data?: unknown } };
+      const train = body.train ?? {};
+      expect(train.architecture).toBe('retinanet_resnet50_fpn_v2');
+      expect(train.epochs).toBe(15);
+      expect(train.precision).toBe('amp');
+      /**
+       * 이 계층은 화면의 **평평한** 칸 값을 보냅니다. 중첩으로 바꾸는 것은
+       * `train_config.py`이고, 그 왕복(중첩 -> 평평 -> 중첩)이 맞는지가 이
+       * 기능의 핵심입니다. 여기서는 평평한 쪽이 제대로 채워졌는지 봅니다.
+       */
+      expect(train.augmentation).toBe('pill_geometric');
+      expect(train.lr_scheduler).toBe('cosine');
+      expect(String(train.lr_warmup_steps)).toBe('500');
+      // dataset은 물려받지 않고 **준비된 것**을 그대로 씁니다.
+      expect(body.inputs?.data).toEqual(source().data);
     }
   });
 });
