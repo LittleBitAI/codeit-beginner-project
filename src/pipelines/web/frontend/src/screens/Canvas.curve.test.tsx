@@ -139,7 +139,7 @@ afterEach(() => {
 function show(runIds = ['retina-a7f3']) {
   return render(
     <MemoryRouter initialEntries={[`/canvas?${runIds.map((id) => `run=${id}`).join('&')}`]}>
-      <Canvas datasetKey="v5" records={[record()]} loading={false} onScoreSaved={() => {}} />
+      <Canvas datasetKey="v5" records={[record()]} loading={false} onScoreSaved={() => {}} onNewExperiment={() => {}} />
     </MemoryRouter>,
   );
 }
