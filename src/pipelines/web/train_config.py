@@ -154,7 +154,9 @@ _FIELD_LABELS = {
     "optimizer": ("Optimizer", "가중치를 갱신할 optimizer와 관련 수치 항목을 선택합니다."),
     "augmentation": (
         "증강 preset",
-        "학습 split에만 적용합니다. 데이터가 적을 때 pill_basic이 과적합을 줄여 줍니다.",
+        "학습 split에만 적용합니다. pill_basic은 뒤집기와 약한 색 변형이고,"
+        " pill_geometric은 여기에 90° 회전·자르기·잡음을 더하고 색을 더 세게 흔듭니다."
+        " 데이터가 적을수록 과적합을 줄여 줍니다.",
     ),
     "precision": (
         "연산 정밀도",
