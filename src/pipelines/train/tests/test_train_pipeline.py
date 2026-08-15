@@ -2287,6 +2287,169 @@ def test_pill_basic_color_augmentation_keeps_detection_target(monkeypatch):
     assert torch.equal(augmented_target["labels"], target["labels"])
 
 
+@pytest.mark.parametrize(
+    ("turn_draw", "turns", "expected_box"),
+    [
+        # 세 방향은 서로 다른 식을 씁니다. 한 방향만 재면 나머지 둘은 아무도 안 봅니다.
+        (0.0, 1, [1.0, 2.0, 3.0, 5.0]),
+        (0.4, 2, [2.0, 1.0, 5.0, 3.0]),
+        (0.7, 3, [1.0, 1.0, 3.0, 4.0]),
+    ],
+)
+def test_pill_geometric_quarter_turn_moves_boxes_with_the_image(
+    monkeypatch, turn_draw, turns, expected_box
+):
+    """90°의 배수 회전은 이미지를 돌립니다. bbox도 같은 각도로 따라가야 합니다.
+
+    이미지가 4x6이므로 90°와 270°는 가로와 세로를 맞바꾸고 180°는 그대로 둡니다.
+    """
+
+    # 회전 gate, 회전할 1/4바퀴 수, 좌우 뒤집기, 자르기, 색, 잡음 순서입니다.
+    draws = iter((0.0, turn_draw, 1.0, 1.0, 1.0, 1.0))
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
+    image = torch.arange(3 * 4 * 6, dtype=torch.float32).reshape(3, 4, 6)
+    target = {
+        "boxes": torch.tensor([[1.0, 1.0, 4.0, 3.0]]),
+        "labels": torch.tensor([1]),
+    }
+    augmentation = DetectionAugmentation(
+        dict(pipeline.AUGMENTATION_PRESETS["pill_geometric"])
+    )
+
+    augmented_image, augmented_target = augmentation(image, target)
+
+    assert torch.equal(augmented_image, torch.rot90(image, turns, dims=(-2, -1)))
+    assert torch.equal(augmented_target["boxes"], torch.tensor([expected_box]))
+
+
+def test_pill_geometric_crop_drops_the_pills_it_would_cut(monkeypatch):
+    """잘린 알약은 각인이 함께 잘려 label과 맞지 않으므로 남기지 않습니다.
+
+    box만 지우고 labels나 area를 그대로 두면 알약과 이름이 한 칸씩 어긋난 채
+    학습합니다. 그래서 알약마다 하나씩인 값은 모두 같이 걸러야 합니다.
+    """
+
+    # 회전, 좌우 뒤집기, 자르기 gate, 자를 비율, 위쪽, 왼쪽, 색, 잡음 순서입니다.
+    draws = iter((1.0, 1.0, 0.0, 0.0, 0.5, 0.5, 1.0, 1.0))
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
+    image = torch.arange(3 * 20 * 20, dtype=torch.float32).reshape(3, 20, 20)
+    target = {
+        "boxes": torch.tensor([[3.0, 3.0, 7.0, 7.0], [1.0, 1.0, 5.0, 5.0]]),
+        "labels": torch.tensor([1, 2]),
+        "area": torch.tensor([16.0, 16.0]),
+        "iscrowd": torch.tensor([0, 0]),
+        "image_id": torch.tensor([9]),
+    }
+    augmentation = DetectionAugmentation(
+        dict(pipeline.AUGMENTATION_PRESETS["pill_geometric"])
+    )
+
+    augmented_image, augmented_target = augmentation(image, target)
+
+    # 0.85배로 잘라 17칸이 되고, 시작점은 위아래 모두 2입니다.
+    assert torch.equal(augmented_image, image[..., 2:19, 2:19])
+    # 첫 알약만 온전히 들어오고, 잘린 값만큼 좌표를 당깁니다.
+    assert torch.equal(augmented_target["boxes"], torch.tensor([[1.0, 1.0, 5.0, 5.0]]))
+    assert torch.equal(augmented_target["labels"], torch.tensor([1]))
+    assert torch.equal(augmented_target["area"], torch.tensor([16.0]))
+    assert torch.equal(augmented_target["iscrowd"], torch.tensor([0]))
+    # 알약마다 하나씩인 값이 아니므로 그대로 남아야 합니다.
+    assert torch.equal(augmented_target["image_id"], torch.tensor([9]))
+
+
+def test_pill_geometric_crop_keeps_the_whole_image_when_no_pill_survives(monkeypatch):
+    """자를 자리에 온전한 알약이 하나도 없으면 자르지 않습니다.
+
+    알약 없는 그림으로 배우게 두면 그 이미지가 통째로 배경 예제가 됩니다. 뽑는
+    무작위 수는 자를 때와 같아야 하므로, 일찍 빠져나가도 자리·비율을 먼저 뽑습니다.
+    """
+
+    # 회전, 좌우 뒤집기, 자르기 gate, 자를 비율, 위쪽, 왼쪽, 색, 잡음 순서입니다.
+    draws = iter((1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0))
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
+    image = torch.arange(3 * 20 * 20, dtype=torch.float32).reshape(3, 20, 20)
+    # 0.85배로 자르면 왼쪽 위 17칸이라, 두 알약 모두 오른쪽 아래로 걸칩니다.
+    target = {
+        "boxes": torch.tensor([[18.0, 18.0, 20.0, 20.0], [2.0, 18.0, 6.0, 20.0]]),
+        "labels": torch.tensor([1, 2]),
+        "area": torch.tensor([4.0, 8.0]),
+        "iscrowd": torch.tensor([0, 0]),
+        "image_id": torch.tensor([9]),
+    }
+    original = copy.deepcopy(target)
+    augmentation = DetectionAugmentation(
+        dict(pipeline.AUGMENTATION_PRESETS["pill_geometric"])
+    )
+
+    augmented_image, augmented_target = augmentation(image, target)
+
+    assert torch.equal(augmented_image, image)
+    assert torch.equal(augmented_target["boxes"], original["boxes"])
+    assert torch.equal(augmented_target["labels"], original["labels"])
+    assert torch.equal(augmented_target["area"], original["area"])
+    assert torch.equal(augmented_target["iscrowd"], original["iscrowd"])
+    assert torch.equal(target["boxes"], original["boxes"])
+
+
+def test_pill_geometric_color_actually_changes_the_picture(monkeypatch):
+    """색 변형은 그림을 실제로 바꿔야 합니다.
+
+    EDA가 잰 대로 이 데이터에는 조명 변화가 거의 없고 대회 test와는 전경 색이
+    벌어져 있어, 색이 이 preset에서 가장 세게 거는 변형입니다(확률 0.8). 값만
+    소비하고 그림을 그대로 돌려주면 그 사실을 아무도 눈치채지 못합니다.
+    """
+
+    # 회전·좌우·자르기는 건너뛰고 색만 걸립니다. 그 뒤 넷은 밝기·대비·채도·색조가
+    # 쓰는 값이고, 마지막은 잡음 gate입니다.
+    draws = iter((1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
+    image = torch.zeros(3, 4, 6)
+    image[0], image[1], image[2] = 0.8, 0.4, 0.2
+    target = {
+        "boxes": torch.tensor([[1.0, 1.0, 4.0, 3.0]]),
+        "labels": torch.tensor([1]),
+    }
+    augmentation = DetectionAugmentation(
+        dict(pipeline.AUGMENTATION_PRESETS["pill_geometric"])
+    )
+
+    augmented_image, augmented_target = augmentation(image, target)
+
+    assert not torch.equal(augmented_image, image)
+    assert float(augmented_image.min()) >= 0.0
+    assert float(augmented_image.max()) <= 1.0
+    assert torch.equal(augmented_target["boxes"], target["boxes"])
+
+
+def test_pill_geometric_noise_changes_pixels_and_keeps_them_in_range(monkeypatch):
+    """잡음은 그림을 실제로 바꾸되 값 범위는 [0, 1]로 되돌려 놓아야 합니다.
+
+    뒤따르는 정규화가 그 범위를 전제합니다. 0과 1로만 채운 그림을 넣어 위아래
+    양쪽에서 잘리는지 함께 봅니다.
+    """
+
+    # 회전, 좌우 뒤집기, 자르기, 색은 모두 건너뛰고 잡음만 걸리게 합니다.
+    draws = iter((1.0, 1.0, 1.0, 1.0, 0.0))
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
+    image = torch.zeros(3, 4, 6)
+    image[:, :, 3:] = 1.0
+    target = {
+        "boxes": torch.tensor([[1.0, 1.0, 4.0, 3.0]]),
+        "labels": torch.tensor([1]),
+    }
+    augmentation = DetectionAugmentation(
+        dict(pipeline.AUGMENTATION_PRESETS["pill_geometric"])
+    )
+
+    torch.manual_seed(17)
+    augmented_image, augmented_target = augmentation(image, target)
+
+    assert not torch.equal(augmented_image, image)
+    assert float(augmented_image.min()) >= 0.0
+    assert float(augmented_image.max()) <= 1.0
+    assert torch.equal(augmented_target["boxes"], target["boxes"])
+
+
 def test_faster_rcnn_cpu_forward_and_backward_smoke():
     torch.manual_seed(17)
     model = build_model(2, pretrained=False).cpu().train()

@@ -120,7 +120,7 @@ OPTIMIZER_PROFILES: dict[str, dict[str, float]] = {
 }
 
 #: 고를 수 있는 증강 preset의 이름입니다. 실제 변형 값은 train이 들고 있습니다.
-AUGMENTATIONS = ("none", "pill_basic")
+AUGMENTATIONS = ("none", "pill_basic", "pill_geometric")
 DEFAULT_AUGMENTATION = "none"
 
 #: `amp`가 fp16을 쓸지 bf16을 쓸지는 train이 GPU와 architecture를 보고 정하고,

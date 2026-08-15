@@ -77,6 +77,31 @@ AUGMENTATION_PRESETS = {
         "saturation": 0.1,
         "hue": 0.02,
     },
+    # version 2는 EDA(`v6-seed42-8020-group/eda/report.json`)가 잰 값에서 나왔습니다.
+    # 촬영 조건이 사실상 3가지(각도 70·75·90)뿐이라 조명 변화가 데이터에 거의 없고,
+    # 그런데도 대회 test와 전경 색 거리가 23.17입니다. 그래서 색을 가장 세게 흔듭니다.
+    # 크기는 test와 학습이 0.99로 같아 자르기는 확대가 아니라 규제 목적이라 약합니다.
+    "pill_geometric": {
+        "version": 2,
+        "preset": "pill_geometric",
+        # 0.75와 1/4바퀴 1~3을 합치면 네 방향이 각각 25%가 됩니다. 좌우 뒤집기까지
+        # 합치면 정사각 대칭 8가지가 모두 같은 확률로 나옵니다. 상하 뒤집기는 그
+        # 8가지 안에 이미 들어 있어(180° 회전 + 좌우 뒤집기) 0으로 둡니다.
+        "quarter_turn_probability": 0.75,
+        "horizontal_flip_probability": 0.5,
+        "vertical_flip_probability": 0.0,
+        "crop_probability": 0.3,
+        "crop_minimum_scale": 0.85,
+        "color_probability": 0.8,
+        "brightness": 0.3,
+        "contrast": 0.3,
+        "saturation": 0.25,
+        # 알약 색 자체가 class 단서라 색조만 좁게 둡니다. 넓히면 주황 알약을 노란
+        # 알약이라고 가르치는 셈이 됩니다.
+        "hue": 0.03,
+        "noise_probability": 0.2,
+        "noise_sigma": 0.008,
+    },
 }
 LR_WARMUP_DEFAULTS = _contract.LR_WARMUP_DEFAULTS
 LR_SCHEDULER_DEFAULTS = _contract.LR_SCHEDULER_DEFAULTS
