@@ -12,9 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from src.common import LocalStorage, ObjectNotFoundError, StorageError
+from src.common import LocalStorage, ObjectNotFoundError, StorageError, train_contract
 from src.pipelines import registry
 from src.pipelines.registry import rebuild_index as rebuild_module
+from src.pipelines.registry import summary as summary_module
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures"
@@ -320,7 +321,9 @@ def test_training_block_is_filled_from_the_config_snapshot(local_run):
         "augmentation": {"preset": "pill_geometric"},
         "lr_scheduler": {"name": "cosine", "warmup_steps": 500},
         "early_stopping": {"patience": 4, "min_delta": 0.0},
-        # 경로와 seed는 summary에 옮기지 않습니다.
+        # 이어서 학습한 실행인지는 설정이라 옮깁니다.
+        "resume_from": "artifacts/experiments/exp-0000/last_checkpoint.pt",
+        # 결과를 어디에 두는지와 seed는 옮기지 않습니다.
         "output_dir": "artifacts/train",
         "seed": 7,
     }
@@ -353,7 +356,25 @@ def test_training_block_is_filled_from_the_config_snapshot(local_run):
         "augmentation": {"preset": "pill_geometric"},
         "lr_scheduler": {"name": "cosine", "warmup_steps": 500},
         "early_stopping": {"patience": 4, "min_delta": 0.0},
+        "resume_from": "artifacts/experiments/exp-0000/last_checkpoint.pt",
     }
+
+
+def test_every_contract_setting_is_summarized_or_deliberately_left_out():
+    """계약이 정한 학습 설정은 summary에 담기거나, 왜 빼는지 여기 적혀 있어야 합니다.
+
+    `TRAINING_KEYS`를 손으로 적는 한 계약에 설정이 늘 때마다 조용히 빠집니다. 실제로
+    `resume_from`이 그렇게 빠져 있었고, 이어서 학습한 실행이 처음부터 학습한 실행과
+    구별되지 않았습니다. 양쪽을 다 대조하므로 계약에서 사라진 이름도 함께 잡힙니다.
+    """
+
+    summarized = {key for key, _ in summary_module.TRAINING_KEYS}
+    # 담지 않는 넷입니다. seed는 summary 최상위에 이미 있고, 나머지 셋은 결과를 어디에
+    # 두는지일 뿐 무엇을 학습했는지가 아닙니다.
+    left_out = {"seed", "run_id", "output_dir", "output_prefix"}
+
+    assert summarized | left_out == set(train_contract.SETTING_KEYS)
+    assert not (summarized & left_out)
 
 
 def test_record_without_a_train_section_stays_successful(local_run):
