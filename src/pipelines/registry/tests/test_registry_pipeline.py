@@ -153,6 +153,9 @@ def test_legacy_run_without_optional_artifacts_still_succeeds(local_run):
     assert record["pipelines"]["train"]["run_id"] == "exp-0001"
     assert "test_manifest_uri" not in record["pipelines"]["data"]
     assert "submission_uri" not in record["pipelines"]["evaluate"]
+    # 없는 선택 artifact는 자리를 만들지 않습니다. null descriptor를 적으면 읽는 쪽이
+    # "기록은 있는데 파일이 없다"로 읽습니다.
+    assert "test_predictions_uri" not in record["pipelines"]["evaluate"]
 
 
 def test_records_and_hashes_optional_artifacts_deterministically(tmp_path: Path):
@@ -202,6 +205,17 @@ def test_records_and_hashes_optional_artifacts_deterministically(tmp_path: Path)
         assert entry["verified"] is True
     assert record["verification"]["artifacts_checked"] == 12
     assert record["verification"]["artifacts_hashed"] == 12
+
+    # 값이 있을 때 summary가 그것을 그대로 싣는지 봅니다. 없을 때 null이 되는 것만
+    # 재면, summary가 값을 잃고 null을 내도 통과합니다.
+    summary = json.loads(
+        (tmp_path / result["artifacts"]["experiment_summary_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summary["artifacts"]["test_predictions_uri"] == (
+        inputs["evaluate"]["test_predictions_uri"]
+    )
 
 
 def test_record_uri_is_repository_relative(local_run):
