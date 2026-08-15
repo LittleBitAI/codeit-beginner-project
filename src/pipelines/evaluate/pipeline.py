@@ -306,11 +306,8 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
 
     metrics_uri = join_uri(output_dir, metrics_filename)
     predictions_uri = join_uri(output_dir, predictions_filename)
-    if metrics_uri == predictions_uri:
-        raise ConfigurationError(
-            "metrics와 predictions는 같은 위치에 저장할 수 없습니다. "
-            f"evaluate.metrics_filename과 evaluate.predictions_filename을 다르게 두세요: {metrics_uri}"
-        )
+    # 출력 위치가 겹치는지는 `run()`에서 저장 계층의 이름으로 견줍니다. 여기서는
+    # 저장소 root를 모르므로 `./m.json` 같은 표기 차이를 가릴 수 없습니다.
     test_predictions_uri = (
         join_uri(output_dir, test_predictions_filename) if test_manifest_uri is not None else None
     )
@@ -326,21 +323,6 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
             join_uri(DEFAULT_SUBMISSION_ROOT, resolved_run_id),
             DEFAULT_SUBMISSION_FILENAME,
         )
-    # 출력이 넷으로 늘어 짝마다 따로 보면 빠뜨리기 쉽습니다. 한 번에 셉니다.
-    # 비교는 main과 같이 글자 그대로입니다. 표기가 다른 같은 파일(`./m.json`)은 예전처럼
-    # 지나갑니다 — 이 변경이 만든 구멍이 아니고, 저장 계층과 같은 규칙으로 고치는 것은
-    # 따로 다뤄야 합니다.
-    written_uris = [
-        uri
-        for uri in (metrics_uri, predictions_uri, submission_uri, test_predictions_uri)
-        if uri is not None
-    ]
-    if len(set(written_uris)) != len(written_uris):
-        raise ConfigurationError(
-            "metrics, predictions, submission, test predictions는 같은 위치에 "
-            "저장할 수 없습니다."
-        )
-
     # 메인 지표 구간은 대회 실행 여부와 무관하게 [0.75, 0.80, 0.85, 0.90, 0.95]입니다.
     iou_thresholds = _resolve_iou_thresholds(
         settings.get("iou_thresholds"), competition=test_manifest_uri is not None
@@ -420,6 +402,27 @@ def run(config: dict) -> dict:
         settings = resolve_settings(config)
         random.seed(settings.seed)
         store = ArtifactStore(config)
+
+        # 겹침은 **저장 계층이 실제로 쓰는 이름**으로 견줍니다. 글자 그대로 비교하면
+        # `./m.json`과 `m.json`이 달라 보여, 나중에 쓰는 쪽이 앞의 결과를 덮고도
+        # 성공을 보고합니다. S3 key는 글자 그대로이므로 `normalize_uri`가 그대로
+        # 돌려주고, 다른 object를 같다고 막지 않습니다.
+        written_by_name: dict[str, str] = {}
+        for label, uri in (
+            ("metrics", settings.metrics_uri),
+            ("predictions", settings.predictions_uri),
+            ("submission", settings.submission_uri),
+            ("test predictions", settings.test_predictions_uri),
+        ):
+            if uri is None:
+                continue
+            name = store.normalize_uri(uri)
+            if name in written_by_name:
+                raise ConfigurationError(
+                    f"{written_by_name[name]}와 {label}는 같은 위치에 저장할 수 "
+                    f"없습니다: {name}"
+                )
+            written_by_name[name] = label
 
         output_uris = [settings.metrics_uri, settings.predictions_uri]
         if settings.submission_uri is not None:
@@ -600,6 +603,11 @@ def run(config: dict) -> dict:
                 # 어느 test manifest를 본 예측인지 적습니다. 이것이 없으면 서로 다른
                 # dataset 판의 예측을 image_id만 보고 섞어도 조용히 지나갑니다.
                 "test_manifest_uri": settings.test_manifest_uri,
+                # test 예측은 **언제나** checkpoint 추론으로 만듭니다. validation이
+                # 저장된 예측을 읽었더라도 그렇습니다. common_fields의 출처를 그대로
+                # 두면 이 파일이 "저장된 예측에서 왔다"고 잘못 말합니다.
+                "prediction_source": "checkpoint",
+                "predictions_input_uri": None,
                 "bbox_format": "xywh",
                 # 제출에서 뺀 class가 있으면 이 파일에도 없습니다. 무엇이 빠졌는지
                 # 적어 두지 않으면 나중에 읽는 쪽이 모델이 못 맞힌 것으로 읽습니다.

@@ -983,3 +983,58 @@ def test_metrics_exclusion_applies_before_the_per_image_cap(
     [entry] = metrics["per_class"]
     assert entry["prediction_count"] == 1
     assert entry["ap"] is not None and entry["ap"] > 0.0
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        pytest.param("metrics.json", id="같은-이름"),
+        pytest.param("./metrics.json", id="표기만-다른-같은-파일"),
+    ],
+)
+def test_test_predictions_cannot_share_a_file_with_another_output(
+    base_config: dict, repository_root: Path, filename: str
+):
+    """새 출력이 다른 산출물을 덮지 않도록 실행 전에 막습니다.
+
+    출력이 하나 늘면 겹칠 수 있는 짝도 늘어납니다. 글자 그대로만 비교하면 표기가 다른
+    같은 파일이 지나가고, `overwrite=true`면 덮고도 성공을 보고합니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"]["test_predictions_filename"] = filename
+    base_config["evaluate"]["overwrite"] = True
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "같은 위치에 저장할 수 없습니다" in result["message"]
+
+
+def test_test_predictions_record_the_checkpoint_as_their_source(
+    base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """validation이 저장된 예측을 읽어도 test 예측의 출처는 checkpoint입니다.
+
+    실행 전체의 `prediction_source`를 그대로 베끼면, 이 파일이 "저장된 예측에서
+    왔다"고 잘못 말합니다. 나중에 합치는 쪽이 어느 모델이 만든 것인지 잘못 읽습니다.
+    """
+    from src.pipelines.evaluate import pipeline
+
+    _add_test_manifest(base_config, repository_root)
+    # `predictions_input_uri`를 그대로 둡니다 — validation은 파일에서 읽고 test만
+    # 추론합니다. 대회 실행의 정상 경로입니다.
+    monkeypatch.setattr(
+        pipeline,
+        "predict_record_groups_with_checkpoint",
+        lambda *args, **kwargs: [[_test_prediction(10, 7, 1.0, 0.9)]],
+    )
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    # 실행 전체는 저장된 예측을 읽었다고 말합니다.
+    assert result["summary"]["prediction_source"] == "predictions_file"
+    # 그러나 test 예측 파일은 checkpoint에서 왔습니다.
+    document = _read_json(repository_root, result["artifacts"]["test_predictions_uri"])
+    assert document["prediction_source"] == "checkpoint"
+    assert document["predictions_input_uri"] is None
