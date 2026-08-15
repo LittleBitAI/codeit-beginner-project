@@ -272,12 +272,9 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         _optional_uri(settings.get("predictions_filename"), "evaluate.predictions_filename")
         or DEFAULT_PREDICTIONS_FILENAME
     )
-    test_predictions_filename = (
-        _optional_uri(
-            settings.get("test_predictions_filename"), "evaluate.test_predictions_filename"
-        )
-        or DEFAULT_TEST_PREDICTIONS_FILENAME
-    )
+    # 이름을 설정으로 열지 않습니다. 열면 다른 출력과 겹칠 수 있는 짝이 늘어나고,
+    # 겹침을 저장 계층과 똑같이 판정하는 일은 이 변경이 감당할 범위가 아닙니다.
+    # 필요해지면 그때 열면 됩니다.
 
     score_threshold = settings.get("score_threshold", 0.0)
     if (
@@ -309,7 +306,9 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
     # 출력 위치가 겹치는지는 `run()`에서 저장 계층의 이름으로 견줍니다. 여기서는
     # 저장소 root를 모르므로 `./m.json` 같은 표기 차이를 가릴 수 없습니다.
     test_predictions_uri = (
-        join_uri(output_dir, test_predictions_filename) if test_manifest_uri is not None else None
+        join_uri(output_dir, DEFAULT_TEST_PREDICTIONS_FILENAME)
+        if test_manifest_uri is not None
+        else None
     )
 
     configured_submission_uri = _optional_uri(

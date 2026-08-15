@@ -986,22 +986,23 @@ def test_metrics_exclusion_applies_before_the_per_image_cap(
 
 
 @pytest.mark.parametrize(
-    "filename",
+    "metrics_filename",
     [
-        pytest.param("metrics.json", id="같은-이름"),
-        pytest.param("./metrics.json", id="표기만-다른-같은-파일"),
+        pytest.param("test_predictions.json", id="같은-이름"),
+        pytest.param("./test_predictions.json", id="표기만-다른-같은-파일"),
     ],
 )
 def test_test_predictions_cannot_share_a_file_with_another_output(
-    base_config: dict, repository_root: Path, filename: str
+    base_config: dict, repository_root: Path, metrics_filename: str
 ):
-    """새 출력이 다른 산출물을 덮지 않도록 실행 전에 막습니다.
+    """새 출력이 다른 산출물과 같은 파일이면 실행 전에 막습니다.
 
-    출력이 하나 늘면 겹칠 수 있는 짝도 늘어납니다. 글자 그대로만 비교하면 표기가 다른
-    같은 파일이 지나가고, `overwrite=true`면 덮고도 성공을 보고합니다.
+    출력이 하나 늘면 겹칠 수 있는 짝도 늘어납니다. 이름 자체는 설정으로 열지 않지만,
+    다른 출력의 이름을 이쪽으로 맞추면 여전히 겹칩니다. `overwrite=true`면 덮고도
+    성공을 보고하므로 실행 전에 거절해야 합니다.
     """
     _add_test_manifest(base_config, repository_root)
-    base_config["evaluate"]["test_predictions_filename"] = filename
+    base_config["evaluate"]["metrics_filename"] = metrics_filename
     base_config["evaluate"]["overwrite"] = True
 
     result = run(base_config)
