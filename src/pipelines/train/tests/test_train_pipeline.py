@@ -2357,6 +2357,40 @@ def test_pill_geometric_crop_drops_the_pills_it_would_cut(monkeypatch):
     assert torch.equal(augmented_target["image_id"], torch.tensor([9]))
 
 
+def test_pill_geometric_crop_keeps_the_whole_image_when_no_pill_survives(monkeypatch):
+    """자를 자리에 온전한 알약이 하나도 없으면 자르지 않습니다.
+
+    알약 없는 그림으로 배우게 두면 그 이미지가 통째로 배경 예제가 됩니다. 뽑는
+    무작위 수는 자를 때와 같아야 하므로, 일찍 빠져나가도 자리·비율을 먼저 뽑습니다.
+    """
+
+    # 회전, 좌우 뒤집기, 자르기 gate, 자를 비율, 위쪽, 왼쪽, 색, 잡음 순서입니다.
+    draws = iter((1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0))
+    monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
+    image = torch.arange(3 * 20 * 20, dtype=torch.float32).reshape(3, 20, 20)
+    # 0.85배로 자르면 왼쪽 위 17칸이라, 두 알약 모두 오른쪽 아래로 걸칩니다.
+    target = {
+        "boxes": torch.tensor([[18.0, 18.0, 20.0, 20.0], [2.0, 18.0, 6.0, 20.0]]),
+        "labels": torch.tensor([1, 2]),
+        "area": torch.tensor([4.0, 8.0]),
+        "iscrowd": torch.tensor([0, 0]),
+        "image_id": torch.tensor([9]),
+    }
+    original = copy.deepcopy(target)
+    augmentation = DetectionAugmentation(
+        dict(pipeline.AUGMENTATION_PRESETS["pill_geometric"])
+    )
+
+    augmented_image, augmented_target = augmentation(image, target)
+
+    assert torch.equal(augmented_image, image)
+    assert torch.equal(augmented_target["boxes"], original["boxes"])
+    assert torch.equal(augmented_target["labels"], original["labels"])
+    assert torch.equal(augmented_target["area"], original["area"])
+    assert torch.equal(augmented_target["iscrowd"], original["iscrowd"])
+    assert torch.equal(target["boxes"], original["boxes"])
+
+
 def test_faster_rcnn_cpu_forward_and_backward_smoke():
     torch.manual_seed(17)
     model = build_model(2, pretrained=False).cpu().train()
