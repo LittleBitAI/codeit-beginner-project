@@ -174,8 +174,8 @@ def test_run_writes_an_index_entry_next_to_the_record(local_run):
     assert summary["metrics"]["mAP50"] == pytest.approx(0.55)
     # evaluate가 간추린 약한 class를 그대로 옮깁니다. 여기서 다시 세면 화면과
     # evaluate의 판정이 갈립니다.
-    assert summary["per_class"]["counts"]["weak"] == 1
-    assert summary["per_class"]["weak"][0]["category_id"] == 16548
+    assert summary["per_class_summary"]["counts"]["weak"] == 1
+    assert summary["per_class_summary"]["weak"][0]["category_id"] == 16548
     assert summary["submission_check"]["checked"] is False
 
     # 선언된 artifact key는 없더라도 null로 자리를 채워 소비자가 분기하지 않게 합니다.

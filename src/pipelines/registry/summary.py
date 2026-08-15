@@ -32,7 +32,7 @@ from .record import (
 # "1" -> "2": metrics를 s3://에서도 읽고 losses와 losses_source를 더했습니다.
 # "2" -> "3": training이 precision·checkpoint_every·gradient_accumulation_steps·
 #   input_size와 중첩 설정 셋(augmentation·lr_scheduler·early_stopping)을 함께 담고,
-#   per_class가 생겼습니다. 기존 key는 이름도 뜻도 그대로입니다.
+#   per_class_summary가 생겼습니다. 기존 key는 이름도 뜻도 그대로입니다.
 SUMMARY_VERSION = "3"
 
 # Evaluate가 metrics.json에 쓰는 이름을 그대로 씁니다. 이름을 한 번 더 번역하면
@@ -382,7 +382,7 @@ def build_summary(
         "metrics_source": metrics_source,
         # 평가를 못 읽었거나 그 key가 없던 옛 결과는 None입니다. 빈 목록으로 두면
         # 약한 class가 없다는 뜻이 되어 못 읽은 것과 구별되지 않습니다.
-        "per_class": per_class,
+        "per_class_summary": per_class,
         "losses": losses,
         "losses_source": losses_source,
         "training": training,
