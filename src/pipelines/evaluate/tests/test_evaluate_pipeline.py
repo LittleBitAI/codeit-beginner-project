@@ -360,23 +360,6 @@ def test_existing_test_predictions_stop_before_inference(
     assert existing.read_text(encoding="utf-8") == "keep\n"
 
 
-def test_output_paths_that_spell_the_same_file_are_rejected(
-    base_config: dict, repository_root: Path
-):
-    """표기만 다르고 같은 파일이면 거절합니다.
-
-    글자 그대로 비교하면 `./metrics.json`이 `metrics.json`과 달라 보입니다. 그대로
-    두면 나중에 쓰는 쪽이 먼저 쓴 파일을 덮고도 성공을 보고합니다.
-    """
-    _add_test_manifest(base_config, repository_root)
-    base_config["evaluate"]["test_predictions_filename"] = "./metrics.json"
-
-    result = run(base_config)
-
-    assert result["status"] == "error"
-    assert "같은 위치에 저장할 수 없습니다" in result["message"]
-
-
 def test_existing_submission_stops_before_inference(
     base_config: dict, repository_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1000,20 +983,3 @@ def test_metrics_exclusion_applies_before_the_per_image_cap(
     [entry] = metrics["per_class"]
     assert entry["prediction_count"] == 1
     assert entry["ap"] is not None and entry["ap"] > 0.0
-
-
-def test_s3_output_paths_are_compared_letter_by_letter(base_config: dict, repository_root: Path):
-    """S3 key는 글자 그대로입니다. 정규화해서 같다고 막으면 안 됩니다.
-
-    `out/./m.json`과 `out/m.json`은 local에서는 같은 파일이지만 S3에서는 서로 다른
-    object입니다. local 규칙을 그대로 적용하면 쓸 수 있는 조합을 거절합니다.
-    """
-    _add_test_manifest(base_config, repository_root)
-    base_config["evaluate"]["output_dir"] = "s3://bucket/out"
-    base_config["evaluate"]["metrics_filename"] = "m.json"
-    base_config["evaluate"]["test_predictions_filename"] = "./m.json"
-
-    settings = resolve_settings(base_config)
-
-    assert settings.metrics_uri == "s3://bucket/out/m.json"
-    assert settings.test_predictions_uri == "s3://bucket/out/./m.json"

@@ -93,28 +93,3 @@ def test_remove_local_ignores_paths_outside_the_repository(repository_root: Path
     ArtifactStore().remove_local("../keep-me.json")
 
     assert outside.exists()
-
-
-def test_failed_local_write_leaves_no_partial_artifact(repository_root: Path):
-    """쓰다가 끊겨도 반쯤 쓰인 artifact와 임시 파일을 남기지 않습니다.
-
-    대상 파일을 직접 열면 여기서 반쯤 쓰인 JSON이 남습니다. 그것을 "이번 실행이
-    만들었으니 지우자"로 해결하면, 확인과 쓰기 사이에 다른 실행이 만든 파일까지
-    지우게 됩니다. 아예 남지 않게 하는 쪽이 맞습니다.
-    """
-
-    class Unserializable:
-        pass
-
-    store = ArtifactStore()
-    target = repository_root / "artifacts/evaluate/broken.json"
-
-    with pytest.raises(TypeError):
-        # 앞의 큰 문자열이 먼저 흘러 나간 뒤 뒤에서 끊깁니다.
-        store.write_json(
-            "artifacts/evaluate/broken.json",
-            {"filler": "가" * 5000, "bad": Unserializable()},
-        )
-
-    assert not target.exists()
-    assert list(target.parent.glob("*")) == []

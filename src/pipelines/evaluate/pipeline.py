@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import posixpath
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -18,7 +17,7 @@ from .manifest import load_class_map, load_manifest, load_test_manifest
 from .metrics import DEFAULT_IOU_THRESHOLDS, evaluate_detections, filter_predictions
 from .predictor import load_predictions, predict_record_groups_with_checkpoint
 from .progress import ProgressEmitter
-from .storage_io import ArtifactStore, is_remote_uri, join_uri
+from .storage_io import ArtifactStore, join_uri
 from .submission import render_submission_csv
 
 
@@ -191,21 +190,6 @@ def _without_categories(
     ]
 
 
-def _same_file_key(uri: str) -> str:
-    """표기가 달라도 같은 파일을 가리키면 같은 key가 되게 만듭니다.
-
-    출력 위치가 겹치는지를 **글자 그대로** 비교하면 `./metrics.json`과
-    `metrics.json`이 서로 다른 것으로 보입니다. 그대로 두면 겹침 검사를 지나쳐,
-    나중에 쓰는 쪽이 먼저 쓴 파일을 덮습니다.
-    """
-
-    if is_remote_uri(uri):
-        # S3 key는 글자 그대로입니다. `a//b`와 `a/b`, `./a`와 `a`가 서로 **다른**
-        # object이므로 정규화하면 다른 것을 같다고 잘못 막습니다.
-        return uri
-    return posixpath.normpath(uri.replace("\\", "/"))
-
-
 def _resolve_max_detections(value: Any) -> int | None:
     if value is None:
         return DEFAULT_MAX_DETECTIONS_PER_IMAGE
@@ -322,7 +306,7 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
 
     metrics_uri = join_uri(output_dir, metrics_filename)
     predictions_uri = join_uri(output_dir, predictions_filename)
-    if _same_file_key(metrics_uri) == _same_file_key(predictions_uri):
+    if metrics_uri == predictions_uri:
         raise ConfigurationError(
             "metrics와 predictions는 같은 위치에 저장할 수 없습니다. "
             f"evaluate.metrics_filename과 evaluate.predictions_filename을 다르게 두세요: {metrics_uri}"
@@ -343,8 +327,11 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
             DEFAULT_SUBMISSION_FILENAME,
         )
     # 출력이 넷으로 늘어 짝마다 따로 보면 빠뜨리기 쉽습니다. 한 번에 셉니다.
+    # 비교는 main과 같이 글자 그대로입니다. 표기가 다른 같은 파일(`./m.json`)은 예전처럼
+    # 지나갑니다 — 이 변경이 만든 구멍이 아니고, 저장 계층과 같은 규칙으로 고치는 것은
+    # 따로 다뤄야 합니다.
     written_uris = [
-        _same_file_key(uri)
+        uri
         for uri in (metrics_uri, predictions_uri, submission_uri, test_predictions_uri)
         if uri is not None
     ]
@@ -593,9 +580,10 @@ def run(config: dict) -> dict:
             "predictions": [_public_prediction(prediction) for prediction in predictions],
         }
         submission_uri: str | None = None
-        # 쓴 **뒤에** 목록에 넣습니다. 쓰기 전에 넣으면, `exists()`와 쓰기 사이에 다른
-        # 실행이 만든 파일을 이 실행이 지우게 됩니다. 반쯤 쓰인 파일은 `storage_io`의
-        # 원자적 쓰기가 막습니다.
+        # 네 출력 모두 쓴 **뒤에** 정리 목록에 넣습니다. 쓰기 전에 넣으면 `exists()`와
+        # 쓰기 사이에 다른 실행이 만든 파일까지 이 실행이 지웁니다. 그 대신 쓰다가
+        # 끊기면 반쯤 쓰인 파일이 남는데, 이는 이 pipeline이 처음부터 갖고 있던 성질이고
+        # 고치려면 저장 계층을 원자적으로 바꿔야 해서 따로 다룹니다.
         if settings.submission_uri is not None and submission_text is not None:
             submission_existed = store.exists(settings.submission_uri)
             submission_uri = store.write_text(
