@@ -2287,11 +2287,25 @@ def test_pill_basic_color_augmentation_keeps_detection_target(monkeypatch):
     assert torch.equal(augmented_target["labels"], target["labels"])
 
 
-def test_pill_geometric_quarter_turn_moves_boxes_with_the_image(monkeypatch):
-    """90° 회전은 이미지의 가로와 세로를 맞바꿉니다. bbox도 같이 돌아야 합니다."""
+@pytest.mark.parametrize(
+    ("turn_draw", "turns", "expected_box"),
+    [
+        # 세 방향은 서로 다른 식을 씁니다. 한 방향만 재면 나머지 둘은 아무도 안 봅니다.
+        (0.0, 1, [1.0, 2.0, 3.0, 5.0]),
+        (0.4, 2, [2.0, 1.0, 5.0, 3.0]),
+        (0.7, 3, [1.0, 1.0, 3.0, 4.0]),
+    ],
+)
+def test_pill_geometric_quarter_turn_moves_boxes_with_the_image(
+    monkeypatch, turn_draw, turns, expected_box
+):
+    """90°의 배수 회전은 이미지를 돌립니다. bbox도 같은 각도로 따라가야 합니다.
+
+    이미지가 4x6이므로 90°와 270°는 가로와 세로를 맞바꾸고 180°는 그대로 둡니다.
+    """
 
     # 회전 gate, 회전할 1/4바퀴 수, 좌우 뒤집기, 자르기, 색, 잡음 순서입니다.
-    draws = iter((0.0, 0.0, 1.0, 1.0, 1.0, 1.0))
+    draws = iter((0.0, turn_draw, 1.0, 1.0, 1.0, 1.0))
     monkeypatch.setattr(torch, "rand", lambda *args, **kwargs: torch.tensor(next(draws)))
     image = torch.arange(3 * 4 * 6, dtype=torch.float32).reshape(3, 4, 6)
     target = {
@@ -2304,9 +2318,8 @@ def test_pill_geometric_quarter_turn_moves_boxes_with_the_image(monkeypatch):
 
     augmented_image, augmented_target = augmentation(image, target)
 
-    assert torch.equal(augmented_image, torch.rot90(image, 1, dims=(-2, -1)))
-    # (x, y)가 (y, width - x)로 갑니다. 여기서 width는 6입니다.
-    assert torch.equal(augmented_target["boxes"], torch.tensor([[1.0, 2.0, 3.0, 5.0]]))
+    assert torch.equal(augmented_image, torch.rot90(image, turns, dims=(-2, -1)))
+    assert torch.equal(augmented_target["boxes"], torch.tensor([expected_box]))
 
 
 def test_pill_geometric_crop_drops_the_pills_it_would_cut(monkeypatch):
