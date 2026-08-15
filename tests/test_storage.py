@@ -297,3 +297,33 @@ def test_s3_identity_refuses_an_empty_key_like_reading_and_writing_do(tmp_path):
 
     with pytest.raises(StorageConfigurationError):
         storage.identity("")
+
+
+def test_local_identity_asks_the_filesystem_for_files_that_already_exist(tmp_path):
+    """이미 있는 파일은 hard link로 이어진 두 경로를 같다고 봅니다.
+
+    덮어쓰기를 켠 실행은 이미 있는 파일에 씁니다. 표기로만 판정하면 서로 hard
+    link인 두 출력이 다르다고 나와, 차례로 덮고도 성공을 보고합니다.
+    """
+    root = tmp_path / "storage"
+    root.mkdir(parents=True)
+    (root / "metrics.json").write_text("{}", encoding="utf-8", newline="\n")
+    try:
+        os.link(root / "metrics.json", root / "predictions.json")
+    except (OSError, NotImplementedError, AttributeError) as error:
+        pytest.skip(f"이 filesystem은 hard link를 만들 수 없습니다: {error}")
+
+    storage = LocalStorage(root)
+
+    assert storage.identity("metrics.json") == storage.identity("predictions.json")
+
+
+def test_local_identity_of_a_missing_file_never_matches_an_existing_one(tmp_path):
+    """아직 없는 파일과 이미 있는 파일을 섞어 같다고 말하지 않습니다."""
+    root = tmp_path / "storage"
+    root.mkdir(parents=True)
+    (root / "metrics.json").write_text("{}", encoding="utf-8", newline="\n")
+
+    storage = LocalStorage(root)
+
+    assert storage.identity("metrics.json") != storage.identity("predictions.json")

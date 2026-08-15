@@ -118,12 +118,15 @@ class Storage(ABC):
         **약속하는 것:** 읽고 쓸 때와 같은 해석을 거친 뒤에도 같은 자리를 가리키는
         표기는 같은 값이 됩니다. backend가 다르면 절대 겹치지 않습니다.
 
-        **약속하지 않는 것:** 파일 시스템에 물어보지 않습니다. 판정은 파일이 생기기
-        **전에** 필요하므로 그럴 수가 없습니다. 그래서 hard link와 symlink로 이어진
-        두 경로, volume마다 다르게 설정된 대소문자 규칙은 가리지 못합니다. 대소문자는
-        그 platform의 기본 규칙(`os.path.normcase`)만 따릅니다.
+        **이미 있는 파일**은 파일 시스템에 직접 물어봅니다. 그래서 hard link로 이어진
+        두 경로와 volume마다 다르게 설정된 대소문자 규칙까지 가립니다. 덮어쓰기를 켠
+        실행이 이 갈래로 들어옵니다.
 
-        값의 모양도 약속하지 않습니다. 사람에게 보여 줄 이름이 아닙니다.
+        **아직 없는 파일**은 물어볼 대상이 없어 표기로만 판정합니다. 대소문자는 그
+        platform의 기본 규칙(`os.path.normcase`)만 따르므로, volume 설정이 다르면
+        가리지 못합니다.
+
+        값의 모양은 약속하지 않습니다. 사람에게 보여 줄 이름이 아닙니다.
         """
 
 
@@ -243,10 +246,18 @@ class LocalStorage(Storage):
         return self._resolve(location).is_file()
 
     def identity(self, location: str | Path) -> tuple[str, ...]:
-        # 읽고 쓸 때와 **같은** `_resolve`를 씁니다. `normcase`는 그 platform의 기본
-        # 대소문자 규칙입니다. volume마다 다르게 설정한 경우까지는 가리지 못하는데,
-        # 파일이 생기기 전에 판정해야 해서 filesystem에 물어볼 수가 없습니다.
-        return ("local", os.path.normcase(str(self._resolve(location))))
+        # 읽고 쓸 때와 **같은** `_resolve`를 씁니다.
+        path = self._resolve(location)
+        try:
+            status = path.stat()
+        except OSError:
+            # 아직 없는 파일은 물어볼 대상이 없어 표기로만 판정합니다. `normcase`는
+            # 그 platform의 기본 대소문자 규칙입니다.
+            return ("local-path", os.path.normcase(str(path)))
+        # 이미 있는 파일은 filesystem에 직접 묻습니다. hard link로 이어진 두 경로와
+        # volume마다 다르게 설정된 대소문자 규칙은 여기서만 가릴 수 있습니다.
+        # `overwrite`를 켠 실행은 이미 있는 파일에 쓰므로 이 갈래로 들어옵니다.
+        return ("local-file", str(status.st_dev), str(status.st_ino))
 
     def list(self, prefix: str | Path = "") -> list[str]:
         prefix_path = self._resolve(prefix)
