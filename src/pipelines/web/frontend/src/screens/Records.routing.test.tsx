@@ -8,7 +8,7 @@
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useParams, useSearchParams } from 'react-router-dom';
 
 import type { RunRecord } from '../lib/records';
 import { Records } from './Records';
@@ -44,6 +44,16 @@ function record(overrides: Partial<RunRecord> = {}): RunRecord {
   } as RunRecord;
 }
 
+function CanvasStub() {
+  const [params] = useSearchParams();
+  return <div>견줄 실행 화면 {params.getAll('run').join(',')}</div>;
+}
+
+function MonitorStub() {
+  const { jobId } = useParams();
+  return <div>모니터 화면 {jobId}</div>;
+}
+
 function show(records: RunRecord[]) {
   return render(
     <MemoryRouter initialEntries={['/records']}>
@@ -63,8 +73,9 @@ function show(records: RunRecord[]) {
             />
           }
         />
-        <Route path="/canvas" element={<div>견줄 실행 화면</div>} />
-        <Route path="/monitor/:jobId" element={<div>모니터 화면</div>} />
+        {/* 어느 실행으로 갔는지까지 드러냅니다. 주소만 맞고 대상이 빠지면 안 됩니다. */}
+        <Route path="/canvas" element={<CanvasStub />} />
+        <Route path="/monitor/:jobId" element={<MonitorStub />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -76,7 +87,7 @@ describe('기록에서 실행 열기', () => {
 
     fireEvent.click(screen.getByText('run-a'));
 
-    expect(screen.getByText('견줄 실행 화면')).toBeTruthy();
+    expect(screen.getByText('견줄 실행 화면 run-a')).toBeTruthy();
   });
 
   it('팀원이 돌린 등록 실행도 같은 화면으로 간다', () => {
@@ -84,7 +95,7 @@ describe('기록에서 실행 열기', () => {
 
     fireEvent.click(screen.getByText('run-a'));
 
-    expect(screen.getByText('견줄 실행 화면')).toBeTruthy();
+    expect(screen.getByText('견줄 실행 화면 run-a')).toBeTruthy();
   });
 
   it('아직 등록되지 않은 내 실행은 모니터로 간다', () => {
@@ -93,6 +104,6 @@ describe('기록에서 실행 열기', () => {
 
     fireEvent.click(screen.getByText('run-a'));
 
-    expect(screen.getByText('모니터 화면')).toBeTruthy();
+    expect(screen.getByText('모니터 화면 job-77')).toBeTruthy();
   });
 });

@@ -7,7 +7,7 @@
 
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom';
 
 import type { ExperimentSummary } from '../api/types';
 import type { RunRecord } from '../lib/records';
@@ -102,9 +102,14 @@ function experiment(weakCount = 2): ExperimentSummary {
   } as unknown as ExperimentSummary;
 }
 
-function show(records: RunRecord[]) {
+function MonitorStub() {
+  const { jobId } = useParams();
+  return <div>모니터 화면 {jobId}</div>;
+}
+
+function show(records: RunRecord[], runs = ['run-a']) {
   return render(
-    <MemoryRouter initialEntries={['/canvas?run=run-a']}>
+    <MemoryRouter initialEntries={[`/canvas?${runs.map((id) => `run=${id}`).join('&')}`]}>
       <Routes>
         <Route
           path="/canvas"
@@ -118,8 +123,8 @@ function show(records: RunRecord[]) {
             />
           }
         />
-        {/* 링크가 있는 것만으로는 부족합니다. 어디로 가는지까지 봅니다. */}
-        <Route path="/monitor/:jobId" element={<div>모니터 화면</div>} />
+        {/* 주소만 맞는 것으로는 부족합니다. 어느 job으로 갔는지까지 드러냅니다. */}
+        <Route path="/monitor/:jobId" element={<MonitorStub />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -147,6 +152,8 @@ describe('약한 class 표', () => {
     // 0.120은 실제로 잰 값이라 나와야 하고, null은 0.000이 되면 안 됩니다.
     expect(screen.getByText('0.120')).toBeTruthy();
     expect(screen.queryByText('0.000')).toBeNull();
+    // 그 자리에 무엇이 적히는지까지 봅니다. 안 적히는 것만 보면 빈 칸도 통과합니다.
+    expect(screen.getByText('못 잼')).toBeTruthy();
   });
 
   it('이 컴퓨터가 돌린 실행이면 그 job의 로그 화면으로 보낸다', async () => {
@@ -154,7 +161,8 @@ describe('약한 class 표', () => {
 
     fireEvent.click(await screen.findByText('로그 보기'));
 
-    expect(await screen.findByText('모니터 화면')).toBeTruthy();
+    // 어느 job인지까지 봅니다. 주소만 맞고 엉뚱한 job이면 안 됩니다.
+    expect(await screen.findByText('모니터 화면 job-77')).toBeTruthy();
   });
 
   it('목록이 잘려 있으면 없는 class를 약하지 않다고 적지 않는다', async () => {
@@ -181,11 +189,32 @@ describe('약한 class 표', () => {
         ),
       ),
     );
-    show([record(), record({ runId: 'run-b' })]);
+    show([record(), record({ runId: 'run-b' })], ['run-a', 'run-b']);
 
     expect(await screen.findByText('가바토파정 100mg')).toBeTruthy();
     // run-b 칸이 "순위 밖"이어야 합니다. "-"로 적으면 약하지 않다고 단정하는 것입니다.
     expect(screen.getAllByText('순위 밖').length).toBeGreaterThan(0);
+  });
+
+  it('평가를 안 돌린 실행을 약하지 않다고 적지 않는다', async () => {
+    // per_class_summary가 아예 없는 실행입니다. 약한지 아닌지 말할 자료가 없습니다.
+    const notEvaluated = { ...experiment(), experiment_id: 'run-b', run_id: 'run-b' };
+    delete (notEvaluated as { per_class_summary?: unknown }).per_class_summary;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({ experiments: [experiment(), notEvaluated], missing: [], curves: {} }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    );
+    show([record(), record({ runId: 'run-b' })], ['run-a', 'run-b']);
+
+    expect(await screen.findByText('가바토파정 100mg')).toBeTruthy();
+    // 안 돌린 실행이 "약하지 않음"으로 보이면 그 실행이 가장 좋아 보입니다.
+    expect(screen.getAllByText('평가 없음').length).toBeGreaterThan(0);
+    expect(screen.queryByText('약하지 않음')).toBeNull();
   });
 
   it('어느 칸이 어느 실행인지 머리글로 밝힌다', async () => {

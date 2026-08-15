@@ -204,9 +204,13 @@ function settingRows(experiments: ExperimentSummary[]): Row[] {
  * 그렇게 말해 버리면 실제로는 약한데 순위 밖인 class가 괜찮은 것으로 읽힙니다.
  *
  * - 숫자: 그 실행에서 약했고 AP를 쟀습니다.
- * - `?`: 약한 목록에 있는데 AP를 재지 못했습니다.
+ * - `못 잼`: 약한 목록에 있는데 AP를 재지 못했습니다.
  * - `순위 밖`: 목록이 잘려 있어 약한지 아닌지 이 화면이 알 수 없습니다.
- * - `-`: 목록이 잘리지 않았고 거기 없으므로 약하지 않았습니다.
+ * - `평가 없음`: 그 실행은 평가를 돌리지 않아 말할 자료가 없습니다.
+ * - `약하지 않음`: 목록이 잘리지 않았고 거기 없으므로 약하지 않았습니다.
+ *
+ * 기호 대신 글자로 적습니다. `-`나 `?`는 표 위 설명을 읽지 않으면 뜻을 알 수 없고,
+ * 이 표에서 가장 위험한 오해가 "말할 수 없는 것"을 "괜찮다"로 읽는 것입니다.
  *
  * 약한지 아닌지는 evaluate가 이미 정해 둔 것을 그대로 씁니다. 여기서 다시 세면 이
  * 화면과 evaluate가 서로 다른 답을 말합니다.
@@ -217,11 +221,18 @@ function settingRows(experiments: ExperimentSummary[]): Row[] {
  * 잘린 목록에 없는 것을 `-`로 적으면 "약하지 않다"고 단정하는 셈인데, 그 말을 할
  * 근거가 화면에 없습니다.
  */
-function cell(values: Map<number, number | null>, id: number, truncated: boolean): string {
+function cell(
+  values: Map<number, number | null>,
+  id: number,
+  { truncated, evaluated }: { truncated: boolean; evaluated: boolean },
+): string {
   const value = values.get(id);
   if (typeof value === 'number') return value.toFixed(3);
-  if (values.has(id)) return '?';
-  return truncated ? '순위 밖' : '-';
+  if (values.has(id)) return '못 잼';
+  // 평가를 안 돌린 실행은 약한지 아닌지 말할 자료가 아예 없습니다. 그것을
+  // "약하지 않음"으로 적으면 안 돌린 실행이 가장 좋아 보입니다.
+  if (!evaluated) return '평가 없음';
+  return truncated ? '순위 밖' : '약하지 않음';
 }
 
 function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
@@ -248,6 +259,8 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
     const summary = item.per_class_summary;
     return summary ? summary.counts.weak > summary.weak.length : false;
   });
+  /** 그 실행이 평가를 돌렸는지. 안 돌렸으면 약한지 아닌지 말할 자료가 없습니다. */
+  const evaluated = experiments.map((item) => Boolean(item.per_class_summary));
   /**
    * 모든 실행 중 가장 낮은 AP를 기준으로 세웁니다.
    *
@@ -270,8 +283,7 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
       <div style={{ ...type.note, color: color.textMuted, marginTop: 6, maxWidth: '46em' }}>
         정답이 {measured[0]?.per_class_summary?.min_truth_count}개 이상인데 AP가 낮은 class입니다.
         표본이 적어 AP를 믿을 수 없는 class는 evaluate가 따로 세어 두므로 여기 넣지 않습니다.
-        {' 값 대신 적히는 것: "?"는 재지 못함, "순위 밖"은 목록이 잘려 알 수 없음, "-"는 약하지 않음입니다.'}
-        {experiments.length > measured.length && ' 평가 결과가 없는 실행은 칸이 비어 있습니다.'}
+        {' 잰 AP가 없으면 그 이유를 그대로 적습니다: 못 잼, 순위 밖(목록이 잘려 알 수 없음), 평가 없음, 약하지 않음.'}
       </div>
       <div style={{ overflowX: 'auto', marginTop: 14 }}>
         <div style={{ minWidth: 170 + experiments.length * 150 }}>
@@ -335,7 +347,10 @@ function WeakClassTable({ experiments }: { experiments: ExperimentSummary[] }) {
                     color: typeof values.get(id) === 'number' ? color.text : color.textFaint,
                   }}
                 >
-                  {cell(values, id, truncated[index] ?? false)}
+                  {cell(values, id, {
+                    truncated: truncated[index] ?? false,
+                    evaluated: evaluated[index] ?? false,
+                  })}
                 </span>
               ))}
             </div>
