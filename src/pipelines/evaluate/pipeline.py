@@ -402,11 +402,11 @@ def run(config: dict) -> dict:
         random.seed(settings.seed)
         store = ArtifactStore(config)
 
-        # 겹침은 **저장 계층이 실제로 쓰는 이름**으로 견줍니다. 글자 그대로 비교하면
-        # `./m.json`과 `m.json`이 달라 보여, 나중에 쓰는 쪽이 앞의 결과를 덮고도
-        # 성공을 보고합니다. S3 key는 글자 그대로이므로 `normalize_uri`가 그대로
-        # 돌려주고, 다른 object를 같다고 막지 않습니다.
-        written_by_name: dict[str, str] = {}
+        # 겹침은 **저장 계층에 물어서** 견줍니다. 표기 규칙을 여기서 지어내면
+        # backend가 실제로 하는 해석과 어긋납니다 — `./m.json`과 `m.json`을 다르게
+        # 보거나, S3에서 서로 다른 object인 `a//b`와 `a/b`를 같다고 막습니다.
+        # 이미 있는 파일이면 hard link까지 가려 주므로 덮어쓰기를 켠 실행도 걸립니다.
+        written_by_target: dict[tuple[str, ...], str] = {}
         for label, uri in (
             ("metrics", settings.metrics_uri),
             ("predictions", settings.predictions_uri),
@@ -415,13 +415,13 @@ def run(config: dict) -> dict:
         ):
             if uri is None:
                 continue
-            name = store.normalize_uri(uri)
-            if name in written_by_name:
+            target = store.artifact_identity(uri)
+            if target in written_by_target:
                 raise ConfigurationError(
-                    f"{written_by_name[name]}와 {label}는 같은 위치에 저장할 수 "
-                    f"없습니다: {name}"
+                    f"{written_by_target[target]}와 {label}는 같은 위치에 저장할 수 "
+                    f"없습니다: {store.normalize_uri(uri)}"
                 )
-            written_by_name[name] = label
+            written_by_target[target] = label
 
         output_uris = [settings.metrics_uri, settings.predictions_uri]
         if settings.submission_uri is not None:

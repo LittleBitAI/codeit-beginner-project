@@ -1039,3 +1039,30 @@ def test_test_predictions_record_the_checkpoint_as_their_source(
     document = _read_json(repository_root, result["artifacts"]["test_predictions_uri"])
     assert document["prediction_source"] == "checkpoint"
     assert document["predictions_input_uri"] is None
+
+
+def test_outputs_that_are_hard_links_of_each_other_are_rejected(
+    base_config: dict, repository_root: Path
+):
+    """이미 있는 두 출력이 서로 hard link면 겹친 것으로 봅니다.
+
+    덮어쓰기를 켠 실행은 이미 있는 파일에 씁니다. 표기로만 판정하면 이름이 달라
+    통과한 뒤 차례로 덮고도 성공을 보고합니다. 저장 계층에 물어봐야 걸립니다.
+    """
+    import os
+
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"]["overwrite"] = True
+
+    output_dir = repository_root / "artifacts/evaluate/evaluate-0001"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "metrics.json").write_text("{}", encoding="utf-8", newline="\n")
+    try:
+        os.link(output_dir / "metrics.json", output_dir / "test_predictions.json")
+    except (OSError, NotImplementedError, AttributeError) as error:
+        pytest.skip(f"이 filesystem은 hard link를 만들 수 없습니다: {error}")
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "같은 위치에 저장할 수 없습니다" in result["message"]

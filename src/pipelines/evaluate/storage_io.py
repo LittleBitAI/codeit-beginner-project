@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from src.common import Storage, StorageError, create_storage
+from src.common import LocalStorage, Storage, StorageError, create_storage
 
 from .errors import ArtifactWriteError, InputArtifactError
 
@@ -83,6 +83,33 @@ class ArtifactStore:
             return absolute.resolve().relative_to(self.repository_root).as_posix()
         except ValueError:
             return absolute.resolve().as_posix()
+
+    def artifact_identity(self, uri: str) -> tuple[str, ...]:
+        """저장 계층이 보는 대상을 그대로 돌려줍니다.
+
+        두 산출물이 같은 파일에 저장되는지 쓰기 전에 판정하려는 쪽이 씁니다. 표기
+        규칙을 여기서 다시 만들지 않고 backend에 물어봅니다 — 밖에서 지어낸 규칙은
+        backend가 실제로 하는 해석과 어긋납니다.
+
+        local은 이 저장소 root 기준으로 봅니다. 쓸 때 `local_path`가 쓰는 것과 같은
+        기준이라야 판정과 실제 저장이 어긋나지 않습니다. 저장소 밖 경로는 다른
+        입출력과 똑같이 `local_path`가 먼저 막습니다.
+        """
+        if is_remote_uri(uri):
+            try:
+                return self.storage.identity(uri)
+            except StorageError as error:
+                raise InputArtifactError(
+                    f"저장 위치를 확인하지 못했습니다 ({uri}): {error}"
+                ) from error
+
+        path = self.local_path(uri)
+        try:
+            return LocalStorage(self.repository_root).identity(path)
+        except StorageError as error:
+            raise InputArtifactError(
+                f"저장 위치를 확인하지 못했습니다 ({uri}): {error}"
+            ) from error
 
     def exists(self, uri: str) -> bool:
         """대상 artifact가 이미 있는지 확인합니다."""
