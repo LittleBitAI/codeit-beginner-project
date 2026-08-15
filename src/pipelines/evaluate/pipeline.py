@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import posixpath
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -190,6 +191,21 @@ def _without_categories(
     ]
 
 
+def _same_file_key(uri: str) -> str:
+    """표기가 달라도 같은 파일을 가리키면 같은 key가 되게 만듭니다.
+
+    출력 위치가 겹치는지를 **글자 그대로** 비교하면 `./metrics.json`과
+    `metrics.json`이 서로 다른 것으로 보입니다. 그대로 두면 겹침 검사를 지나쳐,
+    나중에 쓰는 쪽이 먼저 쓴 파일을 덮습니다.
+    """
+
+    normalized = uri.replace("\\", "/")
+    scheme, separator, rest = normalized.partition("://")
+    if separator:
+        return f"{scheme}://{posixpath.normpath(rest)}"
+    return posixpath.normpath(normalized)
+
+
 def _resolve_max_detections(value: Any) -> int | None:
     if value is None:
         return DEFAULT_MAX_DETECTIONS_PER_IMAGE
@@ -306,7 +322,7 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
 
     metrics_uri = join_uri(output_dir, metrics_filename)
     predictions_uri = join_uri(output_dir, predictions_filename)
-    if metrics_uri == predictions_uri:
+    if _same_file_key(metrics_uri) == _same_file_key(predictions_uri):
         raise ConfigurationError(
             "metrics와 predictions는 같은 위치에 저장할 수 없습니다. "
             f"evaluate.metrics_filename과 evaluate.predictions_filename을 다르게 두세요: {metrics_uri}"
@@ -328,7 +344,7 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         )
     # 출력이 넷으로 늘어 짝마다 따로 보면 빠뜨리기 쉽습니다. 한 번에 셉니다.
     written_uris = [
-        uri
+        _same_file_key(uri)
         for uri in (metrics_uri, predictions_uri, submission_uri, test_predictions_uri)
         if uri is not None
     ]
@@ -577,13 +593,15 @@ def run(config: dict) -> dict:
             "predictions": [_public_prediction(prediction) for prediction in predictions],
         }
         submission_uri: str | None = None
+        # 쓰기 **전에** 정리 목록에 넣습니다. 쓰다가 실패하면 반쯤 쓰인 파일이 남는데,
+        # 쓴 뒤에 넣으면 그 파일이 목록에 없어 지워지지 않습니다. 이미 있던 파일은
+        # 여전히 목록에 넣지 않으므로 남의 결과를 지우지 않습니다.
         if settings.submission_uri is not None and submission_text is not None:
-            submission_existed = store.exists(settings.submission_uri)
+            if not store.exists(settings.submission_uri):
+                created_uris.append(settings.submission_uri)
             submission_uri = store.write_text(
                 settings.submission_uri, submission_text, overwrite=settings.overwrite
             )
-            if not submission_existed:
-                created_uris.append(settings.submission_uri)
             progress.emit("submission_written", rows=submission_rows)
 
         test_predictions_uri: str | None = None
@@ -604,29 +622,26 @@ def run(config: dict) -> dict:
                     _public_prediction(prediction) for prediction in test_predictions
                 ],
             }
-            test_predictions_existed = store.exists(settings.test_predictions_uri)
+            if not store.exists(settings.test_predictions_uri):
+                created_uris.append(settings.test_predictions_uri)
             test_predictions_uri = store.write_json(
                 settings.test_predictions_uri,
                 test_predictions_document,
                 overwrite=settings.overwrite,
             )
-            if not test_predictions_existed:
-                created_uris.append(settings.test_predictions_uri)
 
-        predictions_existed = store.exists(settings.predictions_uri)
+        if not store.exists(settings.predictions_uri):
+            created_uris.append(settings.predictions_uri)
         predictions_uri = store.write_json(
             settings.predictions_uri, predictions_document, overwrite=settings.overwrite
         )
-        if not predictions_existed:
-            created_uris.append(settings.predictions_uri)
 
         metrics_document = {**common_fields, **report}
-        metrics_existed = store.exists(settings.metrics_uri)
+        if not store.exists(settings.metrics_uri):
+            created_uris.append(settings.metrics_uri)
         metrics_uri = store.write_json(
             settings.metrics_uri, metrics_document, overwrite=settings.overwrite
         )
-        if not metrics_existed:
-            created_uris.append(settings.metrics_uri)
 
         progress.emit(
             "evaluate_completed",
