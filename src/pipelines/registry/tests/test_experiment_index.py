@@ -357,6 +357,7 @@ def test_training_block_is_filled_from_the_config_snapshot(local_run):
         "lr_scheduler": {"name": "cosine", "warmup_steps": 500},
         "early_stopping": {"patience": 4, "min_delta": 0.0},
         "resume_from": "artifacts/experiments/exp-0000/last_checkpoint.pt",
+        "seed": 7,
     }
 
 
@@ -369,9 +370,9 @@ def test_every_contract_setting_is_summarized_or_deliberately_left_out():
     """
 
     summarized = {key for key, _ in summary_module.TRAINING_KEYS}
-    # 담지 않는 넷입니다. seed는 summary 최상위에 이미 있고, 나머지 셋은 결과를 어디에
-    # 두는지일 뿐 무엇을 학습했는지가 아닙니다.
-    left_out = {"seed", "run_id", "output_dir", "output_prefix"}
+    # 담지 않는 셋입니다. 결과를 어디에 두는지일 뿐 무엇을 학습했는지가 아닙니다.
+    # seed는 summary 최상위에도 있지만 그쪽은 registry 자신의 seed라 따로 담습니다.
+    left_out = {"run_id", "output_dir", "output_prefix"}
 
     assert summarized | left_out == set(train_contract.SETTING_KEYS)
     assert not (summarized & left_out)
