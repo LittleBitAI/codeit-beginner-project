@@ -778,3 +778,54 @@ export interface CreatedConfig {
   config: RuntimeConfig;
   warnings: FieldMessage[];
 }
+
+/**
+ * 합칠 수 있는 실행 하나. **체크포인트가 있으면 후보**이고, 점수가 높은 것부터 옵니다.
+ *
+ * `ready`가 false면 test 예측이 아직 없다는 뜻입니다. 고를 수는 있고, 합치기를 누르면
+ * 서버가 먼저 만듭니다 — 그 단계만 GPU를 씁니다.
+ */
+export interface EnsembleCandidate {
+  run_id: string;
+  checkpoint_uri: string;
+  test_predictions_uri: string | null;
+  ready: boolean;
+  dataset_label: string | null;
+  kaggle_score: number | null;
+  created_at: string | null;
+}
+
+/** 합치기 전에 알 수 있는 것 하나. `level`이 `warn`이어도 실행은 막지 않습니다. */
+export interface EnsembleCheck {
+  id: string;
+  level: 'ok' | 'warn';
+  title: string;
+  detail: string;
+}
+
+export interface EnsembleDiagnosis {
+  run_ids: string[];
+  checks: EnsembleCheck[];
+  diversity: {
+    agreement?: number;
+    box_iou?: number;
+    pairs: { runs: [string, string]; agreement: number; box_iou: number }[];
+  };
+  /** 결과가 떨어질 구간입니다. 일곱 개 융합이 평균에서 최고까지의 82% 지점이었습니다. */
+  expected: { floor?: number; ceiling?: number; observed_ratio?: number };
+  blocking: boolean;
+}
+
+export interface EnsembleJob {
+  status: 'idle' | 'running' | 'succeeded' | 'failed';
+  run_id?: string;
+  /** 예측을 만드는 중(`harvest`)인지 합치는 중(`fuse`)인지. */
+  stage?: 'harvest' | 'fuse';
+  pending?: string[];
+  harvesting?: string;
+  harvest_progress?: [number, number];
+  message?: string | null;
+  artifacts?: Record<string, unknown>;
+  summary?: Record<string, unknown>;
+  logs?: string[];
+}

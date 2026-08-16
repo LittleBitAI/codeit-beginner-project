@@ -75,6 +75,21 @@ function IconRecords() {
   );
 }
 
+/** 여러 갈래가 하나로 모이는 모양입니다 — 실행 여럿을 제출 하나로 합칩니다. */
+function IconEnsemble() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style={iconBox}>
+      <path
+        d="M2.5 3.5h4c2 0 3 1.5 3 4.5s1 4.5 3 4.5h1.5M2.5 12.5h4"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+      <circle cx="13.2" cy="8" r="1.6" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
 function IconBoard() {
   return (
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style={iconBox}>
@@ -273,6 +288,15 @@ export function AppShell({
           onClick={() => navigate('/records')}
         >
           기록
+        </RailItem>
+        {/* 기록 바로 뒤입니다. 끝난 실행을 골라 합치는 일이라, 기록이 있어야
+            시작되는 다음 순서이기 때문입니다. */}
+        <RailItem
+          icon={<IconEnsemble />}
+          active={pathname.startsWith('/ensemble')}
+          onClick={() => navigate('/ensemble')}
+        >
+          앙상블
         </RailItem>
         <RailItem
           icon={<IconBoard />}

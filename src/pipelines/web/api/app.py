@@ -23,6 +23,7 @@ from ..errors import (
 )
 from . import (
     routes_data,
+    routes_ensemble,
     routes_gpu,
     routes_meta,
     routes_settings,
@@ -142,6 +143,7 @@ def create_app(*, serve_frontend: bool = True) -> FastAPI:
     app.include_router(routes_gpu.router)
     app.include_router(routes_settings.router)
     app.include_router(routes_team.router)
+    app.include_router(routes_ensemble.router)
 
     if serve_frontend and _FRONTEND_DIST.is_dir():
         # 빌드된 frontend가 있으면 같은 origin에서 함께 제공합니다.

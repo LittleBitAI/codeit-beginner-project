@@ -4,6 +4,9 @@ import type {
   DataSource,
   DataVerification,
   Defaults,
+  EnsembleCandidate,
+  EnsembleDiagnosis,
+  EnsembleJob,
   EvaluationState,
   ExperimentDetail,
   PerClassSummary,
@@ -112,6 +115,31 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ run_ids: runIds }),
     }),
+
+  // 앙상블은 합치기 전에는 이득을 알 수 없고, 확인하는 방법이 Kaggle 제출뿐입니다.
+  // 그래서 고른 조합을 먼저 진단해 보고 실행합니다.
+  ensembleCandidates: () =>
+    request<{ candidates: EnsembleCandidate[] }>('/api/ensemble/candidates'),
+
+  // 예측 파일을 읽어야 해서 처음 한 번은 수 초 걸립니다. 재 본 쌍은 서버가 저장해
+  // 두므로 후보를 하나씩 바꿔 볼 때는 빨라집니다.
+  diagnoseEnsemble: (runIds: string[]) =>
+    request<EnsembleDiagnosis>('/api/ensemble/diagnose', {
+      method: 'POST',
+      body: JSON.stringify({ run_ids: runIds }),
+    }),
+
+  startEnsemble: (payload: {
+    run_ids: string[];
+    run_id: string;
+    allow_copied_images?: boolean;
+  }) =>
+    request<EnsembleJob>('/api/ensemble/jobs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  ensembleStatus: () => request<EnsembleJob>('/api/ensemble/jobs'),
 
   getJob: (jobId: string) => request<JobRecord>(`/api/train/jobs/${jobId}`),
 
