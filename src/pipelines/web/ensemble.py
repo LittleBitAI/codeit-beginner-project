@@ -68,6 +68,49 @@ _PREDICTION_CACHE: dict[str, dict[str, Any]] = {}
 _PAIR_CACHE: dict[tuple[str, str], dict[str, float]] = {}
 
 
+def _uses_s3() -> bool:
+    """S3에 쓰는가. **자리를 정하는 모든 곳이 이 하나를 봐야** 서로 갈리지 않습니다."""
+
+    return storage_environment()["default_backend"] == "s3"
+
+
+def _storage_root() -> str:
+    """S3일 때의 `s3://<bucket>`입니다."""
+
+    return f"s3://{(storage_environment().get('bucket') or '').strip()}"
+
+
+def _storage_config() -> dict[str, Any]:
+    """pipeline에 넘길 storage 설정입니다. 자리를 정하는 곳과 같은 기준으로 갈립니다."""
+
+    if _uses_s3():
+        bucket = (storage_environment().get("bucket") or "").strip()
+        return {"backend": "s3", "s3": {"bucket": bucket, "prefix": ""}}
+    return {"backend": "local", "local": {"root": str(repository_root())}}
+
+
+def _checkpoint_identity(uri: str) -> str:
+    """checkpoint의 저장 신원입니다. 못 물어보면 글자 그대로 씁니다.
+
+    신원을 못 얻는 것과 다른 파일인 것은 다릅니다. 못 얻었다고 합치기를 막으면,
+    저장소가 잠깐 흔들릴 때 멀쩡한 조합이 막힙니다.
+    """
+
+    config, _ = _scope()
+    try:
+        return str(create_storage(config).identity(uri))
+    except StorageError:
+        return uri
+
+
+def _submission_uri(run_id: str) -> str:
+    """융합 결과 제출 CSV가 놓일 자리입니다."""
+
+    if _uses_s3():
+        return f"{_storage_root()}/submissions/{run_id}/submission.csv"
+    return f"artifacts/ensemble/{run_id}/submission.csv"
+
+
 def _scope() -> tuple[dict[str, Any], str]:
     """kaggle 점수와 같은 자리 규칙을 씁니다."""
 
@@ -113,8 +156,10 @@ def _harvest_root() -> str:
     목록에는 후보가 보이는데 누르면 안 되는 셈이라 더 나쁩니다.
     """
 
-    bucket = (storage_environment().get("bucket") or "").strip()
-    return f"s3://{bucket}/{_HARVEST_PREFIX}" if bucket else _LOCAL_HARVEST_PREFIX
+    # **`_scope()`와 같은 기준으로 갈립니다.** bucket이 있는지만 보면
+    # `PILL_STORAGE_BACKEND=local`에 bucket이 함께 설정된 환경에서 저장은 local로,
+    # 경로는 s3://로 갈려 실행이 실패합니다.
+    return f"{_storage_root()}/{_HARVEST_PREFIX}" if _uses_s3() else _LOCAL_HARVEST_PREFIX
 
 
 def _harvest_uri(run_id: str) -> str:
@@ -153,7 +198,6 @@ def list_candidates() -> list[dict[str, Any]]:
 
     scores = kaggle_scores.load_scores()
     harvested = _harvested_runs()
-    bucket = (storage_environment().get("bucket") or "").strip()
 
     candidates: list[dict[str, Any]] = []
     for summary in summaries:
@@ -640,7 +684,9 @@ def check_selection(
     # 거부하는데, 추론을 다 마친 뒤에 알게 됩니다.
     seen: dict[str, str] = {}
     for item in selected:
-        checkpoint = str(item.get("checkpoint_uri") or "")
+        # **표기가 아니라 저장 신원으로 봅니다.** `s3://bucket/a.pt`와 `a.pt`는 글자로는
+        # 다르지만 같은 파일이고, evaluate는 신원으로 걸러 추론 뒤에 거절합니다.
+        checkpoint = _checkpoint_identity(str(item.get("checkpoint_uri") or ""))
         if checkpoint in seen:
             raise WebError(
                 f"{seen[checkpoint]}와 {item['run_id']}가 같은 checkpoint를 가리킵니다. "
@@ -658,6 +704,19 @@ def check_selection(
             "'사진이 같은데 위치만 다른 것을 확인했습니다'를 켜고 다시 실행하세요."
         )
 
+    # 합친 결과는 다시 합칠 수 없습니다. 예측이 이미 있는 것만 지금 열어 볼 수 있고,
+    # 없는 것은 만든 뒤에야 알 수 있으므로 여기서 볼 수 있는 것만 봅니다.
+    for item in selected:
+        uri = item.get("test_predictions_uri")
+        if not uri:
+            continue
+        document = _read_predictions(str(uri))
+        if document["prediction_source"] == "fusion" or document["fused_from"] is not None:
+            raise WebError(
+                f"{item['run_id']}은 이미 합친 결과입니다. 합친 것을 다시 합칠 수는 "
+                "없으니 원본 실행들을 고르세요."
+            )
+
     # 같은 이름의 결과가 이미 있으면 evaluate가 덮어쓰지 않고 멈춥니다. 그 판단도
     # 추론 뒤가 아니라 지금 합니다.
     if not overwrite:
@@ -671,20 +730,22 @@ def check_selection(
 
 
 def _existing_output(run_id: str) -> str | None:
-    """같은 이름의 융합 결과가 이미 있는지입니다. 못 읽으면 없는 것으로 봅니다."""
+    """같은 이름의 융합 결과가 이미 있는지입니다.
 
-    bucket = (storage_environment().get("bucket") or "").strip()
-    uri = (
-        f"s3://{bucket}/submissions/{run_id}/submission.csv"
-        if bucket
-        else f"artifacts/ensemble/{run_id}/submission.csv"
-    )
+    **확인하지 못하면 추측하지 않고 그 자리에서 알립니다.** 없다고 넘기면 추론을 다
+    돌린 뒤 출력 충돌로 실패하고, 있다고 넘기면 멀쩡한 이름이 막힙니다. 게다가 저장소를
+    못 읽는 상태면 뒤 단계도 안전하게 끝나지 않습니다 — 원인을 지금 말하는 편이 낫습니다.
+    """
+
+    uri = _submission_uri(run_id)
     config, _ = _scope()
     try:
         return uri if create_storage(config).exists(uri) else None
-    except StorageError:
-        # 확인하지 못한 것을 "있다"로 다루면 멀쩡한 이름까지 막힙니다.
-        return None
+    except StorageError as error:
+        raise WebError(
+            f"{uri}가 이미 있는지 확인하지 못했습니다({type(error).__name__}). "
+            "저장소에 닿지 못하면 합치기도 끝까지 갈 수 없습니다."
+        ) from error
 
 
 def pending_runs(run_ids: Sequence[str]) -> list[dict[str, Any]]:
@@ -719,13 +780,9 @@ def build_harvest_config(candidate: Mapping[str, Any], *, device: str | None = N
         if key not in data_inputs:
             raise WebError(f"{run_id}에 {key}가 없어 예측을 만들 수 없습니다.")
 
-    bucket = (storage_environment().get("bucket") or "").strip()
-    if bucket:
-        storage: dict[str, Any] = {"backend": "s3", "s3": {"bucket": bucket, "prefix": ""}}
-    else:
-        # local backend에서도 만들 수 있어야 합니다. S3만 지원하면 목록에는 후보가
-        # 보이는데 누르면 언제나 실패합니다.
-        storage = {"backend": "local", "local": {"root": str(repository_root())}}
+    # local backend에서도 만들 수 있어야 합니다. S3만 지원하면 목록에는 후보가
+    # 보이는데 누르면 언제나 실패합니다.
+    storage = _storage_config()
     output_dir = f"{_harvest_root()}/{run_id}"
 
     return {
@@ -793,15 +850,13 @@ def build_fusion_config(
         if key not in data_inputs:
             raise WebError(f"{anchor['run_id']}에 {key}가 없어 융합 config를 만들 수 없습니다.")
 
-    bucket = (storage_environment().get("bucket") or "").strip()
-    if bucket:
-        storage: dict[str, Any] = {"backend": "s3", "s3": {"bucket": bucket, "prefix": ""}}
-        output_dir = f"s3://{bucket}/experiments/ensemble/{name}"
-        submission_uri = f"s3://{bucket}/submissions/{name}/submission.csv"
-    else:
-        storage = {"backend": "local", "local": {"root": str(repository_root())}}
-        output_dir = f"artifacts/ensemble/{name}"
-        submission_uri = f"artifacts/ensemble/{name}/submission.csv"
+    storage = _storage_config()
+    output_dir = (
+        f"{_storage_root()}/experiments/ensemble/{name}"
+        if _uses_s3()
+        else f"artifacts/ensemble/{name}"
+    )
+    submission_uri = _submission_uri(name)
 
     settings: dict[str, Any] = {
         "run_id": name,

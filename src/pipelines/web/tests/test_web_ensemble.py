@@ -734,3 +734,77 @@ def test_the_route_passes_overwrite_through(fake_runs, monkeypatch) -> None:
 
     assert seen["overwrite"] is True
     assert ensemble_jobs  # import가 살아 있는지 확인합니다.
+
+
+def test_a_forced_local_backend_with_a_bucket_stays_local(monkeypatch) -> None:
+    """bucket이 있는지만 보면 저장은 local인데 경로만 s3://가 되어 실행이 실패합니다."""
+
+    monkeypatch.setattr(
+        ensemble,
+        "storage_environment",
+        lambda: {"default_backend": "local", "bucket": "some-bucket"},
+    )
+
+    assert ensemble._harvest_root() == "artifacts/web/ensemble-candidates"
+    assert ensemble._storage_config()["backend"] == "local"
+    assert not ensemble._submission_uri("fusion-two").startswith("s3://")
+
+
+def test_two_spellings_of_one_checkpoint_are_refused(fake_runs, monkeypatch) -> None:
+    """`s3://bucket/a.pt`와 `a.pt`는 글자로만 다르고 같은 파일입니다."""
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("first", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    fake_runs("second", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
+    for item in ensemble.list_candidates():
+        item["checkpoint_uri"] = (
+            "s3://bucket/shared.pt" if item["run_id"] == "first" else "shared.pt"
+        )
+    # 저장 계층이 둘을 같은 파일이라고 답하는 상황입니다.
+    monkeypatch.setattr(ensemble, "_checkpoint_identity", lambda uri: "same-file")
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["first", "second"], run_id="fusion-two")
+    assert "같은 checkpoint" in str(error.value)
+
+
+def test_an_already_fused_input_is_refused_before_inference(fake_runs) -> None:
+    """합친 것을 다시 합칠 수 없습니다. 추론 뒤가 아니라 지금 압니다."""
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("plain", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    fake_runs(
+        "already",
+        0.63,
+        _prediction_document(checkpoint="ckpt/f.pt", boxes=boxes, prediction_source="fusion"),
+    )
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["plain", "already"], run_id="fusion-two")
+    assert "이미 합친 결과" in str(error.value)
+
+
+def test_failing_to_check_the_output_is_reported_not_guessed(fake_runs, monkeypatch) -> None:
+    """없다고 넘기면 추론 뒤 충돌하고, 있다고 넘기면 멀쩡한 이름이 막힙니다.
+
+    저장소를 못 읽는 상태면 뒤 단계도 안전하게 끝나지 않으므로 지금 알립니다.
+    """
+
+    from src.common import StorageError
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    fake_runs("b", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
+
+    class Broken:
+        def identity(self, uri):
+            return uri
+
+        def exists(self, uri):
+            raise StorageError("접근 거부")
+
+    monkeypatch.setattr(ensemble, "create_storage", lambda config: Broken())
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["a", "b"], run_id="fusion-two")
+    assert "확인하지 못했습니다" in str(error.value)
