@@ -84,6 +84,10 @@ export function Ensemble() {
     setSelected((current) =>
       current.includes(runId) ? current.filter((item) => item !== runId) : [...current, runId],
     );
+    // **고른 것이 바뀌면 지난 동의는 무효입니다.** A와 B가 같은 사진이라고 확인했다고
+    // 해서 C까지 확인한 것이 아닙니다. 남겨 두면 새 진단이 오기 전에 실행할 때 C까지
+    // 위치 검사를 면제해, 같은 id·크기의 다른 사진을 조용히 합칩니다.
+    setAllowCopied(false);
   }, []);
 
   const warnings = useMemo(
@@ -92,8 +96,16 @@ export function Ensemble() {
   );
   // 시험지가 다르다는 경고가 있을 때만 물어봅니다. 늘 보이면 뜻 없이 켜집니다.
   const needsCopyConsent = warnings.some((check) => check.id === 'test_set');
-  const [allowCopied, setAllowCopied] = useState(false);
   const running = job?.status === 'running';
+  // 진단이 지금 고른 것에 대한 답인지입니다. 아직 안 왔거나 옛 조합의 답이면,
+  // 그 위에서 실행을 결정하면 안 됩니다.
+  const fresh =
+    diagnosis !== null &&
+    !diagnosing &&
+    diagnosis.run_ids.length === selected.length &&
+    diagnosis.run_ids.every((item, index) => item === selected[index]);
+
+  const [allowCopied, setAllowCopied] = useState(false);
 
   const start = useCallback(() => {
     const runId = name.trim() || `${NAME_PREFIX}-${selected.length}-${Date.now()}`;
@@ -212,7 +224,7 @@ export function Ensemble() {
           </label>
         ) : null}
         <div>
-          <Button onClick={start} disabled={selected.length < 2 || running}>
+          <Button onClick={start} disabled={selected.length < 2 || running || !fresh}>
             {running ? '합치는 중…' : `${selected.length}개 합치기`}
           </Button>
           {warnings.length > 0 ? (

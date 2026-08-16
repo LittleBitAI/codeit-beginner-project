@@ -166,6 +166,53 @@ describe('앙상블 화면', () => {
     expect(start.mock.calls[0]?.[0].run_ids).toEqual(['dino-a', 'dino-b']);
   });
 
+  it('고른 것이 바뀌면 지난 동의를 버린다', async () => {
+    // A와 B가 같은 사진이라고 확인했다고 해서 C까지 확인한 것이 아닙니다. 남겨 두면
+    // 새 진단 전에 실행할 때 C까지 위치 검사를 면제해, 다른 사진을 조용히 합칩니다.
+    const consent = '사진이 같은데 위치만 다른 것을 확인했습니다 (fusion_allow_copied_images)';
+    stub(
+      [candidate(), candidate({ run_id: 'dino-b' }), candidate({ run_id: 'dino-c' })],
+      diagnosis({
+        run_ids: ['dino-a', 'dino-b'],
+        checks: [{ id: 'test_set', level: 'warn', title: '시험지가 다릅니다', detail: 'v5와 v6' }],
+      }),
+    );
+
+    render(<Ensemble />);
+    await screen.findByText('dino-a');
+    pickTwo();
+    const box = (await screen.findByText(consent)).querySelector('input') as HTMLInputElement;
+    fireEvent.click(box);
+    expect(box.checked).toBe(true);
+
+    fireEvent.click(screen.getAllByRole('checkbox')[2] as HTMLElement);
+
+    await waitFor(() => {
+      const again = screen.queryByText(consent)?.querySelector('input') as HTMLInputElement | null;
+      expect(again === null || again.checked === false).toBe(true);
+    });
+  });
+
+  it('진단이 지금 고른 것의 답이 아니면 실행을 막는다', async () => {
+    // 옛 조합의 진단 위에서 실행을 결정하면, 화면이 보여 준 경고와 실제로 합치는
+    // 것이 달라집니다.
+    stub(
+      [candidate(), candidate({ run_id: 'dino-b' }), candidate({ run_id: 'dino-c' })],
+      diagnosis({ run_ids: ['dino-a', 'dino-b'] }),
+    );
+
+    render(<Ensemble />);
+    await screen.findByText('dino-a');
+    pickTwo();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /합치기/ })).toHaveProperty('disabled', false),
+    );
+
+    fireEvent.click(screen.getAllByRole('checkbox')[2] as HTMLElement);
+
+    expect(screen.getByRole('button', { name: /합치기/ })).toHaveProperty('disabled', true);
+  });
+
   it('추론 중인지 합치는 중인지 구분해 보여 준다', async () => {
     // 45개를 고르면 GPU가 몇 시간 돕니다. 어느 단계인지 안 보이면 멈춘 줄 압니다.
     vi.spyOn(api, 'ensembleCandidates').mockResolvedValue({ candidates: [candidate()] });

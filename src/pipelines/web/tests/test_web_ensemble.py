@@ -416,3 +416,135 @@ def test_predictions_this_screen_made_count_as_ready(fake_registry, monkeypatch)
     assert candidate["test_predictions_uri"] == (
         "s3://bucket/experiments/web-state/ensemble-candidates/low/test_predictions.json"
     )
+
+
+def test_agreement_does_not_depend_on_which_run_came_first(fake_runs) -> None:
+    """한쪽 수로 나누면 고른 순서가 답을 바꿉니다.
+
+    94개가 100개에 통째로 들어 있으면 순서에 따라 100%(경고)와 94%(통과)로 갈립니다.
+    저장해 두는 값의 key는 순서를 가리지 않아서, 먼저 잰 쪽이 영원히 남습니다.
+    """
+
+    small = {(index, 7): [float(index), 0.0, 5.0, 5.0] for index in range(4)}
+    large = {**small, **{(index, 7): [float(index), 0.0, 5.0, 5.0] for index in range(4, 10)}}
+    fake_runs("small", 0.62, _prediction_document(checkpoint="ckpt/s.pt", boxes=small))
+    fake_runs("large", 0.61, _prediction_document(checkpoint="ckpt/l.pt", boxes=large))
+
+    forward = ensemble.diagnose(["small", "large"])["diversity"]["agreement"]
+    ensemble._PAIR_CACHE.clear()
+    backward = ensemble.diagnose(["large", "small"])["diversity"]["agreement"]
+
+    assert forward == pytest.approx(backward)
+    # 4 / 10 — 부분집합이라고 "완전히 같다"로 읽으면 안 됩니다.
+    assert forward == pytest.approx(0.4)
+
+
+def test_a_single_run_is_refused_before_any_inference(fake_runs) -> None:
+    """검증을 뒤로 미루면 GPU가 9분 돌고 나서야 "둘 이상 필요"로 실패합니다."""
+
+    fake_runs("only", 0.62, None)
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["only"], run_id="fusion-one")
+    assert "둘 이상" in str(error.value)
+
+
+def test_a_result_name_cannot_escape_its_own_folder(fake_runs) -> None:
+    """길이만 재면 local backend에서 `../train/name`이 다른 pipeline 자리로 풀립니다."""
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    fake_runs("b", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
+
+    for bad in ("../train/name", "a/b", ".hidden", ""):
+        with pytest.raises(Exception):
+            ensemble.check_selection(["a", "b"], run_id=bad)
+    # 멀쩡한 이름은 통과해야 합니다. 막기만 하면 쓸 수가 없습니다.
+    assert len(ensemble.check_selection(["a", "b"], run_id="fusion-top3")) == 2
+
+
+def test_the_same_run_twice_is_refused_up_front(fake_runs) -> None:
+    """한 실행이 두 표를 가지면 확신도가 부풀려집니다. 추론 전에 막습니다."""
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["a", "a"], run_id="fusion-dup")
+    assert "두 번" in str(error.value)
+
+
+def test_harvest_works_without_an_s3_bucket(fake_registry, monkeypatch) -> None:
+    """S3만 지원하면 기본 local 환경에서는 목록에 후보가 보이는데 눌러도 늘 실패합니다."""
+
+    monkeypatch.setattr(
+        ensemble, "storage_environment", lambda: {"default_backend": "local", "bucket": None}
+    )
+    fake_registry.append(_summary("low", predictions=False))
+    candidate = ensemble.list_candidates()[0]
+
+    config = ensemble.build_harvest_config(candidate, device="cpu")
+
+    assert config["storage"]["backend"] == "local"
+    assert config["evaluate"]["output_dir"] == "artifacts/web/ensemble-candidates/low"
+
+
+def test_the_same_folder_name_in_another_place_is_not_the_same_test_set(fake_runs) -> None:
+    """폴더 이름만 보면 bucket이 달라도 같은 판으로 읽히고, 거부는 evaluate에 가서야 납니다."""
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    fake_runs(
+        "b",
+        0.61,
+        _prediction_document(
+            checkpoint="ckpt/b.pt",
+            boxes=boxes,
+            manifest="s3://other-bucket/datasets/processed/v5-seed42-8020-group/test_manifest.json",
+        ),
+    )
+
+    result = ensemble.diagnose(["a", "b"])
+
+    assert _check(result, "test_set")["level"] == "warn"
+
+
+def test_the_runner_refuses_before_it_spends_any_gpu(fake_runs, monkeypatch) -> None:
+    """검증이 `check_selection`에 있어도, **실행기가 그것을 부르지 않으면 소용없습니다.**
+
+    부르지 않으면 예측 없는 후보 하나만 보내도 체크포인트당 9분씩 추론한 뒤에야
+    "둘 이상 필요"로 실패합니다. 그 시간은 되돌릴 수 없습니다.
+    """
+
+    from src.pipelines.web import ensemble_jobs
+
+    fake_runs("only", 0.62, None)
+    calls: list[Any] = []
+    monkeypatch.setattr(ensemble_jobs, "run_evaluation", lambda *a, **k: calls.append(a) or {"ok": True})
+
+    runner = ensemble_jobs.EnsembleRunner()
+    with pytest.raises(Exception) as error:
+        runner.start(["only"], run_id="fusion-one")
+
+    assert "둘 이상" in str(error.value)
+    # 추론이 **한 번도** 시작되지 않아야 합니다.
+    assert calls == []
+    assert runner.status()["status"] == "idle"
+
+
+def test_the_runner_refuses_a_name_that_escapes_its_folder(fake_runs, monkeypatch) -> None:
+    """이름 검사도 실행기가 불러야 뜻이 있습니다."""
+
+    from src.pipelines.web import ensemble_jobs
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    fake_runs("b", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
+    calls: list[Any] = []
+    monkeypatch.setattr(ensemble_jobs, "run_evaluation", lambda *a, **k: calls.append(a) or {"ok": True})
+
+    runner = ensemble_jobs.EnsembleRunner()
+    with pytest.raises(Exception):
+        runner.start(["a", "b"], run_id="../train/name")
+
+    assert calls == []

@@ -34,11 +34,13 @@ from .datasets import storage_environment
 from .errors import WebError, WebStateError
 from .experiments import registry_config
 from .paths import repository_root
+from .train_config import RUN_ID_PATTERN
 
 
 __all__ = [
     "build_fusion_config",
     "build_harvest_config",
+    "check_selection",
     "diagnose",
     "list_candidates",
     "pending_runs",
@@ -94,6 +96,8 @@ def _dataset_label(manifest_uri: str) -> str | None:
 #: 이 화면이 만든 test 예측을 두는 자리입니다. web이 소유한 상태 아래에 둡니다 —
 #: 남이 만든 artifact를 덮어쓰지 않으려는 것입니다.
 _HARVEST_PREFIX = "experiments/web-state/ensemble-candidates"
+#: local backend에서 쓰는 같은 자리입니다. `artifacts/web/` 아래는 gitignore됩니다.
+_LOCAL_HARVEST_PREFIX = "artifacts/web/ensemble-candidates"
 #: 합치려면 이미지마다 후보가 넉넉해야 합니다. 제출이 남기는 4개만 저장하면 융합이
 #: 고를 것이 없습니다. 그래서 이 파일의 CSV는 제출할 수 없고, 그것이 의도입니다.
 _HARVEST_DETECTIONS = 20
@@ -102,8 +106,19 @@ _HARVEST_DETECTIONS = 20
 _HARVEST_MINUTES = 9
 
 
-def _harvest_uri(bucket: str, run_id: str) -> str:
-    return f"s3://{bucket}/{_HARVEST_PREFIX}/{run_id}/test_predictions.json"
+def _harvest_root() -> str:
+    """이 화면이 만든 예측을 두는 자리입니다. backend에 따라 갈립니다.
+
+    S3만 지원하면 기본 local 환경에서 "예측을 먼저 만든다"가 통째로 실패합니다.
+    목록에는 후보가 보이는데 누르면 안 되는 셈이라 더 나쁩니다.
+    """
+
+    bucket = (storage_environment().get("bucket") or "").strip()
+    return f"s3://{bucket}/{_HARVEST_PREFIX}" if bucket else _LOCAL_HARVEST_PREFIX
+
+
+def _harvest_uri(run_id: str) -> str:
+    return f"{_harvest_root()}/{run_id}/test_predictions.json"
 
 
 def list_candidates() -> list[dict[str, Any]]:
@@ -143,7 +158,7 @@ def list_candidates() -> list[dict[str, Any]]:
         # 기록이 가리키는 것이 먼저입니다. 없으면 이 화면이 만들어 둔 것을 씁니다.
         predictions = _text(artifacts.get("test_predictions_uri"))
         if predictions is None and run_id in harvested:
-            predictions = _harvest_uri(bucket, run_id)
+            predictions = _harvest_uri(run_id)
         candidates.append(
             {
                 "run_id": run_id,
@@ -169,11 +184,8 @@ def list_candidates() -> list[dict[str, Any]]:
 def _harvested_runs() -> set[str]:
     """이 화면이 이미 예측을 만들어 둔 실행입니다. 목록 한 번으로 끝냅니다."""
 
-    bucket = (storage_environment().get("bucket") or "").strip()
-    if not bucket:
-        return set()
     config, _ = _scope()
-    root = f"s3://{bucket}/{_HARVEST_PREFIX}"
+    root = _harvest_root()
     try:
         entries = [str(item) for item in create_storage(config).list(root)]
     except StorageError:
@@ -294,16 +306,22 @@ def _compare(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, flo
     **쌍 일치**는 (이미지, class)가 겹치는 비율이고, **상자 IoU**는 겹친 쌍의 상자가
     얼마나 포개지는지입니다. 둘 다 높으면 합칠 것이 없습니다 — 서로 다르게 틀려야
     앙상블이 이득을 냅니다.
+
+    겹치는 수를 **합집합**으로 나눕니다. 한쪽 수로 나누면 어느 쪽을 먼저 골랐는지에
+    따라 답이 달라집니다 — 94개가 100개에 통째로 들어 있으면 순서에 따라 100%(경고)와
+    94%(통과)로 갈립니다. 저장해 두는 값의 key는 순서를 가리지 않으므로, 먼저 잰
+    쪽이 영원히 남아 같은 조합이 다르게 판정됩니다.
     """
 
     left_boxes: dict[Any, tuple[float, ...]] = left["boxes"]
     right_boxes: dict[Any, tuple[float, ...]] = right["boxes"]
-    if not left_boxes:
-        return {"agreement": 0.0, "box_iou": 0.0}
     shared = set(left_boxes) & set(right_boxes)
+    union = set(left_boxes) | set(right_boxes)
+    if not union:
+        return {"agreement": 0.0, "box_iou": 0.0}
     ious = [_iou(left_boxes[key], right_boxes[key]) for key in shared]
     return {
-        "agreement": len(shared) / len(left_boxes),
+        "agreement": len(shared) / len(union),
         "box_iou": statistics.median(ious) if ious else 0.0,
     }
 
@@ -336,17 +354,23 @@ def _check(identifier: str, level: str, title: str, detail: str) -> dict[str, st
 
 
 def _test_set_check(loaded: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-    """같은 시험지를 본 예측인가."""
+    """같은 시험지를 본 예측인가.
 
+    **manifest URI 전체**를 견줍니다. 폴더 이름만 보면 bucket이나 앞 경로가 달라도
+    같은 판으로 읽혀 "모두 같은 시험지"라는 잘못된 통과가 나오고, 실제 거부는
+    evaluate에 가서야 일어납니다. 폴더 이름은 사람이 읽을 이름으로만 씁니다.
+    """
+
+    uris = {item["test_manifest_uri"] for item in loaded if item["test_manifest_uri"]}
     labels = {_dataset_label(item["test_manifest_uri"] or "") for item in loaded}
     labels.discard(None)
-    if len(labels) <= 1:
+    if len(uris) <= 1:
         return _check("test_set", "ok", "같은 시험지", "모두 같은 test manifest를 봤습니다.")
     return _check(
         "test_set",
         "warn",
         "시험지가 다릅니다",
-        f"{', '.join(sorted(str(label) for label in labels))} — dataset 판마다 같은 사진을 "
+        f"{', '.join(sorted(str(label) for label in labels)) or '경로가 다릅니다'} — dataset 판마다 같은 사진을 "
         "자기 prefix에 복사해 두기 때문에, 내용이 같아도 위치가 달라 evaluate가 거부할 수 "
         "있습니다. 같은 사진임을 확인했다면 fusion_allow_copied_images를 켜고 실행하세요.",
     )
@@ -531,6 +555,34 @@ def diagnose(run_ids: Sequence[str]) -> dict[str, Any]:
 
 # --------------------------------------------------------------------- 실행 config
 
+def check_selection(run_ids: Sequence[str], *, run_id: str) -> list[dict[str, Any]]:
+    """추론을 걸기 **전에** 거절할 것을 거절합니다.
+
+    합칠 수 있는지는 융합 단계에서도 확인하지만, 그때는 이미 체크포인트마다 9분씩
+    GPU를 쓴 뒤입니다. 알 수 있는 것을 늦게 알리면 그 시간이 통째로 버려집니다.
+
+    이름도 여기서 봅니다. 길이만 재면 local backend에서 `../train/name` 같은 값이
+    `artifacts/ensemble/` 밖의 **다른 pipeline 자리**로 풀립니다.
+    """
+
+    wanted = [str(item).strip() for item in run_ids if str(item).strip()]
+    if len(wanted) < 2:
+        raise WebError("합칠 예측이 둘 이상 필요합니다.")
+    if len(set(wanted)) != len(wanted):
+        raise WebError("같은 실행을 두 번 골랐습니다.")
+    name = str(run_id).strip()
+    if not RUN_ID_PATTERN.fullmatch(name):
+        raise WebError(
+            "결과 이름은 영문·숫자로 시작하고 영문·숫자·`.`·`_`·`-`만 쓸 수 있습니다: "
+            f"{run_id!r}"
+        )
+    by_run = {item["run_id"]: item for item in list_candidates()}
+    unknown = [item for item in wanted if item not in by_run]
+    if unknown:
+        raise WebError(f"기록에 없는 실행입니다: {', '.join(unknown)}")
+    return [by_run[item] for item in wanted]
+
+
 def pending_runs(run_ids: Sequence[str]) -> list[dict[str, Any]]:
     """고른 것 중 예측이 아직 없어 추론이 필요한 실행입니다. 고른 순서를 지킵니다."""
 
@@ -564,14 +616,18 @@ def build_harvest_config(candidate: Mapping[str, Any], *, device: str | None = N
             raise WebError(f"{run_id}에 {key}가 없어 예측을 만들 수 없습니다.")
 
     bucket = (storage_environment().get("bucket") or "").strip()
-    if not bucket:
-        raise WebError("S3 bucket이 설정되지 않아 예측을 만들 자리가 없습니다.")
-    output_dir = f"s3://{bucket}/{_HARVEST_PREFIX}/{run_id}"
+    if bucket:
+        storage: dict[str, Any] = {"backend": "s3", "s3": {"bucket": bucket, "prefix": ""}}
+    else:
+        # local backend에서도 만들 수 있어야 합니다. S3만 지원하면 목록에는 후보가
+        # 보이는데 누르면 언제나 실패합니다.
+        storage = {"backend": "local", "local": {"root": str(repository_root())}}
+    output_dir = f"{_harvest_root()}/{run_id}"
 
     return {
         "project": {"name": "pill-object-detection"},
         "execution": {"mode": "real"},
-        "storage": {"backend": "s3", "s3": {"bucket": bucket, "prefix": ""}},
+        "storage": storage,
         "evaluate": {
             "run_id": run_id,
             "output_dir": output_dir,

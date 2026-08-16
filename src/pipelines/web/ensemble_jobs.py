@@ -58,6 +58,9 @@ class EnsembleRunner:
 
         from . import ensemble
 
+        # **추론을 걸기 전에 거절할 것은 먼저 거절합니다.** 검증을 뒤로 미루면 예측
+        # 없는 후보 하나만 보내도 GPU가 9분을 돌고 나서야 "둘 이상 필요"로 실패합니다.
+        ensemble.check_selection(run_ids, run_id=run_id)
         pending = ensemble.pending_runs(run_ids)
         with self._lock:
             if self._state.get("status") == STATUS_RUNNING:
