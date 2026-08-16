@@ -716,6 +716,18 @@ def check_selection(
                 f"{item['run_id']}은 이미 합친 결과입니다. 합친 것을 다시 합칠 수는 "
                 "없으니 원본 실행들을 고르세요."
             )
+        # 예측 문서가 **스스로** 무엇의 증거인지 말해야 합니다. 기록에 있는 값이
+        # 아니라 이 파일 안의 값을 evaluate가 읽습니다.
+        if not document["checkpoint_uri"]:
+            raise WebError(
+                f"{item['run_id']}의 예측 파일이 어느 checkpoint의 증거인지 적고 있지 "
+                "않아 합칠 수 없습니다."
+            )
+        if not document["test_manifest_uri"]:
+            raise WebError(
+                f"{item['run_id']}의 예측 파일이 어느 시험지를 본 것인지 적고 있지 "
+                "않아 합칠 수 없습니다."
+            )
 
     # 같은 이름의 결과가 이미 있으면 evaluate가 덮어쓰지 않고 멈춥니다. 그 판단도
     # 추론 뒤가 아니라 지금 합니다.

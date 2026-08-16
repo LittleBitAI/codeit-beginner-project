@@ -808,3 +808,30 @@ def test_failing_to_check_the_output_is_reported_not_guessed(fake_runs, monkeypa
     with pytest.raises(Exception) as error:
         ensemble.check_selection(["a", "b"], run_id="fusion-two")
     assert "확인하지 못했습니다" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "phrase"),
+    [
+        pytest.param("checkpoint_uri", "checkpoint의 증거", id="checkpoint를-안-적음"),
+        pytest.param("test_manifest_uri", "시험지를 본 것인지", id="시험지를-안-적음"),
+    ],
+)
+def test_a_prediction_file_that_does_not_say_what_it_is_is_refused(
+    fake_runs, field: str, phrase: str
+) -> None:
+    """기록이 아니라 **예측 파일 안의 값**을 evaluate가 읽습니다.
+
+    파일이 스스로 무엇의 증거인지 말하지 않으면 evaluate가 거절하는데, 추론을 다
+    마친 뒤에 알게 됩니다.
+    """
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    document = _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes)
+    document[field] = None
+    fake_runs("b", 0.61, document)
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["a", "b"], run_id="fusion-two")
+    assert phrase in str(error.value)
