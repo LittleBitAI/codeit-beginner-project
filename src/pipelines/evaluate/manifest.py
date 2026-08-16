@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import posixpath
+import random
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -422,6 +423,63 @@ def load_class_map(store: ArtifactStore, uri: str) -> dict[int, str]:
     return parse_class_map(store.read_json(uri), source=uri)
 
 
+def sample_records(
+    records: Sequence[Mapping[str, Any]], size: int, *, seed: int
+) -> list[dict[str, Any]]:
+    """검증 image를 ``size``장만 고릅니다. class가 고르게 들어가도록 집습니다.
+
+    후보 checkpoint 20개를 전수로 재면 GPU로도 한 시간이 넘습니다. 그런데 그냥
+    무작위로 줄이면 **드문 class가 통째로 빠집니다.** 알약 118종에 300장이면 한
+    class가 한 장도 못 들어가는 일이 흔하고, 그 class의 AP는 측정값이 아니라 없는
+    값이 되어 후보끼리 견줄 수 없게 됩니다.
+
+    그래서 class를 번갈아 한 장씩 집습니다. 어떤 class도 두 번째 장을 받기 전에
+    모든 class가 첫 장을 받습니다. 같은 ``seed``면 같은 표본이므로 후보들은 모두
+    같은 시험지를 봅니다.
+    """
+
+    if size >= len(records):
+        return [dict(record) for record in records]
+    shuffled = [dict(record) for record in records]
+    # 전역 ``random``을 쓰면 이 표본이 호출 순서에 따라 달라집니다.
+    random.Random(seed).shuffle(shuffled)
+
+    queues: dict[int, list[dict[str, Any]]] = {}
+    for record in shuffled:
+        for category_id in sorted(
+            {annotation["category_id"] for annotation in record["annotations"]}
+        ):
+            queues.setdefault(category_id, []).append(record)
+
+    chosen: dict[Any, dict[str, Any]] = {}
+    while len(chosen) < size and queues:
+        for category_id in sorted(queues):
+            queue = queues[category_id]
+            while queue and queue[-1]["image_id"] in chosen:
+                queue.pop()
+            if not queue:
+                del queues[category_id]
+                continue
+            record = queue.pop()
+            chosen[record["image_id"]] = record
+            if len(chosen) == size:
+                break
+    # 라벨이 하나도 없는 image는 어느 class에도 속하지 않습니다. 자리가 남으면
+    # 그것으로 채웁니다 — 배경만 있는 사진에서 나온 오탐도 점수에 들어갑니다.
+    for record in shuffled:
+        if len(chosen) == size:
+            break
+        chosen.setdefault(record["image_id"], record)
+
+    # manifest 순서를 지킵니다. 뒤섞인 순서로 추론하면 진행 로그와 예측 파일의
+    # 순서가 실행마다 달라져 두 결과를 나란히 놓고 볼 수 없습니다.
+    return [
+        chosen[record["image_id"]]
+        for record in records
+        if record["image_id"] in chosen
+    ]
+
+
 __all__ = [
     "load_class_map",
     "load_manifest",
@@ -430,4 +488,5 @@ __all__ = [
     "parse_class_map",
     "parse_manifest",
     "parse_test_manifest",
+    "sample_records",
 ]

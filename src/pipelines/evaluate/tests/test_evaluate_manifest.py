@@ -8,7 +8,12 @@ from copy import deepcopy
 import pytest
 
 from src.pipelines.evaluate.errors import InputArtifactError
-from src.pipelines.evaluate.manifest import parse_class_map, parse_manifest, parse_test_manifest
+from src.pipelines.evaluate.manifest import (
+    parse_class_map,
+    parse_manifest,
+    parse_test_manifest,
+    sample_records,
+)
 
 
 VALID_RECORD = {
@@ -285,3 +290,63 @@ def test_parse_class_map_rejects_duplicate_ids():
 
     with pytest.raises(InputArtifactError, match="중복되었습니다"):
         parse_class_map(document, source="class_map.json")
+
+
+# --- 표본 ------------------------------------------------------------------
+
+
+def _records(counts: dict[int, int]) -> list[dict]:
+    """class마다 그 수만큼 image를 만듭니다. 한 image에는 class 하나입니다."""
+
+    records = []
+    for category_id, count in counts.items():
+        for number in range(count):
+            records.append(
+                {
+                    "image_id": f"c{category_id}-{number}",
+                    "image_uri": "data/val/x.jpg",
+                    "width": 100,
+                    "height": 100,
+                    "annotations": [{"category_id": category_id, "bbox": [0, 0, 5, 5]}],
+                }
+            )
+    return records
+
+
+def test_sample_gives_a_rare_class_a_place_before_a_common_one_gets_a_second():
+    """무작위로 줄이면 드문 class가 통째로 빠집니다.
+
+    빠진 class의 AP는 측정값이 아니라 없는 값이 되어, 그 표본으로는 후보끼리
+    견줄 수 없게 됩니다.
+    """
+
+    records = _records({1: 100, 2: 1, 3: 1})
+
+    sample = sample_records(records, 6, seed=42)
+
+    assert len(sample) == 6
+    classes = [record["annotations"][0]["category_id"] for record in sample]
+    assert set(classes) == {1, 2, 3}
+
+
+def test_the_same_seed_looks_at_the_same_images():
+    """후보들이 서로 다른 시험지를 보면 점수를 나란히 놓을 수 없습니다."""
+
+    records = _records({1: 20, 2: 20})
+
+    first = sample_records(records, 8, seed=42)
+    second = sample_records(records, 8, seed=42)
+    other = sample_records(records, 8, seed=7)
+
+    assert [record["image_id"] for record in first] == [
+        record["image_id"] for record in second
+    ]
+    assert [record["image_id"] for record in first] != [
+        record["image_id"] for record in other
+    ]
+
+
+def test_a_sample_bigger_than_the_manifest_keeps_every_image():
+    records = _records({1: 3})
+
+    assert len(sample_records(records, 10, seed=42)) == 3
