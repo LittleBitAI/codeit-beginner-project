@@ -139,6 +139,7 @@ export interface JobRecord {
   progress: Progress;
   evaluation?: EvaluationState;
   registration?: RegistrationState;
+  epoch_sweep?: EpochSweepState;
   log_lines: number;
   orphan_note: string | null;
   cloud_run_id?: string | null;
@@ -153,6 +154,43 @@ export interface JobRecord {
  */
 export interface AppSettings {
   evaluation_mode: 'parallel' | 'serial' | null;
+  /** epoch 훑기가 순위를 매길 지표 3개. 고른 순서가 곧 가중치(3:2:1)입니다. */
+  epoch_metrics: string[] | null;
+}
+
+/** 고를 수 있는 지표. 서버(`settings.py`)의 목록과 같아야 합니다. */
+export const EPOCH_METRIC_NAMES = [
+  'mAP',
+  'mAP50_95',
+  'mAP50',
+  'mAP75',
+  'precision50',
+  'recall50',
+] as const;
+
+export interface EpochSweepCandidate {
+  epoch: number;
+  checkpoint_uri: string;
+  metrics?: Record<string, number | null>;
+  normalized?: Record<string, number>;
+  score?: number;
+  failed?: boolean;
+  message?: string;
+}
+
+export interface EpochSweepState {
+  status: 'idle' | 'running' | 'succeeded' | 'failed';
+  job_id?: string | null;
+  busy_with?: string | null;
+  message?: string;
+  metrics?: string[];
+  sample_size?: number;
+  total?: number;
+  done?: number;
+  candidates?: EpochSweepCandidate[];
+  winner?: (EpochSweepCandidate & { run_id?: string; full_metrics?: Record<string, number | null> }) | null;
+  artifacts?: Record<string, string>;
+  registration?: { status: string; message?: string };
 }
 
 export interface TeamConfig {

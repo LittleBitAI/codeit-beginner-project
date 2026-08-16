@@ -8,8 +8,9 @@
 import { useState, type ReactNode } from 'react';
 
 import { api, ApiError } from '../api/client';
+import { EPOCH_METRIC_NAMES } from '../api/types';
 import type { AppSettings, GpuStatus, RegistryScope } from '../api/types';
-import { AlertRow, Button, MicroLabel, Sheet } from '../components/primitives';
+import { AlertRow, Button, Field, MicroLabel, Sheet, controlStyle } from '../components/primitives';
 import { color, font, radius, type } from '../design/tokens';
 import { megabytes, percent } from '../lib/format';
 import { useTeam } from '../team/TeamContext';
@@ -71,8 +72,15 @@ export function SettingsSheet({
 }) {
   const team = useTeam();
   const [mode, setMode] = useState<EvaluationMode | null>(settings?.evaluation_mode ?? null);
+  // 순서가 곧 가중치입니다(3:2:1). 고르지 않은 자리는 빈 문자열입니다.
+  const [metrics, setMetrics] = useState<string[]>(settings?.epoch_metrics ?? ['', '', '']);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const picked = metrics.filter((name) => name !== '');
+  const metricsChosen = picked.length === 3 && new Set(picked).size === 3;
+  const metricsTouched = picked.length > 0;
+  const metricsInvalid = metricsTouched && !metricsChosen;
 
   const device = gpu?.telemetry.devices[0] ?? null;
   const totalMb = device?.memory_total_mb ?? null;
@@ -84,11 +92,15 @@ export function SettingsSheet({
   const tight = totalMb !== null && usedMb !== null && totalMb - usedMb < 1800;
 
   async function save() {
-    if (mode === null) return;
+    if (mode === null || metricsInvalid) return;
     setSaving(true);
     setError(null);
     try {
-      await api.saveSettings({ evaluation_mode: mode });
+      // 고르다 만 상태는 보내지 않습니다. 보내지 않은 값은 서버가 그대로 둡니다.
+      await api.saveSettings({
+        evaluation_mode: mode,
+        epoch_metrics: metricsChosen ? picked : null,
+      });
       onSaved();
       onClose();
     } catch (caught) {
@@ -104,7 +116,11 @@ export function SettingsSheet({
       onClose={onClose}
       footer={
         <>
-          <Button kind="primary" disabled={mode === null || saving} onClick={() => void save()}>
+          <Button
+            kind="primary"
+            disabled={mode === null || metricsInvalid || saving}
+            onClick={() => void save()}
+          >
             {saving ? '저장 중…' : '저장'}
           </Button>
           <Button kind="ghost" onClick={onClose}>
@@ -173,6 +189,39 @@ export function SettingsSheet({
         {settings?.evaluation_mode == null
           ? '아직 고르지 않아 자동 평가가 꺼져 있습니다. 지금은 학습 화면에서 직접 눌러야 평가가 돕니다. 하나를 고르고 저장하면 학습이 성공할 때마다 이어서 평가합니다.'
           : '학습이 성공하면 이 방식으로 이어서 평가합니다. 평가가 실패한 학습은 다시 집지 않습니다 — 학습 화면에서 직접 다시 누르세요.'}
+      </div>
+
+      <MicroLabel style={{ marginBottom: 16 }}>epoch 훑기 기준</MicroLabel>
+      <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+        {[0, 1, 2].map((slot) => (
+          <div key={slot} style={{ minWidth: 150, flex: 1 }}>
+            <Field label={`${slot + 1}순위`}>
+              <select
+                value={metrics[slot] ?? ''}
+                onChange={(event) => {
+                  const next = [...metrics];
+                  next[slot] = event.target.value;
+                  setMetrics(next);
+                }}
+                style={controlStyle}
+              >
+                <option value="">고르지 않음</option>
+                {EPOCH_METRIC_NAMES.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
+        ))}
+      </div>
+      <div style={{ ...type.note, color: color.textMuted, marginBottom: 26, textWrap: 'pretty' }}>
+        {metricsInvalid
+          ? '서로 다른 지표 3개를 모두 골라야 저장할 수 있습니다.'
+          : settings?.epoch_metrics
+            ? '훑기가 후보 epoch을 이 순서로 줄 세웁니다. 1순위에 가장 큰 몫(3:2:1)이 가고, 척도가 다른 지표를 섞어도 되도록 후보들 사이에서 0~1로 펴서 더합니다.'
+            : '아직 고르지 않아 epoch 훑기를 시작할 수 없습니다. 무엇이 Kaggle 점수를 예측하는지 모르는 것이 이 기능을 만든 이유라, 기본값을 두지 않았습니다.'}
       </div>
 
       {error && (

@@ -16,13 +16,20 @@ from .. import train_capabilities
 from ..errors import FieldError, JobConflictError, WebValidationError
 from ..evaluate_metrics import read_per_class_summary
 from ..evaluation import DEFAULT_MAX_DETECTIONS, get_evaluation_runner
+from ..epoch_sweep import (
+    DEFAULT_SAMPLE_SIZE,
+    epoch_candidates,
+    get_epoch_sweep_runner,
+)
 from .. import experiments
+from .. import settings as web_settings
 from ..gpu import cuda_is_available
 from ..jobs import get_manager
 from ..jobs.model import (
     STATUS_CANCELLED,
     STATUS_FAILED,
     STATUS_INTERRUPTED,
+    STATUS_SUCCEEDED,
     TERMINAL_STATUSES,
     JobRecord,
 )
@@ -483,6 +490,53 @@ def resume_job(
         "entries": manager.queue_entries(),
         "paused": manager.queue_paused(),
     }
+
+
+class EpochSweepRequest(BaseModel):
+    """epoch 훑기 설정. 순위를 매길 지표는 설정 화면에서 미리 고릅니다."""
+
+    device: str | None = Field(default=None)
+    sample_size: int = Field(default=DEFAULT_SAMPLE_SIZE, ge=1, le=100000)
+
+
+@router.get("/jobs/{job_id}/epoch-sweep")
+def epoch_sweep_status(job_id: str) -> dict[str, Any]:
+    """이 학습에 대한 훑기 상태와, 훑을 수 있는 후보 목록입니다."""
+
+    record = get_manager().get(job_id)  # 없는 job이면 404
+    return {
+        "epoch_sweep": get_epoch_sweep_runner().status_for(record),
+        "candidates": epoch_candidates(record),
+        "metrics": web_settings.epoch_metrics(),
+    }
+
+
+@router.post("/jobs/{job_id}/epoch-sweep", status_code=202)
+def start_epoch_sweep(
+    job_id: str, payload: EpochSweepRequest = Body(...)
+) -> dict[str, Any]:
+    """보관해 둔 epoch checkpoint를 훑어 제일 잘 맞히는 것을 고릅니다.
+
+    후보마다 표본 평가를 돌리고, 이긴 하나만 전수로 다시 재어 제출까지 만듭니다.
+    후보가 20개면 몇십 분이 걸리므로 시작만 시키고 상태는 따로 확인합니다.
+
+    도는 학습이나 평가가 있으면 시작하지 않습니다. 8GB 카드에서 겹치면 둘 다 out of
+    memory로 잃습니다.
+    """
+
+    manager = get_manager()
+    runner = get_epoch_sweep_runner()
+    with runner.locked():
+        record = manager.get(job_id)  # 지워졌으면 여기서 404
+        if record.status != STATUS_SUCCEEDED:
+            raise JobConflictError("성공으로 끝난 학습만 훑을 수 있습니다.")
+        if manager.active_job() is not None:
+            raise JobConflictError(
+                "학습이 도는 중에는 훑을 수 없습니다. 끝난 뒤 다시 눌러 주세요."
+            )
+        if get_evaluation_runner().status().get("status") == "running":
+            raise JobConflictError("평가가 도는 중에는 훑을 수 없습니다.")
+        return {"epoch_sweep": runner.start(record, payload.model_dump())}
 
 
 @router.post("/jobs/{job_id}/register")

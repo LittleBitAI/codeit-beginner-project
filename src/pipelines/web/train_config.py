@@ -90,6 +90,10 @@ DATA_ARTIFACT_KEYS = _contract.DATA_ARTIFACT_KEYS
 # 기존 데이터셋에는 없어도 되므로 필수 4개와 분리합니다.
 OPTIONAL_DATA_ARTIFACT_KEYS = _contract.OPTIONAL_DATA_ARTIFACT_KEYS
 
+# 모델마다 다른 "이쯤부터 보관하면 된다"는 값입니다. train이 기본값으로 쓰지는
+# 않으므로, 이 화면이 켠 사람에게 채워 주는 값입니다.
+EPOCH_ARCHIVE_START = _contract.EPOCH_ARCHIVE_START
+
 DEFAULT_OUTPUT_DIR = _contract.SETTING_DEFAULTS["output_dir"]
 DEFAULT_OUTPUT_PREFIX = _contract.SETTING_DEFAULTS["output_prefix"]
 
@@ -168,6 +172,17 @@ _FIELD_LABELS = {
     "checkpoint_every": (
         "Checkpoint 주기",
         "몇 epoch마다 이어서 할 수 있는 checkpoint를 남길지 정합니다. 1이면 매 epoch입니다.",
+    ),
+    "archive_epochs": (
+        "epoch 보관",
+        "학습이 끝난 뒤 어느 epoch이 실제로 제일 잘 맞히는지 재 보려면 그 epoch들이"
+        " 남아 있어야 합니다. 켜면 아래 epoch부터 매 checkpoint 시점에 평가용 사본을"
+        " 하나씩 더 남깁니다. 모델 하나에 190MB쯤이니 20 epoch이면 4GB 가까이 씁니다.",
+    ),
+    "archive_epochs_from": (
+        "보관 시작 epoch",
+        "이 epoch부터 남깁니다. 수렴 전 epoch은 어차피 이기지 못하는데 자리는 똑같이"
+        " 차지합니다. 비워 두면 모델에 맞는 값을 씁니다.",
     ),
     "epochs": ("Epochs", "전체 학습 데이터를 몇 번 반복할지 정합니다."),
     "batch_size": ("Batch size", "한 번에 처리할 이미지 수. GPU 메모리에 가장 큰 영향을 줍니다."),
@@ -274,7 +289,12 @@ _ARCHITECTURE_SHORT_NAMES = {
 }
 
 # 이름은 설정을 읽으라고 있는 것이라, 경로와 이름 자체는 꼬리표 계산에서 뺍니다.
-_FINGERPRINT_IGNORED = frozenset({"run_id", "output_dir", "output_prefix"})
+# `archive_epochs_from`도 같습니다 — 무엇을 배우는지가 아니라 무엇을 남기는지입니다.
+# 여기 넣지 않으면 같은 학습을 보관만 켜고 다시 돌렸을 때 다른 이름이 붙어, 중복
+# 실험이라는 사실이 이름에서 사라집니다.
+_FINGERPRINT_IGNORED = frozenset(
+    {"run_id", "output_dir", "output_prefix", "archive_epochs_from"}
+)
 # 어떤 값과도 같지 않은 표식입니다. `None`을 쓰면 값이 None인 설정을 잘못 빼 버립니다.
 _MISSING = object()
 
@@ -493,6 +513,24 @@ def field_specs() -> list[dict[str, Any]]:
             "hint": hint,
         }
     )
+    label, hint = _FIELD_LABELS["archive_epochs"]
+    specs.append(
+        {"name": "archive_epochs", "type": "boolean", "default": False, "label": label, "hint": hint}
+    )
+    label, hint = _FIELD_LABELS["archive_epochs_from"]
+    specs.append(
+        {
+            "name": "archive_epochs_from",
+            "type": "integer",
+            # 모델을 고르기 전 화면에 보이는 값입니다. 아래 표가 고른 모델에 맞는 값으로
+            # 덮어씁니다 — 하나만 내려보내면 DINO를 고른 사람에게 15라고 안내합니다.
+            "default": EPOCH_ARCHIVE_START[LEGACY_ARCHITECTURE],
+            "defaults_by_architecture": dict(EPOCH_ARCHIVE_START),
+            "minimum": 1,
+            "label": label,
+            "hint": hint,
+        }
+    )
     for name, default, minimum, kind in (
         ("lr_warmup_steps", LR_WARMUP_DEFAULTS["warmup_steps"], 0, "integer"),
         ("lr_warmup_start_factor", LR_WARMUP_DEFAULTS["warmup_start_factor"], 0.0, "number"),
@@ -648,6 +686,33 @@ def _normalize_lr_scheduler(raw: Any, errors: list[FieldError]) -> dict[str, Any
     if name == DEFAULT_LR_SCHEDULER and warmup_steps == 0:
         return None
     return settings
+
+
+def _normalize_epoch_archive(
+    raw: Any, architecture: str, errors: list[FieldError]
+) -> int | None:
+    """켜져 있으면 보관을 시작할 epoch, 꺼져 있으면 ``None``입니다.
+
+    조기 종료와 같은 모양입니다. 꺼져 있으면 key 자체를 만들지 않아, 보관하지 않는
+    사람의 config는 이 기능이 생기기 전과 한 글자도 달라지지 않습니다. 기본값이
+    모델마다 다른 것은 무거운 model이 한 epoch에 더 비싸고 더 일찍 수렴하기 때문입니다.
+    """
+
+    enabled = raw.get("archive_epochs", False)
+    if not isinstance(enabled, bool):
+        collect(errors, "train.archive_epochs", "true 또는 false여야 합니다.")
+        enabled = False
+    if not enabled:
+        if "archive_epochs_from" in raw:
+            collect(
+                errors,
+                "train.archive_epochs_from",
+                "epoch 보관을 켰을 때만 쓰는 값입니다.",
+            )
+        return None
+    return _normalize_integer(
+        raw, "archive_epochs_from", EPOCH_ARCHIVE_START[architecture], 1, errors
+    )
 
 
 def _normalize_early_stopping(
@@ -815,6 +880,7 @@ def normalize_train_settings(
         "pretrained": pretrained,
         "lr_scheduler": _normalize_lr_scheduler(raw, errors),
         "early_stopping": _normalize_early_stopping(raw, errors),
+        "archive_epochs_from": _normalize_epoch_archive(raw, architecture, errors),
         "output_dir": output_dir,
         "output_prefix": output_prefix.strip("/"),
     }
@@ -883,6 +949,13 @@ def normalize_train_settings(
         "seed": settings["seed"],
         "epochs": settings["epochs"],
         "checkpoint_every": settings["checkpoint_every"],
+        # 보관하지 않는 실행은 key 자체를 넣지 않습니다. train은 없으면 지금과 완전히
+        # 같게 동작합니다.
+        **(
+            {"archive_epochs_from": settings["archive_epochs_from"]}
+            if settings["archive_epochs_from"] is not None
+            else {}
+        ),
         "batch_size": settings["batch_size"],
         "num_workers": settings["num_workers"],
         "gradient_accumulation_steps": settings["gradient_accumulation_steps"],

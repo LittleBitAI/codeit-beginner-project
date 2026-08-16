@@ -63,7 +63,7 @@ function show(settings: AppSettings | null, used = 2000, onSaved = () => {}) {
 
 describe('SettingsSheet', () => {
   it('고른 적이 없으면 자동 평가가 꺼져 있다고 말하고 저장을 막는다', () => {
-    show({ evaluation_mode: null });
+    show({ evaluation_mode: null, epoch_metrics: null });
 
     expect(screen.getByText(/아직 고르지 않아 자동 평가가 꺼져 있습니다/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '저장' })).toBeDisabled();
@@ -71,7 +71,7 @@ describe('SettingsSheet', () => {
 
   it('고르면 저장이 열리고 그 값만 보낸다', async () => {
     const onSaved = vi.fn();
-    show({ evaluation_mode: null }, 2000, onSaved);
+    show({ evaluation_mode: null, epoch_metrics: null }, 2000, onSaved);
 
     fireEvent.click(screen.getByRole('button', { name: /학습과 함께/ }));
 
@@ -80,11 +80,40 @@ describe('SettingsSheet', () => {
     fireEvent.click(save);
 
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
-    expect(put).toEqual([{ path: '/api/settings', body: { evaluation_mode: 'parallel' } }]);
+    expect(put).toEqual([
+      { path: '/api/settings', body: { evaluation_mode: 'parallel', epoch_metrics: null } },
+    ]);
+  });
+
+  // 순서가 곧 가중치입니다(3:2:1). 정렬해 보내면 1순위가 사라집니다.
+  it('훑기 지표는 고른 순서 그대로 보낸다', async () => {
+    const onSaved = vi.fn();
+    show({ evaluation_mode: 'serial', epoch_metrics: null }, 2000, onSaved);
+
+    const slots = screen.getAllByRole('combobox');
+    ['recall50', 'mAP', 'mAP50'].forEach((name, index) => {
+      fireEvent.change(slots[index]!, { target: { value: name } });
+    });
+    fireEvent.click(screen.getByRole('button', { name: '저장' }));
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(put[0]!.body).toEqual({
+      evaluation_mode: 'serial',
+      epoch_metrics: ['recall50', 'mAP', 'mAP50'],
+    });
+  });
+
+  it('셋을 다 고르기 전에는 저장을 막는다', () => {
+    show({ evaluation_mode: 'serial', epoch_metrics: null });
+
+    fireEvent.change(screen.getAllByRole('combobox')[0]!, { target: { value: 'mAP' } });
+
+    expect(screen.getByRole('button', { name: '저장' })).toBeDisabled();
+    expect(screen.getByText(/서로 다른 지표 3개를 모두 골라야/)).toBeInTheDocument();
   });
 
   it('이미 고른 값이 눌려 있다', () => {
-    show({ evaluation_mode: 'serial' });
+    show({ evaluation_mode: 'serial', epoch_metrics: null });
 
     expect(screen.getByRole('button', { name: /학습이 끝난 뒤/ })).toHaveAttribute(
       'aria-pressed',
@@ -94,7 +123,7 @@ describe('SettingsSheet', () => {
 
   it('VRAM이 모자라면 병렬을 고르지 말라고 말한다', () => {
     // 8192 - 6800 = 1392MB. 평가 몫 1800MB가 안 들어갑니다.
-    show({ evaluation_mode: null }, 6800);
+    show({ evaluation_mode: null, epoch_metrics: null }, 6800);
 
     expect(screen.getByText(/병렬로 두면 둘 다 out of memory/)).toBeInTheDocument();
   });

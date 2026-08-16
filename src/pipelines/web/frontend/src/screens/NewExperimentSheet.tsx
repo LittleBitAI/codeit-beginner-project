@@ -89,6 +89,10 @@ const TABS: { key: TabKey; label: string; fields: string[] }[] = [
       // 무엇을 남기는지가 한 묶음이라 조기 종료 뒤에 둡니다. 이 값이 곧 중지한 학습을
       // 이어갈 수 있는 지점이기도 합니다.
       'checkpoint_every',
+      // 무엇을 남기는지가 한 묶음이라 checkpoint 주기 옆입니다. 켜야 학습이 끝난 뒤
+      // epoch을 훑어 제일 잘 맞히는 것을 고를 수 있습니다.
+      'archive_epochs',
+      'archive_epochs_from',
       'beta1',
       'beta2',
       'epsilon',
