@@ -644,3 +644,93 @@ def test_values_measured_by_the_old_formula_are_not_reused(monkeypatch) -> None:
     monkeypatch.setattr(ensemble, "_AGREEMENT_FORMULA", "another-v9")
 
     assert ensemble._stored_pair_path("prefix", ("a", "b")) != path
+
+
+def test_a_neighbouring_folder_is_not_mistaken_for_a_candidate(
+    fake_registry, monkeypatch, tmp_path
+) -> None:
+    """구분자 없는 앞자리로 거르면 `ensemble-candidates-old/…`까지 걸립니다."""
+
+    monkeypatch.setattr(
+        ensemble, "storage_environment", lambda: {"default_backend": "local", "bucket": None}
+    )
+    monkeypatch.setattr(ensemble, "repository_root", lambda: tmp_path)
+    monkeypatch.setattr(ensemble, "_harvested_runs", _real_harvested_runs)
+    for folder in ("artifacts/web/ensemble-candidates-old/low", "artifacts/web/ensemble-candidates/low/nested"):
+        made = tmp_path / folder
+        made.mkdir(parents=True)
+        (made / "test_predictions.json").write_text("{}", encoding="utf-8")
+    fake_registry.append(_summary("low", predictions=False))
+
+    # 이웃 폴더의 것도, 한 칸 더 깊은 것도 준비 완료가 아닙니다.
+    assert ensemble.list_candidates()[0]["ready"] is False
+
+
+def test_a_deeper_path_is_not_taken_as_a_run_name(monkeypatch, tmp_path) -> None:
+    """파일이 든 폴더 이름만 보면 `<root>/a/b/…`의 `b`가 실행 이름으로 잡힙니다."""
+
+    monkeypatch.setattr(
+        ensemble, "storage_environment", lambda: {"default_backend": "local", "bucket": None}
+    )
+    monkeypatch.setattr(ensemble, "repository_root", lambda: tmp_path)
+    shallow = tmp_path / "artifacts/web/ensemble-candidates/good"
+    deep = tmp_path / "artifacts/web/ensemble-candidates/outer/inner"
+    for made in (shallow, deep):
+        made.mkdir(parents=True)
+        (made / "test_predictions.json").write_text("{}", encoding="utf-8")
+
+    assert _real_harvested_runs() == {"good"}
+
+
+def test_two_names_for_the_same_checkpoint_are_refused_before_inference(fake_runs) -> None:
+    """이름이 달라도 같은 checkpoint면 한 실행이 두 표를 갖습니다."""
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("first", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    fake_runs("second", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
+    twin = next(item for item in ensemble.list_candidates() if item["run_id"] == "second")
+    twin["checkpoint_uri"] = next(
+        item for item in ensemble.list_candidates() if item["run_id"] == "first"
+    )["checkpoint_uri"]
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["first", "second"], run_id="fusion-two")
+    assert "같은 checkpoint" in str(error.value)
+
+
+def test_an_existing_result_name_is_refused_before_inference(fake_runs, monkeypatch) -> None:
+    """덮어쓰지 않는 것이 기본이라, 이름이 겹치면 추론 뒤 출력 충돌로 실패합니다."""
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    fake_runs("b", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
+    monkeypatch.setattr(ensemble, "_existing_output", lambda name: f"artifacts/ensemble/{name}/submission.csv")
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["a", "b"], run_id="fusion-two")
+    assert "이미 있습니다" in str(error.value)
+
+    # 덮어쓰기를 켜면 통과합니다. 막기만 하면 다시 돌릴 길이 없습니다.
+    assert len(ensemble.check_selection(["a", "b"], run_id="fusion-two", overwrite=True)) == 2
+
+
+def test_the_route_passes_overwrite_through(fake_runs, monkeypatch) -> None:
+    """요청이 받은 값을 실행기에 안 넘기면, true를 명시해도 늘 false로 돕니다."""
+
+    from src.pipelines.web.api import routes_ensemble
+    from src.pipelines.web import ensemble_jobs
+
+    seen: dict[str, Any] = {}
+
+    class Recorder:
+        def start(self, run_ids, **kwargs):
+            seen.update(kwargs)
+            return {"status": "running"}
+
+    monkeypatch.setattr(routes_ensemble, "get_ensemble_runner", Recorder)
+    routes_ensemble.start(
+        routes_ensemble.StartRequest(run_ids=["a", "b"], run_id="fusion-two", overwrite=True)
+    )
+
+    assert seen["overwrite"] is True
+    assert ensemble_jobs  # import가 살아 있는지 확인합니다.

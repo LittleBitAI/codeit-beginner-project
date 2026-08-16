@@ -68,6 +68,7 @@ def start(request: StartRequest = Body(...)) -> dict[str, Any]:
         request.run_ids,
         run_id=request.run_id,
         allow_copied_images=request.allow_copied_images,
+        overwrite=request.overwrite,
     )
 
 

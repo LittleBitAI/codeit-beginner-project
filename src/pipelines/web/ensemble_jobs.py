@@ -48,6 +48,7 @@ class EnsembleRunner:
         *,
         run_id: str,
         allow_copied_images: bool = False,
+        overwrite: bool = False,
     ) -> dict[str, Any]:
         """예측이 없는 실행은 먼저 만들고, 그다음 합칩니다.
 
@@ -61,7 +62,10 @@ class EnsembleRunner:
         # **추론을 걸기 전에 거절할 것은 먼저 거절합니다.** 검증을 뒤로 미루면 예측
         # 없는 후보 하나만 보내도 GPU가 9분을 돌고 나서야 "둘 이상 필요"로 실패합니다.
         ensemble.check_selection(
-            run_ids, run_id=run_id, allow_copied_images=bool(allow_copied_images)
+            run_ids,
+            run_id=run_id,
+            allow_copied_images=bool(allow_copied_images),
+            overwrite=bool(overwrite),
         )
         pending = ensemble.pending_runs(run_ids)
         with self._lock:
@@ -81,7 +85,7 @@ class EnsembleRunner:
 
         thread = threading.Thread(
             target=self._run_all,
-            args=(list(run_ids), run_id, bool(allow_copied_images), pending),
+            args=(list(run_ids), run_id, bool(allow_copied_images), bool(overwrite), pending),
             daemon=True,
         )
         thread.start()
@@ -92,6 +96,7 @@ class EnsembleRunner:
         run_ids: list[str],
         run_id: str,
         allow_copied_images: bool,
+        overwrite: bool,
         pending: list[Mapping[str, Any]],
     ) -> None:
         from . import ensemble
@@ -117,7 +122,10 @@ class EnsembleRunner:
             self._state.pop("harvesting", None)
         try:
             config = ensemble.build_fusion_config(
-                run_ids, run_id=run_id, allow_copied_images=allow_copied_images
+                run_ids,
+                run_id=run_id,
+                allow_copied_images=allow_copied_images,
+                overwrite=overwrite,
             )
         except Exception as error:  # noqa: BLE001
             self._fail(run_id, f"융합 설정을 만들지 못했습니다({type(error).__name__}).")

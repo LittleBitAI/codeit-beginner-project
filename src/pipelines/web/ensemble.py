@@ -121,6 +121,20 @@ def _harvest_uri(run_id: str) -> str:
     return f"{_harvest_root()}/{run_id}/test_predictions.json"
 
 
+def _harvest_match_prefix() -> str:
+    """목록 결과와 견줄 앞자리입니다.
+
+    local 저장소는 **절대 경로**를 돌려주므로, 저장소 뿌리를 앞에 붙여야 같은 자리를
+    가리킵니다. 앞자리를 안 맞추면 `startswith`가 늘 거짓이 되어 수확한 것을 못 찾거나,
+    반대로 느슨하게 견주면 남의 폴더까지 걸립니다.
+    """
+
+    root = _harvest_root()
+    if root.startswith("s3://"):
+        return root
+    return str(repository_root() / root).replace("\\", "/")
+
+
 def list_candidates() -> list[dict[str, Any]]:
     """**체크포인트가 있는 학습은 전부 후보입니다.**
 
@@ -192,17 +206,18 @@ def _harvested_runs() -> set[str]:
         # 못 읽으면 "아직 없다"와 같게 다룹니다. 다시 만들면 되고, 목록 전체를
         # 못 보게 만들 이유가 없습니다.
         return set()
-    # **앞자리를 잘라 내지 않습니다.** local 저장소는 절대 OS 경로를 돌려주므로
-    # `root` 길이로 자르면 엉뚱한 곳이 잘리고, Windows에서는 구분자가 역슬래시라
-    # 아예 걸리지도 않습니다. 파일이 든 **폴더 이름**만 봅니다.
+    # **자리를 정확히 견줍니다.** 파일이 든 폴더 이름만 보면 `<root>/a/b/…` 같은 깊은
+    # 경로의 `b`까지 실행 이름으로 잡히고, 구분자 없는 앞자리로 거르면
+    # `ensemble-candidates-old/…`까지 걸립니다. **뿌리 바로 아래 한 칸**만 받습니다.
+    prefix = _harvest_match_prefix().rstrip("/") + "/"
     found: set[str] = set()
     for entry in entries:
         normalized = str(entry).replace("\\", "/")
-        if not normalized.endswith("/test_predictions.json"):
+        if not normalized.startswith(prefix):
             continue
-        parts = normalized.rsplit("/", 2)
-        if len(parts) >= 2 and parts[-2]:
-            found.add(parts[-2])
+        parts = normalized[len(prefix):].split("/")
+        if len(parts) == 2 and parts[0] and parts[1] == "test_predictions.json":
+            found.add(parts[0])
     return found
 
 
@@ -576,7 +591,11 @@ def diagnose(run_ids: Sequence[str]) -> dict[str, Any]:
 # --------------------------------------------------------------------- 실행 config
 
 def check_selection(
-    run_ids: Sequence[str], *, run_id: str, allow_copied_images: bool = False
+    run_ids: Sequence[str],
+    *,
+    run_id: str,
+    allow_copied_images: bool = False,
+    overwrite: bool = False,
 ) -> list[dict[str, Any]]:
     """추론을 걸기 **전에** 거절할 것을 거절합니다.
 
@@ -617,6 +636,18 @@ def check_selection(
                 f"{item['run_id']}의 기록에 {', '.join(missing)}가 없어 합칠 수 없습니다."
             )
 
+    # 이름이 달라도 같은 checkpoint면 한 실행이 두 표를 갖습니다. evaluate가 이것을
+    # 거부하는데, 추론을 다 마친 뒤에 알게 됩니다.
+    seen: dict[str, str] = {}
+    for item in selected:
+        checkpoint = str(item.get("checkpoint_uri") or "")
+        if checkpoint in seen:
+            raise WebError(
+                f"{seen[checkpoint]}와 {item['run_id']}가 같은 checkpoint를 가리킵니다. "
+                "한 실행이 두 표를 갖게 되어 확신도가 부풀려집니다."
+            )
+        seen[checkpoint] = item["run_id"]
+
     # 시험지가 다르면 evaluate가 거부합니다. 사람이 같은 사진임을 확인했다고 말한
     # 경우에만 통과시킵니다 — 그 확인 없이 추론부터 돌리면 전부 버려집니다.
     manifests = {str((item.get("data_inputs") or {})["test_manifest_uri"]) for item in selected}
@@ -626,7 +657,34 @@ def check_selection(
             f"{', '.join(sorted(manifests))} — 사진이 같은데 위치만 다른 것을 확인했다면 "
             "'사진이 같은데 위치만 다른 것을 확인했습니다'를 켜고 다시 실행하세요."
         )
+
+    # 같은 이름의 결과가 이미 있으면 evaluate가 덮어쓰지 않고 멈춥니다. 그 판단도
+    # 추론 뒤가 아니라 지금 합니다.
+    if not overwrite:
+        existing = _existing_output(name)
+        if existing is not None:
+            raise WebError(
+                f"{name}이라는 결과가 이미 있습니다: {existing} — 다른 이름을 쓰거나 "
+                "덮어쓰기를 켜세요."
+            )
     return selected
+
+
+def _existing_output(run_id: str) -> str | None:
+    """같은 이름의 융합 결과가 이미 있는지입니다. 못 읽으면 없는 것으로 봅니다."""
+
+    bucket = (storage_environment().get("bucket") or "").strip()
+    uri = (
+        f"s3://{bucket}/submissions/{run_id}/submission.csv"
+        if bucket
+        else f"artifacts/ensemble/{run_id}/submission.csv"
+    )
+    config, _ = _scope()
+    try:
+        return uri if create_storage(config).exists(uri) else None
+    except StorageError:
+        # 확인하지 못한 것을 "있다"로 다루면 멀쩡한 이름까지 막힙니다.
+        return None
 
 
 def pending_runs(run_ids: Sequence[str]) -> list[dict[str, Any]]:
