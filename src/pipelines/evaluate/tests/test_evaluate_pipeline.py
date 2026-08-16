@@ -717,6 +717,7 @@ def test_summary_stays_unchanged_when_no_category_is_excluded(
         ({"max_detections_per_image": 0}, "max_detections_per_image"),
         ({"seed": "7"}, "seed"),
         ({"overwrite": "yes"}, "overwrite"),
+        ({"fusion_allow_copied_images": "yes"}, "fusion_allow_copied_images"),
         ({"device": ""}, "device"),
         ({"submission_excluded_category_ids": "3"}, "submission_excluded_category_ids"),
         ({"submission_excluded_category_ids": [-1]}, "submission_excluded_category_ids"),
@@ -1066,3 +1067,568 @@ def test_outputs_that_are_hard_links_of_each_other_are_rejected(
 
     assert result["status"] == "error"
     assert "같은 위치에 저장할 수 없습니다" in result["message"]
+
+
+def test_fusing_saved_predictions_makes_a_submission_without_a_checkpoint(
+    base_config: dict, repository_root: Path
+):
+    """합칠 예측을 주면 추론 없이 제출을 만듭니다.
+
+    앙상블의 목적입니다. 이미 점수가 달린 체크포인트들의 예측을 다시 읽어 합치는
+    것이라 재학습도 재추론도 필요 없습니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    base_config["inputs"]["train"].pop("best_checkpoint_uri")
+
+    for name, bbox_x in (("a", 3.0), ("b", 3.4)):
+        write_json(
+            repository_root / f"data/test/{name}.json",
+            {
+                "test_manifest_uri": "data/test/instances.json",
+                "checkpoint_uri": f"checkpoints/{name}.pt",
+                "predictions": [
+                    {"image_id": 10, "category_id": 7, "bbox": [bbox_x, 2.0, 3.0, 4.0], "score": 0.9},
+                    {"image_id": 20, "category_id": 3, "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.5},
+                ],
+            },
+        )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/a.json",
+        "data/test/b.json",
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    rows = (
+        (repository_root / result["artifacts"]["submission_uri"])
+        .read_text(encoding="utf-8")
+        .splitlines()[1:]
+    )
+    # 두 실행이 거의 같은 자리를 가리켰으므로 image 10은 한 줄로 합쳐집니다.
+    assert len(rows) == 2
+    fused = [row for row in rows if row.split(",")[1] == "10"][0].split(",")
+    # 상자는 두 값 사이에 놓입니다.
+    assert 3.0 < float(fused[3]) < 3.4
+    # 둘 다 찾았으므로 확신도가 그대로입니다.
+    assert float(fused[7]) == pytest.approx(0.9)
+
+
+def test_fusion_refuses_predictions_from_another_test_set(
+    base_config: dict, repository_root: Path
+):
+    """다른 시험지를 본 예측을 섞지 않습니다.
+
+    image_id만 보고 섞으면 조용히 틀린 제출이 나옵니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    write_json(
+        repository_root / "data/test/other.json",
+        {
+            "test_manifest_uri": "data/test/instances.json",
+            "checkpoint_uri": "checkpoints/other.pt",
+            "predictions": [
+                {"image_id": 999, "category_id": 7, "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}
+            ],
+        },
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/other.json",
+        _write_fusion_input(repository_root, "ours2", [10, 20], checkpoint="ckpt/o.pt"),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "manifest에 없는 image_id" in result["message"]
+
+
+def _write_fusion_input(
+    repository_root: Path,
+    name: str,
+    image_ids: list[int],
+    *,
+    checkpoint: str | None = None,
+    manifest_uri: str = "data/test/instances.json",
+) -> str:
+    """수집한 `test_predictions.json`과 같은 모양의 입력을 만듭니다.
+
+    `test_manifest_uri`와 `checkpoint_uri`는 합쳐도 되는지 판정하는 데 쓰이므로
+    실제 파일처럼 담아 둡니다.
+    """
+    write_json(
+        repository_root / f"data/test/{name}.json",
+        {
+            "test_manifest_uri": manifest_uri,
+            "checkpoint_uri": checkpoint or f"checkpoints/{name}.pt",
+            "run_id": f"harvest-{name}",
+            "predictions": [
+                {"image_id": image_id, "category_id": 7,
+                 "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}
+                for image_id in image_ids
+            ],
+        },
+    )
+    return f"data/test/{name}.json"
+
+
+@pytest.mark.parametrize(
+    "second",
+    [
+        pytest.param("same-path", id="같은-파일을-두-번"),
+        pytest.param("copy", id="같은-실행을-다른-경로로"),
+        pytest.param("alias", id="같은-checkpoint를-다른-표기로"),
+    ],
+)
+def test_the_same_run_cannot_be_fused_with_itself(
+    base_config: dict, repository_root: Path, second: str
+):
+    """같은 실행의 예측을 두 번 주면 막습니다.
+
+    그대로 두면 서로 다른 실행으로 세어 자기 자신과 동의하고, 확신도가 근거 없이
+    올라갑니다. 저장 위치만 보면 **복사본**을 갈라내지 못하므로 그 예측을 만든
+    checkpoint로 봅니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    first = _write_fusion_input(repository_root, "one", [10, 20], checkpoint="ckpt/a.pt")
+    if second == "same-path":
+        other = f"./{first}"
+    else:
+        # `alias`는 같은 checkpoint를 다른 표기로 적습니다. 글자만 견주면 놓칩니다.
+        checkpoint = "./ckpt/a.pt" if second == "alias" else "ckpt/a.pt"
+        other = _write_fusion_input(
+            repository_root, second, [10, 20], checkpoint=checkpoint
+        )
+    base_config["evaluate"]["test_predictions_input_uris"] = [first, other]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "같은 실행의 예측이 두 번" in result["message"]
+
+
+def test_fusion_refuses_a_prediction_from_another_test_set(
+    base_config: dict, repository_root: Path
+):
+    """다른 시험지를 본 예측은 합치지 않습니다.
+
+    예측에 나온 id만 보면 안 됩니다. 같은 id를 쓰는 다른 시험지가 그대로 지나갑니다.
+    각 파일이 적어 둔 manifest를 실제로 읽어 견줍니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    # **id는 같고 사진 크기만 다른** 시험지입니다. id 집합만 견주면 통과합니다.
+    write_json(
+        repository_root / "data/test/other_instances.json",
+        {
+            "images": [
+                {"id": 20, "file_name": "20.jpg", "width": 640, "height": 480},
+                {"id": 10, "file_name": "10.jpg", "width": 640, "height": 480},
+            ],
+            "annotations": [],
+            "categories": [{"id": 3, "name": "pill-a"}, {"id": 7, "name": "pill-b"}],
+        },
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        _write_fusion_input(repository_root, "ours", [10, 20]),
+        _write_fusion_input(
+            repository_root, "theirs", [10, 20],
+            manifest_uri="data/test/other_instances.json",
+        ),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "다른 시험지" in result["message"]
+
+
+def test_fusion_accepts_a_run_that_found_nothing_in_some_images(
+    base_config: dict, repository_root: Path
+):
+    """어떤 이미지에서 아무것도 못 찾은 실행도 합칩니다.
+
+    검출이 0건인 이미지는 예측 목록에 없는 것이 **정상**입니다. 예측에 나온 id로
+    시험지를 판정하면 멀쩡한 입력을 거절합니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    base_config["inputs"]["train"].pop("best_checkpoint_uri")
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        _write_fusion_input(repository_root, "both", [10, 20]),
+        _write_fusion_input(repository_root, "one_only", [10]),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    rows = (
+        (repository_root / result["artifacts"]["submission_uri"])
+        .read_text(encoding="utf-8")
+        .splitlines()[1:]
+    )
+    assert {row.split(",")[1] for row in rows} == {"10", "20"}
+
+
+def test_a_fused_file_records_what_it_was_fused_from(
+    base_config: dict, repository_root: Path
+):
+    """합친 결과는 무엇을 합쳤는지 남깁니다.
+
+    `checkpoint`라고 적으면 checkpoint 없이 만든 실행과 모순되고, 어느 실행들의
+    앙상블인지 되짚을 수 없습니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    # checkpoint 설정을 **남겨 둡니다.** 지우면 합친 결과가 무관한 checkpoint를
+    # 물려받는지 확인할 수 없습니다.
+    uris = [
+        _write_fusion_input(repository_root, "left", [10, 20]),
+        _write_fusion_input(repository_root, "right", [10, 20]),
+    ]
+    base_config["evaluate"]["test_predictions_input_uris"] = uris
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    document = _read_json(repository_root, result["artifacts"]["test_predictions_uri"])
+    assert document["prediction_source"] == "fusion"
+    # 어느 실행을 합쳤는지 되짚을 수 있어야 합니다. 경로는 덮어써질 수 있으므로
+    # 그 예측을 만든 checkpoint까지 남깁니다.
+    assert [entry["uri"] for entry in document["fused_from"]] == uris
+    assert [entry["checkpoint_uri"] for entry in document["fused_from"]] == [
+        "checkpoints/left.pt",
+        "checkpoints/right.pt",
+    ]
+    assert document["fusion_iou_threshold"] is not None
+    # 합친 결과는 어느 checkpoint의 것도 아닙니다. 설정에 있던 값을 물려받으면 다음
+    # 융합이 그것을 모델 신원으로 써서 서로 다른 증거를 하나로 셉니다.
+    assert document["checkpoint_uri"] is None
+
+
+def test_fusion_refuses_a_prediction_that_does_not_say_which_test_set_it_saw(
+    base_config: dict, repository_root: Path
+):
+    """어느 시험지를 봤는지 안 적힌 예측은 합치지 않습니다.
+
+    `test_predictions_uri`가 생기기 전에 만든 파일이 그렇습니다. 확인할 수 없는 것을
+    통과시키면 시험지 검사가 있으나 마나입니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    write_json(
+        repository_root / "data/test/nameless.json",
+        {
+            "checkpoint_uri": "checkpoints/nameless.pt",
+            "predictions": [
+                {"image_id": 10, "category_id": 7, "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}
+            ],
+        },
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/nameless.json",
+        _write_fusion_input(repository_root, "named", [10, 20], checkpoint="ckpt/n.pt"),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "어느 test manifest를 본 예측인지" in result["message"]
+
+
+def test_a_fusion_result_cannot_be_fused_again(
+    base_config: dict, repository_root: Path
+):
+    """합친 결과를 다시 합치지 않습니다.
+
+    그러면 실행 수를 **입력 파일 수**로 세게 되어, 안에 다섯 실행이 들어 있는 파일과
+    한 실행짜리 파일이 같은 한 표가 됩니다. 확신도가 어긋나 제출이 조용히 달라집니다.
+    평평하게 합치려면 원본 예측들을 한 번에 주면 됩니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    write_json(
+        repository_root / "data/test/already_fused.json",
+        {
+            "test_manifest_uri": "data/test/instances.json",
+            "checkpoint_uri": None,
+            "prediction_source": "fusion",
+            "fused_from": [
+                {"uri": "x.json", "checkpoint_uri": "ckpt/one.pt"},
+                {"uri": "y.json", "checkpoint_uri": "ckpt/two.pt"},
+            ],
+            "predictions": [
+                {"image_id": 10, "category_id": 7,
+                 "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}
+            ],
+        },
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/already_fused.json",
+        _write_fusion_input(repository_root, "plain_one", [10, 20], checkpoint="ckpt/z.pt"),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "합친 결과를 다시 합칠 수는 없습니다" in result["message"]
+
+
+def _add_copied_test_manifest(
+    repository_root: Path,
+    *,
+    sizes: tuple[int, int] = (100, 100),
+    category_ids: tuple[int, int] = (3, 7),
+) -> str:
+    """같은 시험지를 다른 폴더에 복사해 둡니다.
+
+    dataset 판마다 같은 사진을 자기 prefix로 복사해 둡니다(`raw/v5/...`와
+    `raw/v6/...`). 사진 자체는 만들지 않습니다 — 이 코드는 사진을 열지 않으므로
+    만들어도 아무것도 증명하지 못합니다.
+    """
+    width, height = sizes
+    copied = repository_root / "data/test_copy"
+    copied.mkdir(parents=True, exist_ok=True)
+    write_json(
+        copied / "instances.json",
+        {
+            "images": [
+                {"id": 20, "file_name": "0020.jpg", "width": width, "height": height},
+                {"id": 10, "file_name": "0010.jpg", "width": width, "height": height},
+            ],
+            "annotations": [],
+            "categories": [
+                {"id": category_ids[0], "name": "pill-a"},
+                {"id": category_ids[1], "name": "pill-b"},
+            ],
+        },
+    )
+    return "data/test_copy/instances.json"
+
+
+def _fuse_across_two_places(base_config: dict, repository_root: Path, copy_uri: str):
+    base_config["inputs"]["train"].pop("best_checkpoint_uri")
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        _write_fusion_input(repository_root, "here", [10, 20], checkpoint="ckpt/h.pt"),
+        _write_fusion_input(
+            repository_root, "there", [10, 20],
+            checkpoint="ckpt/t.pt",
+            manifest_uri=copy_uri,
+        ),
+    ]
+    return run(base_config)
+
+
+def test_photos_in_another_place_are_refused_unless_someone_checked(
+    base_config: dict, repository_root: Path
+):
+    """사진이 다른 곳에 있으면 **기본은 막습니다.**
+
+    위치가 다르다는 것은 다른 사진이라는 증명이 아닙니다. 그런데도 막는 것은 틀리는
+    방향이 다르기 때문입니다 — 잘못 합치면 조용히 틀린 제출이 나오고, 잘못 막히면
+    시끄럽게 멈춰서 사람이 확인할 기회가 생깁니다.
+
+    막을 때는 **빠져나갈 길을 알려 줘야** 합니다. 그러지 않으면 정당한 조합이 막다른
+    길이 됩니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    copy_uri = _add_copied_test_manifest(repository_root)
+
+    result = _fuse_across_two_places(base_config, repository_root, copy_uri)
+
+    assert result["status"] == "error"
+    assert "다른 시험지" in result["message"]
+    assert "fusion_allow_copied_images" in result["message"]
+
+
+def test_copied_photos_are_accepted_once_someone_says_they_checked(
+    base_config: dict, repository_root: Path
+):
+    """`fusion_allow_copied_images`를 켜면 위치만 빼고 견줍니다.
+
+    실제로 합치려던 일곱 개 중 둘이 위치 때문에 막혔고, 그 둘은 MD5까지 같은
+    복사본이었습니다. 사람이 그것을 확인했다고 말하는 자리가 이 설정입니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    copy_uri = _add_copied_test_manifest(repository_root)
+    base_config["evaluate"]["fusion_allow_copied_images"] = True
+
+    result = _fuse_across_two_places(base_config, repository_root, copy_uri)
+
+    assert result["status"] == "ok", result["message"]
+
+
+@pytest.mark.parametrize(
+    "difference",
+    [
+        pytest.param({"sizes": (100, 200)}, id="크기가-다름"),
+        pytest.param({"category_ids": (3, 9)}, id="category가-다름"),
+    ],
+)
+def test_saying_the_photos_were_checked_does_not_skip_the_rest(
+    base_config: dict, repository_root: Path, difference: dict
+):
+    """확인했다는 말은 **사진 위치 하나만** 면제합니다.
+
+    이 설정이 시험지 검사를 통째로 건너뛰면, 사진을 확인한 사람이 크기와 class까지
+    보증한 셈이 됩니다. 확인한 것만 면제해야 합니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    copy_uri = _add_copied_test_manifest(repository_root, **difference)
+    base_config["evaluate"]["fusion_allow_copied_images"] = True
+
+    result = _fuse_across_two_places(base_config, repository_root, copy_uri)
+
+    assert result["status"] == "error"
+    assert "다른 시험지" in result["message"]
+
+
+def test_a_fusion_result_is_refused_even_when_it_names_a_checkpoint(
+    base_config: dict, repository_root: Path
+):
+    """합친 결과라고 밝힌 파일은 checkpoint가 채워져 있어도 받지 않습니다.
+
+    checkpoint가 **없는 것만** 보면 표식과 checkpoint를 함께 담아 우회할 수 있고,
+    그러면 중첩 융합이 실행 수를 잘못 세는 자리로 되돌아갑니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    write_json(
+        repository_root / "data/test/sneaky.json",
+        {
+            "test_manifest_uri": "data/test/instances.json",
+            "checkpoint_uri": "ckpt/looks-real.pt",
+            "prediction_source": "fusion",
+            "predictions": [
+                {"image_id": 10, "category_id": 7,
+                 "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}
+            ],
+        },
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/sneaky.json",
+        _write_fusion_input(repository_root, "honest", [10, 20], checkpoint="ckpt/h2.pt"),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "합친 결과를 다시 합칠 수는 없습니다" in result["message"]
+
+
+def test_one_prediction_file_is_not_a_fusion(
+    base_config: dict, repository_root: Path
+):
+    """하나만 주면 막습니다.
+
+    합칠 것이 없는데도 겹치는 상자를 묶어 원본과 다른 예측이 나옵니다. 추론 없이
+    제출을 다시 만드는 길처럼 보이지만 결과가 달라집니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        _write_fusion_input(repository_root, "alone", [10, 20], checkpoint="ckpt/a1.pt"),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "둘 이상 필요합니다" in result["message"]
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    [pytest.param(7, id="숫자"), pytest.param(["a"], id="list"), pytest.param("   ", id="공백만")],
+)
+def test_a_checkpoint_that_is_not_a_name_is_refused(
+    base_config: dict, repository_root: Path, checkpoint: object
+):
+    """checkpoint 자리에 이름이 아닌 것이 오면 막습니다.
+
+    그대로 문자열로 바꾸면 `7`과 `'7'`이 같은 실행이 되거나, 공백만 있는 값이 서로
+    다른 실행으로 세어집니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    write_json(
+        repository_root / "data/test/odd.json",
+        {
+            "test_manifest_uri": "data/test/instances.json",
+            "checkpoint_uri": checkpoint,
+            "predictions": [
+                {"image_id": 10, "category_id": 7,
+                 "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}
+            ],
+        },
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/odd.json",
+        _write_fusion_input(repository_root, "sane", [10, 20], checkpoint="ckpt/s.pt"),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "어느 checkpoint의 증거인지" in result["message"]
+
+
+@pytest.mark.parametrize(
+    "fused_from",
+    [pytest.param([], id="빈-목록"), pytest.param([{"uri": "x.json"}], id="항목-있음")],
+)
+def test_a_file_carrying_fused_from_is_refused_on_that_alone(
+    base_config: dict, repository_root: Path, fused_from: list
+):
+    """`fused_from`이 있으면 그것만으로 거절합니다.
+
+    `prediction_source` 표식이 없어도, 빈 목록이어도 합친 결과라는 뜻입니다. 진릿값
+    으로 보면 `fused_from: []`에 checkpoint를 붙인 파일이 통과합니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    write_json(
+        repository_root / "data/test/has_lineage.json",
+        {
+            "test_manifest_uri": "data/test/instances.json",
+            "checkpoint_uri": "ckpt/real.pt",
+            "fused_from": fused_from,
+            "predictions": [
+                {"image_id": 10, "category_id": 7,
+                 "bbox": [1.0, 2.0, 3.0, 4.0], "score": 0.9}
+            ],
+        },
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/has_lineage.json",
+        _write_fusion_input(repository_root, "clean", [10, 20], checkpoint="ckpt/c2.pt"),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "합친 결과를 다시 합칠 수는 없습니다" in result["message"]
+
+
+def test_a_test_set_with_other_categories_is_refused(
+    base_config: dict, repository_root: Path
+):
+    """이미지가 같아도 class 목록이 다르면 다른 시험지입니다.
+
+    같은 사진에 다른 정답 체계를 씌운 것이라 예측의 category id가 다른 뜻을 갖습니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    write_json(
+        repository_root / "data/test/other_categories.json",
+        {
+            "images": [
+                {"id": 20, "file_name": "0020.jpg", "width": 100, "height": 100},
+                {"id": 10, "file_name": "0010.jpg", "width": 100, "height": 100},
+            ],
+            "annotations": [],
+            "categories": [{"id": 3, "name": "pill-a"}, {"id": 9, "name": "pill-c"}],
+        },
+    )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        _write_fusion_input(repository_root, "std", [10, 20], checkpoint="ckpt/s3.pt"),
+        _write_fusion_input(
+            repository_root, "othercat", [10, 20],
+            checkpoint="ckpt/o3.pt",
+            manifest_uri="data/test/other_categories.json",
+        ),
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "다른 시험지" in result["message"]
