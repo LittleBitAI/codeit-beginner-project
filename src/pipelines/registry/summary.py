@@ -82,6 +82,9 @@ TRAINING_KEYS: tuple[tuple[str, str], ...] = (
     ("num_workers", "integer"),
     ("precision", "text"),
     ("checkpoint_every", "integer"),
+    # 이 실행이 어느 epoch부터 epoch마다 평가용 checkpoint를 남겼는지입니다. 없으면
+    # 하나도 남기지 않은 실행이라 나중에 epoch을 골라 볼 수 없습니다.
+    ("archive_epochs_from", "integer"),
     ("resume_from", "text"),
     ("seed", "integer"),
     ("gradient_accumulation_steps", "integer"),

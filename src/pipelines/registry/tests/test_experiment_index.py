@@ -317,6 +317,7 @@ def test_training_block_is_filled_from_the_config_snapshot(local_run):
         "num_workers": 0,
         "precision": "amp",
         "checkpoint_every": 2,
+        "archive_epochs_from": 8,
         "gradient_accumulation_steps": 8,
         "input_size": 640,
         "augmentation": {"preset": "pill_geometric"},
@@ -350,6 +351,7 @@ def test_training_block_is_filled_from_the_config_snapshot(local_run):
         "num_workers": 0,
         "precision": "amp",
         "checkpoint_every": 2,
+        "archive_epochs_from": 8,
         "gradient_accumulation_steps": 8,
         "input_size": 640,
         # 중첩 설정은 모양 그대로 옮깁니다. 평평하게 펴면 화면이 그 값으로 새 실험을

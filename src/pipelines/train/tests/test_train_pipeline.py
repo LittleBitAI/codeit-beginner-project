@@ -1125,6 +1125,29 @@ def test_early_stopping_keeps_best_and_actual_last_checkpoint_separate(
     assert completed["stopped_early"] is True
 
 
+def test_epoch_archive_keeps_one_evaluable_checkpoint_per_epoch(local_config):
+    """어느 epoch이 실제로 제일 잘 맞히는지 나중에 재려면 그 epoch이 남아 있어야 합니다.
+
+    수렴 전 epoch까지 남기면 쓰지도 않을 파일이 GB 단위로 쌓이므로 시작 지점을 받고,
+    optimizer 상태는 뺍니다 — 이 파일로 이어서 학습하지 않습니다.
+    """
+
+    local_config["train"].update({"epochs": 3, "archive_epochs_from": 2})
+
+    result = train.run(local_config)
+
+    assert result["status"] == "ok", result["message"]
+    archived = result["artifacts"]["epoch_checkpoint_uris"]
+    assert [Path(uri).name for uri in archived] == ["epoch_002.pt", "epoch_003.pt"]
+    payload = torch.load(
+        REPOSITORY_ROOT / archived[0], map_location="cpu", weights_only=True
+    )
+    assert payload["epoch"] == 2
+    # evaluate가 읽는 key입니다. 이것이 빠지면 보관해 봐야 평가할 수 없습니다.
+    assert {"model_state_dict", "architecture", "num_classes", "class_map"} <= set(payload)
+    assert "optimizer_state_dict" not in payload
+
+
 def test_progress_stream_stays_silent_for_the_dummy_execution(capsys):
     result = train.run({"execution": {"mode": "dummy"}})
     captured = capsys.readouterr()

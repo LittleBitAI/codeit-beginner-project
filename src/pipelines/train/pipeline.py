@@ -152,6 +152,17 @@ def _integer(settings: Mapping[str, Any], name: str, default: int, *, minimum: i
     return value
 
 
+def _optional_integer(settings: Mapping[str, Any], name: str, *, minimum: int) -> int | None:
+    """없거나 ``None``이면 그 기능을 쓰지 않는다는 뜻인 정수 설정입니다."""
+
+    value = settings.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        raise ValueError(f"train.{name} must be an integer >= {minimum} or absent")
+    return value
+
+
 def _float(settings: Mapping[str, Any], name: str, default: float, *, minimum: float) -> float:
     value = settings.get(name, default)
     if (
@@ -417,6 +428,13 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "checkpoint_every": _integer(
             raw, "checkpoint_every", _DEFAULTS["checkpoint_every"], minimum=1
         ),
+        # 이 epoch부터 epoch마다 **평가용** checkpoint를 따로 남깁니다. 없으면 지금까지와
+        # 같이 하나도 남기지 않습니다. 계약의 EPOCH_ARCHIVE_START는 GUI가 미리 채우는
+        # 값일 뿐, 여기서 기본값으로 쓰지 않습니다 — 켜 본 적 없는 실행이 갑자기 수 GB를
+        # 쌓으면 안 됩니다. 남기는 시점은 `checkpoint_every`를 함께 따릅니다(기본 1).
+        "archive_epochs_from": _optional_integer(
+            raw, "archive_epochs_from", minimum=1
+        ),
         # microbatch를 몇 개 모아 한 번 갱신할지입니다. 1이면 지금까지와 같습니다.
         # web이 이 기본값을 먼저 복제해 두었습니다(PR 143).
         # 기본값이 architecture에 따라 다릅니다. 8GB에서 batch 1로 도는 두 모델은
@@ -637,6 +655,17 @@ def _replace_checkpoint(path: Path, value: Mapping[str, Any]) -> None:
     with temporary.open("wb") as output:
         torch.save(dict(value), output)
     os.replace(temporary, path)
+
+
+#: 매 epoch 평가용 checkpoint가 쌓이는 폴더입니다. 이어서 학습할 두 파일과 섞이지
+#: 않도록 한 칸 아래에 둡니다.
+EPOCH_ARCHIVE_DIRNAME = "epochs"
+
+
+def _epoch_archive_name(epoch: int) -> str:
+    """`epoch_008.pt`. 이름순 정렬이 곧 epoch 순서가 되도록 자리를 채웁니다."""
+
+    return f"epoch_{epoch:03d}.pt"
 
 
 def _final_directory(settings: Mapping[str, Any]) -> Path:
@@ -1109,6 +1138,38 @@ def _execute_claimed(
         # 따라 최종 last checkpoint의 내용이 달라지지 않습니다.
         latest: dict[str, Any] = {}
         s3_mirror_owned = False
+        # 보관한 epoch과, S3라면 그 자리입니다. 로컬은 작업 폴더째 옮겨진 뒤에야
+        # 최종 경로가 정해지므로 번호만 들고 있다가 게시 뒤에 만듭니다.
+        archived_epochs: list[int] = []
+        archived_uris: list[str] = []
+
+        def archive_epoch(payload: Mapping[str, Any], epoch: int) -> None:
+            """그 epoch의 **평가용** checkpoint를 따로 남깁니다.
+
+            optimizer 상태를 뺍니다. 이 파일은 나중에 어느 epoch이 실제로 제일 잘
+            맞히는지 재려고 두는 것이라 가중치만 있으면 되고, 빼면 파일이 1/3이
+            됩니다. 이어서 학습은 지금까지처럼 마지막 checkpoint로 합니다.
+            """
+
+            name = _epoch_archive_name(epoch)
+            keep = {
+                key: value
+                for key, value in payload.items()
+                if key not in ("optimizer_state_dict", "resume_state")
+            }
+            if isinstance(storage, S3Storage):
+                destination = (
+                    f"{_s3_run_prefix(settings)}/{EPOCH_ARCHIVE_DIRNAME}/{name}"
+                )
+                with _temporary_checkpoint_directory("train-epoch-") as temporary:
+                    path = temporary / name
+                    _write_checkpoint(path, keep)
+                    archived_uris.append(storage.upload_file(path, destination))
+            else:
+                directory = working_directory / EPOCH_ARCHIVE_DIRNAME
+                directory.mkdir(exist_ok=True)
+                _write_checkpoint(directory / name, keep)
+            archived_epochs.append(epoch)
 
         def write_checkpoints(
             last: dict[str, Any],
@@ -1150,6 +1211,10 @@ def _execute_claimed(
                     overwrite=s3_mirror_owned,
                 )
                 s3_mirror_owned = True
+            # 이어서 할 수 있는 상태를 먼저 안전하게 만든 뒤에 보관합니다.
+            archive_from = settings["archive_epochs_from"]
+            if archive_from is not None and last["epoch"] >= archive_from:
+                archive_epoch(payload, last["epoch"])
 
         progress = ProgressEmitter(settings["run_id"])
         progress.emit(
@@ -1202,6 +1267,19 @@ def _execute_claimed(
     else:
         artifact_uris = _publish_local(_working_directory(settings), history, settings)
     artifacts = {"run_id": settings["run_id"], **artifact_uris}
+    if archived_epochs:
+        # 로컬은 작업 폴더가 방금 공개 자리로 옮겨졌으므로 이제 경로가 정해집니다.
+        epoch_directory = _final_directory(settings) / EPOCH_ARCHIVE_DIRNAME
+        artifacts["epoch_checkpoint_uris"] = (
+            list(archived_uris)
+            if isinstance(storage, S3Storage)
+            else [
+                (epoch_directory / _epoch_archive_name(epoch))
+                .relative_to(REPOSITORY_ROOT)
+                .as_posix()
+                for epoch in archived_epochs
+            ]
+        )
     best_epoch = min(history, key=lambda entry: entry["validation_loss"])
     # 이어서 한 실행의 history는 1부터 이어지므로 마지막 epoch 번호가 곧 진행한 양입니다.
     completed_epochs = history[-1]["epoch"]

@@ -35,6 +35,7 @@ __all__ = [
     "DEFAULT_PRECISION",
     "DEVICES",
     "EARLY_STOPPING_KEYS",
+    "EPOCH_ARCHIVE_START",
     "LEGACY_OPTIMIZER",
     "LR_SCHEDULER_DEFAULTS",
     "LR_WARMUP_DEFAULTS",
@@ -142,6 +143,13 @@ LR_SCHEDULER_DEFAULTS: dict[str, dict[str, float | int]] = {
 }
 DEFAULT_LR_SCHEDULER = "none"
 
+#: 매 epoch checkpoint를 남기기 시작할 epoch입니다. **GUI가 새 실험 화면에 미리
+#: 채워 주는 값이고, 기본값이 아닙니다** — 보내지 않으면 train은 아무것도 보관하지
+#: 않습니다. 무거운 model은 한 epoch이 비싸고 일찍 수렴하므로 더 앞에서 시작합니다.
+EPOCH_ARCHIVE_START: dict[str, int] = {
+    name: (8 if name in MMDETECTION_ARCHITECTURES else 15) for name in ARCHITECTURES
+}
+
 #: train은 모르는 key가 하나만 있어도 early_stopping object를 통째로 거부합니다.
 EARLY_STOPPING_KEYS = ("patience", "min_delta")
 DEFAULT_EARLY_STOPPING_MIN_DELTA = 0.0
@@ -155,6 +163,7 @@ DEFAULT_EARLY_STOPPING_MIN_DELTA = 0.0
 #: 확인합니다. 어느 쪽도 상대를 import하지 않고 여기만 봅니다.
 SETTING_KEYS = (
     "architecture",
+    "archive_epochs_from",
     "augmentation",
     "batch_size",
     "beta1",
