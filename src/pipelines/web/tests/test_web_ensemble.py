@@ -964,3 +964,47 @@ def test_an_s3_identity_does_not_need_a_configured_bucket() -> None:
 
     assert "any" in identity and "where.pt" in identity
     assert identity != ensemble._checkpoint_identity("s3://other/where.pt")
+
+
+def test_an_uppercase_s3_scheme_is_still_s3() -> None:
+    """계층은 대소문자를 가리지 않습니다. local로 보내면 멀쩡한 입력이 막힙니다."""
+
+    from src.common import S3Storage
+
+    assert ensemble._checkpoint_identity("S3://b/a/x.pt") == str(
+        S3Storage(bucket="b").identity("S3://b/a/x.pt")
+    )
+    # 같은 객체를 대소문자만 달리 적어도 같은 신원이어야 합니다.
+    assert ensemble._checkpoint_identity("S3://b/a/x.pt") == ensemble._checkpoint_identity(
+        "s3://b/a/x.pt"
+    )
+
+
+def test_a_relative_key_follows_the_configured_backend(monkeypatch) -> None:
+    """상대 key는 **지금 쓰는 저장소**의 것입니다.
+
+    S3로 돌면서 기록에 상대 key가 적힌 경우를 local로 보내면 같은 파일을 다른 것으로
+    셉니다.
+    """
+
+    from src.common import S3Storage
+
+    monkeypatch.setattr(
+        ensemble, "storage_environment", lambda: {"default_backend": "s3", "bucket": "team"}
+    )
+    key = "experiments/completed/run/best_checkpoint.pt"
+
+    assert ensemble._checkpoint_identity(key) == str(S3Storage(bucket="team").identity(key))
+    # 같은 객체를 절대 주소로 적어도 같은 신원입니다.
+    assert ensemble._checkpoint_identity(key) == ensemble._checkpoint_identity(f"s3://team/{key}")
+
+
+def test_a_relative_key_stays_local_when_the_backend_is_local(monkeypatch, tmp_path) -> None:
+    """local로 돌면 상대 key는 local입니다. 반대로 보내면 없는 곳을 가리킵니다."""
+
+    monkeypatch.setattr(
+        ensemble, "storage_environment", lambda: {"default_backend": "local", "bucket": "team"}
+    )
+    monkeypatch.setattr(ensemble, "repository_root", lambda: tmp_path)
+
+    assert not ensemble._checkpoint_identity("ckpt/best.pt").startswith("('s3'")
