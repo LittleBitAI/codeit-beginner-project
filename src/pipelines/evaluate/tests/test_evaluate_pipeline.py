@@ -1377,7 +1377,11 @@ def test_the_same_test_set_copied_to_another_place_is_still_the_same(
     `raw/v6/...`). 사진의 **위치**를 견주면 그 둘로 만든 예측을 합칠 수 없게 됩니다 —
     실제로 합치려던 일곱 개 중 둘이 그렇게 막혔습니다.
 
-    위치가 다르다고 다른 사진인지도 알 수 없습니다. 알려면 842장을 내려받아야 합니다.
+    이 test가 재는 것은 **위치를 무시한다**는 것 하나입니다. 사진이 정말 같은 파일인지는
+    재지 않습니다 — 이 코드가 사진을 열지 않기 때문에 test도 그것을 세울 수 없습니다.
+    같은 id가 서로 다른 사진을 가리키는 경우는 `parse_test_manifest`가 `file_name`의
+    숫자 stem과 image id가 같기를 요구해 이름 수준에서는 이미 묶여 있고, 그 이름의
+    사진이 정말 같은 바이트인지는 842장을 내려받아야만 알 수 있습니다.
     """
     _add_test_manifest(base_config, repository_root)
     base_config["inputs"]["train"].pop("best_checkpoint_uri")
@@ -1407,6 +1411,8 @@ def test_the_same_test_set_copied_to_another_place_is_still_the_same(
     result = run(base_config)
 
     assert result["status"] == "ok", result["message"]
+
+
 def test_a_fusion_result_is_refused_even_when_it_names_a_checkpoint(
     base_config: dict, repository_root: Path
 ):
