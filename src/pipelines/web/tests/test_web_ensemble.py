@@ -335,6 +335,10 @@ def test_harvest_writes_beside_web_state_not_over_the_run(fake_runs, monkeypatch
     assert "/submissions/" not in settings["submission_uri"]
 
 
+#: fixture가 덮어쓰기 전의 진짜 함수입니다.
+_real_harvested_runs = ensemble._harvested_runs
+
+
 def _summary(run_id: str, *, checkpoint: bool = True, predictions: bool = False) -> dict[str, Any]:
     artifacts: dict[str, Any] = {
         "train_manifest_uri": "s3://bucket/datasets/processed/v5-seed42-8020-group/train_manifest.json",
@@ -435,8 +439,31 @@ def test_agreement_does_not_depend_on_which_run_came_first(fake_runs) -> None:
     backward = ensemble.diagnose(["large", "small"])["diversity"]["agreement"]
 
     assert forward == pytest.approx(backward)
-    # 4 / 10 — 부분집합이라고 "완전히 같다"로 읽으면 안 됩니다.
-    assert forward == pytest.approx(0.4)
+    # Dice: 2 * 4 / (4 + 10). 부분집합이라고 "완전히 같다"로 읽으면 안 됩니다.
+    assert forward == pytest.approx(2 * 4 / 14)
+
+
+def test_the_warning_threshold_still_catches_what_it_used_to(fake_runs) -> None:
+    """공식을 바꾸면서 **눈금이 함께 바뀌면** 경고가 조용히 사라집니다.
+
+    예전에는 `겹침 / 왼쪽 수`라서 96.9% 조합이 임계값 0.95를 넘어 경고했습니다.
+    합집합으로 나누면(Jaccard) 같은 조합이 94.0%가 되어 빠져나갑니다. Dice는 두 실행의
+    예측 수가 같을 때 예전과 같은 값을 내므로 임계값을 다시 맞출 필요가 없습니다.
+    """
+
+    total, overlap = 1000, 969
+    left = {(index, 7): [float(index), 0.0, 5.0, 5.0] for index in range(total)}
+    right = {
+        (index if index < overlap else index + total, 7): [float(index), 0.0, 5.0, 5.0]
+        for index in range(total)
+    }
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=left))
+    fake_runs("b", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=right))
+
+    result = ensemble.diagnose(["a", "b"])
+
+    assert result["diversity"]["agreement"] == pytest.approx(0.969)
+    assert _check(result, "diversity")["level"] == "warn"
 
 
 def test_a_single_run_is_refused_before_any_inference(fake_runs) -> None:
@@ -548,3 +575,72 @@ def test_the_runner_refuses_a_name_that_escapes_its_folder(fake_runs, monkeypatc
         runner.start(["a", "b"], run_id="../train/name")
 
     assert calls == []
+
+
+def test_local_harvest_results_are_recognised(fake_registry, monkeypatch, tmp_path) -> None:
+    """local 저장소는 **절대 OS 경로**를 돌려줍니다.
+
+    앞자리를 `root` 길이로 잘라 내면 엉뚱한 곳이 잘리고, Windows에서는 구분자가
+    역슬래시라 아예 걸리지도 않습니다. 그러면 수확에 성공해도 영원히 `ready`가 되지
+    않고 융합 단계에서 실패합니다.
+    """
+
+    monkeypatch.setattr(
+        ensemble, "storage_environment", lambda: {"default_backend": "local", "bucket": None}
+    )
+    monkeypatch.setattr(ensemble, "repository_root", lambda: tmp_path)
+    # fixture가 비워 둔 것을 여기서만 되살립니다 — 이 test가 재려는 것이 그 함수입니다.
+    monkeypatch.setattr(ensemble, "_harvested_runs", _real_harvested_runs)
+    made = tmp_path / "artifacts/web/ensemble-candidates/low"
+    made.mkdir(parents=True)
+    (made / "test_predictions.json").write_text("{}", encoding="utf-8")
+    fake_registry.append(_summary("low", predictions=False))
+
+    candidate = ensemble.list_candidates()[0]
+
+    assert candidate["ready"] is True
+    assert candidate["test_predictions_uri"] == "artifacts/web/ensemble-candidates/low/test_predictions.json"
+
+
+def test_a_run_missing_its_data_inputs_is_refused_before_inference(fake_runs) -> None:
+    """순서대로 확인하면 세 번째의 결함을 앞의 둘을 18분 추론한 뒤에 알게 됩니다."""
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    fake_runs("b", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
+    fake_runs("broken", 0.60, None)
+    # 마지막 후보의 입력을 지웁니다. fixture가 세운 목록을 그대로 씁니다.
+    broken = next(item for item in ensemble.list_candidates() if item["run_id"] == "broken")
+    broken["data_inputs"]["class_map_uri"] = None
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["a", "b", "broken"], run_id="fusion-three")
+    assert "class_map_uri" in str(error.value)
+
+
+def test_different_test_manifests_are_refused_before_inference(fake_runs) -> None:
+    """시험지가 다르면 evaluate가 거부합니다. 확인 없이 추론부터 돌리면 전부 버려집니다."""
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    fake_runs("b", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
+    other = next(item for item in ensemble.list_candidates() if item["run_id"] == "b")
+    other["data_inputs"]["test_manifest_uri"] = "s3://bucket/v6/test_manifest.json"
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["a", "b"], run_id="fusion-two")
+    assert "test manifest" in str(error.value)
+
+    # 사람이 같은 사진임을 확인했다고 말하면 통과합니다. 막기만 하면 쓸 수 없습니다.
+    assert len(
+        ensemble.check_selection(["a", "b"], run_id="fusion-two", allow_copied_images=True)
+    ) == 2
+
+
+def test_values_measured_by_the_old_formula_are_not_reused(monkeypatch) -> None:
+    """값만 보고는 어느 공식으로 쟀는지 알 수 없습니다. 자리로 갈라야 합니다."""
+
+    path = ensemble._stored_pair_path("prefix", ("a", "b"))
+    monkeypatch.setattr(ensemble, "_AGREEMENT_FORMULA", "another-v9")
+
+    assert ensemble._stored_pair_path("prefix", ("a", "b")) != path

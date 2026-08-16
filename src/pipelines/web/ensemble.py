@@ -192,10 +192,17 @@ def _harvested_runs() -> set[str]:
         # 못 읽으면 "아직 없다"와 같게 다룹니다. 다시 만들면 되고, 목록 전체를
         # 못 보게 만들 이유가 없습니다.
         return set()
+    # **앞자리를 잘라 내지 않습니다.** local 저장소는 절대 OS 경로를 돌려주므로
+    # `root` 길이로 자르면 엉뚱한 곳이 잘리고, Windows에서는 구분자가 역슬래시라
+    # 아예 걸리지도 않습니다. 파일이 든 **폴더 이름**만 봅니다.
     found: set[str] = set()
     for entry in entries:
-        if entry.endswith("/test_predictions.json"):
-            found.add(entry[len(root):].strip("/").split("/")[0])
+        normalized = str(entry).replace("\\", "/")
+        if not normalized.endswith("/test_predictions.json"):
+            continue
+        parts = normalized.rsplit("/", 2)
+        if len(parts) >= 2 and parts[-2]:
+            found.add(parts[-2])
     return found
 
 
@@ -261,8 +268,16 @@ def _pair_key(left: str, right: str) -> tuple[str, str]:
     return (left, right) if left <= right else (right, left)
 
 
+#: 일치율을 재는 방법이 바뀌면 올립니다. **저장해 둔 값의 자리가 함께 바뀌어야**
+#: 옛 공식으로 잰 값이 새 공식인 척 되살아나지 않습니다. 값만 보고는 어느 공식으로
+#: 쟀는지 알 수 없으므로 key로 가릅니다.
+_AGREEMENT_FORMULA = "dice-v1"
+
+
 def _stored_pair_path(prefix: str, key: tuple[str, str]) -> str:
-    digest = hashlib.sha256(" ".join(key).encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(
+        " ".join((_AGREEMENT_FORMULA, *key)).encode("utf-8")
+    ).hexdigest()
     return f"{prefix}/{digest}.json"
 
 
@@ -307,21 +322,26 @@ def _compare(left: Mapping[str, Any], right: Mapping[str, Any]) -> dict[str, flo
     얼마나 포개지는지입니다. 둘 다 높으면 합칠 것이 없습니다 — 서로 다르게 틀려야
     앙상블이 이득을 냅니다.
 
-    겹치는 수를 **합집합**으로 나눕니다. 한쪽 수로 나누면 어느 쪽을 먼저 골랐는지에
-    따라 답이 달라집니다 — 94개가 100개에 통째로 들어 있으면 순서에 따라 100%(경고)와
-    94%(통과)로 갈립니다. 저장해 두는 값의 key는 순서를 가리지 않으므로, 먼저 잰
-    쪽이 영원히 남아 같은 조합이 다르게 판정됩니다.
+    한쪽 수로 나누면 어느 쪽을 먼저 골랐는지에 따라 답이 달라집니다 — 94개가 100개에
+    통째로 들어 있으면 순서에 따라 100%(경고)와 94%(통과)로 갈립니다. 저장해 두는 값의
+    key는 순서를 가리지 않으므로, 먼저 잰 쪽이 영원히 남아 같은 조합이 다르게
+    판정됩니다.
+
+    그래서 **Dice**를 씁니다: `2|∩| / (|A| + |B|)`. 대칭이면서, 두 실행의 예측 수가
+    같을 때 예전 값과 **정확히 같은 눈금**을 냅니다. 합집합으로 나누면(Jaccard) 대칭은
+    되지만 눈금이 바뀌어, 96.9%로 경고하던 조합이 94.0%가 되어 임계값 0.95를 조용히
+    빠져나갑니다. 제출은 이미지마다 같은 수(4개)를 남기므로 크기가 대개 같습니다.
     """
 
     left_boxes: dict[Any, tuple[float, ...]] = left["boxes"]
     right_boxes: dict[Any, tuple[float, ...]] = right["boxes"]
-    shared = set(left_boxes) & set(right_boxes)
-    union = set(left_boxes) | set(right_boxes)
-    if not union:
+    total = len(left_boxes) + len(right_boxes)
+    if not total:
         return {"agreement": 0.0, "box_iou": 0.0}
+    shared = set(left_boxes) & set(right_boxes)
     ious = [_iou(left_boxes[key], right_boxes[key]) for key in shared]
     return {
-        "agreement": len(shared) / len(union),
+        "agreement": 2 * len(shared) / total,
         "box_iou": statistics.median(ious) if ious else 0.0,
     }
 
@@ -555,7 +575,9 @@ def diagnose(run_ids: Sequence[str]) -> dict[str, Any]:
 
 # --------------------------------------------------------------------- 실행 config
 
-def check_selection(run_ids: Sequence[str], *, run_id: str) -> list[dict[str, Any]]:
+def check_selection(
+    run_ids: Sequence[str], *, run_id: str, allow_copied_images: bool = False
+) -> list[dict[str, Any]]:
     """추론을 걸기 **전에** 거절할 것을 거절합니다.
 
     합칠 수 있는지는 융합 단계에서도 확인하지만, 그때는 이미 체크포인트마다 9분씩
@@ -580,7 +602,31 @@ def check_selection(run_ids: Sequence[str], *, run_id: str) -> list[dict[str, An
     unknown = [item for item in wanted if item not in by_run]
     if unknown:
         raise WebError(f"기록에 없는 실행입니다: {', '.join(unknown)}")
-    return [by_run[item] for item in wanted]
+    selected = [by_run[item] for item in wanted]
+
+    # **마지막 실행의 결함도 첫 추론 전에 찾습니다.** 순서대로 확인하면 세 번째가
+    # 입력을 빠뜨린 것을 앞의 둘을 18분 추론한 뒤에 알게 됩니다.
+    for item in selected:
+        missing = [
+            key
+            for key in ("validation_manifest_uri", "test_manifest_uri", "class_map_uri")
+            if not (item.get("data_inputs") or {}).get(key)
+        ]
+        if missing:
+            raise WebError(
+                f"{item['run_id']}의 기록에 {', '.join(missing)}가 없어 합칠 수 없습니다."
+            )
+
+    # 시험지가 다르면 evaluate가 거부합니다. 사람이 같은 사진임을 확인했다고 말한
+    # 경우에만 통과시킵니다 — 그 확인 없이 추론부터 돌리면 전부 버려집니다.
+    manifests = {str((item.get("data_inputs") or {})["test_manifest_uri"]) for item in selected}
+    if len(manifests) > 1 and not allow_copied_images:
+        raise WebError(
+            "고른 실행들이 서로 다른 test manifest를 봅니다: "
+            f"{', '.join(sorted(manifests))} — 사진이 같은데 위치만 다른 것을 확인했다면 "
+            "'사진이 같은데 위치만 다른 것을 확인했습니다'를 켜고 다시 실행하세요."
+        )
+    return selected
 
 
 def pending_runs(run_ids: Sequence[str]) -> list[dict[str, Any]]:

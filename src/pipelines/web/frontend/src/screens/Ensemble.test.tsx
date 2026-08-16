@@ -211,6 +211,9 @@ describe('앙상블 화면', () => {
     fireEvent.click(screen.getAllByRole('checkbox')[2] as HTMLElement);
 
     expect(screen.getByRole('button', { name: /합치기/ })).toHaveProperty('disabled', true);
+    // 세 개짜리 진단이 도착하는 것까지 기다립니다. 안 기다리면 test가 끝난 뒤 상태가
+    // 바뀌어 React가 act(...) 경고를 냅니다.
+    await waitFor(() => expect(api.diagnoseEnsemble).toHaveBeenCalledTimes(2));
   });
 
   it('추론 중인지 합치는 중인지 구분해 보여 준다', async () => {
