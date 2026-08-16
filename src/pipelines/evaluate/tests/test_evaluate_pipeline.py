@@ -717,6 +717,7 @@ def test_summary_stays_unchanged_when_no_category_is_excluded(
         ({"max_detections_per_image": 0}, "max_detections_per_image"),
         ({"seed": "7"}, "seed"),
         ({"overwrite": "yes"}, "overwrite"),
+        ({"fusion_allow_copied_images": "yes"}, "fusion_allow_copied_images"),
         ({"device": ""}, "device"),
         ({"submission_excluded_category_ids": "3"}, "submission_excluded_category_ids"),
         ({"submission_excluded_category_ids": [-1]}, "submission_excluded_category_ids"),

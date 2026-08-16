@@ -4,7 +4,7 @@ Read the repository root `CLAUDE.md` first. This file adds only what is specific
 
 ## Scope
 
-Takes a validation manifest plus a checkpoint or supplied predictions and produces COCO-style detection metrics with the predictions scored. Given an unlabeled COCO test manifest it also writes a competition submission CSV. It never trains or scores test data.
+Takes a validation manifest plus a checkpoint or supplied predictions and produces COCO-style detection metrics with the scored predictions. Given an unlabeled COCO test manifest it also writes a competition submission CSV. It never trains or scores test data.
 
 ## Boundaries
 
@@ -23,7 +23,7 @@ Manifests are JSONL or one COCO document, validated for duplicate ids, annotatio
 A metrics file and a predictions file under the output directory, plus `submissions/{run_id}/submission.csv` and `test_predictions.json` when asked. All are written only after metrics and test predictions are complete, so a failure leaves no partial result.
 
 Two rules are easy to undo by accident:
-- Stored boxes and scores are **not rounded**. Rounding would make a re-run over the saved predictions give different numbers.
+- Stored boxes and scores are **not rounded**, or a re-run over the saved predictions gives different numbers.
 - A metric that was not computed is `null`, never `0.0`, keeping "not measured" distinct from "zero".
 
 ## Run and Test
@@ -38,18 +38,18 @@ Fixtures are contract-shaped; inference on CPU.
 ## Local Rules
 
 - AP and mAP come from pycocotools `COCOeval`. numpy only builds the IoU threshold array and aggregates `evalImgs`; never write matching logic.
-- The main metric is `mAP@[0.75:0.95]`. `COCOeval` always receives the fixed ten points `0.50:0.95` and the main interval is a slice, so `mAP50`/`mAP75`/`mAP50_95` are always available. `evaluate.iou_thresholds` is not injectable — any other value raises `ConfigurationError` rather than being ignored.
-- `maxDets` is the configured value (4). `COCOeval` writes to stdout, so calls are wrapped in `redirect_stdout` — web parses the log. `summarize()` is never called; index `eval` instead.
+- The main metric is `mAP@[0.75:0.95]`. `COCOeval` always gets the fixed ten points `0.50:0.95` and the main interval is a slice, so `mAP50`/`mAP75`/`mAP50_95` are always available. `evaluate.iou_thresholds` is not injectable — any other value raises `ConfigurationError`.
+- `maxDets` is the configured value (4). `COCOeval` writes to stdout, so calls are wrapped in `redirect_stdout` — web parses the log. `summarize()` is never called; index `eval`.
 - Progress goes to stderr as `evaluate.progress/1` JSON Lines; the emitter never raises or writes stdout.
-- `precision50`/`recall50` are aggregate counts at `score >= 0.5`, not the last PR-curve point.
+- `precision50`/`recall50` are aggregate counts at `score >= 0.5`, not the last PR-curve point; a GUI label fix is open as proposal `002-evaluate-metric-label-clarity`.
 - `analysis.py` diagnoses: threshold sweep, best F1, confusion matrix, per-class summary, per-image failures, false-positive causes. All from `evalImgs`; extra IoU from `maskUtils.iou`. Four traps:
   - `gtMatches` reflects matching **before** the score filter, so judging misses with it erases ground truth a low-score detection touched. Use ids surviving detections claimed.
   - The confusion matrix needs the `useCats = 0` pass; the default pass matches within a class and cannot show a mix-up.
-  - False positives bucket strongest-overlap-first: `duplicate`, `classification`, `localization`, `background`; `duplicate` would otherwise inflate another. `LOCALIZATION_IOU_FLOOR` keeps far-off boxes out of `localization`.
+  - False positives bucket strongest-overlap-first: `duplicate`, `classification`, `localization`, `background`, or `duplicate` inflates another. `LOCALIZATION_IOU_FLOOR` keeps far-off boxes out of `localization`.
   - `per_class_summary` only re-sorts `per_class`: `truth_count` splits groups, `ap = null` is never read as 0, and it is not IoU-keyed.
 - Competition runs use the validation IoU thresholds; test labels and metrics are never accepted or made.
 - `test_predictions.json` carries the **same rows as the submission CSV**, so a later stage reads boxes as numbers instead of re-parsing CSV. Written whenever a test manifest is given. For more fusion candidates than the four a submission keeps, raise `max_detections_per_image`; that CSV is then unsubmittable, which is the point. It records the excluded ids, or a reader takes a dropped class for a miss.
-- `evaluate.test_predictions_input_uris` fuses runs' `test_predictions.json` into one submission (`fusion.py`), then filters it as usual. **Two inputs minimum**, each naming a **checkpoint** and a manifest whose ids, image locations, sizes and categories match this run's. A fusion result is never an input — re-fusing counts runs as files, and one alone still merges its own boxes. Scores scale by how many runs agreed, counted once each at their best box; `fused_from` records them. Locations prove nothing about content, but a wrong join is silent and a wrong block loud; `fusion_allow_copied_images` exempts **only** locations, for a test set copied to another prefix.
+- `evaluate.test_predictions_input_uris` fuses runs' `test_predictions.json` into one submission (`fusion.py`), then filters it as usual. **Two inputs minimum**, each naming a **checkpoint** and a manifest whose ids, image locations, sizes and categories match this run's. A fusion result is never an input — re-fusing counts runs as files, and one alone still merges its own boxes. Scores scale by how many runs agreed, counted once each at their best box; `fused_from` records them. Locations prove nothing about content, but a wrong join is silent and a wrong block loud; `fusion_allow_copied_images` exempts **only** locations, for a test set copied elsewhere.
 - `evaluate.submission_excluded_category_ids` drops those categories from the **submission CSV only**, inside `filter_predictions` *before* the cap so the 4 slots go to scorable rows. Test call only; default empty changes nothing.
 - `evaluate.metrics_excluded_category_ids` drops them from **validation scoring only**, so local mAP averages the classes the competition scores; it also filters *before* the cap. Ground-truth images stay — dropping one turns its predictions into false positives — and saved predictions keep every row. Default empty changes nothing.
 - Identical output names are rejected before anything runs.
