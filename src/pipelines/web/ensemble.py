@@ -19,14 +19,11 @@ from __future__ import annotations
 import hashlib
 import statistics
 import threading
-from urllib.parse import urlsplit
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from src.common import (
     ExperimentRegistryError,
-    LocalStorage,
-    S3Storage,
     StorageError,
     create_storage,
     list_experiment_summaries,
@@ -99,28 +96,21 @@ def _checkpoint_identity(uri: str) -> str:
     움직였습니다 — S3에서 `a//x.pt`와 `a/x.pt`는 서로 **다른** key인데 같다고 보았고,
     percent 표기(`%2F`)는 같은 객체인데 다르다고 보았습니다.
 
-    **어느 저장소인지도 계층과 같은 방식으로 가릅니다.**
+    **어느 저장소인지도 직접 가르지 않습니다.** 이 화면의 다른 자리가 전부 쓰는
+    `create_storage()`에 그대로 맡깁니다. 손으로 갈랐더니 계층이 보는 것을 세 번
+    빠뜨렸습니다 — `S3://` 대문자, 상대 key, 그리고 `PILL_STORAGE_S3_PREFIX`와
+    `PILL_STORAGE_LOCAL_ROOT`. 앞의 둘을 메워도 뒤의 하나가 남았습니다. **빠뜨린
+    항목을 세는 대신 세는 자리를 없앱니다.**
 
-    - 주소가 `s3://`로 시작하면 S3입니다. 계층처럼 **대소문자를 가리지 않습니다** —
-      `S3://`를 local로 보내면 멀쩡한 입력이 막힙니다.
-    - 주소가 아닌 **상대 key**는 지금 쓰는 저장소의 것입니다. S3로 돌면서 기록에
-      상대 key가 적힌 경우를 local로 보내면 같은 파일을 다른 것으로 셉니다.
+    설정된 bucket 밖의 `s3://` 주소는 계층이 거절합니다. 그대로 둡니다 — 여기서만
+    받아 주면 evaluate가 나중에 같은 주소를 거절해 GPU를 쓴 뒤에 실패합니다.
 
-    `identity()`는 원격에 닿지 않으므로 credential도 설정된 bucket도 필요 없습니다.
+    `identity()`는 원격에 닿지 않으므로 credential이 없어도 됩니다.
     **오류는 숨기지 않습니다** — 글자로 되돌리면 같은 파일을 두 번 넣은 것을 놓칩니다.
     """
 
     try:
-        if uri.lower().startswith("s3://"):
-            # 주소가 스스로 bucket을 말합니다. 설정된 bucket과 달라도 됩니다.
-            storage: Any = S3Storage(bucket=urlsplit(uri).netloc)
-        elif _uses_s3():
-            # bucket을 명시합니다. 비워 두면 환경 변수에 기대게 되어, 같은 판정을
-            # 두 곳(설정과 환경)에서 읽는 자리가 또 생깁니다.
-            storage = S3Storage(bucket=(storage_environment().get("bucket") or "").strip())
-        else:
-            storage = LocalStorage(repository_root())
-        return str(storage.identity(uri))
+        return str(create_storage({"storage": _storage_config()}).identity(uri))
     except StorageError as error:
         raise WebError(
             f"{uri}의 저장 신원을 얻지 못했습니다({type(error).__name__}). 같은 "

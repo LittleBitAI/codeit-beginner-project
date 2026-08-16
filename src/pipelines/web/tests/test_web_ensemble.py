@@ -12,6 +12,12 @@ from typing import Any
 import pytest
 
 from src.pipelines.web import ensemble
+from src.pipelines.web.errors import WebError
+
+
+# `fake_runs`가 결과 이름 확인을 비켜 두므로, 그 확인 자체를 재는 test가 되돌릴 수
+# 있도록 진짜를 잡아 둡니다.
+_REAL_EXISTING_OUTPUT = ensemble._existing_output
 
 
 def _prediction_document(
@@ -36,8 +42,14 @@ def _prediction_document(
 
 @pytest.fixture
 def fake_runs(monkeypatch: pytest.MonkeyPatch):
-    """후보 목록과 예측 파일을 화면이 보는 모양 그대로 흉내 냅니다."""
+    """후보 목록과 예측 파일을 화면이 보는 모양 그대로 흉내 냅니다.
 
+    주소가 전부 `s3://bucket/…`이므로 **저장 설정도 그 bucket이어야** 합니다. local로
+    두면 저장 계층이 그 주소를 거절하고, 그것은 실제로 맞는 거절입니다 — local로 도는
+    evaluate도 같은 주소를 못 읽습니다.
+    """
+
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "bucket")
     documents: dict[str, dict[str, Any]] = {}
     candidates: list[dict[str, Any]] = []
 
@@ -71,7 +83,9 @@ def fake_runs(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(ensemble, "list_candidates", lambda: list(candidates))
     monkeypatch.setattr(ensemble, "_read_predictions", lambda uri: _load(documents[uri], uri))
-    # 저장해 둔 값을 읽거나 쓰는 것은 이 test의 대상이 아닙니다.
+    # 저장해 둔 값을 읽거나 쓰는 것은 이 test의 대상이 아닙니다. 결과 이름이 이미
+    # 있는지도 마찬가지입니다 — 그 검사는 자기 test에서 직접 세웁니다.
+    monkeypatch.setattr(ensemble, "_existing_output", lambda name: None)
     monkeypatch.setattr(ensemble, "_load_stored_pair", lambda key: None)
     monkeypatch.setattr(ensemble, "_store_pair", lambda key, value: None)
     monkeypatch.setattr(ensemble, "_PAIR_CACHE", {})
@@ -818,6 +832,8 @@ def test_failing_to_check_the_output_is_reported_not_guessed(fake_runs, monkeypa
         def exists(self, uri):
             raise StorageError("접근 거부")
 
+    # 이 test의 대상이 바로 그 확인이므로, fixture가 비켜 둔 것을 되돌립니다.
+    monkeypatch.setattr(ensemble, "_existing_output", _REAL_EXISTING_OUTPUT)
     monkeypatch.setattr(ensemble, "create_storage", lambda config: Broken())
 
     with pytest.raises(Exception) as error:
@@ -903,14 +919,10 @@ def test_failing_to_read_a_checkpoint_identity_is_reported(fake_runs, monkeypatc
     fake_runs("b", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
 
     class Broken:
-        def __init__(self, *args, **kwargs):
-            pass
-
         def identity(self, uri):
             raise StorageError("설정 오류")
 
-    monkeypatch.setattr(ensemble, "LocalStorage", Broken)
-    monkeypatch.setattr(ensemble, "S3Storage", Broken)
+    monkeypatch.setattr(ensemble, "create_storage", lambda *args, **kwargs: Broken())
 
     with pytest.raises(Exception) as error:
         ensemble.check_selection(["a", "b"], run_id="fusion-two")
@@ -931,7 +943,7 @@ def test_scope_and_paths_agree_on_the_backend(monkeypatch) -> None:
     assert not ensemble._harvest_root().startswith("s3://")
 
 
-def test_the_s3_identity_matches_the_shared_storage_layer() -> None:
+def test_the_s3_identity_matches_the_shared_storage_layer(monkeypatch) -> None:
     """규칙을 새로 적지 않고 공용 계층에 맡깁니다.
 
     직접 풀었더니 계층과 반대로 움직였습니다 — S3에서 `a//x.pt`와 `a/x.pt`는 서로
@@ -941,35 +953,42 @@ def test_the_s3_identity_matches_the_shared_storage_layer() -> None:
 
     from src.common import S3Storage
 
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "b")
+
     for uri in ("s3://b/a/x.pt", "s3://b//a//x.pt", "s3://b/a%2Fx.pt"):
         expected = str(S3Storage(bucket="b").identity(uri))
         assert ensemble._checkpoint_identity(uri) == expected
 
 
-def test_s3_keys_that_differ_by_a_slash_are_different_objects() -> None:
+def test_s3_keys_that_differ_by_a_slash_are_different_objects(monkeypatch) -> None:
     """`a//x.pt`와 `a/x.pt`는 S3에서 다른 key입니다. 같다고 보면 멀쩡한 조합을 막습니다."""
+
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "b")
 
     assert ensemble._checkpoint_identity("s3://b/a/x.pt") != ensemble._checkpoint_identity(
         "s3://b//a//x.pt"
     )
 
 
-def test_an_s3_identity_does_not_need_a_configured_bucket() -> None:
-    """bucket이 없어도 물어볼 수 있어야 합니다. 못 물으면 합치기가 통째로 막힙니다.
+def test_a_checkpoint_outside_the_configured_bucket_is_refused(monkeypatch) -> None:
+    """설정한 bucket 밖의 주소는 계층이 거절합니다. 여기서만 받아 주면 안 됩니다.
 
-    `identity()`는 원격에 닿지 않으므로 credential도, 설정된 bucket도 필요 없습니다.
+    받아 두면 이 화면은 통과시키고 evaluate가 같은 주소를 거절합니다 — GPU를 9분 쓴
+    **뒤에** 실패합니다. 계층이 거절하는 것은 여기서도 거절합니다.
     """
 
-    identity = ensemble._checkpoint_identity("s3://any/where.pt")
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "team")
 
-    assert "any" in identity and "where.pt" in identity
-    assert identity != ensemble._checkpoint_identity("s3://other/where.pt")
+    with pytest.raises(WebError):
+        ensemble._checkpoint_identity("s3://other-team/where.pt")
 
 
-def test_an_uppercase_s3_scheme_is_still_s3() -> None:
+def test_an_uppercase_s3_scheme_is_still_s3(monkeypatch) -> None:
     """계층은 대소문자를 가리지 않습니다. local로 보내면 멀쩡한 입력이 막힙니다."""
 
     from src.common import S3Storage
+
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "b")
 
     assert ensemble._checkpoint_identity("S3://b/a/x.pt") == str(
         S3Storage(bucket="b").identity("S3://b/a/x.pt")
@@ -989,9 +1008,7 @@ def test_a_relative_key_follows_the_configured_backend(monkeypatch) -> None:
 
     from src.common import S3Storage
 
-    monkeypatch.setattr(
-        ensemble, "storage_environment", lambda: {"default_backend": "s3", "bucket": "team"}
-    )
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "team")
     key = "experiments/completed/run/best_checkpoint.pt"
 
     assert ensemble._checkpoint_identity(key) == str(S3Storage(bucket="team").identity(key))
@@ -999,12 +1016,50 @@ def test_a_relative_key_follows_the_configured_backend(monkeypatch) -> None:
     assert ensemble._checkpoint_identity(key) == ensemble._checkpoint_identity(f"s3://team/{key}")
 
 
+def test_a_configured_s3_prefix_is_applied_to_a_relative_key(monkeypatch) -> None:
+    """`PILL_STORAGE_S3_PREFIX`를 세우면 상대 key는 그 아래의 객체입니다.
+
+    설정을 손으로 다시 조립하다 이것을 빠뜨렸습니다. 실제로 읽히는 객체와 다른 신원이
+    나와, 같은 checkpoint를 두 번 넣은 것을 놓칩니다. 답을 손으로 적지 않고 **그 객체의
+    절대 주소와 같은지**로 잽니다.
+    """
+
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "team")
+    monkeypatch.setenv("PILL_STORAGE_S3_PREFIX", "team-a")
+    key = "experiments/completed/run/best_checkpoint.pt"
+
+    assert ensemble._checkpoint_identity(key) == ensemble._checkpoint_identity(
+        f"s3://team/team-a/{key}"
+    )
+    # prefix를 무시하면 뿌리의 객체와 같아집니다. 그것은 다른 객체입니다.
+    assert ensemble._checkpoint_identity(key) != ensemble._checkpoint_identity(f"s3://team/{key}")
+
+
 def test_a_relative_key_stays_local_when_the_backend_is_local(monkeypatch, tmp_path) -> None:
     """local로 돌면 상대 key는 local입니다. 반대로 보내면 없는 곳을 가리킵니다."""
 
-    monkeypatch.setattr(
-        ensemble, "storage_environment", lambda: {"default_backend": "local", "bucket": "team"}
-    )
     monkeypatch.setattr(ensemble, "repository_root", lambda: tmp_path)
 
     assert not ensemble._checkpoint_identity("ckpt/best.pt").startswith("('s3'")
+
+
+def test_a_configured_local_root_is_where_a_relative_key_lives(monkeypatch, tmp_path) -> None:
+    """`PILL_STORAGE_LOCAL_ROOT`를 세우면 상대 key는 그 아래입니다.
+
+    설정을 손으로 다시 조립하다 이것도 빠뜨렸습니다. 저장소 뿌리를 기준으로 삼으면
+    실제로 읽히는 파일과 다른 신원이 나옵니다.
+    """
+
+    from src.common import LocalStorage
+
+    elsewhere = tmp_path / "elsewhere"
+    monkeypatch.setattr(ensemble, "repository_root", lambda: tmp_path)
+    monkeypatch.setenv("PILL_STORAGE_LOCAL_ROOT", str(elsewhere))
+
+    assert ensemble._checkpoint_identity("ckpt/best.pt") == str(
+        LocalStorage(elsewhere).identity("ckpt/best.pt")
+    )
+    # 저장소 뿌리를 기준으로 삼으면 다른 파일을 가리킵니다.
+    assert ensemble._checkpoint_identity("ckpt/best.pt") != str(
+        LocalStorage(tmp_path).identity("ckpt/best.pt")
+    )
