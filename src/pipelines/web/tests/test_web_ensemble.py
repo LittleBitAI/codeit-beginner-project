@@ -903,10 +903,14 @@ def test_failing_to_read_a_checkpoint_identity_is_reported(fake_runs, monkeypatc
     fake_runs("b", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
 
     class Broken:
+        def __init__(self, *args, **kwargs):
+            pass
+
         def identity(self, uri):
             raise StorageError("설정 오류")
 
-    monkeypatch.setattr(ensemble, "create_storage", lambda config: Broken())
+    monkeypatch.setattr(ensemble, "LocalStorage", Broken)
+    monkeypatch.setattr(ensemble, "S3Storage", Broken)
 
     with pytest.raises(Exception) as error:
         ensemble.check_selection(["a", "b"], run_id="fusion-two")
@@ -927,25 +931,36 @@ def test_scope_and_paths_agree_on_the_backend(monkeypatch) -> None:
     assert not ensemble._harvest_root().startswith("s3://")
 
 
-@pytest.mark.parametrize(
-    ("left", "right"),
-    [
-        pytest.param("s3://b/a/x.pt", "s3://b//a//x.pt", id="빗금이-겹침"),
-        pytest.param("s3://b/a/x.pt", "s3://b/a/x.pt/", id="끝에-빗금"),
-    ],
-)
-def test_two_s3_spellings_of_one_object_share_an_identity(left: str, right: str) -> None:
-    """`s3://`는 이미 절대 주소라 저장소에 묻지 않고 직접 풉니다.
+def test_the_s3_identity_matches_the_shared_storage_layer() -> None:
+    """규칙을 새로 적지 않고 공용 계층에 맡깁니다.
 
-    저장 계층에 물으면 bucket이 설정되지 않은 환경(기본 local, test)에서 늘 실패해
-    기능이 통째로 막힙니다. 대신 빗금 표기를 정규화해 같은 객체를 같은 값으로 만듭니다.
+    직접 풀었더니 계층과 반대로 움직였습니다 — S3에서 `a//x.pt`와 `a/x.pt`는 서로
+    **다른** key인데 같다고 보았습니다. 그래서 답을 손으로 적지 않고 **계층이 내는
+    값과 견줍니다.** 계층이 바뀌면 이 test가 함께 따라갑니다.
     """
 
-    assert ensemble._checkpoint_identity(left) == ensemble._checkpoint_identity(right)
-    assert ensemble._checkpoint_identity(left) != ensemble._checkpoint_identity("s3://b/a/y.pt")
+    from src.common import S3Storage
+
+    for uri in ("s3://b/a/x.pt", "s3://b//a//x.pt", "s3://b/a%2Fx.pt"):
+        expected = str(S3Storage(bucket="b").identity(uri))
+        assert ensemble._checkpoint_identity(uri) == expected
+
+
+def test_s3_keys_that_differ_by_a_slash_are_different_objects() -> None:
+    """`a//x.pt`와 `a/x.pt`는 S3에서 다른 key입니다. 같다고 보면 멀쩡한 조합을 막습니다."""
+
+    assert ensemble._checkpoint_identity("s3://b/a/x.pt") != ensemble._checkpoint_identity(
+        "s3://b//a//x.pt"
+    )
 
 
 def test_an_s3_identity_does_not_need_a_configured_bucket() -> None:
-    """bucket이 없어도 물어볼 수 있어야 합니다. 못 물으면 합치기가 통째로 막힙니다."""
+    """bucket이 없어도 물어볼 수 있어야 합니다. 못 물으면 합치기가 통째로 막힙니다.
 
-    assert ensemble._checkpoint_identity("s3://any/where.pt").startswith("s3://")
+    `identity()`는 원격에 닿지 않으므로 credential도, 설정된 bucket도 필요 없습니다.
+    """
+
+    identity = ensemble._checkpoint_identity("s3://any/where.pt")
+
+    assert "any" in identity and "where.pt" in identity
+    assert identity != ensemble._checkpoint_identity("s3://other/where.pt")

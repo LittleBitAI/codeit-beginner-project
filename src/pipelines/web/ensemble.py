@@ -24,6 +24,8 @@ from typing import Any
 
 from src.common import (
     ExperimentRegistryError,
+    LocalStorage,
+    S3Storage,
     StorageError,
     create_storage,
     list_experiment_summaries,
@@ -92,24 +94,23 @@ def _storage_config() -> dict[str, Any]:
 def _checkpoint_identity(uri: str) -> str:
     """checkpoint의 신원입니다. 표기가 달라도 같은 파일이면 같은 값입니다.
 
-    **`s3://`는 저장소에 묻지 않습니다.** 이미 절대 주소라 bucket과 key만 풀면
-    같은 파일인지 알 수 있고, 저장 계층에 물으면 bucket이 설정되지 않은 환경(기본
-    local, test)에서 늘 실패해 기능이 통째로 막힙니다.
+    **규칙을 새로 적지 않고 공용 저장 계층에 맡깁니다.** 직접 풀었더니 계층과 반대로
+    움직였습니다 — S3에서 `a//x.pt`와 `a/x.pt`는 서로 **다른** key인데 같다고 보았고,
+    percent 표기(`%2F`)는 같은 객체인데 다르다고 보았습니다. 규칙을 두 곳에 적으면
+    이렇게 갈립니다.
 
-    나머지는 local 저장소에 물어봅니다 — hard link나 대소문자 차이처럼 글자로는 못
-    가리는 것을 가려 줍니다. **여기서 나는 오류는 숨기지 않습니다.** local은 파일이
-    없어도 정상 신원을 내므로, 오류가 났다면 저장 설정 자체가 잘못된 것이고 글자로
-    되돌리면 같은 파일을 두 번 넣은 것을 놓칩니다.
+    `s3://`는 **주소에서 bucket을 뽑아** 그 저장소에 물어봅니다. `identity()`는 원격에
+    닿지 않으므로 credential도 설정도 필요 없고, bucket이 설정되지 않은 환경(기본
+    local, test)에서도 됩니다.
+
+    **오류는 숨기지 않습니다.** 글자로 되돌리면 같은 파일을 두 번 넣은 것을 놓칩니다.
     """
 
-    if uri.startswith("s3://"):
-        # `s3://bucket//a//b.pt`와 `s3://bucket/a/b.pt`는 같은 객체를 가리킵니다.
-        rest = uri[len("s3://"):]
-        bucket, _, key = rest.partition("/")
-        return "s3://" + bucket + "/" + "/".join(part for part in key.split("/") if part)
-    config = {"storage": {"backend": "local", "local": {"root": str(repository_root())}}}
     try:
-        return str(create_storage(config).identity(uri))
+        if uri.startswith("s3://"):
+            bucket = uri[len("s3://"):].split("/", 1)[0]
+            return str(S3Storage(bucket=bucket).identity(uri))
+        return str(LocalStorage(repository_root()).identity(uri))
     except StorageError as error:
         raise WebError(
             f"{uri}의 저장 신원을 얻지 못했습니다({type(error).__name__}). 같은 "
