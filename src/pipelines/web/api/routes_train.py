@@ -23,6 +23,7 @@ from ..jobs.model import (
     STATUS_CANCELLED,
     STATUS_FAILED,
     STATUS_INTERRUPTED,
+    STATUS_SUCCEEDED,
     TERMINAL_STATUSES,
     JobRecord,
 )
@@ -31,6 +32,7 @@ from ..train_config import (
     build_resume_config,
     data_field_specs,
     field_specs,
+    next_resume_run_id,
     read_runtime_config,
     resume_checkpoint_exists,
     validate_request,
@@ -377,7 +379,44 @@ def start_evaluation(job_id: str, payload: EvaluateRequest = Body(...)) -> dict[
         return {"evaluation": runner.start(record, payload.model_dump())}
 
 
-RESUMABLE_STATUSES = {STATUS_INTERRUPTED, STATUS_FAILED, STATUS_CANCELLED}
+RESUMABLE_STATUSES = {
+    STATUS_INTERRUPTED,
+    STATUS_FAILED,
+    STATUS_CANCELLED,
+    # 끝까지 간 학습도 이어갈 수 있습니다. best_epoch이 마지막 epoch이면 더 배울 것이
+    # 남아 있다는 뜻이고, 그때 처음부터 다시 도는 것은 이미 한 학습을 두 번 하는 일입니다.
+    STATUS_SUCCEEDED,
+}
+
+
+def _completed_epochs(record: JobRecord) -> int | None:
+    """그 실행이 실제로 마친 epoch 수입니다. train이 알려 주지 않았으면 ``None``."""
+
+    value = record.summary.get("completed_epochs")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _plan_refusal(record: JobRecord, epochs: int | None) -> str | None:
+    """총 epoch을 늘리지 않은 이어 학습을 시작 전에 거절할 이유입니다.
+
+    ``epochs``는 남은 수가 아니라 **전체 목표**입니다. 끝까지 간 학습을 그대로 이어가면
+    "이미 지난 epoch보다 크지 않다"며 train이 거절하는데, 그 답은 job과 config를 만들고
+    대기열을 다시 돌린 뒤에 옵니다. 화면에서 몇 epoch 더 돌릴지 받으면 여기서 끝납니다.
+    """
+
+    if record.status != STATUS_SUCCEEDED:
+        return None
+    done = _completed_epochs(record)
+    if done is None:
+        return None
+    if epochs is None:
+        return f"이 학습은 epoch {done}까지 마쳤습니다. 몇 epoch까지 더 돌릴지 정해 주세요."
+    if epochs <= done:
+        return (
+            f"총 epoch은 이미 마친 {done}보다 커야 합니다. "
+            f"{done + 5}처럼 더 큰 값을 보내세요."
+        )
+    return None
 
 
 @router.get("/jobs/{job_id}/resume")
@@ -401,8 +440,22 @@ def resume_availability(job_id: str) -> dict[str, Any]:
     record = get_manager().get(job_id)
     if record.status not in RESUMABLE_STATUSES:
         return {"available": False, "reason": "끝난 학습만 이어갈 수 있습니다."}
+    if record.status == STATUS_SUCCEEDED and record.summary.get("stopped_early"):
+        # 조기 종료로 끝난 실행의 checkpoint에는 patience를 다 쓴 상태가 그대로 들어
+        # 있어, 이어서 하면 train이 첫 batch 전에 거절합니다. 단추를 세워 두면 대기열만
+        # 한 번 돌고 같은 말로 끝납니다.
+        return {
+            "available": False,
+            "reason": (
+                "조기 종료로 끝난 학습입니다. patience를 다 쓴 상태가 checkpoint에 함께 "
+                "저장돼 이어갈 수 없습니다. 새 실험에서 patience를 올리거나 early "
+                "stopping을 끄고 시작하세요."
+            ),
+        }
     try:
-        exists = resume_checkpoint_exists(read_runtime_config(record.config_id))
+        exists = resume_checkpoint_exists(
+            read_runtime_config(record.config_id), record.artifacts
+        )
     except StorageError:
         return {
             "available": True,
@@ -429,11 +482,12 @@ def resume_job(
     payload: ResumeRequest = Body(...),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """중단·중지됐거나 checkpoint를 남기고 실패한 학습을 이어서 시작합니다.
+    """끝난 학습을 이어서 시작합니다. 중단·중지·실패한 것도, 끝까지 간 것도 같습니다.
 
     이어서 하는 실행은 **새 이름**을 받습니다. 같은 이름을 다시 쓰면 train이 남아 있는
     작업 폴더를 보고 시작을 거부하고, 결과도 섞입니다. `epochs`는 남은 수가 아니라
-    전체 목표이므로 비워 두면 중단된 실행의 계획을 그대로 씁니다.
+    전체 목표이므로 비워 두면 중단된 실행의 계획을 그대로 씁니다. 끝까지 간 학습은
+    그 계획을 이미 채웠으므로 더 큰 값을 받아야 합니다.
 
     끝난 이유는 묻지 않고 **checkpoint가 있는지만** 봅니다. 사람이 중지했든, 실패했든,
     서버가 상태를 잃었든 이어갈 수 있는 조건은 같습니다. 확인을 건너뛰면 새 설정과 job을
@@ -445,12 +499,15 @@ def resume_job(
     record = manager.get(job_id)
     if record.status not in RESUMABLE_STATUSES:
         raise JobConflictError(
-            "중단·중지됐거나 실패한 학습만 이어갈 수 있습니다."
+            "끝난 학습만 이어갈 수 있습니다. 돌고 있는 학습은 끝난 뒤에 이어가세요."
         )
+    refusal = _plan_refusal(record, payload.epochs)
+    if refusal is not None:
+        raise JobConflictError(refusal)
 
     source_config = read_runtime_config(record.config_id)
     try:
-        checkpoint_exists = resume_checkpoint_exists(source_config)
+        checkpoint_exists = resume_checkpoint_exists(source_config, record.artifacts)
     except StorageError as error:
         raise JobConflictError(
             "그 학습의 checkpoint를 확인하지 못했습니다. "
@@ -464,7 +521,11 @@ def resume_job(
 
     config = build_resume_config(
         source_config,
-        run_id=payload.run_id,
+        artifacts=record.artifacts,
+        # 이름은 A -> A.2 -> A.3으로 이어집니다. 이미 있는 번호를 다시 쓰면 train이
+        # 시작을 거부하므로, 이 서버가 아는 이름을 모두 건네 건너뛰게 합니다.
+        run_id=payload.run_id
+        or next_resume_run_id(record.run_id, [job.run_id for job in manager.list_jobs()]),
         epochs=payload.epochs,
     )
     config_id = write_runtime_config(config)

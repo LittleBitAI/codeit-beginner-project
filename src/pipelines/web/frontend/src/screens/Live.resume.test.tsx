@@ -13,6 +13,8 @@ import type { JobListing, JobRecord } from '../api/types';
 import { Live } from './Live';
 
 let posted: string[] = [];
+/** POST 본문. 화면이 전체 목표를 계산해 보내는지 봅니다. */
+let bodies: unknown[] = [];
 let current: JobRecord | null = null;
 /** 서버가 답할 이어하기 가능 여부. 화면은 이 답만 보고 단추를 세웁니다. */
 let availability: { available: boolean; reason: string | null } = {
@@ -64,6 +66,7 @@ function jsonResponse(body: unknown): Response {
 
 beforeEach(() => {
   posted = [];
+  bodies = [];
   current = null;
   availability = { available: true, reason: null };
   availabilityFails = false;
@@ -74,9 +77,10 @@ beforeEach(() => {
         typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
       if (init?.method === 'POST') {
         posted.push(path);
+        bodies.push(typeof init.body === 'string' ? JSON.parse(init.body) : init.body);
         return jsonResponse({
           config_id: 'cfg-2',
-          run_id: 'retina-stopped-resume-20260101T030000Z',
+          run_id: 'retina-stopped.2',
           resumed_from_job_id: 'job-1',
           resume_from: 'artifacts/experiments/completed/.retina-stopped.partial/last_checkpoint.pt',
           // 줄만 서고 시작하지는 않은 경우입니다. 시작하면 화면이 그쪽으로 넘어갑니다.
@@ -130,7 +134,7 @@ describe('Live 이어서 학습', () => {
 
     await waitFor(() => expect(posted).toEqual(['/api/train/jobs/job-1/resume']));
     expect(
-      await screen.findByText(/retina-stopped-resume-20260101T030000Z' 이름으로 대기열에 넣었습니다/),
+      await screen.findByText(/retina-stopped.2' 이름으로 대기열에 넣었습니다/),
     ).toBeInTheDocument();
   });
 
@@ -151,6 +155,34 @@ describe('Live 이어서 학습', () => {
 
     expect(await screen.findByText(/확인하지 못했습니다/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '이어서 학습' })).toBeInTheDocument();
+  });
+
+  // 끝까지 간 학습은 계획한 epoch을 이미 채웠습니다. 그대로 이어가면 train이
+  // "이미 지난 epoch보다 크지 않다"며 거절하므로, 화면이 몇 epoch 더 돌지를 받아
+  // **전체 목표**로 바꿔 보냅니다.
+  it('끝까지 간 학습은 몇 epoch 더 돌지를 받아 전체 목표로 보낸다', async () => {
+    show(
+      job({
+        status: 'succeeded',
+        status_label: '성공',
+        summary: { completed_epochs: 30, stopped_early: false },
+        artifacts: { last_checkpoint_uri: 'artifacts/x/last_checkpoint.pt' },
+      }),
+    );
+
+    const start = await screen.findByRole('button', { name: 'epoch 35까지 이어서 학습' });
+    fireEvent.click(start);
+
+    await waitFor(() => expect(posted).toEqual(['/api/train/jobs/job-1/resume']));
+    expect(bodies).toEqual([{ epochs: 35 }]);
+  });
+
+  it('끝까지 갔어도 서버가 아니라고 하면 시작 칸을 두지 않는다', async () => {
+    availability = { available: false, reason: '조기 종료로 끝난 학습입니다.' };
+    show(job({ status: 'succeeded', status_label: '성공', summary: { completed_epochs: 30 } }));
+
+    expect(await screen.findByText(/조기 종료로 끝난 학습입니다/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /이어서 학습/ })).toBeNull();
   });
 
   // **마친 epoch 수로는 알 수 없는 경우입니다.** 이 학습은 epoch 7까지 마쳤지만
