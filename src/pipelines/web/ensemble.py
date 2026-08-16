@@ -90,17 +90,31 @@ def _storage_config() -> dict[str, Any]:
 
 
 def _checkpoint_identity(uri: str) -> str:
-    """checkpoint의 저장 신원입니다. 못 물어보면 글자 그대로 씁니다.
+    """checkpoint의 신원입니다. 표기가 달라도 같은 파일이면 같은 값입니다.
 
-    신원을 못 얻는 것과 다른 파일인 것은 다릅니다. 못 얻었다고 합치기를 막으면,
-    저장소가 잠깐 흔들릴 때 멀쩡한 조합이 막힙니다.
+    **`s3://`는 저장소에 묻지 않습니다.** 이미 절대 주소라 bucket과 key만 풀면
+    같은 파일인지 알 수 있고, 저장 계층에 물으면 bucket이 설정되지 않은 환경(기본
+    local, test)에서 늘 실패해 기능이 통째로 막힙니다.
+
+    나머지는 local 저장소에 물어봅니다 — hard link나 대소문자 차이처럼 글자로는 못
+    가리는 것을 가려 줍니다. **여기서 나는 오류는 숨기지 않습니다.** local은 파일이
+    없어도 정상 신원을 내므로, 오류가 났다면 저장 설정 자체가 잘못된 것이고 글자로
+    되돌리면 같은 파일을 두 번 넣은 것을 놓칩니다.
     """
 
-    config, _ = _scope()
+    if uri.startswith("s3://"):
+        # `s3://bucket//a//b.pt`와 `s3://bucket/a/b.pt`는 같은 객체를 가리킵니다.
+        rest = uri[len("s3://"):]
+        bucket, _, key = rest.partition("/")
+        return "s3://" + bucket + "/" + "/".join(part for part in key.split("/") if part)
+    config = {"storage": {"backend": "local", "local": {"root": str(repository_root())}}}
     try:
         return str(create_storage(config).identity(uri))
-    except StorageError:
-        return uri
+    except StorageError as error:
+        raise WebError(
+            f"{uri}의 저장 신원을 얻지 못했습니다({type(error).__name__}). 같은 "
+            "checkpoint를 두 번 넣었는지 가릴 수 없어 멈춥니다."
+        ) from error
 
 
 def _submission_uri(run_id: str) -> str:
@@ -114,8 +128,7 @@ def _submission_uri(run_id: str) -> str:
 def _scope() -> tuple[dict[str, Any], str]:
     """kaggle 점수와 같은 자리 규칙을 씁니다."""
 
-    environment = storage_environment()
-    if environment["default_backend"] == "s3":
+    if _uses_s3():
         return {"storage": {"backend": "s3", "s3": {"prefix": ""}}}, _S3_PREFIX
     return (
         {"storage": {"backend": "local", "local": {"root": str(repository_root())}}},
@@ -680,54 +693,63 @@ def check_selection(
                 f"{item['run_id']}의 기록에 {', '.join(missing)}가 없어 합칠 수 없습니다."
             )
 
-    # 이름이 달라도 같은 checkpoint면 한 실행이 두 표를 갖습니다. evaluate가 이것을
-    # 거부하는데, 추론을 다 마친 뒤에 알게 됩니다.
-    seen: dict[str, str] = {}
+    # **evaluate가 읽는 값으로 견줍니다.** 기록과 예측 파일이 다른 값을 담을 수 있고,
+    # 실제로 거절 판정을 하는 쪽은 파일입니다. 예측이 있으면 파일이 선언한 것을,
+    # 아직 없으면 이제 만들 때 쓸 기록의 것을 봅니다.
+    declared: list[tuple[str, str, str]] = []
     for item in selected:
-        # **표기가 아니라 저장 신원으로 봅니다.** `s3://bucket/a.pt`와 `a.pt`는 글자로는
-        # 다르지만 같은 파일이고, evaluate는 신원으로 걸러 추론 뒤에 거절합니다.
-        checkpoint = _checkpoint_identity(str(item.get("checkpoint_uri") or ""))
-        if checkpoint in seen:
+        uri = item.get("test_predictions_uri")
+        if uri:
+            document = _read_predictions(str(uri))
+            if document["prediction_source"] == "fusion" or document["fused_from"] is not None:
+                raise WebError(
+                    f"{item['run_id']}은 이미 합친 결과입니다. 합친 것을 다시 합칠 수는 "
+                    "없으니 원본 실행들을 고르세요."
+                )
+            # 예측 문서가 **스스로** 무엇의 증거인지 말해야 합니다.
+            if not document["checkpoint_uri"]:
+                raise WebError(
+                    f"{item['run_id']}의 예측 파일이 어느 checkpoint의 증거인지 적고 "
+                    "있지 않아 합칠 수 없습니다."
+                )
+            if not document["test_manifest_uri"]:
+                raise WebError(
+                    f"{item['run_id']}의 예측 파일이 어느 시험지를 본 것인지 적고 "
+                    "있지 않아 합칠 수 없습니다."
+                )
+            declared.append(
+                (item["run_id"], str(document["checkpoint_uri"]), str(document["test_manifest_uri"]))
+            )
+        else:
+            declared.append(
+                (
+                    item["run_id"],
+                    str(item.get("checkpoint_uri") or ""),
+                    str((item.get("data_inputs") or {})["test_manifest_uri"]),
+                )
+            )
+
+    # 이름이 달라도 같은 checkpoint면 한 실행이 두 표를 갖습니다. 표기가 아니라
+    # **저장 신원**으로 봅니다 — `s3://bucket/a.pt`와 `a.pt`는 같은 파일입니다.
+    seen: dict[str, str] = {}
+    for name_of, checkpoint, _ in declared:
+        identity = _checkpoint_identity(checkpoint)
+        if identity in seen:
             raise WebError(
-                f"{seen[checkpoint]}와 {item['run_id']}가 같은 checkpoint를 가리킵니다. "
+                f"{seen[identity]}와 {name_of}가 같은 checkpoint를 가리킵니다. "
                 "한 실행이 두 표를 갖게 되어 확신도가 부풀려집니다."
             )
-        seen[checkpoint] = item["run_id"]
+        seen[identity] = name_of
 
     # 시험지가 다르면 evaluate가 거부합니다. 사람이 같은 사진임을 확인했다고 말한
     # 경우에만 통과시킵니다 — 그 확인 없이 추론부터 돌리면 전부 버려집니다.
-    manifests = {str((item.get("data_inputs") or {})["test_manifest_uri"]) for item in selected}
+    manifests = {manifest for _, _, manifest in declared}
     if len(manifests) > 1 and not allow_copied_images:
         raise WebError(
             "고른 실행들이 서로 다른 test manifest를 봅니다: "
             f"{', '.join(sorted(manifests))} — 사진이 같은데 위치만 다른 것을 확인했다면 "
             "'사진이 같은데 위치만 다른 것을 확인했습니다'를 켜고 다시 실행하세요."
         )
-
-    # 합친 결과는 다시 합칠 수 없습니다. 예측이 이미 있는 것만 지금 열어 볼 수 있고,
-    # 없는 것은 만든 뒤에야 알 수 있으므로 여기서 볼 수 있는 것만 봅니다.
-    for item in selected:
-        uri = item.get("test_predictions_uri")
-        if not uri:
-            continue
-        document = _read_predictions(str(uri))
-        if document["prediction_source"] == "fusion" or document["fused_from"] is not None:
-            raise WebError(
-                f"{item['run_id']}은 이미 합친 결과입니다. 합친 것을 다시 합칠 수는 "
-                "없으니 원본 실행들을 고르세요."
-            )
-        # 예측 문서가 **스스로** 무엇의 증거인지 말해야 합니다. 기록에 있는 값이
-        # 아니라 이 파일 안의 값을 evaluate가 읽습니다.
-        if not document["checkpoint_uri"]:
-            raise WebError(
-                f"{item['run_id']}의 예측 파일이 어느 checkpoint의 증거인지 적고 있지 "
-                "않아 합칠 수 없습니다."
-            )
-        if not document["test_manifest_uri"]:
-            raise WebError(
-                f"{item['run_id']}의 예측 파일이 어느 시험지를 본 것인지 적고 있지 "
-                "않아 합칠 수 없습니다."
-            )
 
     # 같은 이름의 결과가 이미 있으면 evaluate가 덮어쓰지 않고 멈춥니다. 그 판단도
     # 추론 뒤가 아니라 지금 합니다.

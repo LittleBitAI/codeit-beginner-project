@@ -619,13 +619,22 @@ def test_a_run_missing_its_data_inputs_is_refused_before_inference(fake_runs) ->
 
 
 def test_different_test_manifests_are_refused_before_inference(fake_runs) -> None:
-    """시험지가 다르면 evaluate가 거부합니다. 확인 없이 추론부터 돌리면 전부 버려집니다."""
+    """**예측 파일이 선언한** 시험지가 다르면 evaluate가 거부합니다.
+
+    확인 없이 추론부터 돌리면 그 시간이 전부 버려집니다.
+    """
 
     boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
     fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
-    fake_runs("b", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
-    other = next(item for item in ensemble.list_candidates() if item["run_id"] == "b")
-    other["data_inputs"]["test_manifest_uri"] = "s3://bucket/v6/test_manifest.json"
+    fake_runs(
+        "b",
+        0.61,
+        _prediction_document(
+            checkpoint="ckpt/b.pt",
+            boxes=boxes,
+            manifest="s3://bucket/datasets/processed/v6-seed42-8020-group-angle/test_manifest.json",
+        ),
+    )
 
     with pytest.raises(Exception) as error:
         ensemble.check_selection(["a", "b"], run_id="fusion-two")
@@ -683,15 +692,15 @@ def test_a_deeper_path_is_not_taken_as_a_run_name(monkeypatch, tmp_path) -> None
 
 
 def test_two_names_for_the_same_checkpoint_are_refused_before_inference(fake_runs) -> None:
-    """이름이 달라도 같은 checkpoint면 한 실행이 두 표를 갖습니다."""
+    """이름이 달라도 **예측 파일이 같은 checkpoint를 선언하면** 한 실행이 두 표를 갖습니다.
+
+    기록이 아니라 파일 안의 값을 evaluate가 읽습니다. 기록으로만 견주면 여기서
+    통과하고 추론을 다 마친 뒤에 거절됩니다.
+    """
 
     boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
-    fake_runs("first", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
-    fake_runs("second", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
-    twin = next(item for item in ensemble.list_candidates() if item["run_id"] == "second")
-    twin["checkpoint_uri"] = next(
-        item for item in ensemble.list_candidates() if item["run_id"] == "first"
-    )["checkpoint_uri"]
+    fake_runs("first", 0.62, _prediction_document(checkpoint="ckpt/shared.pt", boxes=boxes))
+    fake_runs("second", 0.61, _prediction_document(checkpoint="ckpt/shared.pt", boxes=boxes))
 
     with pytest.raises(Exception) as error:
         ensemble.check_selection(["first", "second"], run_id="fusion-two")
@@ -750,18 +759,24 @@ def test_a_forced_local_backend_with_a_bucket_stays_local(monkeypatch) -> None:
     assert not ensemble._submission_uri("fusion-two").startswith("s3://")
 
 
-def test_two_spellings_of_one_checkpoint_are_refused(fake_runs, monkeypatch) -> None:
-    """`s3://bucket/a.pt`와 `a.pt`는 글자로만 다르고 같은 파일입니다."""
+def test_two_spellings_of_one_checkpoint_are_refused(fake_runs, monkeypatch, tmp_path) -> None:
+    """`s3://bucket/a.pt`와 `a.pt`는 글자로만 다르고 같은 파일입니다.
+
+    helper를 흉내 내면 진짜 구현이 글자를 돌려주도록 망가져도 이 test가 통과합니다.
+    그래서 **실제 저장 계층에 물어보게** 두고, 같은 파일을 두 표기로 가리킵니다.
+    """
+
+    monkeypatch.setattr(
+        ensemble, "storage_environment", lambda: {"default_backend": "local", "bucket": None}
+    )
+    monkeypatch.setattr(ensemble, "repository_root", lambda: tmp_path)
+    shared = tmp_path / "ckpt/shared.pt"
+    shared.parent.mkdir(parents=True)
+    shared.write_bytes(b"weights")
 
     boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
-    fake_runs("first", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
-    fake_runs("second", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
-    for item in ensemble.list_candidates():
-        item["checkpoint_uri"] = (
-            "s3://bucket/shared.pt" if item["run_id"] == "first" else "shared.pt"
-        )
-    # 저장 계층이 둘을 같은 파일이라고 답하는 상황입니다.
-    monkeypatch.setattr(ensemble, "_checkpoint_identity", lambda uri: "same-file")
+    fake_runs("first", 0.62, _prediction_document(checkpoint="ckpt/shared.pt", boxes=boxes))
+    fake_runs("second", 0.61, _prediction_document(checkpoint="./ckpt/shared.pt", boxes=boxes))
 
     with pytest.raises(Exception) as error:
         ensemble.check_selection(["first", "second"], run_id="fusion-two")
@@ -835,3 +850,102 @@ def test_a_prediction_file_that_does_not_say_what_it_is_is_refused(
     with pytest.raises(Exception) as error:
         ensemble.check_selection(["a", "b"], run_id="fusion-two")
     assert phrase in str(error.value)
+
+
+def test_the_document_wins_over_the_record_for_checkpoints(fake_runs) -> None:
+    """기록은 서로 다른데 **파일이 같은 checkpoint를 선언한** 경우입니다.
+
+    기록으로만 견주면 통과하고, evaluate가 파일을 읽어 추론 뒤에 거절합니다.
+    """
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("first", 0.62, _prediction_document(checkpoint="ckpt/same.pt", boxes=boxes))
+    fake_runs("second", 0.61, _prediction_document(checkpoint="ckpt/same.pt", boxes=boxes))
+    # 기록에는 서로 다른 checkpoint가 적혀 있습니다.
+    for item in ensemble.list_candidates():
+        item["checkpoint_uri"] = f"s3://bucket/{item['run_id']}/best_checkpoint.pt"
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["first", "second"], run_id="fusion-two")
+    assert "같은 checkpoint" in str(error.value)
+
+
+def test_the_document_wins_over_the_record_for_manifests(fake_runs) -> None:
+    """기록은 같은데 **파일이 다른 시험지를 선언한** 경우입니다."""
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("ready", 0.62, _prediction_document(
+        checkpoint="ckpt/a.pt",
+        boxes=boxes,
+        manifest="s3://bucket/datasets/processed/v6-seed42-8020-group-angle/test_manifest.json",
+    ))
+    fake_runs("pending", 0.61, None)
+    # 기록에는 둘 다 같은 시험지가 적혀 있습니다.
+    for item in ensemble.list_candidates():
+        item["data_inputs"]["test_manifest_uri"] = "s3://bucket/v/test_manifest.json"
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["ready", "pending"], run_id="fusion-two")
+    assert "test manifest" in str(error.value)
+
+
+def test_failing_to_read_a_checkpoint_identity_is_reported(fake_runs, monkeypatch) -> None:
+    """글자로 되돌리면 **같은 파일을 두 번 넣은 것을 놓칩니다.**
+
+    S3는 원격에 닿지 않고 경로만 풀고, local은 파일이 없어도 정상 신원을 냅니다.
+    그래도 오류가 났다면 저장 설정 자체가 잘못된 것입니다.
+    """
+
+    from src.common import StorageError
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    fake_runs("b", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
+
+    class Broken:
+        def identity(self, uri):
+            raise StorageError("설정 오류")
+
+    monkeypatch.setattr(ensemble, "create_storage", lambda config: Broken())
+
+    with pytest.raises(Exception) as error:
+        ensemble.check_selection(["a", "b"], run_id="fusion-two")
+    assert "저장 신원을 얻지 못했습니다" in str(error.value)
+
+
+def test_scope_and_paths_agree_on_the_backend(monkeypatch) -> None:
+    """같은 판단을 두 곳에 적으면 다시 갈립니다. 한 곳만 봅니다."""
+
+    monkeypatch.setattr(
+        ensemble,
+        "storage_environment",
+        lambda: {"default_backend": "local", "bucket": "some-bucket"},
+    )
+
+    assert ensemble._scope()[0]["storage"]["backend"] == "local"
+    assert ensemble._storage_config()["backend"] == "local"
+    assert not ensemble._harvest_root().startswith("s3://")
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        pytest.param("s3://b/a/x.pt", "s3://b//a//x.pt", id="빗금이-겹침"),
+        pytest.param("s3://b/a/x.pt", "s3://b/a/x.pt/", id="끝에-빗금"),
+    ],
+)
+def test_two_s3_spellings_of_one_object_share_an_identity(left: str, right: str) -> None:
+    """`s3://`는 이미 절대 주소라 저장소에 묻지 않고 직접 풉니다.
+
+    저장 계층에 물으면 bucket이 설정되지 않은 환경(기본 local, test)에서 늘 실패해
+    기능이 통째로 막힙니다. 대신 빗금 표기를 정규화해 같은 객체를 같은 값으로 만듭니다.
+    """
+
+    assert ensemble._checkpoint_identity(left) == ensemble._checkpoint_identity(right)
+    assert ensemble._checkpoint_identity(left) != ensemble._checkpoint_identity("s3://b/a/y.pt")
+
+
+def test_an_s3_identity_does_not_need_a_configured_bucket() -> None:
+    """bucket이 없어도 물어볼 수 있어야 합니다. 못 물으면 합치기가 통째로 막힙니다."""
+
+    assert ensemble._checkpoint_identity("s3://any/where.pt").startswith("s3://")
