@@ -21,6 +21,7 @@ import { Home } from './screens/Home';
 import { Live } from './screens/Live';
 import { NewExperimentSheet } from './screens/NewExperimentSheet';
 import { EdaSheet } from './screens/EdaSheet';
+import { Ensemble } from './screens/Ensemble';
 import { PrepareSheet } from './screens/PrepareSheet';
 import { Records, type DatasetOption } from './screens/Records';
 import { SettingsSheet } from './screens/SettingsSheet';
@@ -197,6 +198,9 @@ function Shell() {
             />
           }
         />
+        {/* 기록과 달리 dataset으로 거르지 않습니다. 합쳐도 되는 조합인지는 화면이
+            직접 재서 알려 주므로, 미리 좁혀 두면 그 판단을 가립니다. */}
+        <Route path="/ensemble" element={<Ensemble />} />
         <Route path="/monitor" element={<Live
               listing={listing.data}
               onNewExperiment={() => setSheet('new')}

@@ -1,0 +1,78 @@
+"""여러 실행의 test 예측을 합치는 route.
+
+합칠 값어치가 있는지 **합치기 전에** 알려 주는 것이 이 route의 목적입니다. 이득을
+확인하는 방법이 Kaggle 제출뿐이라, 잘못 고르면 하루치 제출이 사라집니다.
+
+진단은 막지 않고 알려 주기만 합니다. 예측이 틀릴 때가 있고, 막아 버리면 반증할 길까지
+막히기 때문입니다.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Body
+from pydantic import BaseModel, Field
+
+from .. import ensemble
+from ..ensemble_jobs import get_ensemble_runner
+
+
+router = APIRouter(prefix="/api/ensemble", tags=["ensemble"])
+
+
+class SelectionRequest(BaseModel):
+    """합칠 실행 이름들."""
+
+    run_ids: list[str] = Field(min_length=1, max_length=32)
+
+
+class StartRequest(SelectionRequest):
+    """합쳐서 제출을 만들 때 쓰는 요청."""
+
+    run_id: str = Field(min_length=1, max_length=128)
+    # 사진이 같은데 위치만 다른 것을 사람이 확인했을 때만 켭니다. 진단이 시험지
+    # 경고를 냈을 때 화면이 이 값을 물어봅니다.
+    allow_copied_images: bool = False
+    overwrite: bool = False
+
+
+@router.get("/candidates")
+def list_candidates() -> dict[str, Any]:
+    """합칠 수 있는 실행 목록입니다. 점수가 높은 것부터 옵니다."""
+
+    return {"candidates": ensemble.list_candidates()}
+
+
+@router.post("/diagnose")
+def diagnose(request: SelectionRequest = Body(...)) -> dict[str, Any]:
+    """고른 조합을 합치기 전에 알 수 있는 것을 전부 잽니다.
+
+    예측 파일을 읽어야 해서 처음 한 번은 수 초 걸립니다. 재 본 쌍은 저장해 두고 다시
+    씁니다 — 후보를 하나씩 바꿔 볼 때 같은 쌍을 계속 다시 재지 않으려는 것입니다.
+    """
+
+    return ensemble.diagnose(request.run_ids)
+
+
+@router.post("/jobs", status_code=201)
+def start(request: StartRequest = Body(...)) -> dict[str, Any]:
+    """고른 실행을 합쳐 제출 CSV를 만듭니다.
+
+    예측이 아직 없는 실행은 **먼저 만듭니다.** 체크포인트만 있으면 후보가 되므로,
+    한 번도 test 추론을 안 돌린 학습도 여기서 바로 고를 수 있습니다. 그 단계만
+    GPU를 쓰고, 합치는 것 자체는 CPU로 몇 분입니다.
+    """
+
+    return get_ensemble_runner().start(
+        request.run_ids,
+        run_id=request.run_id,
+        allow_copied_images=request.allow_copied_images,
+    )
+
+
+@router.get("/jobs")
+def status() -> dict[str, Any]:
+    """지금 도는 융합의 상태입니다. 한 번에 하나만 돕니다."""
+
+    return get_ensemble_runner().status()
