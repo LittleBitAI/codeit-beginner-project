@@ -68,6 +68,10 @@ class Settings:
     # 있으면 test 추론 대신 이 예측 파일들을 합쳐 씁니다. 실행 여럿을
     # 합치는 유일한 통로이며, 비어 있으면 지금까지처럼 추론합니다.
     test_predictions_input_uris: tuple[str, ...]
+    # 사진이 다른 곳에 있어도 같은 시험지로 볼지입니다. 기본은 막습니다 — 위치가 다른
+    # 것은 다른 사진이라는 증명은 아니지만, 잘못 합치면 조용히 틀린 제출이 나오고
+    # 잘못 막히면 시끄럽게 멈춥니다. 같은 사진임을 **사람이 확인했을 때만** 켭니다.
+    fusion_allow_copied_images: bool
     metrics_uri: str
     predictions_uri: str
     submission_uri: str | None
@@ -245,6 +249,7 @@ def _load_fusion_inputs(
     test_records: Sequence[Mapping[str, Any]],
     test_category_ids: frozenset[int],
     test_manifest_uri: str,
+    allow_copied_images: bool,
 ) -> tuple[list[list[dict[str, Any]]], list[dict[str, Any]]]:
     """합칠 예측을 읽고, 합쳐도 되는 것들인지 확인합니다.
 
@@ -253,8 +258,11 @@ def _load_fusion_inputs(
     **같은 시험지를 봤는가.** 예측에 나온 image id만 보면 안 됩니다. 아무것도 검출하지
     못한 이미지는 목록에 없는 것이 정상이라 멀쩡한 입력을 거절하고, 같은 id를 쓰는
     다른 시험지는 그대로 지나갑니다. 각 파일이 적어 둔 test manifest를 **실제로 읽어**
-    image id와 크기와 category를 견줍니다. 사진의 위치는 보지 않습니다 — 같은 시험지가
-    dataset 판마다 다른 prefix에 복사돼 있어 위치를 견주면 정당한 조합을 막습니다.
+    image id와 사진의 위치와 크기와 category를 견줍니다. 위치까지 견주는 것은 위치가
+    내용을 증명해서가 아니라 **틀리는 방향이 다르기** 때문입니다 — 잘못 합치면 조용히
+    틀린 제출이 나오고, 잘못 막히면 시끄럽게 멈춥니다. 같은 시험지가 dataset 판마다
+    다른 prefix에 복사돼 있는 것은 실제로 있는 일이라, 사람이 같은 사진임을 확인했으면
+    `fusion_allow_copied_images`로 위치만 빼고 견줍니다.
 
     **서로 다른 실행인가.** 그 예측을 만든 **checkpoint**로 봅니다. 그것이 모델의
     신원이고, 같은 checkpoint는 몇 번을 넣어도 한 실행입니다. 표기가 달라도 같은
@@ -266,22 +274,24 @@ def _load_fusion_inputs(
     ) -> tuple[Any, ...]:
         """시험지의 내용을 견줄 수 있는 값으로 만듭니다."""
 
-        # 사진의 **위치**는 견주지 않습니다. 같은 시험지가 dataset 판마다 다른
-        # prefix에 복사돼 있어(`raw/v5/...`와 `raw/v6/...`, 바이트까지 동일함을
-        # 확인했습니다) 위치를 견주면 정당한 조합을 막습니다.
-        #
-        # 사진 **이름**도 따로 견줄 것이 없습니다. `parse_test_manifest`가 이미
+        # 사진 **이름**은 따로 견줄 것이 없습니다. `parse_test_manifest`가 이미
         # `file_name`의 숫자 stem과 image id가 같기를 요구하므로, id가 같으면 이름도
-        # 같습니다. 견줘 봐야 `20.jpg`와 `0020.jpg` 같은 표기 차이로 멀쩡한 조합만
-        # 막습니다.
+        # 같습니다. 그래서 견주는 것은 **어느 파일인가**이고, 표기가 달라도 같은
+        # 파일이면 걸리도록 저장 계층에 물어봅니다.
         #
-        # ponytail: 남는 구멍은 "같은 id에 같은 크기, 같은 class인데 사진만 다른
-        # 시험지"이고, 위치를 견줘도 막히지 않습니다(같은 자리에 다른 사진이 놓일 수
-        # 있음). 가리려면 842장을 내려받아 내용을 해시해야 합니다. manifest에 content
-        # digest가 생기면 그때 그것으로 견줍니다.
+        # ponytail: 위치는 내용의 증명이 아니라 보수적인 대리물입니다. 같은 자리에
+        # 다른 사진이 놓이면 이것으로도 못 막습니다. manifest에 content digest가
+        # 생기면 이 자리를 digest로 바꾸고 `fusion_allow_copied_images`를 없앱니다.
         return (
             frozenset(
-                (record["image_id"], record["width"], record["height"])
+                (
+                    record["image_id"],
+                    None
+                    if allow_copied_images
+                    else store.artifact_identity(record["image_uri"]),
+                    record["width"],
+                    record["height"],
+                )
                 for record in records
             ),
             category_ids,
@@ -313,7 +323,9 @@ def _load_fusion_inputs(
             other_records, other_categories = load_test_manifest(store, declared)
             if manifest_content(other_records, other_categories) != own_content:
                 raise ConfigurationError(
-                    f"{uri}는 다른 시험지를 본 예측입니다: {declared}"
+                    f"{uri}는 다른 시험지를 본 예측입니다: {declared}\n"
+                    "사진이 같은데 위치만 다른 것을 확인했다면 "
+                    "evaluate.fusion_allow_copied_images를 true로 두세요."
                 )
             checked_manifests.add(declared_target)
 
@@ -484,6 +496,12 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         raise ConfigurationError("seed는 정수여야 합니다.")
 
     device = _optional_uri(settings.get("device"), "evaluate.device") or DEFAULT_DEVICE
+    fusion_allow_copied_images = settings.get("fusion_allow_copied_images", False)
+    if not isinstance(fusion_allow_copied_images, bool):
+        raise ConfigurationError(
+            "evaluate.fusion_allow_copied_images는 true 또는 false여야 합니다."
+        )
+
     overwrite = settings.get("overwrite", False)
     if not isinstance(overwrite, bool):
         raise ConfigurationError("evaluate.overwrite는 true 또는 false여야 합니다.")
@@ -522,6 +540,7 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         checkpoint_uri=checkpoint_uri,
         predictions_input_uri=predictions_input_uri,
         test_predictions_input_uris=test_predictions_input_uris,
+        fusion_allow_copied_images=fusion_allow_copied_images,
         metrics_uri=metrics_uri,
         predictions_uri=predictions_uri,
         submission_uri=submission_uri,
@@ -674,6 +693,7 @@ def run(config: dict) -> dict:
                 test_records=test_records,
                 test_category_ids=test_category_ids,
                 test_manifest_uri=str(settings.test_manifest_uri),
+                allow_copied_images=settings.fusion_allow_copied_images,
             )
             fused_test_predictions = fuse_predictions(groups)
             progress.emit(

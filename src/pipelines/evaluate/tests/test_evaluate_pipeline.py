@@ -1368,49 +1368,113 @@ def test_a_fusion_result_cannot_be_fused_again(
     assert "합친 결과를 다시 합칠 수는 없습니다" in result["message"]
 
 
-def test_the_same_test_set_copied_to_another_place_is_still_the_same(
-    base_config: dict, repository_root: Path
-):
-    """같은 시험지가 다른 곳에 복사돼 있어도 같은 시험지입니다.
+def _add_copied_test_manifest(
+    repository_root: Path,
+    *,
+    sizes: tuple[int, int] = (100, 100),
+    category_ids: tuple[int, int] = (3, 7),
+) -> str:
+    """같은 시험지를 다른 폴더에 복사해 둡니다.
 
     dataset 판마다 같은 사진을 자기 prefix로 복사해 둡니다(`raw/v5/...`와
-    `raw/v6/...`). 사진의 **위치**를 견주면 그 둘로 만든 예측을 합칠 수 없게 됩니다 —
-    실제로 합치려던 일곱 개 중 둘이 그렇게 막혔습니다.
-
-    이 test가 재는 것은 **위치를 무시한다**는 것 하나입니다. 사진이 정말 같은 파일인지는
-    재지 않습니다 — 이 코드가 사진을 열지 않기 때문에 test도 그것을 세울 수 없습니다.
-    같은 id가 서로 다른 사진을 가리키는 경우는 `parse_test_manifest`가 `file_name`의
-    숫자 stem과 image id가 같기를 요구해 이름 수준에서는 이미 묶여 있고, 그 이름의
-    사진이 정말 같은 바이트인지는 842장을 내려받아야만 알 수 있습니다.
+    `raw/v6/...`). 사진 자체는 만들지 않습니다 — 이 코드는 사진을 열지 않으므로
+    만들어도 아무것도 증명하지 못합니다.
     """
-    _add_test_manifest(base_config, repository_root)
-    base_config["inputs"]["train"].pop("best_checkpoint_uri")
-
+    width, height = sizes
     copied = repository_root / "data/test_copy"
     copied.mkdir(parents=True, exist_ok=True)
     write_json(
         copied / "instances.json",
         {
             "images": [
-                {"id": 20, "file_name": "0020.jpg", "width": 100, "height": 100},
-                {"id": 10, "file_name": "0010.jpg", "width": 100, "height": 100},
+                {"id": 20, "file_name": "0020.jpg", "width": width, "height": height},
+                {"id": 10, "file_name": "0010.jpg", "width": width, "height": height},
             ],
             "annotations": [],
-            "categories": [{"id": 3, "name": "pill-a"}, {"id": 7, "name": "pill-b"}],
+            "categories": [
+                {"id": category_ids[0], "name": "pill-a"},
+                {"id": category_ids[1], "name": "pill-b"},
+            ],
         },
     )
+    return "data/test_copy/instances.json"
+
+
+def _fuse_across_two_places(base_config: dict, repository_root: Path, copy_uri: str):
+    base_config["inputs"]["train"].pop("best_checkpoint_uri")
     base_config["evaluate"]["test_predictions_input_uris"] = [
         _write_fusion_input(repository_root, "here", [10, 20], checkpoint="ckpt/h.pt"),
         _write_fusion_input(
             repository_root, "there", [10, 20],
             checkpoint="ckpt/t.pt",
-            manifest_uri="data/test_copy/instances.json",
+            manifest_uri=copy_uri,
         ),
     ]
+    return run(base_config)
 
-    result = run(base_config)
+
+def test_photos_in_another_place_are_refused_unless_someone_checked(
+    base_config: dict, repository_root: Path
+):
+    """사진이 다른 곳에 있으면 **기본은 막습니다.**
+
+    위치가 다르다는 것은 다른 사진이라는 증명이 아닙니다. 그런데도 막는 것은 틀리는
+    방향이 다르기 때문입니다 — 잘못 합치면 조용히 틀린 제출이 나오고, 잘못 막히면
+    시끄럽게 멈춰서 사람이 확인할 기회가 생깁니다.
+
+    막을 때는 **빠져나갈 길을 알려 줘야** 합니다. 그러지 않으면 정당한 조합이 막다른
+    길이 됩니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    copy_uri = _add_copied_test_manifest(repository_root)
+
+    result = _fuse_across_two_places(base_config, repository_root, copy_uri)
+
+    assert result["status"] == "error"
+    assert "다른 시험지" in result["message"]
+    assert "fusion_allow_copied_images" in result["message"]
+
+
+def test_copied_photos_are_accepted_once_someone_says_they_checked(
+    base_config: dict, repository_root: Path
+):
+    """`fusion_allow_copied_images`를 켜면 위치만 빼고 견줍니다.
+
+    실제로 합치려던 일곱 개 중 둘이 위치 때문에 막혔고, 그 둘은 MD5까지 같은
+    복사본이었습니다. 사람이 그것을 확인했다고 말하는 자리가 이 설정입니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    copy_uri = _add_copied_test_manifest(repository_root)
+    base_config["evaluate"]["fusion_allow_copied_images"] = True
+
+    result = _fuse_across_two_places(base_config, repository_root, copy_uri)
 
     assert result["status"] == "ok", result["message"]
+
+
+@pytest.mark.parametrize(
+    "difference",
+    [
+        pytest.param({"sizes": (100, 200)}, id="크기가-다름"),
+        pytest.param({"category_ids": (3, 9)}, id="category가-다름"),
+    ],
+)
+def test_saying_the_photos_were_checked_does_not_skip_the_rest(
+    base_config: dict, repository_root: Path, difference: dict
+):
+    """확인했다는 말은 **사진 위치 하나만** 면제합니다.
+
+    이 설정이 시험지 검사를 통째로 건너뛰면, 사진을 확인한 사람이 크기와 class까지
+    보증한 셈이 됩니다. 확인한 것만 면제해야 합니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    copy_uri = _add_copied_test_manifest(repository_root, **difference)
+    base_config["evaluate"]["fusion_allow_copied_images"] = True
+
+    result = _fuse_across_two_places(base_config, repository_root, copy_uri)
+
+    assert result["status"] == "error"
+    assert "다른 시험지" in result["message"]
 
 
 def test_a_fusion_result_is_refused_even_when_it_names_a_checkpoint(
