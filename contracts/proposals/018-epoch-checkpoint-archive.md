@@ -56,8 +56,10 @@ train이 이 표를 기본값으로 쓰지는 않는다. 기본은 "남기지 �
 - checkpoint payload는 evaluate와의 계약이다. 보관본은 그 payload에서 optimizer 상태를
   **뺀 것**이므로, `evaluate/predictor.py`와 `mmdetection_backend.py`가 읽는 key는 전부
   그대로 있다.
-- 남기는 시점은 `checkpoint_every`를 함께 따른다(기본 1이라 매 epoch). 주기를 늘려
-  두면 보관도 그 주기로만 된다.
+- 보관은 **checkpoint를 남기는 시점마다** 함께 일어난다(기본 1이라 매 epoch). 주기를
+  늘리면 보관도 그 주기를 따르지만, 마지막 epoch과 조기 종료 epoch은 주기 밖이라도
+  checkpoint가 남으므로 보관본도 함께 남는다. 그 둘은 빼면 안 되는 후보다 — best epoch이
+  마지막인지 보려고 만든 기능이라 마지막을 빠뜨리면 물음 자체가 사라진다.
 - 이어서 학습한 실행은 자기 run_id 아래에 자기가 돈 epoch만 남긴다. 앞선 실행의
   보관본을 건드리지 않는다.
 
