@@ -79,9 +79,9 @@ describe('재순위 embedding 칸', () => {
     render(<EmbeddingPanel selected={[]} onToggle={() => undefined} />);
     await screen.findByText('emb-r34');
 
-    const boxes = screen.getAllByRole('checkbox') as HTMLInputElement[];
-    expect(boxes[0].disabled).toBe(false);
-    expect(boxes[1].disabled).toBe(true);
+    const boxes = screen.getAllByRole('checkbox');
+    expect((boxes[0] as HTMLInputElement).disabled).toBe(false);
+    expect((boxes[1] as HTMLInputElement).disabled).toBe(true);
   });
 
   it('고른 전처리 폴더에서 참조 crop과 class map을 함께 집는다', async () => {
