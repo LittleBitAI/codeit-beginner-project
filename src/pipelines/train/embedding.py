@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import random
 import tarfile
 import tempfile
@@ -103,6 +104,30 @@ class EmbeddingSettings:
     output_prefix: str
 
 
+def _repository_path(raw: Mapping[str, Any], name: str) -> str:
+    """저장소 안을 가리키는 상대 경로만 받습니다.
+
+    detector가 `train.output_dir`에 거는 것과 같은 규칙입니다. 막지 않으면 절대
+    경로나 `..`로 저장소 **밖에** checkpoint를 쓰고, 그 자리가 그대로 artifact URI가
+    되어 남의 컴퓨터 경로와 사용자 이름까지 결과에 실려 나갑니다.
+    """
+
+    value = raw.get(name, EMBEDDING_SETTING_DEFAULTS[name])
+    if not isinstance(value, str) or not value.strip():
+        raise EmbeddingTrainingError(f"train.{name}은 비어 있지 않은 문자열이어야 합니다.")
+    text = value.strip()
+    candidate = Path(text)
+    if candidate.is_absolute() or ntpath.isabs(text):
+        raise EmbeddingTrainingError(f"train.{name}은 저장소 기준 상대 경로여야 합니다.")
+    try:
+        (REPOSITORY_ROOT / candidate).resolve().relative_to(REPOSITORY_ROOT)
+    except ValueError as error:
+        raise EmbeddingTrainingError(
+            f"train.{name}이 저장소 밖을 가리킵니다: {text}"
+        ) from error
+    return text
+
+
 def _positive_int(raw: Mapping[str, Any], name: str) -> int:
     value = raw.get(name, EMBEDDING_SETTING_DEFAULTS.get(name))
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -131,7 +156,9 @@ def settings(config: Mapping[str, Any]) -> EmbeddingSettings:
         )
 
     run_id = raw.get("run_id")
-    if not isinstance(run_id, str) or not RUN_ID_PATTERN.match(run_id):
+    # `match`가 아니라 `fullmatch`입니다. python의 `$`는 **끝의 줄바꿈 앞에서도**
+    # 맞으므로, `match`로는 `name\n`이 통과해 그 이름이 경로에 실려 갑니다.
+    if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
         raise EmbeddingTrainingError("train.run_id가 이름 규칙에 맞지 않습니다.")
 
     backbone = raw.get("backbone", DEFAULT_EMBEDDING_BACKBONE)
@@ -170,10 +197,8 @@ def settings(config: Mapping[str, Any]) -> EmbeddingSettings:
         num_workers=workers,
         pretrained=pretrained,
         checkpoint_every=_positive_int(raw, "checkpoint_every"),
-        output_dir=str(raw.get("output_dir", EMBEDDING_SETTING_DEFAULTS["output_dir"])),
-        output_prefix=str(
-            raw.get("output_prefix", EMBEDDING_SETTING_DEFAULTS["output_prefix"])
-        ),
+        output_dir=_repository_path(raw, "output_dir"),
+        output_prefix=_repository_path(raw, "output_prefix"),
     )
 
 
@@ -192,6 +217,43 @@ def data_inputs(config: Mapping[str, Any]) -> dict[str, str]:
     return {key: str(data[key]) for key in EMBEDDING_DATA_ARTIFACT_KEYS}
 
 
+def _inside(destination: Path, name: str) -> Path:
+    """푼 자리 안을 가리키는 경로인지 확인하고 그 경로를 돌려줍니다.
+
+    **문자열 앞자리 비교로는 부족합니다.** `dest`와 `dest-evil`은 앞자리가 같아
+    통과합니다. 경계는 경로 단위로 봐야 하므로 `relative_to`에 맡깁니다.
+    """
+
+    if ntpath.isabs(name) or Path(name).is_absolute():
+        raise EmbeddingTrainingError(f"crop 은행에 절대 경로가 있습니다: {name}")
+    root = destination.resolve()
+    target = (destination / name).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as error:
+        raise EmbeddingTrainingError(
+            f"crop 은행에 폴더 밖을 가리키는 경로가 있습니다: {name}"
+        ) from error
+    return target
+
+
+def _safe_member(member: tarfile.TarInfo, destination: Path) -> None:
+    """푸는 항목 하나를 검사합니다.
+
+    이름만 봐서는 모자랍니다. symlink와 hardlink는 **가리키는 곳**으로 나갈 수 있고,
+    device나 fifo는 애초에 crop 은행에 있을 이유가 없습니다. 은행은 우리가 만들지만
+    읽는 쪽은 남이 만든 파일도 받습니다.
+    """
+
+    if not (member.isfile() or member.isdir()):
+        raise EmbeddingTrainingError(
+            f"crop 은행에 보통 파일이 아닌 항목이 있습니다: {member.name}"
+        )
+    _inside(destination, member.name)
+    if member.linkname:
+        _inside(destination, member.linkname)
+
+
 def read_crop_bank(storage: Any, uri: str, destination: Path) -> list[dict[str, Any]]:
     """crop 은행 tar를 풀어 목록을 돌려줍니다.
 
@@ -205,11 +267,7 @@ def read_crop_bank(storage: Any, uri: str, destination: Path) -> list[dict[str, 
         storage.download_file(uri, archive)
         with tarfile.open(archive) as opened:
             for member in opened.getmembers():
-                target = (destination / member.name).resolve()
-                if not str(target).startswith(str(destination.resolve())):
-                    raise EmbeddingTrainingError(
-                        f"crop 은행에 위험한 경로가 있습니다: {member.name}"
-                    )
+                _safe_member(member, destination)
             opened.extractall(destination)
         document = json.loads((destination / INDEX_MEMBER).read_text(encoding="utf-8"))
     except (StorageError, OSError, ValueError, tarfile.TarError) as error:
@@ -221,7 +279,60 @@ def read_crop_bank(storage: Any, uri: str, destination: Path) -> list[dict[str, 
     records = document.get("records") if isinstance(document, Mapping) else None
     if not records:
         raise EmbeddingTrainingError(f"crop 은행이 비어 있습니다: {uri}")
-    return [dict(record) for record in records]
+
+    checked: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise EmbeddingTrainingError(f"crop 은행 항목이 object가 아닙니다: {uri}")
+        path = record.get("path")
+        category_id = record.get("category_id")
+        if not isinstance(path, str) or not path:
+            raise EmbeddingTrainingError(f"crop 은행 항목에 path가 없습니다: {uri}")
+        if not isinstance(category_id, int) or isinstance(category_id, bool):
+            raise EmbeddingTrainingError(
+                f"crop 은행 항목의 category_id가 정수가 아닙니다: {uri}"
+            )
+        # tar을 안전하게 풀었어도 **목록이 다른 곳을 가리킬 수 있습니다.** 여는 것은
+        # 학습 중이라, 여기서 안 막으면 저장소 밖 파일을 batch마다 읽습니다.
+        _inside(destination, path)
+        checked.append(dict(record))
+    return checked
+
+
+def check_class_map(storage: Any, uri: str, categories: list[int]) -> None:
+    """은행의 class가 정말 그 dataset의 class인지 봅니다.
+
+    이 입력을 필수로 두고 읽지 않으면, 다른 dataset의 class map을 붙여도 학습이
+    그냥 성공합니다. 그러면 checkpoint의 `category_ids`가 어느 dataset의 것인지
+    아무도 보증하지 않은 채 재순위까지 흘러갑니다.
+
+    이름은 쓰지 않고 **id 집합만** 봅니다. 학습에는 이름이 필요 없고, 여기서 이름까지
+    맞추라고 하면 표기가 조금 다른 판을 이유 없이 막습니다.
+    """
+
+    try:
+        document = storage.read_json(uri)
+    except (StorageError, OSError, ValueError) as error:
+        raise EmbeddingTrainingError(
+            f"class map을 읽지 못했습니다: {uri} ({type(error).__name__})"
+        ) from error
+    if not isinstance(document, Mapping) or not document:
+        raise EmbeddingTrainingError(f"class map이 비어 있습니다: {uri}")
+
+    # data가 내는 두 형태를 모두 받습니다: {"7": "pill"}과 {"pill": 7}.
+    known: set[int] = set()
+    for key, value in document.items():
+        for candidate in (key, value):
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                known.add(candidate)
+            elif isinstance(candidate, str) and candidate.strip().lstrip("-").isdigit():
+                known.add(int(candidate))
+    missing = sorted(set(categories) - known)
+    if missing:
+        raise EmbeddingTrainingError(
+            "crop 은행의 class가 class map에 없습니다. 다른 dataset의 값을 짝지은 "
+            f"것은 아닌지 확인하세요: {', '.join(str(item) for item in missing[:5])}"
+        )
 
 
 class CropDataset(Dataset):
@@ -304,9 +415,31 @@ def train_embedding(config: Mapping[str, Any]) -> dict[str, Any]:
     inputs = data_inputs(config)
     storage = create_storage(config)
 
+    # detector와 같은 규칙입니다(`trainer.py`). seed만 심고 algorithm mode를 두지
+    # 않으면 CUDA가 비결정 kernel을 골라, 같은 seed로 돌린 두 실행의 checkpoint가
+    # 달라집니다. 전역 상태이므로 끝나면 되돌립니다.
+    previous_deterministic = torch.are_deterministic_algorithms_enabled()
+    previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     random.seed(setting.seed)
     np.random.seed(setting.seed)
     torch.manual_seed(setting.seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+
+    try:
+        return _train_embedding(config, setting, inputs, storage)
+    finally:
+        torch.use_deterministic_algorithms(
+            previous_deterministic, warn_only=previous_warn_only
+        )
+
+
+def _train_embedding(
+    config: Mapping[str, Any],
+    setting: EmbeddingSettings,
+    inputs: dict[str, str],
+    storage: Any,
+) -> dict[str, Any]:
+    """`train_embedding`이 결정성 설정을 걸어 둔 채로 부르는 본체입니다."""
 
     with tempfile.TemporaryDirectory(prefix="embedding-") as scratch:
         root = Path(scratch) / "bank"
@@ -317,6 +450,7 @@ def train_embedding(config: Mapping[str, Any]) -> dict[str, Any]:
             raise EmbeddingTrainingError(
                 "임베딩은 class가 둘 이상이어야 학습할 수 있습니다."
             )
+        check_class_map(storage, inputs["class_map_uri"], categories)
 
         device = torch.device(setting.device)
         model = build_model(
@@ -341,8 +475,19 @@ def train_embedding(config: Mapping[str, Any]) -> dict[str, Any]:
         best_accuracy = -1.0
         best_epoch = 0
         started = time.time()
-        working = Path(setting.output_dir) / f".{setting.run_id}.partial"
-        working.mkdir(parents=True, exist_ok=True)
+        # **작업 directory는 만들어 잡습니다.** 이미 있으면 중단된 앞선 실행이
+        # 거기 있고, 그 안의 checkpoint가 그 학습의 **유일한 사본**입니다. 그대로
+        # 이어 쓰면 다시 돌린 사람이 앞선 밤을 지웁니다. `exist_ok=False`라야
+        # 만들기와 확인이 한 번에 일어나, 두 실행이 동시에 시작해도 하나만 잡습니다.
+        working = REPOSITORY_ROOT / setting.output_dir / f".{setting.run_id}.partial"
+        try:
+            working.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as error:
+            raise EmbeddingTrainingError(
+                f"같은 이름의 중단된 학습이 남아 있습니다: {setting.run_id}. "
+                "그 안의 checkpoint가 유일한 사본이므로 지우거나 다른 run_id를 "
+                "쓰는 것은 사람이 정합니다."
+            ) from error
         best_path = working / "best_checkpoint.pt"
         last_path = working / "last_checkpoint.pt"
 
@@ -371,11 +516,14 @@ def train_embedding(config: Mapping[str, Any]) -> dict[str, Any]:
             )
             if epoch % setting.checkpoint_every == 0 or epoch == setting.epochs:
                 torch.save(_checkpoint(model, setting, categories, epoch, accuracy), last_path)
-                if accuracy > best_accuracy:
-                    best_accuracy, best_epoch = accuracy, epoch
-                    torch.save(
-                        _checkpoint(model, setting, categories, epoch, accuracy), best_path
-                    )
+            # **best는 주기와 무관하게 매 epoch 봅니다.** 주기 안에 두면 주기 사이에
+            # 나온 가장 좋은 epoch이 best가 되지 못하고, 더 나쁜 model이 조용히
+            # best_checkpoint.pt라는 이름으로 나갑니다. 쓰는 쪽은 그 이름을 믿습니다.
+            if accuracy > best_accuracy:
+                best_accuracy, best_epoch = accuracy, epoch
+                torch.save(
+                    _checkpoint(model, setting, categories, epoch, accuracy), best_path
+                )
 
         if not best_path.exists():
             raise EmbeddingTrainingError("checkpoint를 하나도 남기지 못했습니다.")
