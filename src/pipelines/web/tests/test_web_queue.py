@@ -230,6 +230,63 @@ def test_cancelling_the_running_job_holds_the_queue(
     assert manager.queue_paused() is True
 
 
+def test_the_queue_is_already_held_when_stop_returns(
+    manager, config_ids, monkeypatch, fake_process_factory
+):
+    """중지 요청이 돌아온 순간 대기열은 이미 멈춰 있어야 합니다.
+
+    학습 process는 종료 신호를 받고도 곧바로 죽지 않습니다. GPU 메모리를 정리하는
+    동안 살아 있고, 그래도 안 죽으면 10초 뒤에야 강제로 끝냅니다. 그 시간을 job
+    thread의 정리 구간이 끝날 때까지로 보고 대기열을 그때 멈추면, 그 사이에 들어온
+    시작 요청이 다음 학습을 띄웁니다 — 사람은 방금 중지를 눌렀는데도.
+    """
+
+    process = fake_process_factory(stdout="", exit_code=1, block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: process)
+    # 신호는 보냈지만 이 process는 아직 죽지 않습니다. job thread는 계속 기다립니다.
+    monkeypatch.setattr(runner, "terminate_tree", lambda proc: None)
+
+    started = manager.enqueue(config_ids[0])
+    manager.enqueue(config_ids[1])
+    wait_until(lambda: manager._process is not None, what="process 시작")
+
+    manager.cancel(started.job_id)
+
+    assert manager.queue_paused() is True
+    process.release(1)
+    wait_until(lambda: manager.get(started.job_id).status == "cancelled", what="취소 반영")
+
+
+def test_resuming_while_the_stopped_job_winds_down_still_starts_the_next(
+    manager, config_ids, monkeypatch, fake_process_factory
+):
+    """중지 직후 누른 다시 돌리기는 자리가 비는 대로 다음을 시작해야 합니다.
+
+    중지한 process가 정리되는 동안 그 학습이 아직 자리를 쥐고 있어, 그때 들어온
+    요청은 빈손으로 돌아갑니다. 자리가 빈 뒤에도 아무도 다시 밀어 주지 않으면
+    대기열은 사람이 분명히 다시 눌렀는데도 그대로 서 있습니다.
+    """
+
+    stopped = fake_process_factory(stdout="", exit_code=1, block_until_signalled=True)
+    monkeypatch.setattr(runner, "spawn", lambda *a, **k: stopped)
+    monkeypatch.setattr(runner, "terminate_tree", lambda proc: None)
+
+    started = manager.enqueue(config_ids[0])
+    manager.enqueue(config_ids[1])
+    wait_until(lambda: manager._process is not None, what="process 시작")
+    manager.cancel(started.job_id)
+
+    monkeypatch.setattr(
+        runner, "spawn", lambda *a, **k: fake_process_factory(stdout=TRAIN_STDOUT)
+    )
+    # 중지한 학습이 아직 죽지 않았습니다. 자리가 없어 이 요청은 아무것도 시작하지 못합니다.
+    assert manager.resume_queue() is None
+
+    stopped.release(1)
+
+    wait_until(lambda: "second" in finished_run_ids(manager), what="다음 학습 실행")
+
+
 def test_a_held_queue_starts_again_when_asked(
     manager, config_ids, monkeypatch, fake_process_factory
 ):
