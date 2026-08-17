@@ -158,6 +158,20 @@ class JobManager:
                         store.save_record(record)
                     except OSError:
                         pass
+                # 훑기는 thread로만 돕니다. 다시 뜬 server에는 그 thread가 없으므로
+                # 기록에 남은 "도는 중"은 죽은 표시입니다. 그대로 두면 화면이 영원히
+                # 도는 것처럼 보이고, 다음 훑기도 시작할 수 없습니다.
+                if record.epoch_sweep.get("status") == STATUS_RUNNING:
+                    record.epoch_sweep = {
+                        **record.epoch_sweep,
+                        "status": STATUS_INTERRUPTED,
+                        "finished_at": utc_now_text(),
+                        "message": "서버가 다시 시작되어 훑기가 중단됐습니다.",
+                    }
+                    try:
+                        store.save_record(record)
+                    except OSError:
+                        pass
                 self._records[record.job_id] = record
             saved = store.load_queue()
             self._queue = saved["entries"]
@@ -466,8 +480,15 @@ class JobManager:
         8GB 카드에서 둘 다 out of memory로 잃습니다. 잠금 순서는 gate → runner.
         """
 
+        from ..epoch_sweep import get_epoch_sweep_runner
+
         with self._gpu_gate, runner_.locked():
             if serial and self.active_job() is not None:
+                return False
+            # 훑기도 같은 GPU로 추론을 돌립니다. 사람이 누른 평가만 훑기를 확인하고
+            # 자동 평가가 그대로 출발하면, 밤새 도는 쪽에서 둘이 겹칩니다. 훑기가
+            # 끝나면서 다시 깨우므로 여기서 물러나도 줄은 남아 있습니다.
+            if get_epoch_sweep_runner().is_running():
                 return False
             record = self._next_unevaluated()
             if record is None:

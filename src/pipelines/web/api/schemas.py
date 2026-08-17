@@ -39,8 +39,13 @@ class StartJobRequest(BaseModel):
 
 
 class SettingsBody(BaseModel):
-    """설정 화면이 보내는 값. 지금은 평가를 언제 돌릴지 하나뿐입니다."""
+    """설정 화면이 보내는 값."""
 
     evaluation_mode: Literal["parallel", "serial"] | None = Field(
         default=None, description="평가를 학습과 함께 돌릴지(parallel), 끝난 뒤에 돌릴지(serial)"
+    )
+    # 이름과 개수 검증은 `settings.py`가 합니다. 여기서 Literal로 다시 적으면 고를 수
+    # 있는 지표 목록이 두 곳에 생깁니다.
+    epoch_metrics: list[str] | None = Field(
+        default=None, description="epoch 훑기가 순위를 매길 지표 3개(1순위부터)"
     )

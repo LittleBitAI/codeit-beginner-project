@@ -17,7 +17,13 @@ from .. import train_capabilities
 from ..errors import FieldError, JobConflictError, WebValidationError
 from ..evaluate_metrics import read_per_class_summary
 from ..evaluation import DEFAULT_MAX_DETECTIONS, get_evaluation_runner
+from ..epoch_sweep import (
+    DEFAULT_SAMPLE_SIZE,
+    epoch_candidates,
+    get_epoch_sweep_runner,
+)
 from .. import experiments
+from .. import settings as web_settings
 from ..gpu import cuda_is_available
 from ..jobs import get_manager
 from ..jobs.model import (
@@ -299,7 +305,9 @@ def delete_job(job_id: str) -> dict[str, Any]:
     """
 
     manager = get_manager()
-    with get_evaluation_runner().hold_for_delete(job_id):
+    # 평가와 훑기 **둘 다** 끝나면서 같은 record를 다시 저장합니다. 한쪽만 잡으면
+    # 다른 쪽이 지운 기록을 log 없이 되살립니다.
+    with get_evaluation_runner().hold_for_delete(job_id), get_epoch_sweep_runner().hold_for_delete(job_id):
         manager.delete(job_id)  # 없거나 실행 중이면 404 또는 409
     active = manager.active_job()
     return {
@@ -378,6 +386,10 @@ def start_evaluation(job_id: str, payload: EvaluateRequest = Body(...)) -> dict[
         record = get_manager().get(job_id)  # 지워졌으면 여기서 404
         if record.status != "succeeded":
             raise JobConflictError("성공으로 끝난 학습만 평가할 수 있습니다.")
+        # 훑기도 같은 GPU로 추론을 돌립니다. 훑기 쪽만 평가를 확인하면 그 반대 방향이
+        # 비어 있어, 훑기가 시작된 직후 들어온 이 요청과 겹쳐 둘 다 잃습니다.
+        if get_epoch_sweep_runner().is_running():
+            raise JobConflictError("epoch 훑기가 도는 중에는 평가할 수 없습니다.")
         return {"evaluation": runner.start(record, payload.model_dump())}
 
 
@@ -597,6 +609,57 @@ def resume_job(
         "entries": manager.queue_entries(),
         "paused": manager.queue_paused(),
     }
+
+
+class EpochSweepRequest(BaseModel):
+    """epoch 훑기 설정. 순위를 매길 지표는 설정 화면에서 미리 고릅니다."""
+
+    device: str | None = Field(default=None)
+    sample_size: int = Field(default=DEFAULT_SAMPLE_SIZE, ge=1, le=100000)
+
+
+@router.get("/jobs/{job_id}/epoch-sweep")
+def epoch_sweep_status(job_id: str) -> dict[str, Any]:
+    """이 학습에 대한 훑기 상태와, 훑을 수 있는 후보 목록입니다."""
+
+    record = get_manager().get(job_id)  # 없는 job이면 404
+    return {
+        "epoch_sweep": get_epoch_sweep_runner().status_for(record),
+        "candidates": epoch_candidates(record),
+        "metrics": web_settings.epoch_metrics(),
+    }
+
+
+@router.post("/jobs/{job_id}/epoch-sweep", status_code=202)
+def start_epoch_sweep(
+    job_id: str, payload: EpochSweepRequest = Body(...)
+) -> dict[str, Any]:
+    """보관해 둔 epoch checkpoint를 훑어 제일 잘 맞히는 것을 고릅니다.
+
+    후보마다 표본 평가를 돌리고, 이긴 하나만 전수로 다시 재어 제출까지 만듭니다.
+    후보가 20개면 몇십 분이 걸리므로 시작만 시키고 상태는 따로 확인합니다.
+
+    도는 학습이나 평가가 있으면 시작하지 않습니다. 8GB 카드에서 겹치면 둘 다 out of
+    memory로 잃습니다.
+    """
+
+    manager = get_manager()
+    evaluation_runner = get_evaluation_runner()
+    runner = get_epoch_sweep_runner()
+    # **잠금 순서는 언제나 evaluation -> sweep입니다.** 평가 시작과 기록 삭제가 그
+    # 순서로 잡으므로, 여기서만 반대로 잡으면 두 요청이 서로가 쥔 문을 기다리며
+    # 영영 돌아오지 않습니다.
+    with evaluation_runner.locked(), runner.locked():
+        record = manager.get(job_id)  # 지워졌으면 여기서 404
+        if record.status != STATUS_SUCCEEDED:
+            raise JobConflictError("성공으로 끝난 학습만 훑을 수 있습니다.")
+        if manager.active_job() is not None:
+            raise JobConflictError(
+                "학습이 도는 중에는 훑을 수 없습니다. 끝난 뒤 다시 눌러 주세요."
+            )
+        if evaluation_runner.status().get("status") == "running":
+            raise JobConflictError("평가가 도는 중에는 훑을 수 없습니다.")
+        return {"epoch_sweep": runner.start(record, payload.model_dump())}
 
 
 @router.post("/jobs/{job_id}/register")

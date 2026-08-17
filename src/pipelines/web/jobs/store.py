@@ -66,14 +66,28 @@ def _write_atomic(destination: Path, payload: str) -> None:
         raise
 
 
-def _stored_status(destination: Path) -> str | None:
-    """디스크에 이미 적혀 있는 상태입니다. 없거나 깨졌으면 ``None``입니다."""
+def _mirror_key(payload: dict[str, Any]) -> tuple[Any, ...]:
+    """사본을 새로 올릴지 정하는 값입니다.
+
+    학습 상태만 보면 훑기는 한 번도 올라가지 않습니다. 훑는 동안 학습은 이미
+    ``succeeded``로 끝난 채 그대로이기 때문입니다. 그러면 런타임이 사라진 뒤
+    복원했을 때 훑은 번호가 없어, 다음 훑기가 이미 만들어 둔 이름을 다시 씁니다.
+    """
+
+    sweep = payload.get("epoch_sweep")
+    if not isinstance(sweep, dict):
+        sweep = {}
+    return (payload.get("status"), sweep.get("status"), sweep.get("attempt"))
+
+
+def _stored_key(destination: Path) -> tuple[Any, ...] | None:
+    """디스크에 이미 적혀 있는 값입니다. 없거나 깨졌으면 ``None``입니다."""
 
     try:
         payload = json.loads(destination.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return payload.get("status") if isinstance(payload, dict) else None
+    return _mirror_key(payload) if isinstance(payload, dict) else None
 
 
 def save_record(record: JobRecord) -> None:
@@ -81,7 +95,7 @@ def save_record(record: JobRecord) -> None:
 
     payload = redact(record.to_dict())
     destination = job_directory(record.job_id) / _RECORD_NAME
-    previous = _stored_status(destination)
+    previous = _stored_key(destination)
     _write_atomic(
         destination,
         json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
@@ -90,7 +104,7 @@ def save_record(record: JobRecord) -> None:
     # 호출이 manager lock을 쥔 채로 일어나 화면 전체가 그만큼 멈춥니다. 런타임이
     # 죽었을 때 필요한 것은 어떤 설정으로 무엇이 돌고 있었는가이고, 그건 상태가
     # 바뀌는 순간에 이미 정해져 있습니다.
-    if previous != record.status:
+    if previous != _mirror_key(payload):
         state_sync.mirror_job_record(record.job_id, payload)
 
 

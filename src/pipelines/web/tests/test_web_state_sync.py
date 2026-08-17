@@ -137,6 +137,28 @@ def test_the_mirror_never_replaces_a_record_this_runtime_already_has(
     assert store.load_record(JOB_ID).status == "succeeded"
 
 
+def test_a_sweep_leaves_a_copy_but_a_heartbeat_does_not(bucket, isolated_repo):
+    """훑기는 학습 상태를 바꾸지 않습니다. 그것만 보면 사본이 갱신되지 않습니다.
+
+    훑은 번호가 사본에 없으면, 복원한 런타임에서 다음 훑기가 1번부터 다시 세어
+    이미 만들어 둔 `<run>-e16` 산출물과 부딪힙니다. 그렇다고 30초마다 오는
+    heartbeat까지 올리면 그 network 호출이 manager lock을 쥔 채로 일어납니다.
+    """
+
+    record = _running_record(write_runtime_config({"train": {}}), status="succeeded")
+    store.save_record(record)
+    mirrored = dict(bucket.objects[_job_key()])
+
+    record.progress = {"epoch": 3}
+    store.save_record(record)
+    assert bucket.objects[_job_key()] == mirrored, "heartbeat가 사본을 올렸습니다"
+
+    record.epoch_sweep = {"status": "running", "attempt": 2}
+    store.save_record(record)
+
+    assert bucket.objects[_job_key()]["epoch_sweep"]["attempt"] == 2
+
+
 def test_nothing_leaves_this_machine_without_a_workspace_name(
     isolated_repo, monkeypatch
 ):

@@ -15,7 +15,7 @@ from src.pipelines.web.errors import WebValidationError
 def test_고르기_전에는_평가_방식이_비어_있다(client):
     body = client.get("/api/settings").json()
 
-    assert body == {"evaluation_mode": None}
+    assert body == {"evaluation_mode": None, "epoch_metrics": None}
     assert web_settings.evaluation_mode() is None
 
 
@@ -23,9 +23,83 @@ def test_고른_값이_저장되고_그대로_읽힌다(client):
     saved = client.put("/api/settings", json={"evaluation_mode": "parallel"})
 
     assert saved.status_code == 200
-    assert saved.json() == {"evaluation_mode": "parallel"}
-    assert client.get("/api/settings").json() == {"evaluation_mode": "parallel"}
+    assert saved.json() == {"evaluation_mode": "parallel", "epoch_metrics": None}
+    assert client.get("/api/settings").json()["evaluation_mode"] == "parallel"
     assert web_settings.evaluation_mode() == "parallel"
+
+
+# --- epoch 훑기가 무엇으로 순위를 매길지 ------------------------------------
+
+
+def test_고르기_전에는_훑기_지표가_비어_있다(client):
+    """무엇이 Kaggle 점수를 예측하는지 모르는 것이 이 기능을 만든 이유입니다.
+
+    아무도 고르지 않은 기준으로 조용히 순위를 매기면 그 질문 자체가 사라집니다.
+    """
+
+    assert web_settings.epoch_metrics() is None
+
+
+def test_고른_지표가_순서대로_저장된다(client):
+    saved = client.put(
+        "/api/settings",
+        json={"evaluation_mode": "serial", "epoch_metrics": ["mAP50", "mAP", "recall50"]},
+    )
+
+    assert saved.status_code == 200
+    # 순서가 곧 가중치입니다. 정렬해서 저장하면 1순위가 사라집니다.
+    assert web_settings.epoch_metrics() == ["mAP50", "mAP", "recall50"]
+
+
+@pytest.mark.parametrize(
+    "metrics",
+    [
+        ["mAP", "mAP50"],
+        ["mAP", "mAP50", "mAP75", "recall50"],
+        ["mAP", "mAP", "mAP50"],
+        ["mAP", "mAP50", "없는지표"],
+    ],
+)
+def test_지표를_셋이_아니게_고르면_거절한다(client, metrics):
+    response = client.put(
+        "/api/settings", json={"evaluation_mode": "serial", "epoch_metrics": metrics}
+    )
+
+    assert response.status_code == 400
+    assert web_settings.epoch_metrics() is None
+
+
+def test_고른_지표를_다시_해제할_수_있다(client):
+    """비우려고 보낸 null과 아예 보내지 않은 것은 다릅니다.
+
+    둘을 같게 다루면 한 번 고른 기준을 풀 방법이 없어집니다 — 무엇으로 순위를 매길지
+    다시 생각해 보려는 사람이 그 자리에서 막힙니다.
+    """
+
+    client.put(
+        "/api/settings",
+        json={"evaluation_mode": "serial", "epoch_metrics": ["mAP", "mAP50", "recall50"]},
+    )
+
+    response = client.put(
+        "/api/settings", json={"evaluation_mode": "serial", "epoch_metrics": None}
+    )
+
+    assert response.status_code == 200
+    assert web_settings.epoch_metrics() is None
+
+
+def test_평가_방식만_고쳐도_고른_지표는_남는다(client):
+    """평가 시점만 고치러 온 저장이 훑기 설정을 지우면 안 됩니다."""
+
+    client.put(
+        "/api/settings",
+        json={"evaluation_mode": "serial", "epoch_metrics": ["mAP", "mAP50", "recall50"]},
+    )
+
+    client.put("/api/settings", json={"evaluation_mode": "parallel"})
+
+    assert web_settings.epoch_metrics() == ["mAP", "mAP50", "recall50"]
 
 
 def test_모르는_값은_거절한다(client):

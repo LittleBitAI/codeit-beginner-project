@@ -66,6 +66,9 @@ class JobRecord:
     progress: dict[str, Any] = field(default_factory=dict)
     evaluation: dict[str, Any] = field(default_factory=dict)
     registration: dict[str, Any] = field(default_factory=dict)
+    # epoch 훑기의 마지막 상태입니다. 후보 20개를 몇십 분 재고 얻은 결과라, server를
+    # 다시 띄웠다고 사라지면 그 시간을 다시 씁니다. 훑은 적 없는 기록은 빈 dict입니다.
+    epoch_sweep: dict[str, Any] = field(default_factory=dict)
     log_lines: int = 0
     orphan_note: str | None = None
     cloud_run_id: str | None = None
@@ -110,6 +113,7 @@ class JobRecord:
             "progress": dict(self.progress),
             "evaluation": dict(self.evaluation),
             "registration": dict(self.registration),
+            "epoch_sweep": dict(self.epoch_sweep),
             "log_lines": self.log_lines,
             "orphan_note": self.orphan_note,
             "cloud_run_id": self.cloud_run_id,
@@ -136,6 +140,7 @@ class JobRecord:
             progress=dict(payload.get("progress") or {}),
             evaluation=dict(payload.get("evaluation") or {}),
             registration=dict(payload.get("registration") or {}),
+            epoch_sweep=dict(payload.get("epoch_sweep") or {}),
             log_lines=int(payload.get("log_lines") or 0),
             orphan_note=payload.get("orphan_note"),
             cloud_run_id=payload.get("cloud_run_id"),

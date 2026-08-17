@@ -54,6 +54,8 @@ def test_defaults_expose_every_train_field(client):
         "seed",
         "epochs",
         "checkpoint_every",
+        "archive_epochs",
+        "archive_epochs_from",
         "batch_size",
         "num_workers",
         "gradient_accumulation_steps",

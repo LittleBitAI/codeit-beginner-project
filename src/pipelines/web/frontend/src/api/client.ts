@@ -7,6 +7,8 @@ import type {
   EnsembleCandidate,
   EnsembleDiagnosis,
   EnsembleJob,
+  EpochSweepCandidate,
+  EpochSweepState,
   EvaluationState,
   ExperimentDetail,
   PerClassSummary,
@@ -240,6 +242,20 @@ export const api = {
   retryRegistration: (jobId: string) =>
     request<{ registration: RegistrationState }>(`/api/train/jobs/${jobId}/register`, {
       method: 'POST',
+    }),
+
+  // 보관해 둔 epoch checkpoint와 지난 훑기 결과입니다.
+  epochSweepStatus: (jobId: string) =>
+    request<{
+      epoch_sweep: EpochSweepState;
+      candidates: EpochSweepCandidate[];
+      metrics: string[] | null;
+    }>(`/api/train/jobs/${jobId}/epoch-sweep`),
+
+  startEpochSweep: (jobId: string, body: { sample_size?: number; device?: string }) =>
+    request<{ epoch_sweep: EpochSweepState }>(`/api/train/jobs/${jobId}/epoch-sweep`, {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
 
   inspectDirectory: (directory: string) =>

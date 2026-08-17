@@ -11,6 +11,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, ApiError } from '../api/client';
 import type { GpuStatus, JobListing, JobRecord, QueueState } from '../api/types';
+import { EpochSweepPanel } from '../components/EpochSweepPanel';
 import { EvaluatePanel } from '../components/EvaluatePanel';
 import { ChartHead, LossChart } from '../components/LossChart';
 import { LossBreakdown } from '../components/LossBreakdown';
@@ -517,6 +518,13 @@ export function Live({
       {job.status === 'succeeded' && (
         <div style={{ marginTop: 30 }}>
           <EvaluatePanel key={job.job_id} job={job} />
+        </div>
+      )}
+
+      {/* epoch을 보관한 학습에서만 보입니다. 보관하지 않았으면 훑을 것이 없습니다. */}
+      {job.status === 'succeeded' && (
+        <div style={{ marginTop: 30 }}>
+          <EpochSweepPanel key={job.job_id} job={job} />
         </div>
       )}
 
