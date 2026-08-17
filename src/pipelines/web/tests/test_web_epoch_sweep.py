@@ -375,6 +375,134 @@ def test_a_second_sweep_of_the_same_run_takes_new_names(client, manager, monkeyp
     ]
 
 
+class _RecordingLock:
+    """어느 문을 먼저 잡았는지 적어 두는 lock 껍데기입니다."""
+
+    def __init__(self, name: str, order: list[str], lock) -> None:
+        self._name = name
+        self._order = order
+        self._lock = lock
+
+    def __enter__(self):
+        self._order.append(self._name)
+        return self._lock.__enter__()
+
+    def __exit__(self, *exc):
+        return self._lock.__exit__(*exc)
+
+
+def test_both_runners_are_taken_in_the_same_order(client, manager, monkeypatch):
+    """평가 문과 훑기 문을 서로 반대 순서로 잡으면 두 요청이 서로를 기다립니다.
+
+    한쪽이 `evaluation -> sweep`, 다른 쪽이 `sweep -> evaluation`이면 그 둘이 동시에
+    들어온 순간 어느 쪽도 돌아오지 않습니다. 실제 교착을 재현하는 test는 실패할 때
+    영영 멈추므로, **어느 문을 먼저 잡는지**를 봅니다. 두 경로 모두 평가가 먼저여야
+    고리가 생기지 않습니다.
+    """
+
+    from src.pipelines.web import evaluation
+
+    record = _record()
+    manager._records[record.job_id] = record
+    order: list[str] = []
+    evaluation_runner = evaluation.get_evaluation_runner()
+    sweep_runner = epoch_sweep.get_epoch_sweep_runner()
+    monkeypatch.setattr(
+        evaluation_runner, "_lock", _RecordingLock("evaluation", order, evaluation_runner._lock)
+    )
+    monkeypatch.setattr(
+        sweep_runner, "_lock", _RecordingLock("sweep", order, sweep_runner._lock)
+    )
+
+    # 지표를 고르지 않아 훑기는 거절되지만, 거절 전에 이미 두 문을 지납니다.
+    client.post(f"/api/train/jobs/{record.job_id}/epoch-sweep", json={})
+    sweep_route = list(order)
+    order.clear()
+    client.post(f"/api/train/jobs/{record.job_id}/evaluate", json={})
+    evaluate_route = list(order)
+
+    assert sweep_route[0] == "evaluation", f"훑기가 훑기 문을 먼저 잡았습니다: {sweep_route}"
+    assert evaluate_route[0] == "evaluation", f"평가 순서가 바뀌었습니다: {evaluate_route}"
+
+
+def test_a_sweep_that_just_finished_does_not_revive_a_deleted_record(
+    client, manager, monkeypatch
+):
+    """저장보다 상태를 먼저 끝으로 바꾸면, 그 틈에 지운 기록을 저장이 되살립니다.
+
+    저장이 일어나는 그 순간 삭제를 시도해 봅니다. 아직 `running`이어야 삭제가 409로
+    거절되고, 그래야 저장이 지워진 기록을 되살리는 일이 없습니다.
+    """
+
+    from src.pipelines.web.jobs import store
+
+    record = _record()
+    manager._records[record.job_id] = record
+    runner = epoch_sweep.get_epoch_sweep_runner()
+    runner._state = {"status": "running", "job_id": record.job_id}
+    refusals: list[int] = []
+
+    def watching_save(saved_record):
+        refusals.append(client.delete(f"/api/train/jobs/{record.job_id}").status_code)
+
+    monkeypatch.setattr(store, "save_record", watching_save)
+
+    runner._finish(record, status="succeeded", message="끝")
+
+    assert refusals == [409], "저장하는 동안 삭제가 통과했습니다"
+    assert runner.status()["status"] == "succeeded"
+
+
+def test_the_attempt_number_is_written_before_the_sweep_runs(
+    client, manager, monkeypatch
+):
+    """끝날 때만 남기면 도중에 server가 죽었을 때 같은 이름을 다시 씁니다."""
+
+    client.put(
+        "/api/settings",
+        json={"evaluation_mode": "serial", "epoch_metrics": ["mAP", "mAP50", "recall50"]},
+    )
+    record = _record()
+    manager._records[record.job_id] = record
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_run_evaluation(config, on_progress_line=None):  # noqa: ARG001
+        started.set()
+        release.wait(timeout=5)
+        return {"ok": False, "exit_code": 1, "artifacts": {}, "summary": {}, "message": "중단"}
+
+    monkeypatch.setattr(epoch_sweep, "run_evaluation", slow_run_evaluation)
+
+    client.post(f"/api/train/jobs/{record.job_id}/epoch-sweep", json={"sample_size": 5})
+    assert started.wait(timeout=5), "훑기가 첫 후보에 닿지 못했습니다"
+
+    # 아직 도는 중입니다. 이 시점의 기록에 이미 번호가 있어야 합니다.
+    assert manager.get(record.job_id).epoch_sweep["attempt"] == 1
+    assert manager.get(record.job_id).epoch_sweep["status"] == "running"
+    release.set()
+    _finished_sweep()
+
+
+def test_a_sweep_left_running_by_a_restart_reads_as_interrupted(manager, monkeypatch):
+    """훑기는 thread로만 돕니다. 다시 뜬 server에는 그 thread가 없습니다."""
+
+    from src.pipelines.web.jobs import store
+
+    record = _record()
+    record.epoch_sweep = {"status": "running", "job_id": record.job_id, "attempt": 2}
+    store.save_record(record)
+    manager._loaded = False
+    manager._records = {}
+
+    manager.load()
+
+    revived = manager.get(record.job_id).epoch_sweep
+    assert revived["status"] == "interrupted"
+    # 번호는 남아 있어야 다음 훑기가 그 뒤부터 셉니다.
+    assert revived["attempt"] == 2
+
+
 def test_a_sweep_refuses_while_a_training_run_is_going(
     client, manager, monkeypatch, valid_payload, fake_process_factory
 ):

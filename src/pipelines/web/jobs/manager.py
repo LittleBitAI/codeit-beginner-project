@@ -158,6 +158,20 @@ class JobManager:
                         store.save_record(record)
                     except OSError:
                         pass
+                # 훑기는 thread로만 돕니다. 다시 뜬 server에는 그 thread가 없으므로
+                # 기록에 남은 "도는 중"은 죽은 표시입니다. 그대로 두면 화면이 영원히
+                # 도는 것처럼 보이고, 다음 훑기도 시작할 수 없습니다.
+                if record.epoch_sweep.get("status") == STATUS_RUNNING:
+                    record.epoch_sweep = {
+                        **record.epoch_sweep,
+                        "status": STATUS_INTERRUPTED,
+                        "finished_at": utc_now_text(),
+                        "message": "서버가 다시 시작되어 훑기가 중단됐습니다.",
+                    }
+                    try:
+                        store.save_record(record)
+                    except OSError:
+                        pass
                 self._records[record.job_id] = record
             saved = store.load_queue()
             self._queue = saved["entries"]

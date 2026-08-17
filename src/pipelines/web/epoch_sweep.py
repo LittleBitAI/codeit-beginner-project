@@ -340,6 +340,16 @@ class EpochSweepRunner:
                 "registration": {"status": STATUS_IDLE},
             }
 
+        # **시작할 때 기록에 남깁니다.** 끝날 때만 남기면, 도중에 server가 죽었을 때
+        # 다음 훑기가 같은 번호를 다시 써서 이미 만들어진 산출물과 부딪힙니다.
+        record.epoch_sweep = self.status()
+        try:
+            from .jobs import store
+
+            store.save_record(record)
+        except OSError:
+            pass
+
         threading.Thread(
             target=self._run,
             args=(record, candidates, list(metric_names), sample_size, device, attempt),
@@ -355,11 +365,16 @@ class EpochSweepRunner:
             self._state.update(values)
 
     def _finish(self, record: JobRecord, **values: Any) -> None:
-        """상태를 기록에 남기고 팀 화면에도 알립니다."""
+        """상태를 기록에 남기고 팀 화면에도 알립니다.
+
+        **저장을 먼저 하고 상태를 끝으로 바꿉니다.** 순서를 뒤집으면, 끝난 것을 본
+        삭제 요청이 `hold_for_delete`를 통과해 기록을 지운 직후에 이 저장이 그것을 다시
+        살려 냅니다. 아직 `running`인 동안에는 삭제가 거절되므로 그 틈이 없습니다.
+        평가 runner도 같은 순서로 저장합니다.
+        """
 
         with self._lock:
-            self._state.update(finished_at=utc_now_text(), **values)
-            state = dict(self._state)
+            state = {**self._state, "finished_at": utc_now_text(), **values}
         record.epoch_sweep = state
         try:
             from .jobs import store
@@ -367,6 +382,8 @@ class EpochSweepRunner:
             store.save_record(record)
         except OSError:
             pass
+        with self._lock:
+            self._state = state
         team_sync.get_team_sync().enqueue_update(record)
 
     def _run(

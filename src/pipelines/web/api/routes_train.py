@@ -644,8 +644,12 @@ def start_epoch_sweep(
     """
 
     manager = get_manager()
+    evaluation_runner = get_evaluation_runner()
     runner = get_epoch_sweep_runner()
-    with runner.locked():
+    # **잠금 순서는 언제나 evaluation -> sweep입니다.** 평가 시작과 기록 삭제가 그
+    # 순서로 잡으므로, 여기서만 반대로 잡으면 두 요청이 서로가 쥔 문을 기다리며
+    # 영영 돌아오지 않습니다.
+    with evaluation_runner.locked(), runner.locked():
         record = manager.get(job_id)  # 지워졌으면 여기서 404
         if record.status != STATUS_SUCCEEDED:
             raise JobConflictError("성공으로 끝난 학습만 훑을 수 있습니다.")
@@ -653,7 +657,7 @@ def start_epoch_sweep(
             raise JobConflictError(
                 "학습이 도는 중에는 훑을 수 없습니다. 끝난 뒤 다시 눌러 주세요."
             )
-        if get_evaluation_runner().status().get("status") == "running":
+        if evaluation_runner.status().get("status") == "running":
             raise JobConflictError("평가가 도는 중에는 훑을 수 없습니다.")
         return {"epoch_sweep": runner.start(record, payload.model_dump())}
 
