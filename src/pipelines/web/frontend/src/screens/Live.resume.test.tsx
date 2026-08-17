@@ -177,6 +177,27 @@ describe('Live 이어서 학습', () => {
     expect(bodies).toEqual([{ epochs: 35 }]);
   });
 
+  // 서버는 정수만 받습니다. 소수를 그대로 더해 보내면 422로 돌아오고, 사람은 왜
+  // 거절당했는지 알 수 없습니다.
+  it('EPOCH 더에 소수를 넣어도 정수로 보낸다', async () => {
+    show(
+      job({
+        status: 'succeeded',
+        status_label: '성공',
+        summary: { completed_epochs: 30, stopped_early: false },
+        artifacts: { last_checkpoint_uri: 'artifacts/x/last_checkpoint.pt' },
+      }),
+    );
+
+    const input = await screen.findByDisplayValue('5');
+    fireEvent.change(input, { target: { value: '1.5' } });
+    fireEvent.click(screen.getByRole('button', { name: 'epoch 31까지 이어서 학습' }));
+
+    // 응답이 오간 **뒤에** 봅니다. 먼저 재면 아직 보내지 않은 상태를 보고 통과합니다.
+    await waitFor(() => expect(posted).toEqual(['/api/train/jobs/job-1/resume']));
+    expect(bodies).toEqual([{ epochs: 31 }]);
+  });
+
   it('끝까지 갔어도 서버가 아니라고 하면 시작 칸을 두지 않는다', async () => {
     availability = { available: false, reason: '조기 종료로 끝난 학습입니다.' };
     show(job({ status: 'succeeded', status_label: '성공', summary: { completed_epochs: 30 } }));

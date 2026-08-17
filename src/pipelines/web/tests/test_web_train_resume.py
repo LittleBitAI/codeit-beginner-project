@@ -461,6 +461,34 @@ def test_a_finished_run_can_be_continued(
     assert read_runtime_config(body["config_id"])["train"]["epochs"] == 35
 
 
+def test_a_second_resume_skips_the_name_still_waiting_in_the_queue(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """줄만 선 항목은 아직 job 기록이 아닙니다.
+
+    대기열 항목은 실제로 시작할 때에야 `JobRecord`가 되므로, 아는 이름을 job 기록에서만
+    세면 두 번째 이어 학습도 A.2를 받습니다. 둘 다 밤새 기다렸다가 뒤엣것이 이름
+    충돌로 죽습니다.
+    """
+
+    record = _finished_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    # 다른 학습이 돌고 있어 줄만 서는 상태입니다. 대기열을 꺼내 가는 곳이 여기
+    # 하나뿐이라, 멈춰 세우면 실제로 줄이 남아 있는 그 순간을 그대로 봅니다.
+    monkeypatch.setattr(manager, "_start_next", lambda: None)
+
+    first = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 35})
+    second = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 35})
+
+    assert first.json()["run_id"] == "web-run.2"
+    assert second.json()["run_id"] == "web-run.3"
+    assert [entry["run_id"] for entry in manager.queue_entries()] == [
+        "web-run.2",
+        "web-run.3",
+    ]
+
+
 def test_continuing_a_finished_run_needs_a_bigger_plan(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):
@@ -484,7 +512,11 @@ def test_continuing_a_finished_run_needs_a_bigger_plan(
 def test_a_run_that_stopped_early_cannot_be_continued(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):
-    """조기 종료로 끝난 실행의 checkpoint에는 다 쓴 patience가 함께 들어 있습니다."""
+    """조기 종료로 끝난 실행의 checkpoint에는 다 쓴 patience가 함께 들어 있습니다.
+
+    **단추를 감추는 것만으로는 모자랍니다.** 시작하는 쪽이 같은 답을 하지 않으면,
+    직접 부른 요청 하나가 반드시 실패할 학습을 대기열에 밀어 넣습니다.
+    """
 
     record = _finished_job(
         client, manager, monkeypatch, fake_process_factory, data_inputs
@@ -492,9 +524,15 @@ def test_a_run_that_stopped_early_cannot_be_continued(
     record.summary["stopped_early"] = True
 
     body = client.get(f"/api/train/jobs/{record.job_id}/resume").json()
+    started = client.post(
+        f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 35}
+    )
 
     assert body["available"] is False
     assert "patience" in body["reason"]
+    assert started.status_code == 409
+    assert "patience" in started.text
+    assert manager.queue_entries() == []
 
 
 def test_resume_route_refuses_an_interrupted_job_without_a_checkpoint(

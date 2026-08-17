@@ -396,6 +396,39 @@ def _completed_epochs(record: JobRecord) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _stopped_early_refusal(record: JobRecord) -> str | None:
+    """조기 종료로 끝난 실행을 이어갈 수 없는 이유입니다. 이어갈 수 있으면 ``None``.
+
+    조기 종료로 끝난 실행의 checkpoint에는 patience를 다 쓴 상태가 그대로 들어 있어,
+    이어서 하면 train이 첫 batch 전에 거절합니다.
+
+    **단추를 세울지 정하는 GET과 실제로 시작하는 POST가 같은 함수를 봅니다.** 한쪽에만
+    두면 화면은 단추를 감추는데 직접 부른 POST는 통과해, 반드시 실패할 학습이 대기열에
+    들어갑니다.
+    """
+
+    if record.status != STATUS_SUCCEEDED or not record.summary.get("stopped_early"):
+        return None
+    return (
+        "조기 종료로 끝난 학습입니다. patience를 다 쓴 상태가 checkpoint에 함께 "
+        "저장돼 이어갈 수 없습니다. 새 실험에서 patience를 올리거나 early "
+        "stopping을 끄고 시작하세요."
+    )
+
+
+def _taken_run_ids(manager: Any) -> list[str]:
+    """이 서버가 아는 run_id 전부입니다. **대기열에 줄만 선 이름까지** 셉니다.
+
+    대기열 항목은 실제로 시작할 때에야 `JobRecord`가 되므로 `list_jobs()`에 없습니다.
+    다른 학습이 도는 동안 같은 실행을 두 번 이어 걸면 둘 다 A.2를 받고, 뒤엣것은 밤새
+    기다렸다 이름 충돌로 죽습니다.
+    """
+
+    names = [job.run_id for job in manager.list_jobs()]
+    names.extend(str(entry.get("run_id") or "") for entry in manager.queue_entries())
+    return names
+
+
 def _plan_refusal(record: JobRecord, epochs: int | None) -> str | None:
     """총 epoch을 늘리지 않은 이어 학습을 시작 전에 거절할 이유입니다.
 
@@ -440,18 +473,9 @@ def resume_availability(job_id: str) -> dict[str, Any]:
     record = get_manager().get(job_id)
     if record.status not in RESUMABLE_STATUSES:
         return {"available": False, "reason": "끝난 학습만 이어갈 수 있습니다."}
-    if record.status == STATUS_SUCCEEDED and record.summary.get("stopped_early"):
-        # 조기 종료로 끝난 실행의 checkpoint에는 patience를 다 쓴 상태가 그대로 들어
-        # 있어, 이어서 하면 train이 첫 batch 전에 거절합니다. 단추를 세워 두면 대기열만
-        # 한 번 돌고 같은 말로 끝납니다.
-        return {
-            "available": False,
-            "reason": (
-                "조기 종료로 끝난 학습입니다. patience를 다 쓴 상태가 checkpoint에 함께 "
-                "저장돼 이어갈 수 없습니다. 새 실험에서 patience를 올리거나 early "
-                "stopping을 끄고 시작하세요."
-            ),
-        }
+    stopped_early = _stopped_early_refusal(record)
+    if stopped_early is not None:
+        return {"available": False, "reason": stopped_early}
     try:
         exists = resume_checkpoint_exists(
             read_runtime_config(record.config_id), record.artifacts
@@ -501,7 +525,7 @@ def resume_job(
         raise JobConflictError(
             "끝난 학습만 이어갈 수 있습니다. 돌고 있는 학습은 끝난 뒤에 이어가세요."
         )
-    refusal = _plan_refusal(record, payload.epochs)
+    refusal = _stopped_early_refusal(record) or _plan_refusal(record, payload.epochs)
     if refusal is not None:
         raise JobConflictError(refusal)
 
@@ -524,8 +548,7 @@ def resume_job(
         artifacts=record.artifacts,
         # 이름은 A -> A.2 -> A.3으로 이어집니다. 이미 있는 번호를 다시 쓰면 train이
         # 시작을 거부하므로, 이 서버가 아는 이름을 모두 건네 건너뛰게 합니다.
-        run_id=payload.run_id
-        or next_resume_run_id(record.run_id, [job.run_id for job in manager.list_jobs()]),
+        run_id=payload.run_id or next_resume_run_id(record.run_id, _taken_run_ids(manager)),
         epochs=payload.epochs,
     )
     config_id = write_runtime_config(config)

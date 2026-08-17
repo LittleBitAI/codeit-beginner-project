@@ -535,8 +535,9 @@ export function Live({
                     min={1}
                     value={extraEpochs}
                     disabled={resuming}
+                    // 소수를 그대로 더해 보내면 서버가 정수만 받아 422로 돌려줍니다.
                     onChange={(event) =>
-                      setExtraEpochs(Math.max(1, Number(event.target.value) || 1))
+                      setExtraEpochs(Math.max(1, Math.floor(Number(event.target.value)) || 1))
                     }
                     style={controlStyle}
                   />
