@@ -20,6 +20,7 @@ import torch
 from src.common import S3Storage, Storage, StorageError, create_storage
 from src.common import train_contract as _contract
 
+from .embedding import train_embedding
 from .dataset import (
     CocoDetectionDataset,
     REPOSITORY_ROOT,
@@ -51,6 +52,9 @@ RETURN_KEYS = {"status", "artifacts", "summary", "message"}
 # 한 벌만 두므로, 여기서 다시 적으면 두 벌이 되어 어긋날 수 있습니다.
 DATA_ARTIFACT_KEYS = set(_contract.DATA_ARTIFACT_KEYS)
 RUN_ID_PATTERN = _contract.RUN_ID_PATTERN
+TRAIN_TASKS = _contract.TRAIN_TASKS
+TRAIN_TASK_KEY = _contract.TRAIN_TASK_KEY
+DEFAULT_TRAIN_TASK = _contract.DEFAULT_TRAIN_TASK
 OPTIMIZER_PROFILES = _contract.OPTIMIZER_PROFILES
 # preset 이름은 계약이 정하고, 각 preset이 실제로 무엇을 바꾸는지는 train의 몫입니다.
 _DEFAULTS = _contract.SETTING_DEFAULTS
@@ -1335,8 +1339,18 @@ def _execute_claimed(
     }
 
 
+def _requested_task(config: Mapping[str, Any]) -> str:
+    """`config["train"]["task"]`를 읽습니다. 없으면 지금까지의 detector 학습입니다."""
+
+    raw = config.get("train")
+    task = raw.get(TRAIN_TASK_KEY, DEFAULT_TRAIN_TASK) if isinstance(raw, Mapping) else DEFAULT_TRAIN_TASK
+    if task not in TRAIN_TASKS:
+        raise ValueError(f"train.task는 {', '.join(TRAIN_TASKS)} 중 하나여야 합니다.")
+    return task
+
+
 def run(config: dict) -> dict:
-    """Data pipeline artifact와 train 설정으로 detector를 학습합니다."""
+    """Data pipeline artifact와 train 설정으로 detector 또는 임베딩을 학습합니다."""
     try:
         if not isinstance(config, dict):
             raise ValueError("config must be an object")
@@ -1353,7 +1367,12 @@ def run(config: dict) -> dict:
                 "summary": {"pipeline": "train", "mode": "dummy"},
                 "message": "train pipeline dummy execution completed",
             }
-        result = _execute(config)
+        # 임베딩은 입력도 설정도 detector와 다릅니다. 아래 `_execute`가 그것을 먼저
+        # 보게 두면 manifest가 없다는 이유로 거절하므로, 여기서 갈라 보냅니다.
+        if _requested_task(config) == "embedding":
+            result = train_embedding(config)
+        else:
+            result = _execute(config)
     except (FileExistsError, OSError, RuntimeError, StorageError, ValueError) as error:
         result = {
             "status": "error",
