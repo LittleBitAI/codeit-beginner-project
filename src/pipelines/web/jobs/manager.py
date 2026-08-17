@@ -777,25 +777,24 @@ class JobManager:
         except Exception as error:  # spawn 실패 등
             self._finalize_error(job_id, error)
         finally:
-            cancelled = False
             with self._lock:
                 self._close_log()
                 self._process = None
                 if self._active_job_id == job_id:
                     self._active_job_id = None
-                cancelled = self._cancel_requested
-                if cancelled:
-                    # 중지를 눌렀는데 다음 학습이 곧바로 뜨면 멈춘 것이 아닙니다.
-                    self._queue_paused = True
+            # 자리가 비었으니 다음을 밀어 봅니다. 멈춰야 할 이유는 `_queue_paused`
+            # 하나가 들고 있습니다 — 중지를 눌렀다면 `cancel()`이 그때 이미 세웠으므로
+            # 여기서는 아무것도 시작하지 않습니다. 그 뒤에 사람이 다시 돌리기를
+            # 눌렀다면 그 요청은 아직 이 학습이 자리를 쥐고 있어 빈손으로 돌아갔으니,
+            # 이제 시작해 주는 것이 그 사람이 누른 뜻입니다.
             # 실패해도 다음으로 넘어갑니다. 자는 동안 하나가 OOM으로 죽었다고
             # 나머지가 안 돌면 밤을 통째로 버립니다.
-            if not cancelled:
-                try:
-                    self._start_next()
-                except Exception:
-                    # background thread에는 오류를 응답할 caller가 없습니다. _start_next가
-                    # 항목을 복원하고 queue를 멈췄으므로 사람이 상태를 보고 재개할 수 있습니다.
-                    pass
+            try:
+                self._start_next()
+            except Exception:
+                # background thread에는 오류를 응답할 caller가 없습니다. _start_next가
+                # 항목을 복원하고 queue를 멈췄으므로 사람이 상태를 보고 재개할 수 있습니다.
+                pass
             # 성공한 학습만 평가할 것이 있습니다. 취소·실패에는 쓸 checkpoint가 없습니다.
             with self._lock:
                 finished = self._records.get(job_id)
@@ -924,6 +923,11 @@ class JobManager:
             # 신호를 보내기 전에 표시해야, 뒤따르는 비정상 exit code를 실패가 아니라
             # 취소로 해석할 수 있습니다.
             self._cancel_requested = True
+            # 대기열도 같은 자리에서 멈춥니다. process는 신호를 받고도 곧바로 죽지
+            # 않으므로, job thread의 정리 구간까지 미루면 그 사이 대기열은 도는 것으로
+            # 읽힙니다. 그 틈에 들어온 시작 요청이 다음 학습을 띄우면 중지를 누른
+            # 사람에게는 멈춘 것이 아닙니다.
+            self._queue_paused = True
             process = self._process
 
         # 최종 상태는 항상 job thread가 정합니다. 아직 process가 없으면 그 thread가
