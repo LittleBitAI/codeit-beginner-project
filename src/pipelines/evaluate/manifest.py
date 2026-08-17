@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import posixpath
+import random
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -422,6 +423,75 @@ def load_class_map(store: ArtifactStore, uri: str) -> dict[int, str]:
     return parse_class_map(store.read_json(uri), source=uri)
 
 
+def sample_records(
+    records: Sequence[Mapping[str, Any]], size: int, *, seed: int
+) -> list[dict[str, Any]]:
+    """검증 image를 ``size``장만 고릅니다. class가 고르게 들어가도록 집습니다.
+
+    후보 checkpoint 20개를 전수로 재면 GPU로도 한 시간이 넘습니다. 그런데 그냥
+    무작위로 줄이면 **드문 class가 통째로 빠집니다.** 알약 118종에 300장이면 한
+    class가 한 장도 못 들어가는 일이 흔하고, 그 class의 AP는 측정값이 아니라 없는
+    값이 되어 후보끼리 견줄 수 없게 됩니다.
+
+    그래서 **먼저 모든 class를 덮고, 남는 자리를 채웁니다.** 사진 한 장에 알약이 넷까지
+    들어가므로 한 장이 여러 class를 한꺼번에 덮습니다. 이미 덮인 class 차례에 또 한 장을
+    집으면 그 자리만큼 아직 못 덮은 class가 밀려나므로, 덮인 class는 건너뜁니다. 모든
+    class가 한 번씩 나온 뒤에 남는 자리는 무작위로 채워 실제 분포를 따르게 둡니다.
+
+    같은 ``seed``면 같은 표본이므로 후보들은 모두 같은 시험지를 봅니다.
+    """
+
+    if size >= len(records):
+        return [dict(record) for record in records]
+    shuffled = [dict(record) for record in records]
+    # 전역 ``random``을 쓰면 이 표본이 호출 순서에 따라 달라집니다.
+    random.Random(seed).shuffle(shuffled)
+
+    queues: dict[int, list[dict[str, Any]]] = {}
+    for record in shuffled:
+        for category_id in sorted(
+            {annotation["category_id"] for annotation in record["annotations"]}
+        ):
+            queues.setdefault(category_id, []).append(record)
+
+    chosen: dict[Any, dict[str, Any]] = {}
+    covered: set[int] = set()
+    # **한 바퀴면 끝납니다.** 이 바퀴에서 각 class는 자기 사진을 받아 덮이거나, 다른
+    # 사진이 이미 덮었거나, 쓸 사진이 남아 있지 않습니다. 그래서 두 바퀴째에 할 일이
+    # 없습니다.
+    for category_id in sorted(queues):
+        if len(chosen) == size:
+            break
+        if category_id in covered:
+            # 다른 사진이 이미 덮은 class입니다. 여기서 또 집으면 아직 한 장도 없는
+            # class가 그만큼 밀려납니다.
+            continue
+        queue = queues[category_id]
+        while queue and queue[-1]["image_id"] in chosen:
+            queue.pop()
+        if not queue:
+            continue
+        record = queue.pop()
+        chosen[record["image_id"]] = record
+        covered.update(
+            annotation["category_id"] for annotation in record["annotations"]
+        )
+    # 라벨이 하나도 없는 image와, class를 다 덮고 남은 자리입니다. 무작위로 채워
+    # 실제 분포를 따르게 둡니다 — 배경만 있는 사진에서 나온 오탐도 점수에 들어갑니다.
+    for record in shuffled:
+        if len(chosen) == size:
+            break
+        chosen.setdefault(record["image_id"], record)
+
+    # manifest 순서를 지킵니다. 뒤섞인 순서로 추론하면 진행 로그와 예측 파일의
+    # 순서가 실행마다 달라져 두 결과를 나란히 놓고 볼 수 없습니다.
+    return [
+        chosen[record["image_id"]]
+        for record in records
+        if record["image_id"] in chosen
+    ]
+
+
 __all__ = [
     "load_class_map",
     "load_manifest",
@@ -430,4 +500,5 @@ __all__ = [
     "parse_class_map",
     "parse_manifest",
     "parse_test_manifest",
+    "sample_records",
 ]

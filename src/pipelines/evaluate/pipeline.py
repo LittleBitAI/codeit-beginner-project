@@ -20,7 +20,12 @@ from .errors import (
 )
 from .fusion import DEFAULT_IOU_THRESHOLD as DEFAULT_FUSION_IOU_THRESHOLD
 from .fusion import fuse_predictions
-from .manifest import load_class_map, load_manifest, load_test_manifest
+from .manifest import (
+    load_class_map,
+    load_manifest,
+    load_test_manifest,
+    sample_records,
+)
 from .metrics import DEFAULT_IOU_THRESHOLDS, evaluate_detections, filter_predictions
 from .predictor import (
     load_predictions,
@@ -78,6 +83,8 @@ class Settings:
     # 제출한 것과 같은 test 예측을 JSON으로도 남길 위치입니다. test manifest가 있을
     # 때만 값이 있습니다.
     test_predictions_uri: str | None
+    # 검증 image를 몇 장만 보고 잴지입니다. ``None``이면 지금까지처럼 전수입니다.
+    validation_sample_size: int | None
     iou_thresholds: tuple[float, ...]
     score_threshold: float
     max_detections_per_image: int | None
@@ -389,6 +396,16 @@ def _resolve_max_detections(value: Any) -> int | None:
     return value
 
 
+def _resolve_validation_sample_size(value: Any) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ConfigurationError(
+            "evaluate.validation_sample_size는 0보다 큰 정수여야 합니다."
+        )
+    return value
+
+
 def resolve_settings(config: Mapping[str, Any]) -> Settings:
     """config를 검증하고 실행 설정을 만듭니다."""
     if not isinstance(config, Mapping):
@@ -545,6 +562,9 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         predictions_uri=predictions_uri,
         submission_uri=submission_uri,
         test_predictions_uri=test_predictions_uri,
+        validation_sample_size=_resolve_validation_sample_size(
+            settings.get("validation_sample_size")
+        ),
         iou_thresholds=iou_thresholds,
         score_threshold=float(score_threshold),
         max_detections_per_image=_resolve_max_detections(settings.get("max_detections_per_image")),
@@ -643,6 +663,20 @@ def run(config: dict) -> dict:
                 )
 
         records = load_manifest(store, settings.validation_manifest_uri)
+        # 예측 file은 **전체** manifest를 기준으로 확인합니다. 표본에서 빠진 image를
+        # 가리킨다고 그 file이 잘못된 것은 아닙니다.
+        manifest_image_keys = {record["image_key"] for record in records}
+        # 실제로 **줄어든** 실행만 표본입니다. 요청값이 manifest보다 크거나 같으면 전수를
+        # 본 것이므로, 그때 요청값을 그대로 적으면 전수 점수가 표본 점수로 읽힙니다.
+        sampled_size: int | None = None
+        if (
+            settings.validation_sample_size is not None
+            and settings.validation_sample_size < len(records)
+        ):
+            # 표본으로 잰 점수는 전수와 같은 값이 아닙니다. 어느 파일에서 나온
+            # 숫자인지 알 수 있도록 표본 크기를 결과 문서에도 함께 남깁니다.
+            sampled_size = settings.validation_sample_size
+            records = sample_records(records, sampled_size, seed=settings.seed)
         class_map = (
             load_class_map(store, settings.class_map_uri) if settings.class_map_uri else {}
         )
@@ -665,9 +699,16 @@ def run(config: dict) -> dict:
         )
 
         if settings.predictions_input_uri is not None:
-            raw_predictions = load_predictions(
-                store, settings.predictions_input_uri, known_image_keys=image_keys
-            )
+            raw_predictions = [
+                prediction
+                for prediction in load_predictions(
+                    store,
+                    settings.predictions_input_uri,
+                    known_image_keys=manifest_image_keys,
+                )
+                # 표본에 없는 image의 예측은 이번 채점에 들어가지 않습니다.
+                if prediction["image_key"] in image_keys
+            ]
         else:
             raw_predictions = []
 
@@ -799,6 +840,9 @@ def run(config: dict) -> dict:
             "created_at": finished_at,
             "started_at": started_at,
             "validation_manifest_uri": settings.validation_manifest_uri,
+            # 표본으로 잰 점수를 전수 점수로 읽으면 서로 다른 시험지의 숫자를
+            # 나란히 놓게 됩니다. 전수로 잰 실행은 `None`입니다.
+            "validation_sample_size": sampled_size,
             "class_map_uri": settings.class_map_uri,
             "checkpoint_uri": settings.checkpoint_uri,
             "predictions_input_uri": settings.predictions_input_uri,
@@ -925,6 +969,9 @@ def run(config: dict) -> dict:
             "seed": settings.seed,
             "device": settings.device,
             "metrics": report["metrics"],
+            # 전수로 잰 실행의 summary 모양은 그대로 둡니다. 요청값이 manifest보다
+            # 커서 실제로는 전수를 본 실행도 여기 들어가면 안 됩니다.
+            **({"validation_sample_size": sampled_size} if sampled_size else {}),
             # 쓰지 않은 실행의 summary 모양은 그대로 두려고 값이 있을 때만 넣습니다.
             # `frozenset`은 JSON으로 직렬화할 수 없어 정렬한 list로 바꿉니다.
             **(
