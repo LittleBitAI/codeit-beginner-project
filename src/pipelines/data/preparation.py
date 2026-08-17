@@ -768,6 +768,7 @@ def _guard_existing_crop_bank(storage: Storage, settings: PreparationSettings) -
     if storage.exists(f"{settings.processed_prefix}{CROP_BANK_FILE_NAME}"):
         raise DatasetPreparationError(
             f"'{settings.processed_prefix}'에 {CROP_BANK_FILE_NAME}이 이미 있습니다. "
+            "manifest 없이 은행만 있다면 앞선 실행이 도중에 끊긴 것입니다. "
             "다시 만들려면 config['data']['overwrite']를 true로 설정하세요."
         )
 
