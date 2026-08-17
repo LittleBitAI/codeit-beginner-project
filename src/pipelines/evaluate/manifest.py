@@ -456,30 +456,26 @@ def sample_records(
 
     chosen: dict[Any, dict[str, Any]] = {}
     covered: set[int] = set()
-    while len(chosen) < size and queues:
-        picked_this_round = False
-        for category_id in sorted(queues):
-            if len(chosen) == size:
-                break
-            if category_id in covered:
-                # 다른 사진이 이미 덮은 class입니다. 여기서 또 집으면 아직 한 장도 없는
-                # class가 그만큼 밀려납니다.
-                continue
-            queue = queues[category_id]
-            while queue and queue[-1]["image_id"] in chosen:
-                queue.pop()
-            if not queue:
-                del queues[category_id]
-                continue
-            record = queue.pop()
-            chosen[record["image_id"]] = record
-            covered.update(
-                annotation["category_id"] for annotation in record["annotations"]
-            )
-            picked_this_round = True
-        if not picked_this_round:
-            # 남은 class가 모두 덮였습니다. 나머지는 아래에서 채웁니다.
+    # **한 바퀴면 끝납니다.** 이 바퀴에서 각 class는 자기 사진을 받아 덮이거나, 다른
+    # 사진이 이미 덮었거나, 쓸 사진이 남아 있지 않습니다. 그래서 두 바퀴째에 할 일이
+    # 없습니다.
+    for category_id in sorted(queues):
+        if len(chosen) == size:
             break
+        if category_id in covered:
+            # 다른 사진이 이미 덮은 class입니다. 여기서 또 집으면 아직 한 장도 없는
+            # class가 그만큼 밀려납니다.
+            continue
+        queue = queues[category_id]
+        while queue and queue[-1]["image_id"] in chosen:
+            queue.pop()
+        if not queue:
+            continue
+        record = queue.pop()
+        chosen[record["image_id"]] = record
+        covered.update(
+            annotation["category_id"] for annotation in record["annotations"]
+        )
     # 라벨이 하나도 없는 image와, class를 다 덮고 남은 자리입니다. 무작위로 채워
     # 실제 분포를 따르게 둡니다 — 배경만 있는 사진에서 나온 오탐도 점수에 들어갑니다.
     for record in shuffled:
