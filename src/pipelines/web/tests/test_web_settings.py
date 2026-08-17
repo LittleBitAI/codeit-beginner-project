@@ -69,6 +69,26 @@ def test_지표를_셋이_아니게_고르면_거절한다(client, metrics):
     assert web_settings.epoch_metrics() is None
 
 
+def test_고른_지표를_다시_해제할_수_있다(client):
+    """비우려고 보낸 null과 아예 보내지 않은 것은 다릅니다.
+
+    둘을 같게 다루면 한 번 고른 기준을 풀 방법이 없어집니다 — 무엇으로 순위를 매길지
+    다시 생각해 보려는 사람이 그 자리에서 막힙니다.
+    """
+
+    client.put(
+        "/api/settings",
+        json={"evaluation_mode": "serial", "epoch_metrics": ["mAP", "mAP50", "recall50"]},
+    )
+
+    response = client.put(
+        "/api/settings", json={"evaluation_mode": "serial", "epoch_metrics": None}
+    )
+
+    assert response.status_code == 200
+    assert web_settings.epoch_metrics() is None
+
+
 def test_평가_방식만_고쳐도_고른_지표는_남는다(client):
     """평가 시점만 고치러 온 저장이 훑기 설정을 지우면 안 됩니다."""
 

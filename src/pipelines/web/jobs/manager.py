@@ -466,8 +466,15 @@ class JobManager:
         8GB 카드에서 둘 다 out of memory로 잃습니다. 잠금 순서는 gate → runner.
         """
 
+        from ..epoch_sweep import get_epoch_sweep_runner
+
         with self._gpu_gate, runner_.locked():
             if serial and self.active_job() is not None:
+                return False
+            # 훑기도 같은 GPU로 추론을 돌립니다. 사람이 누른 평가만 훑기를 확인하고
+            # 자동 평가가 그대로 출발하면, 밤새 도는 쪽에서 둘이 겹칩니다. 훑기가
+            # 끝나면서 다시 깨우므로 여기서 물러나도 줄은 남아 있습니다.
+            if get_epoch_sweep_runner().is_running():
                 return False
             record = self._next_unevaluated()
             if record is None:

@@ -305,7 +305,9 @@ def delete_job(job_id: str) -> dict[str, Any]:
     """
 
     manager = get_manager()
-    with get_evaluation_runner().hold_for_delete(job_id):
+    # 평가와 훑기 **둘 다** 끝나면서 같은 record를 다시 저장합니다. 한쪽만 잡으면
+    # 다른 쪽이 지운 기록을 log 없이 되살립니다.
+    with get_evaluation_runner().hold_for_delete(job_id), get_epoch_sweep_runner().hold_for_delete(job_id):
         manager.delete(job_id)  # 없거나 실행 중이면 404 또는 409
     active = manager.active_job()
     return {
@@ -384,6 +386,10 @@ def start_evaluation(job_id: str, payload: EvaluateRequest = Body(...)) -> dict[
         record = get_manager().get(job_id)  # 지워졌으면 여기서 404
         if record.status != "succeeded":
             raise JobConflictError("성공으로 끝난 학습만 평가할 수 있습니다.")
+        # 훑기도 같은 GPU로 추론을 돌립니다. 훑기 쪽만 평가를 확인하면 그 반대 방향이
+        # 비어 있어, 훑기가 시작된 직후 들어온 이 요청과 겹쳐 둘 다 잃습니다.
+        if get_epoch_sweep_runner().is_running():
+            raise JobConflictError("epoch 훑기가 도는 중에는 평가할 수 없습니다.")
         return {"evaluation": runner.start(record, payload.model_dump())}
 
 

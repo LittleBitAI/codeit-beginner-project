@@ -47,6 +47,7 @@ __all__ = [
     "build_candidate_config",
     "epoch_candidates",
     "get_epoch_sweep_runner",
+    "next_attempt",
     "score_candidates",
     "winner_record",
 ]
@@ -162,19 +163,40 @@ def _record_for(
     )
 
 
+def next_attempt(record: JobRecord) -> int:
+    """이 학습을 몇 번째로 훑는지입니다. 처음이면 1입니다.
+
+    **이름이 매번 같으면 두 번째 훑기가 통째로 실패합니다.** evaluate는 이미 있는
+    artifact를 덮어쓰지 않으므로, 표본 크기를 바꿔 다시 재려 해도 후보마다 "이미
+    있습니다"로 끝납니다. 번호를 붙여 지난 측정을 지우지 않고 나란히 남깁니다.
+    """
+
+    previous = record.epoch_sweep.get("attempt") if record.epoch_sweep else None
+    return previous + 1 if isinstance(previous, int) and previous >= 1 else 1
+
+
+def _attempt_suffix(attempt: int) -> str:
+    """두 번째부터 `.2`가 붙습니다. 이어 학습 이름과 같은 규칙입니다."""
+
+    return "" if attempt <= 1 else f".{attempt}"
+
+
 def build_candidate_config(
     record: JobRecord,
     candidate: dict[str, Any],
     *,
     sample_size: int,
     device: str | None = None,
+    attempt: int = 1,
 ) -> dict[str, Any]:
     """후보 하나를 표본으로 재는 config입니다."""
 
     config = build_evaluate_config(
         _record_for(
             record,
-            run_id=f"{record.run_id}-e{candidate['epoch']}-sample",
+            run_id=(
+                f"{record.run_id}-e{candidate['epoch']}-sample{_attempt_suffix(attempt)}"
+            ),
             checkpoint_uri=candidate["checkpoint_uri"],
             with_test=False,
         ),
@@ -184,12 +206,14 @@ def build_candidate_config(
     return config
 
 
-def winner_record(record: JobRecord, candidate: dict[str, Any]) -> JobRecord:
+def winner_record(
+    record: JobRecord, candidate: dict[str, Any], *, attempt: int = 1
+) -> JobRecord:
     """이긴 후보를 별개의 실행으로 보는 사본입니다. `<원래이름>-e12`가 됩니다."""
 
     return _record_for(
         record,
-        run_id=f"{record.run_id}-e{candidate['epoch']}",
+        run_id=f"{record.run_id}-e{candidate['epoch']}{_attempt_suffix(attempt)}",
         checkpoint_uri=candidate["checkpoint_uri"],
         with_test=True,
     )
@@ -212,6 +236,28 @@ class EpochSweepRunner:
 
         with self._lock:
             yield
+
+    @contextmanager
+    def hold_for_delete(self, job_id: str) -> Iterator[None]:
+        """이 학습의 기록을 지우는 동안 훑기가 끼어들지 못하게 붙잡습니다.
+
+        훑는 중에 기록을 지우면, 훑기가 끝나면서 손에 든 stale record를 다시 저장해
+        **log 없는 기록으로 되살립니다.** 평가가 같은 이유로 같은 문을 두고 있습니다.
+        """
+
+        with self.locked():
+            if (
+                self._state.get("status") == STATUS_RUNNING
+                and self._state.get("job_id") == job_id
+            ):
+                raise JobConflictError("훑기가 도는 중인 학습의 기록은 지울 수 없습니다.")
+            yield
+
+    def is_running(self) -> bool:
+        """지금 어느 학습이든 훑고 있는지입니다. GPU를 나눠 쓰는 쪽이 물어봅니다."""
+
+        with self._lock:
+            return self._state.get("status") == STATUS_RUNNING
 
     def status(self, job_id: str | None = None) -> dict[str, Any]:
         with self._lock:
@@ -272,10 +318,14 @@ class EpochSweepRunner:
                 raise JobConflictError(
                     "이미 훑기가 실행 중입니다. 끝난 뒤 다시 시도해 주세요."
                 )
+            # 같은 학습을 다시 훑으면 실행 이름에 번호가 붙습니다. 지난 측정을 덮어쓰지
+            # 않으므로 표본 크기를 바꿔 다시 재는 것이 됩니다.
+            attempt = next_attempt(record)
             self._state = {
                 "status": STATUS_RUNNING,
                 "job_id": record.job_id,
                 "run_id": record.run_id,
+                "attempt": attempt,
                 "started_at": utc_now_text(),
                 "finished_at": None,
                 "message": f"후보 {len(candidates)}개를 {sample_size}장 표본으로 재고 있습니다.",
@@ -292,7 +342,7 @@ class EpochSweepRunner:
 
         threading.Thread(
             target=self._run,
-            args=(record, candidates, list(metric_names), sample_size, device),
+            args=(record, candidates, list(metric_names), sample_size, device, attempt),
             name="epoch-sweep",
             daemon=True,
         ).start()
@@ -326,9 +376,12 @@ class EpochSweepRunner:
         metric_names: list[str],
         sample_size: int,
         device: str,
+        attempt: int,
     ) -> None:
         try:
-            self._run_once(record, candidates, metric_names, sample_size, device)
+            self._run_once(
+                record, candidates, metric_names, sample_size, device, attempt
+            )
         except Exception as error:  # 훑기 실패가 server를 죽이면 안 됩니다.
             self._finish(
                 record,
@@ -338,10 +391,14 @@ class EpochSweepRunner:
                 ),
             )
         finally:
+            # GPU를 놓았으니 이 때문에 물러났던 쪽들을 다시 깨웁니다. 깨우지 않으면
+            # 대기열과 자동 평가가 표시도 없이 그대로 멈춰 있습니다.
             try:
                 from .jobs import get_manager
 
-                get_manager()._start_next()
+                manager = get_manager()
+                manager.wake_evaluation()
+                manager._start_next()
             except Exception:
                 pass
 
@@ -352,12 +409,17 @@ class EpochSweepRunner:
         metric_names: list[str],
         sample_size: int,
         device: str,
+        attempt: int,
     ) -> None:
         seen: list[dict[str, Any]] = []
         measured: list[dict[str, Any]] = []
         for index, candidate in enumerate(candidates):
             config = build_candidate_config(
-                record, candidate, sample_size=sample_size, device=device
+                record,
+                candidate,
+                sample_size=sample_size,
+                device=device,
+                attempt=attempt,
             )
             result = run_evaluation(config)
             entry = {**candidate}
@@ -395,7 +457,7 @@ class EpochSweepRunner:
             ),
         )
 
-        best = winner_record(record, winner)
+        best = winner_record(record, winner, attempt=attempt)
         config = build_evaluate_config(best, device=device)
         result = run_evaluation(config)
         if not result["ok"]:

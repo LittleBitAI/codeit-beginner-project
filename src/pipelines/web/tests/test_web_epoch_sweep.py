@@ -277,6 +277,104 @@ def test_one_failed_candidate_does_not_throw_away_the_others(client, manager, mo
     assert [entry["epoch"] for entry in failed] == [15]
 
 
+def test_a_record_being_swept_cannot_be_deleted(client, manager, monkeypatch):
+    """훑는 중에 기록을 지우면 훑기가 끝나면서 그것을 다시 저장합니다.
+
+    log 없는 기록으로 되살아나므로, 지운 사람은 지워지지 않았다고 봅니다. 평가가 같은
+    이유로 같은 문을 두고 있습니다.
+    """
+
+    record = _record()
+    manager._records[record.job_id] = record
+    runner = epoch_sweep.get_epoch_sweep_runner()
+    runner._state = {"status": "running", "job_id": record.job_id}
+
+    response = client.delete(f"/api/train/jobs/{record.job_id}")
+
+    assert response.status_code == 409
+    assert "훑기" in response.text
+    assert manager.get(record.job_id) is record
+
+
+def test_evaluation_does_not_start_while_a_sweep_is_running(client, manager, monkeypatch):
+    """훑기도 같은 GPU로 추론합니다. 한 방향만 막으면 반대편이 그대로 들어옵니다."""
+
+    record = _record()
+    manager._records[record.job_id] = record
+    epoch_sweep.get_epoch_sweep_runner()._state = {
+        "status": "running",
+        "job_id": "다른-학습",
+    }
+
+    response = client.post(f"/api/train/jobs/{record.job_id}/evaluate", json={})
+
+    assert response.status_code == 409
+    assert "훑기" in response.text
+
+
+def test_the_automatic_evaluation_also_stands_back_while_a_sweep_runs(client, manager):
+    """사람이 누른 평가만 막으면 밤새 도는 자동 평가가 그대로 겹칩니다."""
+
+    from src.pipelines.web import evaluation
+    from src.pipelines.web.errors import JobConflictError
+
+    record = _record()
+    manager._records[record.job_id] = record
+    manager._evaluation_pending.append(record.job_id)
+    epoch_sweep.get_epoch_sweep_runner()._state = {"status": "running", "job_id": "다른-학습"}
+
+    more = manager._start_one_evaluation(
+        evaluation.get_evaluation_runner(), JobConflictError, serial=True
+    )
+
+    assert more is False
+    # 물러났을 뿐이라 줄은 그대로 남아 있어야 합니다. 훑기가 끝나면서 다시 깨웁니다.
+    assert manager._evaluation_pending == [record.job_id]
+
+
+def test_a_second_sweep_of_the_same_run_takes_new_names(client, manager, monkeypatch):
+    """이름이 매번 같으면 두 번째 훑기가 통째로 실패합니다.
+
+    evaluate는 이미 있는 artifact를 덮어쓰지 않으므로, 표본 크기를 바꿔 다시 재려 해도
+    후보마다 "이미 있습니다"로 끝나고 그 실패가 지난 성공 상태까지 덮습니다.
+    """
+
+    client.put(
+        "/api/settings",
+        json={"evaluation_mode": "serial", "epoch_metrics": ["mAP", "mAP50", "recall50"]},
+    )
+    record = _record()
+    record.epoch_sweep = {"status": "succeeded", "attempt": 1}
+    manager._records[record.job_id] = record
+    calls: list[str] = []
+
+    def fake_run_evaluation(config, on_progress_line=None):  # noqa: ARG001
+        calls.append(config["evaluate"]["run_id"])
+        return {
+            "ok": True,
+            "exit_code": 0,
+            "artifacts": {},
+            "summary": {"metrics": {"mAP": 0.5, "mAP50": 0.5, "recall50": 0.5}},
+            "message": "완료",
+        }
+
+    monkeypatch.setattr(epoch_sweep, "run_evaluation", fake_run_evaluation)
+    monkeypatch.setattr(
+        epoch_sweep, "run_registry", lambda config: {"ok": True, "artifacts": {}, "summary": {}, "message": "등록"}
+    )
+
+    client.post(f"/api/train/jobs/{record.job_id}/epoch-sweep", json={"sample_size": 5})
+    state = _finished_sweep()
+
+    assert state["status"] == "succeeded", state.get("message")
+    assert state["attempt"] == 2
+    assert calls == [
+        "retina-run-e15-sample.2",
+        "retina-run-e16-sample.2",
+        "retina-run-e15.2",
+    ]
+
+
 def test_a_sweep_refuses_while_a_training_run_is_going(
     client, manager, monkeypatch, valid_payload, fake_process_factory
 ):
