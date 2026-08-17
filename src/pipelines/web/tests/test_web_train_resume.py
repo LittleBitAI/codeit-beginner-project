@@ -489,6 +489,64 @@ def test_a_second_resume_skips_the_name_still_waiting_in_the_queue(
     ]
 
 
+def test_two_resumes_that_start_together_still_get_different_names(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """이름을 고르는 것과 그 이름이 대기열에 보이는 것 사이에 틈이 있으면 안 됩니다.
+
+    FastAPI는 `def` route를 threadpool에서 돌리므로 두 요청이 실제로 동시에 들어옵니다.
+    갈라져 있으면 둘 다 "A.2는 아직 없다"를 보고 같은 이름을 만들고, 뒤엣것은 밤새
+    기다렸다 이름 충돌로 죽습니다.
+
+    **틈을 일부러 벌려 놓고 봅니다.** 그냥 두 thread를 띄우면 대개 앞뒤로 지나가서,
+    문이 없어도 초록으로 통과합니다.
+    """
+
+    import threading
+
+    from src.pipelines.web.api import routes_train
+
+    record = _finished_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    monkeypatch.setattr(manager, "_start_next", lambda: None)
+
+    inside = threading.Event()
+    release = threading.Event()
+    real_write = routes_train.write_runtime_config
+
+    def blocking_write(config):
+        # 첫 요청이 이름을 고른 **직후** 멈춰 세웁니다. 여기가 위험한 창입니다.
+        if config["train"]["run_id"] == "web-run.2":
+            inside.set()
+            release.wait(timeout=5)
+        return real_write(config)
+
+    monkeypatch.setattr(routes_train, "write_runtime_config", blocking_write)
+
+    names: list[str] = []
+
+    def resume() -> None:
+        body = routes_train.resume_job(
+            record.job_id, routes_train.ResumeRequest(epochs=35), None
+        )
+        names.append(body["run_id"])
+
+    first = threading.Thread(target=resume, daemon=True)
+    first.start()
+    assert inside.wait(timeout=5), "첫 요청이 이름을 고르는 지점에 닿지 못했습니다"
+
+    second = threading.Thread(target=resume, daemon=True)
+    second.start()
+    # 문이 없으면 이 사이에 두 번째가 같은 이름을 고르고 지나갑니다.
+    time.sleep(0.3)
+    release.set()
+    first.join(timeout=10)
+    second.join(timeout=10)
+
+    assert sorted(names) == ["web-run.2", "web-run.3"]
+
+
 def test_continuing_a_finished_run_needs_a_bigger_plan(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):

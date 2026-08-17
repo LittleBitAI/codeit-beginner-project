@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any, Iterator
 
@@ -416,6 +417,19 @@ def _stopped_early_refusal(record: JobRecord) -> str | None:
     )
 
 
+#: 이어 학습 이름을 고르고 대기열에 넣기까지를 한 번에 하나만 지나갑니다.
+#:
+#: 이름을 고르는 것과 줄을 세우는 것이 갈라져 있으면, 두 요청이 각자 "A.2는 아직
+#: 없다"를 보고 둘 다 A.2를 만듭니다. 사람이 단추를 두 번 누르거나 두 화면에서 누르면
+#: 그렇게 되고, 뒤엣것은 밤새 기다렸다 이름 충돌로 죽습니다. FastAPI는 `def` route를
+#: threadpool에서 돌리므로 실제로 동시에 들어옵니다.
+#:
+#: **manager의 lock을 쓰면 안 됩니다.** `enqueue`가 안에서 `_start_lock` → `_lock`
+#: 순서로 잡는데, 그 바깥에서 `_lock`을 먼저 쥐면 순서가 뒤집혀 교착합니다. 이 lock은
+#: 여기서만 잡고 아무도 기다리지 않으므로 그 고리를 만들지 않습니다.
+_RESUME_NAMING_LOCK = threading.Lock()
+
+
 def _taken_run_ids(manager: Any) -> list[str]:
     """이 서버가 아는 run_id 전부입니다. **대기열에 줄만 선 이름까지** 셉니다.
 
@@ -543,21 +557,25 @@ def resume_job(
             "checkpoint 주기를 채우기 전에 끝난 학습입니다."
         )
 
-    config = build_resume_config(
-        source_config,
-        artifacts=record.artifacts,
-        # 이름은 A -> A.2 -> A.3으로 이어집니다. 이미 있는 번호를 다시 쓰면 train이
-        # 시작을 거부하므로, 이 서버가 아는 이름을 모두 건네 건너뛰게 합니다.
-        run_id=payload.run_id or next_resume_run_id(record.run_id, _taken_run_ids(manager)),
-        epochs=payload.epochs,
-    )
-    config_id = write_runtime_config(config)
-    started = manager.enqueue(
-        config_id,
-        access_token=_bearer_token(authorization),
-        # 앞선 실행의 손실 곡선을 이어 그리려면 어느 job에서 왔는지 알아야 합니다.
-        resumed_from_job_id=record.job_id,
-    )
+    # 이름을 고르는 것과 그 이름이 대기열에 보이는 것 사이를 갈라 두면, 그 틈에 들어온
+    # 두 번째 요청이 같은 이름을 고릅니다. 한 번에 하나만 지나갑니다.
+    with _RESUME_NAMING_LOCK:
+        config = build_resume_config(
+            source_config,
+            artifacts=record.artifacts,
+            # 이름은 A -> A.2 -> A.3으로 이어집니다. 이미 있는 번호를 다시 쓰면 train이
+            # 시작을 거부하므로, 이 서버가 아는 이름을 모두 건네 건너뛰게 합니다.
+            run_id=payload.run_id
+            or next_resume_run_id(record.run_id, _taken_run_ids(manager)),
+            epochs=payload.epochs,
+        )
+        config_id = write_runtime_config(config)
+        started = manager.enqueue(
+            config_id,
+            access_token=_bearer_token(authorization),
+            # 앞선 실행의 손실 곡선을 이어 그리려면 어느 job에서 왔는지 알아야 합니다.
+            resumed_from_job_id=record.job_id,
+        )
     return {
         "config_id": config_id,
         "run_id": config["train"]["run_id"],
