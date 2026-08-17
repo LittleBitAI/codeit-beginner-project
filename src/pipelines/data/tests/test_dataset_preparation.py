@@ -1828,6 +1828,101 @@ def test_crop_bank_holds_one_pill_per_file_capped_per_class():
     assert result["summary"]["crop_bank"]["crop_count"] == len(index["records"])
 
 
+def test_crop_bank_spreads_the_cap_over_combinations():
+    """상한을 조합 하나가 다 먹으면 안 됩니다.
+
+    원본은 알약 조합 하나를 각도와 조명만 바꿔 여러 장 찍은 것이라, 조합 하나가
+    상한보다 많은 사진을 갖는 것이 보통입니다. 앞에서부터 채우면 은행이 그 조합
+    하나를 외운 것과 다를 바 없어집니다.
+
+    여기서는 조합 여섯이 각각 사진 넉 장을 갖고, 모두 같은 class입니다. 상한이
+    넷이므로 **서로 다른 조합 넷**에서 한 장씩 와야 합니다.
+    """
+
+    objects: dict[str, Any] = {}
+    for image_index in range(1, 25):
+        stem = train_stem(image_index, group=(image_index - 1) // 4 + 1)
+        objects[f"s3://{BUCKET}/{RAW_PREFIX}train_images/{stem}.jpg"] = image_bytes(100, 100)
+        objects[f"s3://{BUCKET}/{RAW_PREFIX}train_annotations/{stem}.json"] = (
+            annotation_document(image_index, [1], stem=stem)
+        )
+    objects[f"s3://{BUCKET}/{RAW_PREFIX}test_images/001.png"] = image_bytes(30, 40)
+
+    result, stored = prepare(
+        prepare_config("8:2", crop_bank=True, crop_bank_per_class=4), objects
+    )
+
+    assert result["status"] == "ok", result["message"]
+    index, _ = crop_bank_members(stored, result)
+    assert len(index["records"]) == 4
+    assert len({record["group"] for record in index["records"]}) == 4
+
+
+def test_crop_bank_refuses_to_start_when_one_is_already_there():
+    """은행이 이미 있으면 **이미지를 한 장도 열기 전에** 멈춰야 합니다.
+
+    은행을 켜는 실행은 이미 만들어 둔 dataset 폴더에 은행만 더하는 경우가 보통이라
+    이 자리가 가장 부딪힙니다. 늦게 걸리면 dataset 전체를 내려받아 자른 뒤 실패하고,
+    그 사이에 쓰인 것이 있으면 반쪽짜리 dataset이 남습니다.
+    """
+
+    config = prepare_config("8:2", crop_bank=True)
+    prefix = preparation.resolve_settings(config).processed_prefix
+    objects = real_image_objects()
+    objects[f"s3://{BUCKET}/{prefix}crop_bank.tar"] = b"an older bank"
+    storage, stored = make_fake_s3_storage(objects)
+
+    result = run_with_fake_storage(storage, config)
+
+    assert result["status"] == "error"
+    assert "crop_bank.tar" in result["message"]
+    # 이미지를 열었다면 뒤늦게 막힌 것입니다. 앞에서 막았다면 한 장도 안 엽니다.
+    opened = [
+        call.args[0]
+        for call in storage.download_file.call_args_list
+        if "/train_images/" in str(call.args[0])
+    ]
+    assert opened == []
+    assert not [uri for uri in stored if uri.endswith("train_manifest.json")]
+
+
+def test_crop_bank_is_refused_on_the_legacy_backfill_path_instead_of_ignored():
+    """보충 경로는 은행을 만들 수 없습니다. 조용히 지나가면 안 됩니다.
+
+    그 경로는 annotation도 split도 읽지 않습니다. 그냥 통과시키면 은행을 달라고
+    한 실행이 은행 없이 "성공"으로 끝나고, 쓰는 쪽은 왜 없는지 알 방법이 없습니다.
+    """
+
+    objects = raw_objects()
+    storage, stored = make_fake_s3_storage(objects)
+    initial = run_with_fake_storage(storage, prepare_config("8:2"))
+    del stored[initial["artifacts"]["test_manifest_uri"]]
+
+    result = run_with_fake_storage(storage, prepare_config("8:2", crop_bank=True))
+
+    assert result["status"] == "error"
+    assert "crop 은행" in result["message"]
+    assert "overwrite" in result["message"]
+
+
+def test_a_failed_crop_bank_upload_leaves_no_half_dataset():
+    """은행 업로드가 실패해도 manifest가 먼저 나가 있으면 안 됩니다.
+
+    다섯 산출물 중 은행만 megabyte 단위 파일 업로드라 여기가 가장 잘 끊깁니다.
+    manifest를 먼저 쓰면 다음 실행은 "이미 있습니다"에 막히는데 정작 은행은 없습니다.
+    """
+
+    storage, stored = make_fake_s3_storage(real_image_objects())
+    storage.upload_file = Mock(side_effect=StorageError("업로드가 끊겼습니다"))
+
+    result = run_with_fake_storage(storage, prepare_config("8:2", crop_bank=True))
+
+    assert result["status"] == "error"
+    assert result["artifacts"] == {}
+    assert storage.upload_file.called, "은행을 올리는 자리까지 가지 못했습니다"
+    assert not [uri for uri in stored if "/processed/" in uri]
+
+
 def test_crop_bank_never_holds_a_validation_crop():
     """validation crop을 은행에 넣으면 그 dataset으로 잰 점수가 자기 답을 본 것이 됩니다."""
 

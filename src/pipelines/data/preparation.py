@@ -754,6 +754,24 @@ def _guard_existing(
         )
 
 
+def _guard_existing_crop_bank(storage: Storage, settings: PreparationSettings) -> None:
+    """은행 자리가 비었는지 **아무것도 쓰기 전에** 봅니다.
+
+    은행은 언제나 나오는 다섯이 아니라 `_existing_artifact_keys`가 보지 않습니다.
+    그런데 은행을 켜는 실행은 이미 만들어 둔 dataset 폴더에 은행만 더하는 경우가
+    보통이라, 실제로 가장 부딪히기 쉬운 자리입니다. 여기서 안 막으면 manifest 네
+    개를 먼저 쓴 뒤 올리다 걸려, 반쪽짜리 dataset이 남습니다.
+    """
+
+    if settings.overwrite or not settings.crop_bank:
+        return
+    if storage.exists(f"{settings.processed_prefix}{CROP_BANK_FILE_NAME}"):
+        raise DatasetPreparationError(
+            f"'{settings.processed_prefix}'에 {CROP_BANK_FILE_NAME}이 이미 있습니다. "
+            "다시 만들려면 config['data']['overwrite']를 true로 설정하세요."
+        )
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -866,8 +884,17 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         frozenset() if settings.overwrite else _existing_artifact_keys(storage, settings)
     )
     if not settings.overwrite and existing_keys == LEGACY_ARTIFACT_KEYS:
+        # 보충 경로는 annotation도 split도 읽지 않아 은행을 만들 수 없습니다. 그냥
+        # 지나가면 은행을 달라고 한 실행이 은행 없이 성공했다고 답합니다.
+        if settings.crop_bank:
+            raise DatasetPreparationError(
+                "test manifest만 보충하는 실행에서는 crop 은행을 만들 수 없습니다. "
+                "은행이 필요하면 config['data']['overwrite']를 true로 두고 전체를 "
+                "다시 만드세요."
+            )
         return _backfill_test_manifest(storage, settings, publisher, progress)
     _guard_existing(settings, existing_keys)
+    _guard_existing_crop_bank(storage, settings)
 
     image_locations, annotation_locations, test_image_locations = _raw_objects(
         storage, settings.raw_prefix
@@ -981,6 +1008,23 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
 
     progress.emit("step_started", step="publish")
     artifacts: dict[str, str] = {}
+    # **은행을 먼저 올립니다.** 다섯 artifact 중 유일하게 megabyte 단위이고 유일하게
+    # 파일 업로드라, 이 자리가 가장 실패하기 쉽습니다. manifest를 먼저 쓰고 여기서
+    # 걸리면 반쪽짜리 dataset이 남습니다. 순서를 되돌리면 안 됩니다.
+    try:
+        if crop_bank_archive is not None and crop_bank_summary is not None:
+            artifacts[CROP_BANK_ARTIFACT_KEY] = publisher.artifact_uri(
+                storage.upload_file(
+                    crop_bank_archive,
+                    f"{settings.processed_prefix}{CROP_BANK_FILE_NAME}",
+                    overwrite=settings.overwrite,
+                )
+            )
+    finally:
+        # 실패해도 임시 tar은 치웁니다. dataset 하나가 수백 MB입니다.
+        if crop_bank_scratch is not None:
+            crop_bank_scratch.cleanup()
+
     for key, value in (
         ("train_manifest_uri", manifests["train"]),
         ("validation_manifest_uri", manifests["validation"]),
@@ -994,17 +1038,6 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
                 overwrite=settings.overwrite,
             )
         )
-
-    if crop_bank_archive is not None and crop_bank_summary is not None:
-        artifacts[CROP_BANK_ARTIFACT_KEY] = publisher.artifact_uri(
-            storage.upload_file(
-                crop_bank_archive,
-                f"{settings.processed_prefix}{CROP_BANK_FILE_NAME}",
-                overwrite=settings.overwrite,
-            )
-        )
-    if crop_bank_scratch is not None:
-        crop_bank_scratch.cleanup()
 
     summary_document = _dataset_summary(
         dataset,

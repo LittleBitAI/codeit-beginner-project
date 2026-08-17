@@ -55,10 +55,15 @@ def _sample(
     per_class: int,
     seed: int,
 ) -> list[Mapping[str, Any]]:
-    """class마다 조합을 골고루 섞어 앞에서부터 뽑습니다.
+    """class마다 조합을 **돌아가며 한 장씩** 뽑습니다.
 
     같은 조합에서만 뽑으면 같은 알약을 같은 배치로 찍은 사진만 담겨, 은행이 그
     조합 하나를 외운 것과 다를 바 없어집니다.
+
+    조합을 섞은 뒤 앞에서부터 채우면 그 일이 그대로 일어납니다. 조합 하나가
+    상한보다 많은 사진을 갖고 있으면 **첫 조합 하나로 상한이 다 찹니다.** 원본은
+    한 조합을 각도와 조명만 바꿔 수십 장씩 찍은 것이라 그것이 보통입니다. 그래서
+    섞기만 하지 않고 조합을 번갈아 가며 한 장씩 가져옵니다.
     """
 
     generator = random.Random(seed)
@@ -69,12 +74,17 @@ def _sample(
             by_group[group_of.get(annotation["image_id"], "")].append(annotation)
         groups = sorted(by_group)
         generator.shuffle(groups)
+        lanes = [by_group[group] for group in groups]
         chosen: list[Mapping[str, Any]] = []
-        for group in groups:
-            chosen.extend(by_group[group])
+        for position in range(max(len(lane) for lane in lanes)):
+            for lane in lanes:
+                if position < len(lane):
+                    chosen.append(lane[position])
+                    if len(chosen) >= per_class:
+                        break
             if len(chosen) >= per_class:
                 break
-        picked.extend(chosen[:per_class])
+        picked.extend(chosen)
     return picked
 
 
@@ -214,30 +224,7 @@ def build_crop_bank(
     }
 
 
-def read_crop_bank(storage: Any, uri: str, destination: Path) -> dict[str, Any]:
-    """은행을 내려받아 풀고 목록을 돌려줍니다. 읽는 쪽이 함께 쓰는 입구입니다."""
-
-    destination.mkdir(parents=True, exist_ok=True)
-    archive_path = destination / CROP_BANK_FILE_NAME
-    try:
-        storage.download_file(uri, archive_path)
-        with tarfile.open(archive_path) as archive:
-            # tar 안의 이름은 우리가 만든 것뿐이지만, 남이 만든 파일을 그대로 푸는
-            # 습관을 남기지 않으려고 경로가 밖으로 나가는 항목은 거부합니다.
-            for member in archive.getmembers():
-                target = (destination / member.name).resolve()
-                if not str(target).startswith(str(destination.resolve())):
-                    raise DatasetPreparationError(
-                        f"crop 은행에 위험한 경로가 있습니다: {member.name}"
-                    )
-            archive.extractall(destination)
-        document = json.loads((destination / INDEX_MEMBER).read_text(encoding="utf-8"))
-    except (StorageError, OSError, ValueError, tarfile.TarError) as error:
-        raise DatasetPreparationError(
-            f"crop 은행을 읽지 못했습니다: {uri} ({type(error).__name__})"
-        ) from error
-    finally:
-        archive_path.unlink(missing_ok=True)
-    if not isinstance(document, Mapping) or not document.get("records"):
-        raise DatasetPreparationError(f"crop 은행 목록이 비어 있습니다: {uri}")
-    return dict(document)
+# 은행을 **읽는** 함수는 여기 두지 않습니다. 읽는 쪽(train, evaluate)은 이 module을
+# import할 수 없어 각자 자기 reader를 갖고 있고, 여기 하나를 더 두면 아무도 부르지
+# 않는 tar 해제 코드가 남습니다. 푸는 코드는 그 자체로 위험면이라, 쓰지 않는 것을
+# "언젠가 쓸지도 모르니" 남겨 둘 이유가 없습니다.
