@@ -21,6 +21,7 @@ import {
   Button,
   EmptyState,
   EstimatedValue,
+  Field,
   LinkAction,
   LiveDot,
   Metric,
@@ -28,6 +29,7 @@ import {
   MicroLabel,
   ProgressBar,
   StatusBadge,
+  controlStyle,
 } from '../components/primitives';
 import { color, font, type } from '../design/tokens';
 import { useJobStream } from '../hooks/useJobStream';
@@ -157,13 +159,22 @@ export function Live({
     available: boolean;
     reason: string | null;
   } | null>(null);
+  // 끝까지 간 학습을 이어갈 때 몇 epoch을 더 돌지입니다. 서버에는 남은 수가 아니라
+  // 전체 목표를 보내므로, 마친 epoch에 이 값을 더해 보냅니다.
+  const [extraEpochs, setExtraEpochs] = useState(5);
   const status = job?.status;
 
   useEffect(() => {
     setResumeCheck(null);
     if (!jobId || !status) return;
     // 끝난 학습을 열 때만 한 번 묻습니다. 목록마다 부르면 job 수만큼 저장소를 두드립니다.
-    if (status !== 'failed' && status !== 'cancelled' && status !== 'interrupted') return;
+    if (
+      status !== 'failed' &&
+      status !== 'cancelled' &&
+      status !== 'interrupted' &&
+      status !== 'succeeded'
+    )
+      return;
     let live = true;
     void api
       .resumeAvailability(jobId)
@@ -228,7 +239,12 @@ export function Live({
   // 이어서 학습할 수 있는 상태입니다. 실패든 사람이 중지했든, 마친 epoch이 있으면
   // 그 지점의 checkpoint가 남아 있습니다. 없으면 이어갈 것이 없으므로 단추를 두지
   // 않습니다 — 눌러 봐야 서버가 같은 이유로 거절합니다.
-  const completedEpochs = Math.max(progress.completed_epochs ?? 0, epochs.length);
+  const summaryEpochs = Number(job.summary?.completed_epochs ?? 0);
+  const completedEpochs = Math.max(
+    progress.completed_epochs ?? 0,
+    epochs.length,
+    Number.isFinite(summaryEpochs) ? summaryEpochs : 0,
+  );
   const resumable = resumeCheck?.available === true;
   // 서버가 이유를 줬으면 그 말을 그대로 씁니다. 단추가 없는 까닭과 눌렀을 때 나올 말이
   // 어긋나지 않아야 합니다. 세 상태(실패·중지·중단)가 모두 이 한 줄을 씁니다.
@@ -264,8 +280,10 @@ export function Live({
     setResuming(true);
     setResumeError(null);
     try {
-      // epochs를 비워 두면 중단된 실행의 전체 목표를 그대로 이어갑니다.
-      const result = await api.resumeJob(job!.job_id, undefined, await team.getAccessToken());
+      // epochs를 비워 두면 중단된 실행의 전체 목표를 그대로 이어갑니다. 끝까지 간
+      // 학습은 그 목표를 이미 채웠으므로 몇 epoch 더 돌지를 더해서 보냅니다.
+      const plan = job!.status === 'succeeded' ? completedEpochs + extraEpochs : undefined;
+      const result = await api.resumeJob(job!.job_id, plan, await team.getAccessToken());
       setResumed(result.run_id);
       if (result.started) navigate(`/monitor/${result.started.job_id}`);
     } catch (caught) {
@@ -499,6 +517,43 @@ export function Live({
       {job.status === 'succeeded' && (
         <div style={{ marginTop: 30 }}>
           <EvaluatePanel key={job.job_id} job={job} />
+        </div>
+      )}
+
+      {/* 끝까지 갔다고 다 배운 것은 아닙니다. best epoch이 마지막이면 더 돌 여지가
+          있고, 그때 처음부터 다시 도는 것은 이미 한 학습을 두 번 하는 일입니다.
+          이 학습의 결과는 그대로 두고 설정과 가중치를 물려받은 새 실행이 생깁니다. */}
+      {job.status === 'succeeded' && (
+        <div style={{ marginTop: 34, paddingTop: 24, borderTop: `1px solid ${color.border}` }}>
+          <MicroLabel style={{ marginBottom: 14 }}>이어서 학습</MicroLabel>
+          {resumable && (
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 14, flexWrap: 'wrap' }}>
+              <div style={{ width: 130 }}>
+                <Field label="EPOCH 더">
+                  <input
+                    type="number"
+                    min={1}
+                    value={extraEpochs}
+                    disabled={resuming}
+                    // 소수를 그대로 더해 보내면 서버가 정수만 받아 422로 돌려줍니다.
+                    onChange={(event) =>
+                      setExtraEpochs(Math.max(1, Math.floor(Number(event.target.value)) || 1))
+                    }
+                    style={controlStyle}
+                  />
+                </Field>
+              </div>
+              <Button onClick={() => void resume()} disabled={resuming} style={{ flex: 'none' }}>
+                {resuming ? '시작하는 중…' : `epoch ${completedEpochs + extraEpochs}까지 이어서 학습`}
+              </Button>
+            </div>
+          )}
+          <div style={{ ...type.note, color: color.textMuted, marginTop: 14, textWrap: 'pretty' }}>
+            {resumeNote ??
+              `epoch ${completedEpochs}까지 마쳤습니다. 같은 설정과 마지막 가중치를 물려받은 새 이름의 실행이 대기열에 들어가고, 이 학습의 checkpoint와 평가 결과는 그대로 남습니다.`}
+            {resumed && ` '${resumed}' 이름으로 대기열에 넣었습니다.`}
+            {resumeError && ` ${resumeError}`}
+          </div>
         </div>
       )}
 
