@@ -38,6 +38,8 @@ from src.common.train_contract import (
     RUN_ID_PATTERN,
 )
 
+from .dataset import REPOSITORY_ROOT
+
 
 #: crop 은행 안에서 목록이 놓이는 자리입니다. data가 만드는 tar의 규약입니다.
 INDEX_MEMBER = "index.json"
@@ -55,6 +57,27 @@ SHIFT_RANGE = 0.08
 
 #: label smoothing은 특징을 한 점에 몰지 않게 해 참조와의 거리를 재기 좋게 만듭니다.
 LABEL_SMOOTHING = 0.1
+
+
+def _published(uri: str) -> str:
+    """저장 계층이 돌려준 자리를 계약이 정한 표기로 바꿉니다.
+
+    local 저장은 **절대 경로**를 돌려줍니다. 그대로 내보내면 세 가지가 어긋납니다.
+    다른 컴퓨터에서 열 수 없고, 저장소 규칙("절대 경로 금지")을 깨고, 화면까지
+    흘러가면 OS 사용자 이름이 드러납니다. detector도 같은 규칙으로 상대 경로를
+    냅니다(`pipeline._publish_local`).
+    """
+
+    if uri.lower().startswith("s3://"):
+        return uri
+    path = Path(uri)
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.resolve().relative_to(REPOSITORY_ROOT).as_posix()
+    except ValueError:
+        # 저장소 밖은 애초에 막혀 있습니다. 여기까지 오면 지어내지 않고 그대로 둡니다.
+        return path.as_posix()
 
 
 class EmbeddingTrainingError(RuntimeError):
@@ -372,14 +395,16 @@ def train_embedding(config: Mapping[str, Any]) -> dict[str, Any]:
         prefix = f"{setting.output_prefix}/{setting.run_id}"
         artifacts = {
             "run_id": setting.run_id,
-            "best_checkpoint_uri": storage.upload_file(
-                best_path, f"{prefix}/best_checkpoint.pt", overwrite=False
+            "best_checkpoint_uri": _published(
+                storage.upload_file(best_path, f"{prefix}/best_checkpoint.pt", overwrite=False)
             ),
-            "last_checkpoint_uri": storage.upload_file(
-                last_path, f"{prefix}/last_checkpoint.pt", overwrite=False
+            "last_checkpoint_uri": _published(
+                storage.upload_file(last_path, f"{prefix}/last_checkpoint.pt", overwrite=False)
             ),
-            "training_history_uri": storage.write_json(
-                f"{prefix}/training_history.json", history_document, overwrite=False
+            "training_history_uri": _published(
+                storage.write_json(
+                    f"{prefix}/training_history.json", history_document, overwrite=False
+                )
             ),
         }
         best_path.unlink(missing_ok=True)

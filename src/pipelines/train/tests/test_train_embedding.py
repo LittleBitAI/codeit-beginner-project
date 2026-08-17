@@ -19,6 +19,7 @@ from PIL import Image
 
 from src.common import train_contract
 from src.pipelines.train import run
+from src.pipelines.train import embedding as embedding_module
 from src.pipelines.train.embedding import (
     CROP_SIZE,
     EmbeddingTrainingError,
@@ -64,6 +65,15 @@ def build_bank(path: Path, *, categories: tuple[int, ...] = (11, 22), per_class:
 def workspace(tmp_path: Path) -> Path:
     build_bank(tmp_path / "crop_bank.tar")
     return tmp_path
+
+
+def artifact_path(uri: str) -> Path:
+    """계약이 정한 저장소 기준 상대 경로를 실제 file로 바꿉니다.
+
+    읽는 쪽(`evaluate/storage_io.py`)도 같은 기준으로 풉니다.
+    """
+
+    return embedding_module.REPOSITORY_ROOT / uri
 
 
 def embedding_config(root: Path, **extra: Any) -> dict[str, Any]:
@@ -157,10 +167,33 @@ def test_embedding_training_writes_two_checkpoints_and_a_history(workspace: Path
         "last_checkpoint_uri",
         "training_history_uri",
     }
-    history = json.loads((workspace / result["artifacts"]["training_history_uri"]).read_text(encoding="utf-8"))
+    history = json.loads(
+        artifact_path(result["artifacts"]["training_history_uri"]).read_text(encoding="utf-8")
+    )
     assert history["task"] == "embedding"
     assert len(history["epochs"]) == 1
     assert result["summary"]["class_count"] == 2
+
+
+def test_local_artifact_uris_are_repository_relative(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """절대 경로를 내보내면 세 가지가 어긋납니다.
+
+    다른 컴퓨터에서 열 수 없고, 저장소 규칙을 깨고, 화면까지 흘러가면 OS 사용자
+    이름이 드러납니다. detector도 같은 규칙으로 상대 경로를 냅니다.
+    """
+
+    monkeypatch.setattr(embedding_module, "REPOSITORY_ROOT", workspace)
+
+    result = run(embedding_config(workspace))
+
+    assert result["status"] == "ok", result["message"]
+    for key in ("best_checkpoint_uri", "last_checkpoint_uri", "training_history_uri"):
+        uri = result["artifacts"][key]
+        assert not Path(uri).is_absolute(), uri
+        assert "\\" not in uri, uri
+        assert artifact_path(uri).is_file(), uri
 
 
 def test_the_checkpoint_alone_can_rebuild_the_model(workspace: Path):
@@ -169,7 +202,7 @@ def test_the_checkpoint_alone_can_rebuild_the_model(workspace: Path):
     result = run(embedding_config(workspace, backbone="resnet18"))
 
     payload = torch.load(
-        workspace / result["artifacts"]["best_checkpoint_uri"], map_location="cpu"
+        artifact_path(result["artifacts"]["best_checkpoint_uri"]), map_location="cpu"
     )
     assert payload["backbone"] == "resnet18"
     assert payload["category_ids"] == [11, 22]
