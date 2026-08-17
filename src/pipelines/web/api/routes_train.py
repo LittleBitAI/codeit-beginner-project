@@ -564,13 +564,21 @@ def resume_job(
     # 이름을 고르는 것과 그 이름이 대기열에 보이는 것 사이를 갈라 두면, 그 틈에 들어온
     # 두 번째 요청이 같은 이름을 고릅니다. 한 번에 하나만 지나갑니다.
     with _RESUME_NAMING_LOCK:
+        taken = _taken_run_ids(manager)
+        # 사람이 이름을 직접 적었으면 번호를 매기지 않습니다. 대신 **같은 목록으로**
+        # 겹치는지 봅니다. 여기서 보지 않으면 자동 이름만 규칙을 지키고, 직접 적은
+        # 이름은 대기열까지 갔다가 train이 첫 batch 전에 거절합니다.
+        if payload.run_id is not None and payload.run_id in set(taken):
+            raise JobConflictError(
+                f"'{payload.run_id}'는 이미 쓰고 있는 실행 이름입니다. "
+                "다른 이름을 쓰거나 이름을 비워 자동으로 짓게 하세요."
+            )
         config = build_resume_config(
             source_config,
             artifacts=record.artifacts,
             # 이름은 A -> A.2 -> A.3으로 이어집니다. 이미 있는 번호를 다시 쓰면 train이
             # 시작을 거부하므로, 이 서버가 아는 이름을 모두 건네 건너뛰게 합니다.
-            run_id=payload.run_id
-            or next_resume_run_id(record.run_id, _taken_run_ids(manager)),
+            run_id=payload.run_id or next_resume_run_id(record.run_id, taken),
             epochs=payload.epochs,
         )
         config_id = write_runtime_config(config)

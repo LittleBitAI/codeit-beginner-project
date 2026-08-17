@@ -489,6 +489,47 @@ def test_a_second_resume_skips_the_name_still_waiting_in_the_queue(
     ]
 
 
+def test_a_name_typed_by_hand_is_checked_against_the_same_list(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """자동 이름만 규칙을 지키면 직접 적은 이름이 그 규칙을 통째로 우회합니다."""
+
+    record = _finished_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+
+    response = client.post(
+        f"/api/train/jobs/{record.job_id}/resume",
+        json={"epochs": 35, "run_id": record.run_id},
+    )
+
+    assert response.status_code == 409
+    assert record.run_id in response.text
+    assert manager.queue_entries() == []
+
+
+def test_a_broken_config_does_not_block_every_resume(isolated_repo):
+    """이름을 세다가 손상된 파일 하나를 만나도 멈추지 않아야 합니다.
+
+    `train`이 object가 아닌 파일은 `or {}`로 걸러지지 않습니다. 복원된 config 하나가
+    그 모양이면 이어 학습 요청이 전부 500이 됩니다.
+    """
+
+    from src.pipelines.web.paths import config_dir
+    from src.pipelines.web.train_config import stored_run_ids, write_runtime_config
+
+    write_runtime_config({"train": {"run_id": "web-run.2"}})
+    for name, payload in (
+        ("broken", "{"),
+        ("list-train", '{"train": ["run_id"]}'),
+        ("text-train", '{"train": "web-run.9"}'),
+        ("no-train", '{"inputs": {}}'),
+    ):
+        (config_dir() / f"{name}.json").write_text(payload, encoding="utf-8")
+
+    assert stored_run_ids() == {"web-run.2"}
+
+
 def test_a_name_stays_reserved_while_the_queue_hands_it_to_a_job_record(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):

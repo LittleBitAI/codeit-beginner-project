@@ -1380,7 +1380,10 @@ def stored_run_ids() -> set[str]:
             continue
         if not isinstance(document, dict):
             continue
-        run_id = (document.get("train") or {}).get("run_id")
+        # `train`이 object가 아닌 config 하나 때문에 이어 학습 전체가 500으로 막히면
+        # 안 됩니다. `or {}`는 빈 값만 걸러 주고 list나 문자열은 그대로 통과시킵니다.
+        train = document.get("train")
+        run_id = train.get("run_id") if isinstance(train, dict) else None
         if isinstance(run_id, str) and run_id.strip():
             names.add(run_id.strip())
     return names
