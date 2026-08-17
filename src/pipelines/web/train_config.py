@@ -15,7 +15,7 @@ import math
 import os
 import re
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -270,15 +270,34 @@ def generate_run_id() -> str:
     return _utc_now().strftime("web-%Y%m%dT%H%M%S%fZ")
 
 
-def _generate_resume_run_id(original_run_id: str) -> str:
-    """원래 실행을 알아볼 수 있으면서 충돌하지 않는 이어서 학습 이름을 만듭니다."""
+def next_resume_run_id(original_run_id: str, taken: Iterable[str] = ()) -> str:
+    """이어서 학습할 실행의 이름입니다. ``A`` 다음은 ``A.2``, 그다음은 ``A.3``입니다.
+
+    이름은 계보를 읽으라고 있습니다. 시각을 붙이면 충돌은 확실히 피하지만 목록에서
+    ``A``와 ``A-resume-20260817T...Z``가 이웃해 있어도 한쪽이 다른 쪽에서 나왔다는
+    것이 보이지 않습니다.
+
+    같은 이름을 다시 쓰면 train이 시작을 거부하므로, **이미 있는 번호는 건너뜁니다.**
+    ``taken``은 이 서버가 아는 run_id 전부입니다. 저장소까지 뒤지지는 않습니다 —
+    ``check_run_id_collision``도 같은 이유로 S3를 보지 않고, 그래도 남은 충돌은
+    train이 첫 batch 전에 이름을 대며 거절합니다.
+    """
 
     if not RUN_ID_PATTERN.fullmatch(original_run_id):
         return generate_run_id()
-    suffix = _utc_now().strftime("-resume-%Y%m%dT%H%M%S%fZ")
-    base = original_run_id[: _RUN_ID_MAX_LENGTH - len(suffix)]
-    candidate = f"{base}{suffix}"
-    return candidate if RUN_ID_PATTERN.fullmatch(candidate) else generate_run_id()
+    used = set(taken)
+    # 이어서 한 실행을 또 이어가면 A.2.2가 아니라 A.3입니다.
+    stem, _, tail = original_run_id.rpartition(".")
+    continued = bool(stem) and tail.isdigit()
+    start = max(int(tail) + 1, 2) if continued else 2
+    if not continued:
+        stem = original_run_id
+    for number in range(start, start + 1000):
+        suffix = f".{number}"
+        candidate = f"{stem[: _RUN_ID_MAX_LENGTH - len(suffix)]}{suffix}"
+        if candidate not in used and RUN_ID_PATTERN.fullmatch(candidate):
+            return candidate
+    return generate_run_id()
 
 
 # 표에서 한눈에 읽히도록 줄인 이름입니다. train에 모델이 늘면 아래 fallback이 받습니다.
@@ -1106,9 +1125,21 @@ def run_id_working_path(settings: dict[str, Any]) -> Path:
     return parent / f".{settings['run_id']}{WORKING_DIRECTORY_SUFFIX}"
 
 
-def resume_checkpoint_uri(config: dict[str, Any]) -> str:
-    """이 실행을 이어서 하려면 어느 checkpoint를 봐야 하는지 알려 줍니다."""
+def resume_checkpoint_uri(
+    config: dict[str, Any], artifacts: Mapping[str, Any] | None = None
+) -> str:
+    """이 실행을 이어서 하려면 어느 checkpoint를 봐야 하는지 알려 줍니다.
 
+    **끝까지 간 학습은 자기가 남긴 산출물을 씁니다.** 그때는 작업 폴더가 이미 공개
+    자리로 옮겨졌거나 지워져서 아래 계산식이 가리키는 자리에 아무것도 없습니다. S3
+    게시 경로에는 실행마다 다른 attempt id가 들어 있어 설정만으로는 만들 수도 없습니다.
+    train이 돌려준 ``last_checkpoint_uri``에는 best 가중치까지 함께 들어 있어 그 파일
+    하나로 이어집니다.
+    """
+
+    published = str((artifacts or {}).get("last_checkpoint_uri") or "").strip()
+    if published:
+        return published
     train = config["train"]
     backend = config.get("storage", {}).get("backend")
     if backend == "s3":
@@ -1156,10 +1187,12 @@ def resume_checkpoint_uri(config: dict[str, Any]) -> str:
     )
 
 
-def resume_checkpoint_exists(config: dict[str, Any]) -> bool:
+def resume_checkpoint_exists(
+    config: dict[str, Any], artifacts: Mapping[str, Any] | None = None
+) -> bool:
     """이 실행을 이어갈 checkpoint가 실제 저장소에 남아 있는지 확인합니다."""
 
-    location = resume_checkpoint_uri(config)
+    location = resume_checkpoint_uri(config, artifacts)
     if location.lower().startswith("s3://"):
         return create_storage(config).exists(location)
     return resolve_within_repo(location, label="이어서 학습할 checkpoint").is_file()
@@ -1168,10 +1201,11 @@ def resume_checkpoint_exists(config: dict[str, Any]) -> bool:
 def build_resume_config(
     config: dict[str, Any],
     *,
+    artifacts: Mapping[str, Any] | None = None,
     run_id: str | None = None,
     epochs: int | None = None,
 ) -> dict[str, Any]:
-    """중단된 실행의 설정을 그대로 두고 이어서 학습할 config를 만듭니다.
+    """앞선 실행의 설정을 그대로 두고 이어서 학습할 config를 만듭니다.
 
     이어서 하는 실행은 **새 이름**을 받습니다. 같은 이름을 다시 쓰면 train이 남아 있는
     작업 폴더를 보고 시작을 거부하고, 결과도 섞입니다.
@@ -1179,8 +1213,8 @@ def build_resume_config(
 
     resumed = copy.deepcopy(config)
     train = resumed["train"]
-    train["resume_from"] = resume_checkpoint_uri(config)
-    new_run_id = run_id or _generate_resume_run_id(str(train.get("run_id") or ""))
+    train["resume_from"] = resume_checkpoint_uri(config, artifacts)
+    new_run_id = run_id or next_resume_run_id(str(train.get("run_id") or ""))
     if not isinstance(new_run_id, str) or not RUN_ID_PATTERN.fullmatch(new_run_id):
         raise WebValidationError(
             [FieldError("train.run_id", "실행 이름에 쓸 수 없는 글자가 있습니다.")]
@@ -1392,6 +1426,40 @@ def read_runtime_config(config_id: str) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise JobNotFoundError("저장된 설정 형식이 올바르지 않습니다.")
     return config
+
+
+def stored_run_ids() -> set[str]:
+    """저장된 runtime config가 붙잡고 있는 run_id 전부입니다.
+
+    이름이 겹치는지 볼 때 **job 기록과 대기열만 세면 안 됩니다.** 대기열 항목은 시작할
+    때 줄에서 빠지고, `JobRecord`는 그 뒤에 만들어집니다. 그 사이에는 어느 목록에도
+    없는 이름이 생기고, 그 순간 들어온 요청이 같은 이름을 고릅니다.
+
+    config 파일은 이름을 고른 **직후** 쓰이고 그 뒤로 지워지지 않으므로 그런 틈이
+    없습니다. 지워진 기록의 이름까지 남아 번호를 하나 더 건너뛸 수는 있지만, 그쪽이
+    안전한 방향입니다.
+
+    읽지 못하는 파일은 건너뜁니다 — 깨진 파일 하나 때문에 이어 학습이 막히면 안 됩니다.
+    """
+
+    names: set[str] = set()
+    directory = config_dir()
+    if not directory.is_dir():
+        return names
+    for path in directory.glob("*.json"):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(document, dict):
+            continue
+        # `train`이 object가 아닌 config 하나 때문에 이어 학습 전체가 500으로 막히면
+        # 안 됩니다. `or {}`는 빈 값만 걸러 주고 list나 문자열은 그대로 통과시킵니다.
+        train = document.get("train")
+        run_id = train.get("run_id") if isinstance(train, dict) else None
+        if isinstance(run_id, str) and run_id.strip():
+            names.add(run_id.strip())
+    return names
 
 
 def config_relative_path(config_id: str) -> str:

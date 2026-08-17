@@ -431,7 +431,9 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         # 이 epoch부터 epoch마다 **평가용** checkpoint를 따로 남깁니다. 없으면 지금까지와
         # 같이 하나도 남기지 않습니다. 계약의 EPOCH_ARCHIVE_START는 GUI가 미리 채우는
         # 값일 뿐, 여기서 기본값으로 쓰지 않습니다 — 켜 본 적 없는 실행이 갑자기 수 GB를
-        # 쌓으면 안 됩니다. 남기는 시점은 `checkpoint_every`를 함께 따릅니다(기본 1).
+        # 쌓으면 안 됩니다. **checkpoint를 남기는 시점마다** 함께 보관하므로, 주기를
+        # 늘리면 그 주기를 따르되 마지막 epoch과 조기 종료 epoch은 주기 밖이라도
+        # 남습니다 — 그 둘이야말로 후보로 봐야 할 자리입니다.
         "archive_epochs_from": _optional_integer(
             raw, "archive_epochs_from", minimum=1
         ),
@@ -1211,7 +1213,9 @@ def _execute_claimed(
                     overwrite=s3_mirror_owned,
                 )
                 s3_mirror_owned = True
-            # 이어서 할 수 있는 상태를 먼저 안전하게 만든 뒤에 보관합니다.
+            # 이어서 할 수 있는 상태를 먼저 안전하게 만든 뒤에 보관합니다. 이 callback은
+            # 주기마다, 그리고 마지막·조기 종료 epoch에 옵니다. 마지막을 빼면 "best가
+            # 마지막 epoch이었나"를 물을 수 없으므로 오는 대로 다 남깁니다.
             archive_from = settings["archive_epochs_from"]
             if archive_from is not None and last["epoch"] >= archive_from:
                 archive_epoch(payload, last["epoch"])

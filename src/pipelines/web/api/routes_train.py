@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any, Iterator
 
@@ -38,8 +39,10 @@ from ..train_config import (
     build_resume_config,
     data_field_specs,
     field_specs,
+    next_resume_run_id,
     read_runtime_config,
     resume_checkpoint_exists,
+    stored_run_ids,
     validate_request,
     write_runtime_config,
 )
@@ -384,7 +387,93 @@ def start_evaluation(job_id: str, payload: EvaluateRequest = Body(...)) -> dict[
         return {"evaluation": runner.start(record, payload.model_dump())}
 
 
-RESUMABLE_STATUSES = {STATUS_INTERRUPTED, STATUS_FAILED, STATUS_CANCELLED}
+RESUMABLE_STATUSES = {
+    STATUS_INTERRUPTED,
+    STATUS_FAILED,
+    STATUS_CANCELLED,
+    # 끝까지 간 학습도 이어갈 수 있습니다. best_epoch이 마지막 epoch이면 더 배울 것이
+    # 남아 있다는 뜻이고, 그때 처음부터 다시 도는 것은 이미 한 학습을 두 번 하는 일입니다.
+    STATUS_SUCCEEDED,
+}
+
+
+def _completed_epochs(record: JobRecord) -> int | None:
+    """그 실행이 실제로 마친 epoch 수입니다. train이 알려 주지 않았으면 ``None``."""
+
+    value = record.summary.get("completed_epochs")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _stopped_early_refusal(record: JobRecord) -> str | None:
+    """조기 종료로 끝난 실행을 이어갈 수 없는 이유입니다. 이어갈 수 있으면 ``None``.
+
+    조기 종료로 끝난 실행의 checkpoint에는 patience를 다 쓴 상태가 그대로 들어 있어,
+    이어서 하면 train이 첫 batch 전에 거절합니다.
+
+    **단추를 세울지 정하는 GET과 실제로 시작하는 POST가 같은 함수를 봅니다.** 한쪽에만
+    두면 화면은 단추를 감추는데 직접 부른 POST는 통과해, 반드시 실패할 학습이 대기열에
+    들어갑니다.
+    """
+
+    if record.status != STATUS_SUCCEEDED or not record.summary.get("stopped_early"):
+        return None
+    return (
+        "조기 종료로 끝난 학습입니다. patience를 다 쓴 상태가 checkpoint에 함께 "
+        "저장돼 이어갈 수 없습니다. 새 실험에서 patience를 올리거나 early "
+        "stopping을 끄고 시작하세요."
+    )
+
+
+#: 이어 학습 이름을 고르고 대기열에 넣기까지를 한 번에 하나만 지나갑니다.
+#:
+#: 이름을 고르는 것과 줄을 세우는 것이 갈라져 있으면, 두 요청이 각자 "A.2는 아직
+#: 없다"를 보고 둘 다 A.2를 만듭니다. 사람이 단추를 두 번 누르거나 두 화면에서 누르면
+#: 그렇게 되고, 뒤엣것은 밤새 기다렸다 이름 충돌로 죽습니다. FastAPI는 `def` route를
+#: threadpool에서 돌리므로 실제로 동시에 들어옵니다.
+#:
+#: **manager의 lock을 쓰면 안 됩니다.** `enqueue`가 안에서 `_start_lock` → `_lock`
+#: 순서로 잡는데, 그 바깥에서 `_lock`을 먼저 쥐면 순서가 뒤집혀 교착합니다. 이 lock은
+#: 여기서만 잡고 아무도 기다리지 않으므로 그 고리를 만들지 않습니다.
+_RESUME_NAMING_LOCK = threading.Lock()
+
+
+def _taken_run_ids(manager: Any) -> list[str]:
+    """이 서버가 아는 run_id 전부입니다.
+
+    **저장된 설정이 기준입니다.** 이름은 config를 쓰는 순간부터 붙잡히고 그 파일은
+    지워지지 않으므로, 대기열에서 빠져 `JobRecord`가 되기 전 같은 어느 목록에도 없는
+    순간이 생기지 않습니다. job 기록과 대기열도 함께 세는 것은 config 파일이 없는
+    기록(다른 곳에서 복원된 것)까지 덮기 위해서입니다 — 합집합은 더 세는 쪽으로만
+    틀리고, 그쪽은 번호 하나를 건너뛸 뿐입니다.
+    """
+
+    names = [job.run_id for job in manager.list_jobs()]
+    names.extend(str(entry.get("run_id") or "") for entry in manager.queue_entries())
+    names.extend(stored_run_ids())
+    return names
+
+
+def _plan_refusal(record: JobRecord, epochs: int | None) -> str | None:
+    """총 epoch을 늘리지 않은 이어 학습을 시작 전에 거절할 이유입니다.
+
+    ``epochs``는 남은 수가 아니라 **전체 목표**입니다. 끝까지 간 학습을 그대로 이어가면
+    "이미 지난 epoch보다 크지 않다"며 train이 거절하는데, 그 답은 job과 config를 만들고
+    대기열을 다시 돌린 뒤에 옵니다. 화면에서 몇 epoch 더 돌릴지 받으면 여기서 끝납니다.
+    """
+
+    if record.status != STATUS_SUCCEEDED:
+        return None
+    done = _completed_epochs(record)
+    if done is None:
+        return None
+    if epochs is None:
+        return f"이 학습은 epoch {done}까지 마쳤습니다. 몇 epoch까지 더 돌릴지 정해 주세요."
+    if epochs <= done:
+        return (
+            f"총 epoch은 이미 마친 {done}보다 커야 합니다. "
+            f"{done + 5}처럼 더 큰 값을 보내세요."
+        )
+    return None
 
 
 @router.get("/jobs/{job_id}/resume")
@@ -408,8 +497,13 @@ def resume_availability(job_id: str) -> dict[str, Any]:
     record = get_manager().get(job_id)
     if record.status not in RESUMABLE_STATUSES:
         return {"available": False, "reason": "끝난 학습만 이어갈 수 있습니다."}
+    stopped_early = _stopped_early_refusal(record)
+    if stopped_early is not None:
+        return {"available": False, "reason": stopped_early}
     try:
-        exists = resume_checkpoint_exists(read_runtime_config(record.config_id))
+        exists = resume_checkpoint_exists(
+            read_runtime_config(record.config_id), record.artifacts
+        )
     except StorageError:
         return {
             "available": True,
@@ -436,11 +530,12 @@ def resume_job(
     payload: ResumeRequest = Body(...),
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """중단·중지됐거나 checkpoint를 남기고 실패한 학습을 이어서 시작합니다.
+    """끝난 학습을 이어서 시작합니다. 중단·중지·실패한 것도, 끝까지 간 것도 같습니다.
 
     이어서 하는 실행은 **새 이름**을 받습니다. 같은 이름을 다시 쓰면 train이 남아 있는
     작업 폴더를 보고 시작을 거부하고, 결과도 섞입니다. `epochs`는 남은 수가 아니라
-    전체 목표이므로 비워 두면 중단된 실행의 계획을 그대로 씁니다.
+    전체 목표이므로 비워 두면 중단된 실행의 계획을 그대로 씁니다. 끝까지 간 학습은
+    그 계획을 이미 채웠으므로 더 큰 값을 받아야 합니다.
 
     끝난 이유는 묻지 않고 **checkpoint가 있는지만** 봅니다. 사람이 중지했든, 실패했든,
     서버가 상태를 잃었든 이어갈 수 있는 조건은 같습니다. 확인을 건너뛰면 새 설정과 job을
@@ -452,12 +547,15 @@ def resume_job(
     record = manager.get(job_id)
     if record.status not in RESUMABLE_STATUSES:
         raise JobConflictError(
-            "중단·중지됐거나 실패한 학습만 이어갈 수 있습니다."
+            "끝난 학습만 이어갈 수 있습니다. 돌고 있는 학습은 끝난 뒤에 이어가세요."
         )
+    refusal = _stopped_early_refusal(record) or _plan_refusal(record, payload.epochs)
+    if refusal is not None:
+        raise JobConflictError(refusal)
 
     source_config = read_runtime_config(record.config_id)
     try:
-        checkpoint_exists = resume_checkpoint_exists(source_config)
+        checkpoint_exists = resume_checkpoint_exists(source_config, record.artifacts)
     except StorageError as error:
         raise JobConflictError(
             "그 학습의 checkpoint를 확인하지 못했습니다. "
@@ -469,18 +567,33 @@ def resume_job(
             "checkpoint 주기를 채우기 전에 끝난 학습입니다."
         )
 
-    config = build_resume_config(
-        source_config,
-        run_id=payload.run_id,
-        epochs=payload.epochs,
-    )
-    config_id = write_runtime_config(config)
-    started = manager.enqueue(
-        config_id,
-        access_token=_bearer_token(authorization),
-        # 앞선 실행의 손실 곡선을 이어 그리려면 어느 job에서 왔는지 알아야 합니다.
-        resumed_from_job_id=record.job_id,
-    )
+    # 이름을 고르는 것과 그 이름이 대기열에 보이는 것 사이를 갈라 두면, 그 틈에 들어온
+    # 두 번째 요청이 같은 이름을 고릅니다. 한 번에 하나만 지나갑니다.
+    with _RESUME_NAMING_LOCK:
+        taken = _taken_run_ids(manager)
+        # 사람이 이름을 직접 적었으면 번호를 매기지 않습니다. 대신 **같은 목록으로**
+        # 겹치는지 봅니다. 여기서 보지 않으면 자동 이름만 규칙을 지키고, 직접 적은
+        # 이름은 대기열까지 갔다가 train이 첫 batch 전에 거절합니다.
+        if payload.run_id is not None and payload.run_id in set(taken):
+            raise JobConflictError(
+                f"'{payload.run_id}'는 이미 쓰고 있는 실행 이름입니다. "
+                "다른 이름을 쓰거나 이름을 비워 자동으로 짓게 하세요."
+            )
+        config = build_resume_config(
+            source_config,
+            artifacts=record.artifacts,
+            # 이름은 A -> A.2 -> A.3으로 이어집니다. 이미 있는 번호를 다시 쓰면 train이
+            # 시작을 거부하므로, 이 서버가 아는 이름을 모두 건네 건너뛰게 합니다.
+            run_id=payload.run_id or next_resume_run_id(record.run_id, taken),
+            epochs=payload.epochs,
+        )
+        config_id = write_runtime_config(config)
+        started = manager.enqueue(
+            config_id,
+            access_token=_bearer_token(authorization),
+            # 앞선 실행의 손실 곡선을 이어 그리려면 어느 job에서 왔는지 알아야 합니다.
+            resumed_from_job_id=record.job_id,
+        )
     return {
         "config_id": config_id,
         "run_id": config["train"]["run_id"],

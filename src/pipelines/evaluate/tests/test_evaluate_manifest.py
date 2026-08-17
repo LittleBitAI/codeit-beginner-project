@@ -329,6 +329,45 @@ def test_sample_gives_a_rare_class_a_place_before_a_common_one_gets_a_second():
     assert set(classes) == {1, 2, 3}
 
 
+def _image(image_id: str, *category_ids: int) -> dict:
+    return {
+        "image_id": image_id,
+        "image_uri": "data/val/x.jpg",
+        "width": 100,
+        "height": 100,
+        "annotations": [
+            {"category_id": category_id, "bbox": [0, 0, 5, 5]}
+            for category_id in category_ids
+        ],
+    }
+
+
+def test_a_class_already_covered_does_not_spend_another_place():
+    """사진 한 장이 알약 넷까지 담으므로 class 여럿을 한꺼번에 덮습니다.
+
+    class 1은 `ab` 한 장에만 있어 그 장이 먼저 뽑히고, 그때 class 2도 함께 덮입니다.
+    거기서 class 2 차례에 또 한 장을 집으면 세 자리 중 둘을 1·2에 쓰게 되어 class 4가
+    통째로 빠집니다. 덮인 class를 건너뛰면 셋으로 넷을 다 덮습니다.
+    """
+
+    records = [
+        _image("ab", 1, 2),
+        _image("b-only", 2),
+        _image("c", 3),
+        _image("d", 4),
+    ]
+
+    sample = sample_records(records, 3, seed=42)
+
+    covered = {
+        annotation["category_id"]
+        for record in sample
+        for annotation in record["annotations"]
+    }
+    assert covered == {1, 2, 3, 4}
+    assert "b-only" not in {record["image_id"] for record in sample}
+
+
 def test_the_same_seed_looks_at_the_same_images():
     """후보들이 서로 다른 시험지를 보면 점수를 나란히 놓을 수 없습니다."""
 

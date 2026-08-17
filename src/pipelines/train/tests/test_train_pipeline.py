@@ -1145,7 +1145,28 @@ def test_epoch_archive_keeps_one_evaluable_checkpoint_per_epoch(local_config):
     assert payload["epoch"] == 2
     # evaluate가 읽는 key입니다. 이것이 빠지면 보관해 봐야 평가할 수 없습니다.
     assert {"model_state_dict", "architecture", "num_classes", "class_map"} <= set(payload)
+    # 뺀 둘입니다. optimizer 상태만 빼고 resume_state를 남기면 그 안에 best 가중치가
+    # 통째로 들어 있어(`_with_embedded_best`) 파일이 도로 커집니다.
     assert "optimizer_state_dict" not in payload
+    assert "resume_state" not in payload
+
+
+def test_the_last_epoch_is_archived_even_off_the_checkpoint_cycle(local_config):
+    """마지막 epoch은 주기 밖이라도 checkpoint가 남고, 보관본도 함께 남습니다.
+
+    best epoch이 마지막인지 보려고 만든 기능이라 마지막을 빠뜨리면 물음 자체가
+    사라집니다. 주기(2)로만 남긴다면 epoch 3은 없어야 합니다.
+    """
+
+    local_config["train"].update(
+        {"epochs": 3, "archive_epochs_from": 1, "checkpoint_every": 2}
+    )
+
+    result = train.run(local_config)
+
+    assert result["status"] == "ok", result["message"]
+    archived = [Path(uri).name for uri in result["artifacts"]["epoch_checkpoint_uris"]]
+    assert archived == ["epoch_002.pt", "epoch_003.pt"]
 
 
 def test_progress_stream_stays_silent_for_the_dummy_execution(capsys):

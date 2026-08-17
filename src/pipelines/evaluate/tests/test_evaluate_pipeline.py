@@ -147,12 +147,38 @@ def test_a_sampled_run_scores_fewer_images_and_says_so(
 
 
 def test_a_full_run_says_it_looked_at_everything(base_config: dict, repository_root: Path):
-    """전수로 잰 실행의 결과 모양은 그대로입니다."""
+    """전수로 잰 실행의 결과 모양은 그대로입니다.
 
-    metrics = _read_json(repository_root, run(base_config)["artifacts"]["metrics_uri"])
+    **한 실행의 결과만 봅니다.** 같은 run_id로 두 번 부르면 두 번째는 artifact 충돌로
+    실패해 summary가 비어 오고, 그 빈 summary에는 무엇이 들어 있어도 이 검사가 통과합니다.
+    """
 
+    result = run(base_config)
+    metrics = _read_json(repository_root, result["artifacts"]["metrics_uri"])
+
+    assert result["status"] == "ok", result["message"]
     assert metrics["validation_sample_size"] is None
-    assert "validation_sample_size" not in run(base_config)["summary"]
+    assert "validation_sample_size" not in result["summary"]
+
+
+def test_a_sample_bigger_than_the_manifest_is_a_full_run(
+    base_config: dict, repository_root: Path
+):
+    """요청값이 manifest보다 크면 전수를 본 것입니다.
+
+    그때 요청값을 그대로 적으면 전수 점수가 표본 점수로 읽혀, 다른 실행의 표본 점수와
+    나란히 놓이게 됩니다.
+    """
+
+    base_config["evaluate"]["validation_sample_size"] = 99
+
+    result = run(base_config)
+    metrics = _read_json(repository_root, result["artifacts"]["metrics_uri"])
+
+    assert result["status"] == "ok", result["message"]
+    assert result["summary"]["image_count"] == 2
+    assert metrics["validation_sample_size"] is None
+    assert "validation_sample_size" not in result["summary"]
 
 
 def test_run_does_not_modify_inputs(base_config: dict, repository_root: Path):
