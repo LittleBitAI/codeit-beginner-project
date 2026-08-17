@@ -4,6 +4,8 @@ import type {
   DataSource,
   DataVerification,
   Defaults,
+  EmbeddingDefaults,
+  EmbeddingRun,
   EnsembleCandidate,
   EnsembleDiagnosis,
   EnsembleJob,
@@ -135,6 +137,8 @@ export const api = {
     run_ids: string[];
     run_id: string;
     allow_copied_images?: boolean;
+    // 비우면 지금까지처럼 detector 점수를 그대로 냅니다.
+    embedding_run_ids?: string[];
   }) =>
     request<EnsembleJob>('/api/ensemble/jobs', {
       method: 'POST',
@@ -142,6 +146,24 @@ export const api = {
     }),
 
   ensembleStatus: () => request<EnsembleJob>('/api/ensemble/jobs'),
+
+  // crop embedding은 재순위에 씁니다. 학습은 detector와 같은 대기열을 지나므로,
+  // 시작한 뒤의 진행과 취소는 학습 화면이 쓰는 job 주소를 그대로 씁니다.
+  embeddingRuns: () => request<{ runs: EmbeddingRun[] }>('/api/embedding/runs'),
+
+  embeddingDefaults: () => request<EmbeddingDefaults>('/api/embedding/defaults'),
+
+  startEmbedding: (payload: {
+    crop_bank_uri: string;
+    class_map_uri: string;
+    run_id?: string;
+    backbone?: string;
+    epochs?: number;
+  }) =>
+    request<{ config_id: string; run_id: string }>('/api/embedding/jobs', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
   getJob: (jobId: string) => request<JobRecord>(`/api/train/jobs/${jobId}`),
 

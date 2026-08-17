@@ -49,6 +49,7 @@ class EnsembleRunner:
         run_id: str,
         allow_copied_images: bool = False,
         overwrite: bool = False,
+        embedding_run_ids: Sequence[str] = (),
     ) -> dict[str, Any]:
         """예측이 없는 실행은 먼저 만들고, 그다음 합칩니다.
 
@@ -66,6 +67,7 @@ class EnsembleRunner:
             run_id=run_id,
             allow_copied_images=bool(allow_copied_images),
             overwrite=bool(overwrite),
+            embedding_run_ids=embedding_run_ids,
         )
         pending = ensemble.pending_runs(run_ids)
         with self._lock:
@@ -77,6 +79,7 @@ class EnsembleRunner:
                 "status": STATUS_RUNNING,
                 "run_id": run_id,
                 "run_ids": list(run_ids),
+                "embedding_run_ids": list(embedding_run_ids),
                 "stage": "harvest" if pending else "fuse",
                 "pending": [item["run_id"] for item in pending],
                 "logs": [],
@@ -85,7 +88,14 @@ class EnsembleRunner:
 
         thread = threading.Thread(
             target=self._run_all,
-            args=(list(run_ids), run_id, bool(allow_copied_images), bool(overwrite), pending),
+            args=(
+                list(run_ids),
+                run_id,
+                bool(allow_copied_images),
+                bool(overwrite),
+                pending,
+                list(embedding_run_ids),
+            ),
             daemon=True,
         )
         thread.start()
@@ -98,6 +108,7 @@ class EnsembleRunner:
         allow_copied_images: bool,
         overwrite: bool,
         pending: list[Mapping[str, Any]],
+        embedding_run_ids: list[str],
     ) -> None:
         from . import ensemble
 
@@ -126,6 +137,7 @@ class EnsembleRunner:
                 run_id=run_id,
                 allow_copied_images=allow_copied_images,
                 overwrite=overwrite,
+                embedding_run_ids=embedding_run_ids,
             )
         except Exception as error:  # noqa: BLE001
             self._fail(run_id, f"융합 설정을 만들지 못했습니다({type(error).__name__}).")

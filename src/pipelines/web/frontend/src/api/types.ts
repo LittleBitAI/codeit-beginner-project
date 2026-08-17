@@ -786,6 +786,8 @@ export interface ProcessedDataset {
   missing: string[];
   has_test_manifest: boolean;
   has_eda_report: boolean;
+  /** crop 은행이 함께 만들어졌는지. embedding 학습이 이것을 봅니다. */
+  has_crop_bank?: boolean;
 }
 
 export interface ProcessedDatasets {
@@ -855,9 +857,41 @@ export interface EnsembleDiagnosis {
   blocking: boolean;
 }
 
+/** 이 서버가 학습한 crop embedding 하나. 재순위에서 고를 후보이기도 합니다. */
+export interface EmbeddingRun {
+  run_id: string;
+  job_id: string;
+  status: string;
+  backbone: string | null;
+  epochs: number | null;
+  checkpoint_uri: string | null;
+  crop_bank_uri: string | null;
+  created_at: string | null;
+  /** 학습이 성공했고 checkpoint를 남겼을 때만 참입니다. */
+  ready: boolean;
+}
+
+export interface EmbeddingDefaults {
+  backbones: string[];
+  devices: string[];
+  run_id_pattern: string;
+  defaults: {
+    backbone: string;
+    epochs: number;
+    batch_size: number;
+    learning_rate: number;
+    weight_decay: number;
+    seed: number;
+    pretrained: boolean;
+    device: string;
+  };
+}
+
 export interface EnsembleJob {
   status: 'idle' | 'running' | 'succeeded' | 'failed';
   run_id?: string;
+  /** 합친 뒤 점수를 다시 매기는 데 쓴 embedding들입니다. */
+  embedding_run_ids?: string[];
   /** 예측을 만드는 중(`harvest`)인지 합치는 중(`fuse`)인지. */
   stage?: 'harvest' | 'fuse';
   pending?: string[];

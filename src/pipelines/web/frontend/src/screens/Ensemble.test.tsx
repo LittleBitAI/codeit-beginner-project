@@ -216,6 +216,42 @@ describe('앙상블 화면', () => {
     await waitFor(() => expect(api.diagnoseEnsemble).toHaveBeenCalledTimes(2));
   });
 
+  it('고른 embedding을 재순위로 함께 보낸다', async () => {
+    // 화면에서 골랐는데 요청에 빠지면, 사람은 재순위한 제출이라고 믿고 Kaggle에
+    // 올립니다. 점수가 왜 그대로인지 알아낼 방법이 없습니다.
+    stub([candidate(), candidate({ run_id: 'dino-b' })]);
+    vi.spyOn(api, 'embeddingRuns').mockResolvedValue({
+      runs: [
+        {
+          run_id: 'emb-r18',
+          job_id: 'job-1',
+          status: 'succeeded',
+          backbone: 'resnet18',
+          epochs: 30,
+          checkpoint_uri: 'artifacts/emb/best.pt',
+          crop_bank_uri: 'datasets/v5/crop_bank.tar',
+          created_at: null,
+          ready: true,
+        },
+      ],
+    });
+    const start = vi
+      .spyOn(api, 'startEnsemble')
+      .mockResolvedValue({ status: 'running', run_id: 'fusion-2' });
+
+    render(<Ensemble />);
+    await screen.findByText('dino-a');
+    pickTwo();
+    await screen.findByText('emb-r18');
+    // 후보 둘 다음에 오는 것이 embedding 칸입니다.
+    fireEvent.click(screen.getAllByRole('checkbox')[2] as HTMLElement);
+    await waitFor(() => expect(api.diagnoseEnsemble).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: /합치기|재순위/ }));
+
+    await waitFor(() => expect(start).toHaveBeenCalled());
+    expect(start.mock.calls[0]?.[0].embedding_run_ids).toEqual(['emb-r18']);
+  });
+
   it('추론 중인지 합치는 중인지 구분해 보여 준다', async () => {
     // 45개를 고르면 GPU가 몇 시간 돕니다. 어느 단계인지 안 보이면 멈춘 줄 압니다.
     vi.spyOn(api, 'ensembleCandidates').mockResolvedValue({ candidates: [candidate()] });

@@ -35,6 +35,9 @@ class StartRequest(SelectionRequest):
     # 경고를 냈을 때 화면이 이 값을 물어봅니다.
     allow_copied_images: bool = False
     overwrite: bool = False
+    # 합친 뒤 점수를 다시 매기는 데 쓸 embedding 학습들입니다. 비우면 지금까지처럼
+    # detector 점수를 그대로 냅니다.
+    embedding_run_ids: list[str] = Field(default_factory=list, max_length=8)
 
 
 @router.get("/candidates")
@@ -69,6 +72,7 @@ def start(request: StartRequest = Body(...)) -> dict[str, Any]:
         run_id=request.run_id,
         allow_copied_images=request.allow_copied_images,
         overwrite=request.overwrite,
+        embedding_run_ids=request.embedding_run_ids,
     )
 
 

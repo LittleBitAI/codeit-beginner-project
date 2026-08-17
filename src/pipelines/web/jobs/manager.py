@@ -405,7 +405,12 @@ class JobManager:
         평가를 이미 한 번 돌린 기록은 건너뜁니다. 실패한 평가도 다시 집지 않습니다 —
         같은 이유로 계속 실패할 텐데 그때마다 GPU를 잡으면 대기열이 통째로 막힙니다.
         사람이 화면에서 다시 누를 수 있습니다.
+
+        embedding 학습도 건너뜁니다. 평가는 detector checkpoint로 상자를 그리는
+        일이라, embedding을 넘기면 GPU를 잡고 나서 checkpoint를 못 읽어 실패합니다.
         """
+
+        from ..embedding import is_embedding_settings
 
         with self._lock:
             while self._evaluation_pending:
@@ -414,6 +419,7 @@ class JobManager:
                     record is not None
                     and record.status == STATUS_SUCCEEDED
                     and not record.evaluation
+                    and not is_embedding_settings(record.settings)
                 ):
                     return record
         return None
