@@ -21,28 +21,38 @@ from src.common import train_contract
 from src.pipelines.train import run
 from src.pipelines.train import embedding as embedding_module
 from src.pipelines.train.embedding import (
-    CROP_SIZE,
+    DEFAULT_CROP_SIZE,
     EmbeddingTrainingError,
     read_crop_bank,
     settings,
 )
 
 
-def crop_bytes(colour: tuple[int, int, int]) -> bytes:
+def crop_bytes(colour: tuple[int, int, int], size: int = DEFAULT_CROP_SIZE) -> bytes:
     buffer = io.BytesIO()
-    Image.new("RGB", (CROP_SIZE, CROP_SIZE), colour).save(buffer, format="JPEG")
+    Image.new("RGB", (size, size), colour).save(buffer, format="JPEG")
     return buffer.getvalue()
 
 
-def build_bank(path: Path, *, categories: tuple[int, ...] = (11, 22), per_class: int = 3):
-    """data가 만드는 것과 같은 모양의 crop 은행 tar를 만듭니다."""
+def build_bank(
+    path: Path,
+    *,
+    categories: tuple[int, ...] = (11, 22),
+    per_class: int = 3,
+    crop_size: int = DEFAULT_CROP_SIZE,
+):
+    """data가 만드는 것과 같은 모양의 crop 은행 tar를 만듭니다.
+
+    `index.json`에 `crop_size`를 적는 것까지 실제 data와 같습니다. 이 field를
+    빼 두면 train이 상수를 쓰는지 은행 값을 쓰는지 구별할 수 없습니다.
+    """
 
     records = []
     with tarfile.open(path, "w") as archive:
         for index, category_id in enumerate(categories):
             for number in range(per_class):
                 name = f"crops/{category_id}/{index}_{number}.jpg"
-                payload = crop_bytes((40 * (index + 1), 60, 90))
+                payload = crop_bytes((40 * (index + 1), 60, 90), crop_size)
                 info = tarfile.TarInfo(name)
                 info.size = len(payload)
                 archive.addfile(info, io.BytesIO(payload))
@@ -54,7 +64,10 @@ def build_bank(path: Path, *, categories: tuple[int, ...] = (11, 22), per_class:
                         "group": f"g{index}",
                     }
                 )
-        payload = json.dumps({"version": 1, "records": records}, ensure_ascii=False).encode()
+        payload = json.dumps(
+            {"version": 1, "crop_size": crop_size, "crop_margin": 0.08, "records": records},
+            ensure_ascii=False,
+        ).encode()
         info = tarfile.TarInfo("index.json")
         info.size = len(payload)
         archive.addfile(info, io.BytesIO(payload))
@@ -220,7 +233,7 @@ def test_the_checkpoint_alone_can_rebuild_the_model(workspace: Path):
     )
     assert payload["backbone"] == "resnet18"
     assert payload["category_ids"] == [11, 22]
-    assert payload["crop_size"] == CROP_SIZE
+    assert payload["crop_size"] == DEFAULT_CROP_SIZE
     assert payload["normalisation"]["mean"] and payload["normalisation"]["std"]
     from src.pipelines.train.embedding import build_model
 
@@ -229,13 +242,140 @@ def test_the_checkpoint_alone_can_rebuild_the_model(workspace: Path):
 
 
 def test_published_files_are_never_overwritten(workspace: Path):
-    """같은 run_id로 다시 돌리면 앞선 결과를 덮지 않고 멈춰야 합니다."""
+    """같은 run_id로 다시 돌리면 앞선 결과를 덮지 않고 **첫 batch 전에** 멈춥니다.
+
+    늦게 막으면 밤새 학습한 뒤 첫 업로드에서야 거절당합니다. 그래서 상태만이 아니라
+    "한 epoch도 돌지 않았는가"를 함께 봅니다.
+    """
 
     assert run(embedding_config(workspace))["status"] == "ok"
+    started = []
+    original = embedding_module.build_model
 
-    again = run(embedding_config(workspace))
+    def watch(*args, **kwargs):
+        started.append(True)
+        return original(*args, **kwargs)
+
+    embedding_module.build_model = watch
+    try:
+        again = run(embedding_config(workspace))
+    finally:
+        embedding_module.build_model = original
 
     assert again["status"] == "error"
+    assert "이미 결과가 있습니다" in again["message"]
+    assert started == [], "model을 만들었다면 학습 준비까지 간 것입니다"
+
+
+def test_a_storage_root_outside_the_repository_is_refused(workspace: Path, tmp_path: Path):
+    """`output_dir`이 저장소 안이어도 저장 root가 밖이면 저장은 밖에서 일어납니다.
+
+    그 경로를 그대로 내보내면 다른 컴퓨터에서 못 여는 URI와 OS 사용자 이름이 결과에
+    실려 나갑니다. 조용히 절대 경로를 돌려주는 대신 멈춰야 합니다.
+    """
+
+    # 입력은 읽히고 **저장만** 밖에서 일어나는 상황이라야 이 판단을 잽니다. 그래서
+    # 은행도 저장 root 쪽에 둡니다. 저장소 root는 workspace 그대로입니다.
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    build_bank(outside / "crop_bank.tar")
+    (outside / "class_map.json").write_text(
+        json.dumps({"11": "pill-a", "22": "pill-b"}), encoding="utf-8"
+    )
+    config = embedding_config(workspace)
+    config["storage"]["local"]["root"] = str(outside)
+
+    result = run(config)
+
+    assert result["status"] == "error"
+    assert "저장소 밖" in result["message"]
+
+
+def test_a_half_written_checkpoint_never_replaces_a_good_one(workspace: Path):
+    """checkpoint는 임시 file에 쓰고 제자리로 옮깁니다.
+
+    같은 경로에 바로 쓰면 쓰는 도중 죽었을 때 앞서 멀쩡했던 사본까지 반쪽이 됩니다.
+    여기서는 두 번째 저장을 실패시켜 앞선 사본이 그대로인지 봅니다.
+    """
+
+    saves = []
+    original = embedding_module.torch.save
+
+    def failing(payload, destination, *args, **kwargs):
+        saves.append(destination)
+        # 세 번째 저장이 `last_checkpoint.pt`의 **두 번째** 쓰기입니다. 앞선 쓰기가
+        # 성공해 둔 자리라야 "지켜졌는가"를 물을 수 있습니다.
+        if len(saves) > 2:
+            # **쓰다가 죽는 것을 흉내 냅니다.** 아무것도 쓰지 않고 던지면 어느
+            # 방식이든 앞선 파일이 멀쩡해, 이 test가 아무것도 구별하지 못합니다.
+            Path(destination).write_bytes(b"half written")
+            raise OSError("디스크가 찼습니다")
+        return original(payload, destination, *args, **kwargs)
+
+    embedding_module.torch.save = failing
+    try:
+        result = run(embedding_config(workspace, epochs=2, checkpoint_every=1))
+    finally:
+        embedding_module.torch.save = original
+
+    assert result["status"] == "error"
+    survivor = workspace / "working" / ".embed-test.partial" / "last_checkpoint.pt"
+    assert survivor.is_file(), "첫 저장이 남아 있어야 합니다"
+    # 반쪽이면 읽다가 터집니다. 온전해야 합니다.
+    assert torch.load(survivor, map_location="cpu")["task"] == "embedding"
+
+
+def test_the_checkpoint_records_the_bank_s_crop_size(tmp_path: Path, monkeypatch):
+    """은행이 다른 크기로 잘려 있으면 checkpoint도 그 크기를 적어야 합니다.
+
+    상수를 적으면 224로 학습하지 않은 model이 224라고 말하고, 쓰는 쪽은 그 값으로
+    시험 crop을 자릅니다.
+    """
+
+    build_bank(tmp_path / "crop_bank.tar", crop_size=64)
+    (tmp_path / "class_map.json").write_text(
+        json.dumps({"11": "pill-a", "22": "pill-b"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(embedding_module, "REPOSITORY_ROOT", tmp_path)
+
+    result = run(embedding_config(tmp_path))
+
+    assert result["status"] == "ok", result["message"]
+    payload = torch.load(
+        artifact_path(result["artifacts"]["best_checkpoint_uri"]), map_location="cpu"
+    )
+    assert payload["crop_size"] == 64
+
+
+def test_the_deterministic_mode_is_on_during_training_and_restored_after(workspace: Path):
+    """결정성 mode는 CPU에서 결과로 드러나지 않습니다. 그래서 계약으로 잽니다.
+
+    도는 동안 켜져 있어야 하고, 정상으로 끝나든 예외로 끝나든 앞선 상태로 돌아와야
+    합니다. 전역 상태라 남겨 두면 뒤에 도는 학습까지 바꿉니다.
+    """
+
+    before = torch.are_deterministic_algorithms_enabled()
+    seen: list[bool] = []
+    original = embedding_module._train_embedding
+
+    def watch(*args, **kwargs):
+        seen.append(torch.are_deterministic_algorithms_enabled())
+        return original(*args, **kwargs)
+
+    embedding_module._train_embedding = watch
+    try:
+        assert run(embedding_config(workspace))["status"] == "ok"
+        assert seen == [True]
+        assert torch.are_deterministic_algorithms_enabled() == before
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("학습이 죽었습니다")
+
+        embedding_module._train_embedding = boom
+        assert run(embedding_config(workspace, run_id="crash"))["status"] == "error"
+        assert torch.are_deterministic_algorithms_enabled() == before
+    finally:
+        embedding_module._train_embedding = original
 
 
 # --- crop 은행 읽기 ---------------------------------------------------------

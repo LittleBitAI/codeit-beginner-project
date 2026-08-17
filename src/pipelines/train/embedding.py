@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import ntpath
+import os
 import random
 import tarfile
 import tempfile
@@ -45,8 +46,10 @@ from .dataset import REPOSITORY_ROOT
 #: crop 은행 안에서 목록이 놓이는 자리입니다. data가 만드는 tar의 규약입니다.
 INDEX_MEMBER = "index.json"
 
-#: 학습에 쓰는 crop 한 변입니다. 은행이 이 크기로 잘라 둡니다.
-CROP_SIZE = 224
+#: 은행이 crop 크기를 적어 두지 않았을 때 쓰는 값입니다. **읽을 수 있으면 은행이
+#: 적은 값이 이깁니다.** 여기 상수를 checkpoint에 적으면, 다른 크기로 자른 은행으로
+#: 학습하고도 checkpoint는 224라고 말하게 됩니다.
+DEFAULT_CROP_SIZE = 224
 
 #: ImageNet 정규화 값입니다. backbone이 그 통계로 학습돼 있습니다.
 MEAN = (0.485, 0.456, 0.406)
@@ -58,6 +61,41 @@ SHIFT_RANGE = 0.08
 
 #: label smoothing은 특징을 한 점에 몰지 않게 해 참조와의 거리를 재기 좋게 만듭니다.
 LABEL_SMOOTHING = 0.1
+
+
+#: 실행 하나가 내는 세 파일입니다. 이름 순서가 곧 올리는 순서이고, 마지막에 올라가는
+#: history가 "이 실행은 끝났다"는 표식 노릇을 합니다.
+PUBLISHED_NAMES = ("best_checkpoint.pt", "last_checkpoint.pt", "training_history.json")
+
+
+def _save_checkpoint(payload: dict[str, Any], destination: Path) -> None:
+    """임시 file에 쓰고 제자리로 옮깁니다.
+
+    같은 경로에 바로 쓰면 쓰는 도중 죽었을 때 **앞서 멀쩡했던 checkpoint까지**
+    반쪽이 됩니다. 30 epoch짜리 학습에서 그 파일이 유일한 사본입니다. detector도
+    같은 이유로 임시 file을 거칩니다.
+    """
+
+    temporary = destination.with_name(f".{destination.name}.writing")
+    torch.save(payload, temporary)
+    os.replace(temporary, destination)
+
+
+def _guard_published(storage: Any, setting: "EmbeddingSettings") -> None:
+    """낼 자리가 비었는지 학습을 시작하기 **전에** 봅니다."""
+
+    prefix = f"{setting.output_prefix}/{setting.run_id}"
+    try:
+        taken = [name for name in PUBLISHED_NAMES if storage.exists(f"{prefix}/{name}")]
+    except StorageError as error:
+        raise EmbeddingTrainingError(
+            f"낼 자리를 확인하지 못했습니다: {prefix} ({type(error).__name__})"
+        ) from error
+    if taken:
+        raise EmbeddingTrainingError(
+            f"'{prefix}'에 이미 결과가 있습니다: {', '.join(taken)}. 끝난 실행이면 "
+            "다른 run_id를 쓰고, 도중에 끊긴 실행이면 남은 것을 지울지 사람이 정합니다."
+        )
 
 
 def _published(uri: str) -> str:
@@ -76,9 +114,15 @@ def _published(uri: str) -> str:
         return path.as_posix()
     try:
         return path.resolve().relative_to(REPOSITORY_ROOT).as_posix()
-    except ValueError:
-        # 저장소 밖은 애초에 막혀 있습니다. 여기까지 오면 지어내지 않고 그대로 둡니다.
-        return path.as_posix()
+    except ValueError as error:
+        # **절대 경로로 돌려주지 않습니다.** `output_dir`은 저장소 안이라도
+        # `storage.local.root`가 밖이면 저장은 밖에서 일어납니다. 그때 그 경로를
+        # 그대로 내보내면 다른 컴퓨터에서 못 여는 URI와 OS 사용자 이름이 결과에
+        # 실려 나갑니다. detector도 이 자리에서 조용히 넘어가지 않습니다.
+        raise EmbeddingTrainingError(
+            "저장 위치가 저장소 밖입니다. storage.local.root를 저장소 안으로 "
+            f"두세요: {path.as_posix()}"
+        ) from error
 
 
 class EmbeddingTrainingError(RuntimeError):
@@ -254,11 +298,14 @@ def _safe_member(member: tarfile.TarInfo, destination: Path) -> None:
         _inside(destination, member.linkname)
 
 
-def read_crop_bank(storage: Any, uri: str, destination: Path) -> list[dict[str, Any]]:
-    """crop 은행 tar를 풀어 목록을 돌려줍니다.
+def read_crop_bank(storage: Any, uri: str, destination: Path) -> dict[str, Any]:
+    """crop 은행 tar를 풀어 **목록 문서를** 돌려줍니다.
 
     data가 만든 파일 규약을 여기서 다시 적습니다. pipeline끼리는 import하지 않으므로
     manifest field 이름을 옮겨 적는 것과 같은 방식입니다.
+
+    `records`만 돌려주지 않는 것은 은행이 자기 `crop_size`를 적어 두기 때문입니다.
+    그 값을 버리면 학습한 크기와 checkpoint에 적는 크기가 갈릴 수 있습니다.
     """
 
     destination.mkdir(parents=True, exist_ok=True)
@@ -296,7 +343,11 @@ def read_crop_bank(storage: Any, uri: str, destination: Path) -> list[dict[str, 
         # 학습 중이라, 여기서 안 막으면 저장소 밖 파일을 batch마다 읽습니다.
         _inside(destination, path)
         checked.append(dict(record))
-    return checked
+
+    crop_size = document.get("crop_size", DEFAULT_CROP_SIZE)
+    if isinstance(crop_size, bool) or not isinstance(crop_size, int) or crop_size < 1:
+        raise EmbeddingTrainingError(f"crop 은행의 crop_size가 정수가 아닙니다: {uri}")
+    return {"records": checked, "crop_size": crop_size}
 
 
 def check_class_map(storage: Any, uri: str, categories: list[int]) -> None:
@@ -382,6 +433,7 @@ def _checkpoint(
     categories: list[int],
     epoch: int,
     accuracy: float,
+    crop_size: int,
 ) -> dict[str, Any]:
     """쓰는 쪽이 이 하나만 읽고 model을 되살릴 수 있어야 합니다."""
 
@@ -391,7 +443,9 @@ def _checkpoint(
         # 학습한 class 순서입니다. 이것이 없으면 head를 되살릴 수 없고, 특징만 쓰는
         # 쪽도 자기가 몇 종을 본 model인지 알 수 없습니다.
         "category_ids": list(categories),
-        "crop_size": CROP_SIZE,
+        # **은행이 적은 값입니다.** 상수를 적으면 다른 크기로 자른 은행으로 학습하고도
+        # 224라고 말하게 되고, 쓰는 쪽은 그 값으로 시험 crop을 자릅니다.
+        "crop_size": crop_size,
         "normalisation": {"mean": list(MEAN), "std": list(STD)},
         "epoch": epoch,
         "train_accuracy": accuracy,
@@ -441,9 +495,15 @@ def _train_embedding(
 ) -> dict[str, Any]:
     """`train_embedding`이 결정성 설정을 걸어 둔 채로 부르는 본체입니다."""
 
+    # **낼 자리가 비었는지 아무것도 하기 전에 봅니다.** 안 보면 같은 run_id로 다시
+    # 돌린 실행이 밤새 학습한 뒤 첫 업로드에서야 거절당합니다. detector도 첫 batch
+    # 전에 멈추는 것을 계약으로 둡니다.
+    _guard_published(storage, setting)
+
     with tempfile.TemporaryDirectory(prefix="embedding-") as scratch:
         root = Path(scratch) / "bank"
-        records = read_crop_bank(storage, inputs["crop_bank_uri"], root)
+        bank = read_crop_bank(storage, inputs["crop_bank_uri"], root)
+        records, crop_size = bank["records"], bank["crop_size"]
         categories = sorted({int(record["category_id"]) for record in records})
         labels = {category: index for index, category in enumerate(categories)}
         if len(categories) < 2:
@@ -515,14 +575,16 @@ def _train_embedding(
                 }
             )
             if epoch % setting.checkpoint_every == 0 or epoch == setting.epochs:
-                torch.save(_checkpoint(model, setting, categories, epoch, accuracy), last_path)
+                _save_checkpoint(
+                    _checkpoint(model, setting, categories, epoch, accuracy, crop_size),last_path
+                )
             # **best는 주기와 무관하게 매 epoch 봅니다.** 주기 안에 두면 주기 사이에
             # 나온 가장 좋은 epoch이 best가 되지 못하고, 더 나쁜 model이 조용히
             # best_checkpoint.pt라는 이름으로 나갑니다. 쓰는 쪽은 그 이름을 믿습니다.
             if accuracy > best_accuracy:
                 best_accuracy, best_epoch = accuracy, epoch
-                torch.save(
-                    _checkpoint(model, setting, categories, epoch, accuracy), best_path
+                _save_checkpoint(
+                    _checkpoint(model, setting, categories, epoch, accuracy, crop_size),best_path
                 )
 
         if not best_path.exists():
