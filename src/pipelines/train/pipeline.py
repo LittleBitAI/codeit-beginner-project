@@ -152,6 +152,17 @@ def _integer(settings: Mapping[str, Any], name: str, default: int, *, minimum: i
     return value
 
 
+def _optional_integer(settings: Mapping[str, Any], name: str, *, minimum: int) -> int | None:
+    """없거나 ``None``이면 그 기능을 쓰지 않는다는 뜻인 정수 설정입니다."""
+
+    value = settings.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        raise ValueError(f"train.{name} must be an integer >= {minimum} or absent")
+    return value
+
+
 def _float(settings: Mapping[str, Any], name: str, default: float, *, minimum: float) -> float:
     value = settings.get(name, default)
     if (
@@ -416,6 +427,13 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         "epochs": _integer(raw, "epochs", _DEFAULTS["epochs"], minimum=1),
         "checkpoint_every": _integer(
             raw, "checkpoint_every", _DEFAULTS["checkpoint_every"], minimum=1
+        ),
+        # 이 epoch부터 epoch마다 평가용 checkpoint를 따로 남깁니다. 이 PR은 이름을
+        # 받아 정규화하는 데까지이고, 실제로 파일을 남기는 것은 다음 PR입니다.
+        # 계약의 EPOCH_ARCHIVE_START는 GUI가 미리 채우는 값일 뿐 기본값이 아닙니다 —
+        # 켜 본 적 없는 실행이 갑자기 수 GB를 쌓으면 안 됩니다.
+        "archive_epochs_from": _optional_integer(
+            raw, "archive_epochs_from", minimum=1
         ),
         # microbatch를 몇 개 모아 한 번 갱신할지입니다. 1이면 지금까지와 같습니다.
         # web이 이 기본값을 먼저 복제해 두었습니다(PR 143).
