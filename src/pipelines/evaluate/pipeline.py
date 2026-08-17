@@ -666,12 +666,17 @@ def run(config: dict) -> dict:
         # 예측 file은 **전체** manifest를 기준으로 확인합니다. 표본에서 빠진 image를
         # 가리킨다고 그 file이 잘못된 것은 아닙니다.
         manifest_image_keys = {record["image_key"] for record in records}
-        if settings.validation_sample_size is not None:
+        # 실제로 **줄어든** 실행만 표본입니다. 요청값이 manifest보다 크거나 같으면 전수를
+        # 본 것이므로, 그때 요청값을 그대로 적으면 전수 점수가 표본 점수로 읽힙니다.
+        sampled_size: int | None = None
+        if (
+            settings.validation_sample_size is not None
+            and settings.validation_sample_size < len(records)
+        ):
             # 표본으로 잰 점수는 전수와 같은 값이 아닙니다. 어느 파일에서 나온
             # 숫자인지 알 수 있도록 표본 크기를 결과 문서에도 함께 남깁니다.
-            records = sample_records(
-                records, settings.validation_sample_size, seed=settings.seed
-            )
+            sampled_size = settings.validation_sample_size
+            records = sample_records(records, sampled_size, seed=settings.seed)
         class_map = (
             load_class_map(store, settings.class_map_uri) if settings.class_map_uri else {}
         )
@@ -837,7 +842,7 @@ def run(config: dict) -> dict:
             "validation_manifest_uri": settings.validation_manifest_uri,
             # 표본으로 잰 점수를 전수 점수로 읽으면 서로 다른 시험지의 숫자를
             # 나란히 놓게 됩니다. 전수로 잰 실행은 `None`입니다.
-            "validation_sample_size": settings.validation_sample_size,
+            "validation_sample_size": sampled_size,
             "class_map_uri": settings.class_map_uri,
             "checkpoint_uri": settings.checkpoint_uri,
             "predictions_input_uri": settings.predictions_input_uri,
@@ -964,12 +969,9 @@ def run(config: dict) -> dict:
             "seed": settings.seed,
             "device": settings.device,
             "metrics": report["metrics"],
-            # 전수로 잰 실행의 summary 모양은 그대로 둡니다.
-            **(
-                {"validation_sample_size": settings.validation_sample_size}
-                if settings.validation_sample_size is not None
-                else {}
-            ),
+            # 전수로 잰 실행의 summary 모양은 그대로 둡니다. 요청값이 manifest보다
+            # 커서 실제로는 전수를 본 실행도 여기 들어가면 안 됩니다.
+            **({"validation_sample_size": sampled_size} if sampled_size else {}),
             # 쓰지 않은 실행의 summary 모양은 그대로 두려고 값이 있을 때만 넣습니다.
             # `frozenset`은 JSON으로 직렬화할 수 없어 정렬한 list로 바꿉니다.
             **(
