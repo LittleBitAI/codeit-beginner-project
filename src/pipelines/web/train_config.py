@@ -1355,6 +1355,37 @@ def read_runtime_config(config_id: str) -> dict[str, Any]:
     return config
 
 
+def stored_run_ids() -> set[str]:
+    """저장된 runtime config가 붙잡고 있는 run_id 전부입니다.
+
+    이름이 겹치는지 볼 때 **job 기록과 대기열만 세면 안 됩니다.** 대기열 항목은 시작할
+    때 줄에서 빠지고, `JobRecord`는 그 뒤에 만들어집니다. 그 사이에는 어느 목록에도
+    없는 이름이 생기고, 그 순간 들어온 요청이 같은 이름을 고릅니다.
+
+    config 파일은 이름을 고른 **직후** 쓰이고 그 뒤로 지워지지 않으므로 그런 틈이
+    없습니다. 지워진 기록의 이름까지 남아 번호를 하나 더 건너뛸 수는 있지만, 그쪽이
+    안전한 방향입니다.
+
+    읽지 못하는 파일은 건너뜁니다 — 깨진 파일 하나 때문에 이어 학습이 막히면 안 됩니다.
+    """
+
+    names: set[str] = set()
+    directory = config_dir()
+    if not directory.is_dir():
+        return names
+    for path in directory.glob("*.json"):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(document, dict):
+            continue
+        run_id = (document.get("train") or {}).get("run_id")
+        if isinstance(run_id, str) and run_id.strip():
+            names.add(run_id.strip())
+    return names
+
+
 def config_relative_path(config_id: str) -> str:
     """subprocess ``--config`` 인자로 넘길 저장소 기준 상대 경로입니다."""
 

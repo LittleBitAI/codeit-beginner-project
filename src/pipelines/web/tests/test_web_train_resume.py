@@ -489,6 +489,32 @@ def test_a_second_resume_skips_the_name_still_waiting_in_the_queue(
     ]
 
 
+def test_a_name_stays_reserved_while_the_queue_hands_it_to_a_job_record(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """대기열에서 빠진 뒤 job 기록이 되기 전, 이름이 어느 목록에도 없는 순간이 있습니다.
+
+    `_start_next_locked`가 항목을 꺼내며 lock을 놓고, `_start_locked`가 설정 파일을
+    읽은 뒤에야 다시 잡아 기록을 만듭니다. 그 사이에 들어온 요청이 같은 이름을 고르면
+    뒤엣것은 이름 충돌로 죽습니다. 이름을 붙잡는 것은 **저장된 설정**이라, 그 순간에도
+    번호가 넘어가야 합니다.
+    """
+
+    record = _finished_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    monkeypatch.setattr(manager, "_start_next", lambda: None)
+
+    first = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 35})
+    # 줄에서는 빠졌고 기록은 아직 없는 그 순간을 그대로 만듭니다.
+    manager._queue.clear()
+
+    second = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 35})
+
+    assert first.json()["run_id"] == "web-run.2"
+    assert second.json()["run_id"] == "web-run.3"
+
+
 def test_two_resumes_that_start_together_still_get_different_names(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):

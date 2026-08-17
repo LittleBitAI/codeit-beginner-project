@@ -36,6 +36,7 @@ from ..train_config import (
     next_resume_run_id,
     read_runtime_config,
     resume_checkpoint_exists,
+    stored_run_ids,
     validate_request,
     write_runtime_config,
 )
@@ -431,15 +432,18 @@ _RESUME_NAMING_LOCK = threading.Lock()
 
 
 def _taken_run_ids(manager: Any) -> list[str]:
-    """이 서버가 아는 run_id 전부입니다. **대기열에 줄만 선 이름까지** 셉니다.
+    """이 서버가 아는 run_id 전부입니다.
 
-    대기열 항목은 실제로 시작할 때에야 `JobRecord`가 되므로 `list_jobs()`에 없습니다.
-    다른 학습이 도는 동안 같은 실행을 두 번 이어 걸면 둘 다 A.2를 받고, 뒤엣것은 밤새
-    기다렸다 이름 충돌로 죽습니다.
+    **저장된 설정이 기준입니다.** 이름은 config를 쓰는 순간부터 붙잡히고 그 파일은
+    지워지지 않으므로, 대기열에서 빠져 `JobRecord`가 되기 전 같은 어느 목록에도 없는
+    순간이 생기지 않습니다. job 기록과 대기열도 함께 세는 것은 config 파일이 없는
+    기록(다른 곳에서 복원된 것)까지 덮기 위해서입니다 — 합집합은 더 세는 쪽으로만
+    틀리고, 그쪽은 번호 하나를 건너뛸 뿐입니다.
     """
 
     names = [job.run_id for job in manager.list_jobs()]
     names.extend(str(entry.get("run_id") or "") for entry in manager.queue_entries())
+    names.extend(stored_run_ids())
     return names
 
 
