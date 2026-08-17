@@ -4,13 +4,13 @@ Read the repository root `CLAUDE.md` first. This file adds only what is specific
 
 ## Scope
 
-Trains a config-selected torchvision detector and writes checkpoints plus a training history. The CPU-friendly MobileNetV3 320 FPN Faster R-CNN is the legacy default. It does not prepare data, score it, or register runs.
+Trains a config-selected torchvision detector and writes checkpoints plus a training history. It does not prepare data, score it, or register runs.
 
 ## Boundaries
 
 You own `src/pipelines/train/`. Do not edit another pipeline and never import one; `src/common` is the only shared code available. `config["inputs"]` is read-only.
 
-Web cannot import you, so the values you both must agree on live in `src/common/train_contract.py`: model and optimizer names, optimizer profiles, precision and schedule tables, the 8GB combination, and the settings defaults. **You own that file** — a name added there is offered by the GUI at once, so add it only once you accept it, and never re-type its values here.
+Web cannot import you, so the values you both must agree on live in `src/common/train_contract.py`: the model, optimizer, precision and schedule tables, the 8GB combination, and the settings defaults. **You own that file** — a name added there is offered by the GUI at once, so add it only once you accept it, and never re-type its values here.
 
 ## Interface
 
@@ -26,9 +26,11 @@ During training, `.<run_id>.partial` sits beside the final output. Every `checkp
 
 The S3 mirror `<prefix>/<run_id>/running/last_checkpoint.pt` is **one** self-contained object, so no pair can end up half updated. Its first conditional write claims the `run_id`; only the winner overwrites it.
 
-The cache fills **before the first batch**, `PREFETCH_WORKERS` images at a time, because fetching one per batch leaves the GPU waiting out one S3 round trip per image and that wait is the whole first epoch. Images already there are skipped, so an interrupted run downloads only the rest. An image that cannot be fetched is left to the training loop rather than stopping the run, and that isolation catches **every** exception on purpose: `src/common` converts only some storage failures, so a narrower clause can end a night of training. Its `image_cache_progress` line counts images **ready**, never attempted (proposal 016).
+From `archive_epochs_from` each write also drops an optimizer-less copy in `epochs/`, listed in `epoch_checkpoint_uris`: it scores an epoch, never resumes one. Absent, none are kept — the contract's table only prefills the GUI (proposal 018).
 
-`artifacts/train-image-cache/` keeps **one** dataset, because one namespace holds a whole one and Colab does not have room for two. Starting a run on a different dataset trashes every other unleased namespace before the first image is fetched; coming back to it refetches. A run **holds its lease file locked** for its whole lifetime, so liveness is asked of the OS rather than of a timestamp: a run that is quiet for hours before its first image keeps its cache, and a killed run stops protecting tens of gigabytes the moment it dies rather than at a TTL.
+The cache fills **before the first batch**, `PREFETCH_WORKERS` images at a time, because fetching one per batch leaves the GPU waiting out an S3 round trip per image — the whole first epoch. Images already there are skipped, so an interrupted run downloads only the rest. An image that cannot be fetched is left to the training loop rather than stopping the run, and that isolation catches **every** exception on purpose: `src/common` converts only some storage failures, so a narrower clause can end a night of training. Its `image_cache_progress` counts images **ready**, never attempted (proposal 016).
+
+`artifacts/train-image-cache/` keeps **one** dataset, because one namespace holds a whole one and Colab does not have room for two. Starting a run on a different dataset trashes every other unleased namespace before the first image is fetched; coming back to it refetches. A run **holds its lease file locked** for its whole lifetime, so liveness is asked of the OS, not of a timestamp: a run quiet for hours keeps its cache, and a killed run stops protecting tens of gigabytes the moment it dies, not at a TTL.
 
 Published files are never overwritten, and a run stops before its first batch when its `run_id` already has a non-empty working directory, an S3 `running/` checkpoint, or a finished result. On the empty disk of a new Colab runtime only the bucket knows an interrupted run is there, so the S3 checks carry the weight.
 
@@ -45,7 +47,7 @@ Published files are never overwritten, and a run stops before its first batch wh
 - `lr_scheduler` is absent by default: the constant learning rate of before. Its factor is recomputed on every **optimizer update**, so warmup counts updates, not microbatches; only `step` decays per epoch. Above 1 `gradient_accumulation_steps` those differ, and counting microbatches leaves `linear` and `cosine` short of their configured floor.
 - `gradient_accumulation_steps` groups that many microbatches into one update, which is how a GPU too small for a larger `batch_size` still gets one. Three parts of it fail silently rather than loudly: clearing gradients every microbatch throws away what was gathered, dividing by the configured size rather than the size a group actually held misweights a short final group, and dropping that final group drops those images from the epoch. It is recorded in `training_config` and compared before a resume, because a different value moves the optimizer and the schedule differently — a checkpoint written before the key existed reads as 1.
 - Checkpoints record normalized model, optimizer, augmentation, schedule, and seed settings under `training_config`. Keep it JSON-safe and credential-free.
-- `resume_from` continues an interrupted run from its self-contained `last_checkpoint.pt`, including the best epoch from before interruption. `epochs` counts the whole run, not the part that remains.
+- `resume_from` continues a run from its self-contained `last_checkpoint.pt`, best epoch included. `epochs` counts the whole run, not the part that remains.
 - Every reason a resume cannot work is checked before the first batch: missing `resume_state`, a history with gaps, a different architecture, class map, optimizer, schedule, or `num_workers`, missing AMP scaler or schedule state, `epochs` no larger than the resumed epoch, and spent patience. Worker count is there because augmentation draws from a per-worker RNG; older checkpoints read as `0`.
 
 ## Run and Test
@@ -64,4 +66,4 @@ Tests train a tiny model on CPU: no GPU, no AWS.
 - Validation must not update BatchNorm running statistics. A test guards this.
 - A seeded run must reproduce. If you introduce randomness, seed it.
 - **A resumed run must reproduce an uninterrupted one.** Tests compare four epochs against two plus two, with a control that breaks the random-state restore. CPU-only: deterministic algorithms use `warn_only=True`, so CUDA kernels may differ.
-- Nobody deletes an orphaned `.<run_id>.partial`. It holds the only copy of an interrupted run, so removing it is a person's decision.
+- Nobody deletes an orphaned `.<run_id>.partial`: it holds the only copy of an interrupted run.

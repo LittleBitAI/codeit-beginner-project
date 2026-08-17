@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
 
 import pytest
 
@@ -19,6 +18,7 @@ from src.pipelines.web.errors import TeamSyncAuthError, WebValidationError
 from src.pipelines.web.train_config import (
     build_resume_config,
     field_specs,
+    next_resume_run_id,
     normalize_train_settings,
     read_runtime_config,
     resume_checkpoint_exists,
@@ -206,14 +206,7 @@ def test_resume_config_keeps_the_whole_plan_and_takes_a_new_name():
     assert resumed["inputs"] == _runtime_config("local")["inputs"]
 
 
-def test_resume_config_shortens_a_long_original_name_without_losing_the_suffix(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        train_config,
-        "_utc_now",
-        lambda: datetime(2026, 8, 10, 9, 8, 7, 654321, tzinfo=timezone.utc),
-    )
+def test_resume_config_shortens_a_long_original_name_without_losing_the_suffix():
     source = _runtime_config("local")
     source["train"]["run_id"] = "a" * 128
 
@@ -221,7 +214,28 @@ def test_resume_config_shortens_a_long_original_name_without_losing_the_suffix(
 
     name = resumed["train"]["run_id"]
     assert len(name) == 128
-    assert name.endswith("-resume-20260810T090807654321Z")
+    assert name.endswith(".2")
+    assert train_config.RUN_ID_PATTERN.fullmatch(name)
+
+
+def test_resume_names_read_as_a_lineage():
+    """A 다음은 A.2, A.2 다음은 A.3입니다. A.2.2가 아닙니다."""
+
+    assert next_resume_run_id("web-run") == "web-run.2"
+    assert next_resume_run_id("web-run.2") == "web-run.3"
+
+
+def test_resume_names_skip_a_number_that_is_already_used():
+    """같은 이름을 다시 쓰면 train이 시작을 거부하고 두 실행이 한 이름으로 섞입니다."""
+
+    assert next_resume_run_id("web-run", ["web-run.2", "web-run.3"]) == "web-run.4"
+
+
+def test_a_name_that_cannot_take_a_suffix_falls_back_to_a_timestamp():
+    """이름을 못 지어서 이어 학습이 막히면 안 됩니다."""
+
+    name = next_resume_run_id("이름 with spaces")
+
     assert train_config.RUN_ID_PATTERN.fullmatch(name)
 
 
@@ -319,7 +333,7 @@ def test_resume_route_queues_a_new_run_from_an_interrupted_job(
 
     assert response.status_code == 201, response.text
     body = response.json()
-    assert body["run_id"].startswith("web-run-resume-")
+    assert body["run_id"] == "web-run.2"
     assert body["resumed_from_job_id"] == record.job_id
 
 
@@ -373,7 +387,7 @@ def test_resume_availability_lets_you_try_when_it_cannot_check(
     )
     record.status = "cancelled"
 
-    def explode(_config):
+    def explode(_config, _artifacts=None):
         raise StorageError("S3에 닿지 못했습니다.")
 
     monkeypatch.setattr(routes_train, "resume_checkpoint_exists", explode)
@@ -392,11 +406,258 @@ def test_resume_availability_refuses_a_run_that_has_not_finished(
     record = _interrupted_job(
         client, manager, monkeypatch, fake_process_factory, data_inputs
     )
-    record.status = "succeeded"
+    record.status = "running"
 
     body = client.get(f"/api/train/jobs/{record.job_id}/resume").json()
 
     assert body["available"] is False
+
+
+# --- 끝까지 간 학습 이어가기 ------------------------------------------------
+
+
+def _finished_job(client, manager, monkeypatch, fake_process_factory, data_inputs):
+    """끝까지 돈 학습 하나입니다. 게시된 checkpoint까지 만들어 둡니다.
+
+    끝난 실행에는 작업 폴더가 없습니다. train이 그 자리를 공개 폴더로 옮기고
+    ``last_checkpoint_uri``로 알려 주므로, 이어갈 파일도 거기 있습니다.
+    """
+
+    from src.pipelines.web.paths import resolve_within_repo
+
+    record = _interrupted_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.status = "succeeded"
+    record.summary = {"completed_epochs": 30, "stopped_early": False}
+    published = "artifacts/experiments/completed/web-run/last_checkpoint.pt"
+    record.artifacts = {"run_id": "web-run", "last_checkpoint_uri": published}
+    path = resolve_within_repo(published, label="checkpoint")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"resumable")
+    return record
+
+
+def test_a_finished_run_can_be_continued(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """best_epoch이 마지막 epoch이면 더 배울 것이 남아 있다는 뜻입니다."""
+
+    record = _finished_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+
+    assert client.get(f"/api/train/jobs/{record.job_id}/resume").json() == {
+        "available": True,
+        "reason": None,
+    }
+
+    response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 35})
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["run_id"] == "web-run.2"
+    assert body["resume_from"] == record.artifacts["last_checkpoint_uri"]
+    assert read_runtime_config(body["config_id"])["train"]["epochs"] == 35
+
+
+def test_a_second_resume_skips_the_name_still_waiting_in_the_queue(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """줄만 선 항목은 아직 job 기록이 아닙니다.
+
+    대기열 항목은 실제로 시작할 때에야 `JobRecord`가 되므로, 아는 이름을 job 기록에서만
+    세면 두 번째 이어 학습도 A.2를 받습니다. 둘 다 밤새 기다렸다가 뒤엣것이 이름
+    충돌로 죽습니다.
+    """
+
+    record = _finished_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    # 다른 학습이 돌고 있어 줄만 서는 상태입니다. 대기열을 꺼내 가는 곳이 여기
+    # 하나뿐이라, 멈춰 세우면 실제로 줄이 남아 있는 그 순간을 그대로 봅니다.
+    monkeypatch.setattr(manager, "_start_next", lambda: None)
+
+    first = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 35})
+    second = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 35})
+
+    assert first.json()["run_id"] == "web-run.2"
+    assert second.json()["run_id"] == "web-run.3"
+    assert [entry["run_id"] for entry in manager.queue_entries()] == [
+        "web-run.2",
+        "web-run.3",
+    ]
+
+
+def test_a_name_typed_by_hand_is_checked_against_the_same_list(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """자동 이름만 규칙을 지키면 직접 적은 이름이 그 규칙을 통째로 우회합니다."""
+
+    record = _finished_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+
+    response = client.post(
+        f"/api/train/jobs/{record.job_id}/resume",
+        json={"epochs": 35, "run_id": record.run_id},
+    )
+
+    assert response.status_code == 409
+    assert record.run_id in response.text
+    assert manager.queue_entries() == []
+
+
+def test_a_broken_config_does_not_block_every_resume(isolated_repo):
+    """이름을 세다가 손상된 파일 하나를 만나도 멈추지 않아야 합니다.
+
+    `train`이 object가 아닌 파일은 `or {}`로 걸러지지 않습니다. 복원된 config 하나가
+    그 모양이면 이어 학습 요청이 전부 500이 됩니다.
+    """
+
+    from src.pipelines.web.paths import config_dir
+    from src.pipelines.web.train_config import stored_run_ids, write_runtime_config
+
+    write_runtime_config({"train": {"run_id": "web-run.2"}})
+    for name, payload in (
+        ("broken", "{"),
+        ("list-train", '{"train": ["run_id"]}'),
+        ("text-train", '{"train": "web-run.9"}'),
+        ("no-train", '{"inputs": {}}'),
+    ):
+        (config_dir() / f"{name}.json").write_text(payload, encoding="utf-8")
+
+    assert stored_run_ids() == {"web-run.2"}
+
+
+def test_a_name_stays_reserved_while_the_queue_hands_it_to_a_job_record(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """대기열에서 빠진 뒤 job 기록이 되기 전, 이름이 어느 목록에도 없는 순간이 있습니다.
+
+    `_start_next_locked`가 항목을 꺼내며 lock을 놓고, `_start_locked`가 설정 파일을
+    읽은 뒤에야 다시 잡아 기록을 만듭니다. 그 사이에 들어온 요청이 같은 이름을 고르면
+    뒤엣것은 이름 충돌로 죽습니다. 이름을 붙잡는 것은 **저장된 설정**이라, 그 순간에도
+    번호가 넘어가야 합니다.
+    """
+
+    record = _finished_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    monkeypatch.setattr(manager, "_start_next", lambda: None)
+
+    first = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 35})
+    # 줄에서는 빠졌고 기록은 아직 없는 그 순간을 그대로 만듭니다.
+    manager._queue.clear()
+
+    second = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 35})
+
+    assert first.json()["run_id"] == "web-run.2"
+    assert second.json()["run_id"] == "web-run.3"
+
+
+def test_two_resumes_that_start_together_still_get_different_names(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """이름을 고르는 것과 그 이름이 대기열에 보이는 것 사이에 틈이 있으면 안 됩니다.
+
+    FastAPI는 `def` route를 threadpool에서 돌리므로 두 요청이 실제로 동시에 들어옵니다.
+    갈라져 있으면 둘 다 "A.2는 아직 없다"를 보고 같은 이름을 만들고, 뒤엣것은 밤새
+    기다렸다 이름 충돌로 죽습니다.
+
+    **틈을 일부러 벌려 놓고 봅니다.** 그냥 두 thread를 띄우면 대개 앞뒤로 지나가서,
+    문이 없어도 초록으로 통과합니다.
+    """
+
+    import threading
+
+    from src.pipelines.web.api import routes_train
+
+    record = _finished_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    monkeypatch.setattr(manager, "_start_next", lambda: None)
+
+    inside = threading.Event()
+    release = threading.Event()
+    real_write = routes_train.write_runtime_config
+
+    def blocking_write(config):
+        # 첫 요청이 이름을 고른 **직후** 멈춰 세웁니다. 여기가 위험한 창입니다.
+        if config["train"]["run_id"] == "web-run.2":
+            inside.set()
+            release.wait(timeout=5)
+        return real_write(config)
+
+    monkeypatch.setattr(routes_train, "write_runtime_config", blocking_write)
+
+    names: list[str] = []
+
+    def resume() -> None:
+        body = routes_train.resume_job(
+            record.job_id, routes_train.ResumeRequest(epochs=35), None
+        )
+        names.append(body["run_id"])
+
+    first = threading.Thread(target=resume, daemon=True)
+    first.start()
+    assert inside.wait(timeout=5), "첫 요청이 이름을 고르는 지점에 닿지 못했습니다"
+
+    second = threading.Thread(target=resume, daemon=True)
+    second.start()
+    # 문이 없으면 이 사이에 두 번째가 같은 이름을 고르고 지나갑니다.
+    time.sleep(0.3)
+    release.set()
+    first.join(timeout=10)
+    second.join(timeout=10)
+
+    assert sorted(names) == ["web-run.2", "web-run.3"]
+
+
+def test_continuing_a_finished_run_needs_a_bigger_plan(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """`epochs`는 남은 수가 아니라 전체 목표입니다.
+
+    그대로 이어가면 "이미 지난 epoch보다 크지 않다"며 train이 거절하는데, 그 답은
+    job과 config를 만들고 대기열을 다시 돌린 뒤에야 옵니다.
+    """
+
+    record = _finished_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+
+    empty = client.post(f"/api/train/jobs/{record.job_id}/resume", json={})
+    same = client.post(f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 30})
+
+    assert empty.status_code == 409 and "30" in empty.text
+    assert same.status_code == 409 and "30" in same.text
+
+
+def test_a_run_that_stopped_early_cannot_be_continued(
+    client, manager, monkeypatch, fake_process_factory, data_inputs
+):
+    """조기 종료로 끝난 실행의 checkpoint에는 다 쓴 patience가 함께 들어 있습니다.
+
+    **단추를 감추는 것만으로는 모자랍니다.** 시작하는 쪽이 같은 답을 하지 않으면,
+    직접 부른 요청 하나가 반드시 실패할 학습을 대기열에 밀어 넣습니다.
+    """
+
+    record = _finished_job(
+        client, manager, monkeypatch, fake_process_factory, data_inputs
+    )
+    record.summary["stopped_early"] = True
+
+    body = client.get(f"/api/train/jobs/{record.job_id}/resume").json()
+    started = client.post(
+        f"/api/train/jobs/{record.job_id}/resume", json={"epochs": 35}
+    )
+
+    assert body["available"] is False
+    assert "patience" in body["reason"]
+    assert started.status_code == 409
+    assert "patience" in started.text
+    assert manager.queue_entries() == []
 
 
 def test_resume_route_refuses_an_interrupted_job_without_a_checkpoint(
@@ -695,15 +956,15 @@ def test_a_run_started_from_scratch_gets_no_borrowed_epochs(
     assert [entry["epoch"] for entry in started.progress["epochs"]] == [1]
 
 
-def test_resume_route_refuses_a_job_that_is_not_interrupted(
+def test_resume_route_refuses_a_job_that_has_not_finished(
     client, manager, monkeypatch, fake_process_factory, data_inputs
 ):
     record = _interrupted_job(
         client, manager, monkeypatch, fake_process_factory, data_inputs
     )
-    record.status = "succeeded"
+    record.status = "running"
 
     response = client.post(f"/api/train/jobs/{record.job_id}/resume", json={})
 
     assert response.status_code == 409
-    assert "중단" in response.text
+    assert "끝난 학습만" in response.text
