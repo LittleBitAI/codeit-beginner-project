@@ -12,7 +12,9 @@ import io
 import json
 import re
 import shutil
+import tarfile
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, call, patch
@@ -77,9 +79,17 @@ def make_fake_s3_storage(objects: dict[str, Any] | None = None) -> tuple[S3Stora
         destination_path.write_bytes(value)
         return destination_path
 
+    def upload_file(source, destination, *, overwrite=False):
+        uri = uri_of(destination)
+        if uri in stored and not overwrite:
+            raise StorageError(f"S3 object가 이미 있습니다: {uri}")
+        stored[uri] = Path(source).read_bytes()
+        return uri
+
     storage.write_json = Mock(side_effect=write_json)
     storage.read_json = Mock(side_effect=read_json)
     storage.download_file = Mock(side_effect=download_file)
+    storage.upload_file = Mock(side_effect=upload_file)
     storage.exists = Mock(side_effect=lambda location: uri_of(location) in stored)
     storage.list = Mock(
         side_effect=lambda prefix="": sorted(
@@ -1751,6 +1761,113 @@ def test_similarity_summary_reports_that_validation_is_indistinguishable():
     assert similarity["measured_crops"] > 0
     assert similarity["near_duplicate_ratio_3"] == 1.0
     assert similarity["median_distance"] == 0.0
+
+
+# --- 참조 crop 은행 ---------------------------------------------------------
+#
+# 검출된 상자가 어떤 알약인지 다시 판정하려면 알약 하나짜리 그림이 필요합니다.
+# 학습 정답 상자를 그대로 잘라 tar 하나로 묶어 둡니다.
+
+
+def crop_bank_members(stored: dict[str, Any], result: dict[str, Any]) -> tuple[dict, list[str]]:
+    """올라간 tar를 풀어 목록과 담긴 file 이름을 돌려줍니다."""
+
+    payload = stored[result["artifacts"]["crop_bank_uri"]]
+    with tarfile.open(fileobj=io.BytesIO(payload)) as archive:
+        names = archive.getnames()
+        index = json.loads(archive.extractfile("index.json").read().decode("utf-8"))
+    return index, names
+
+
+def test_crop_bank_is_absent_unless_asked():
+    """기본값은 꺼짐입니다. 켜지 않은 실행은 train image를 한 장도 열지 않습니다.
+
+    전처리가 갑자기 dataset 전체를 내려받으면 준비 시간이 통째로 달라집니다.
+    """
+
+    storage, _ = make_fake_s3_storage(raw_objects())
+
+    result = run_with_fake_storage(storage, prepare_config("8:2"))
+
+    assert "crop_bank_uri" not in result["artifacts"]
+    opened = [
+        call.args[0]
+        for call in storage.download_file.call_args_list
+        if "/train_images/" in str(call.args[0])
+    ]
+    assert opened == []
+
+
+def test_crop_bank_holds_one_pill_per_file_capped_per_class():
+    """켜면 class마다 상한만큼 잘라 tar 하나에 담고, 목록을 함께 넣습니다.
+
+    이미지 한 장이 같은 class를 셋 담고 있어, 상한을 안 걸면 조합 하나에서만 셋이
+    들어옵니다. 그래야 상한이 실제로 하는 일이 보입니다.
+    """
+
+    objects = raw_objects({index: [1, 1, 1] for index in range(1, 21)})
+    for uri in list(objects):
+        if "/train_images/" in uri:
+            objects[uri] = image_bytes(100, 100)
+
+    result, stored = prepare(
+        prepare_config("8:2", crop_bank=True, crop_bank_per_class=2), objects
+    )
+
+    assert result["status"] == "ok", result["message"]
+    index, names = crop_bank_members(stored, result)
+    assert "index.json" in names
+    assert all(name.startswith("crops/") for name in names if name != "index.json")
+    counts = Counter(record["category_id"] for record in index["records"])
+    assert counts, "crop이 하나도 담기지 않았습니다"
+    assert max(counts.values()) <= 2
+    # 목록과 실제 담긴 file이 어긋나면 읽는 쪽이 없는 파일을 엽니다.
+    assert sorted(record["path"] for record in index["records"]) == sorted(
+        name for name in names if name != "index.json"
+    )
+    assert result["summary"]["crop_bank"]["crop_count"] == len(index["records"])
+
+
+def test_crop_bank_never_holds_a_validation_crop():
+    """validation crop을 은행에 넣으면 그 dataset으로 잰 점수가 자기 답을 본 것이 됩니다."""
+
+    result, stored = prepare(
+        prepare_config("8:2", crop_bank=True), real_image_objects()
+    )
+
+    index, _ = crop_bank_members(stored, result)
+    validation = artifact_document(stored, result, "validation_manifest_uri")
+    held_out = {image["id"] for image in validation["images"]}
+    assert held_out, "validation split이 비어 있어 이 test가 아무것도 지키지 못합니다"
+    assert not held_out & {record["image_id"] for record in index["records"]}
+
+
+@pytest.mark.parametrize("value", [0, -1, "40", True])
+def test_crop_bank_refuses_a_bad_per_class(value):
+    result, _ = prepare(prepare_config("8:2", crop_bank=True, crop_bank_per_class=value))
+
+    assert result["status"] == "error"
+    assert "crop_bank_per_class" in result["message"]
+
+
+def test_crop_bank_runs_on_local_backend(local_storage_root, clean_storage_environment):
+    """Local backend에서도 만들어져야 합니다. manifest의 상대 경로가 아니라
+    원본 위치를 써야 storage root 밖이라며 거부되지 않습니다."""
+
+    build_local_raw(local_storage_root, image_count=20)
+    images = local_storage_root / RAW_PREFIX / "train_images"
+    for path in images.glob("*.jpg"):
+        path.write_bytes(image_bytes(100, 100, image_format="JPEG"))
+
+    config = local_config(local_storage_root)
+    config["data"]["crop_bank"] = True
+
+    result = run(config)
+
+    assert result["status"] == "ok", result["message"]
+    archive = REPOSITORY_ROOT / result["artifacts"]["crop_bank_uri"]
+    with tarfile.open(archive) as opened:
+        assert "index.json" in opened.getnames()
 
 
 def test_similarity_runs_on_local_backend(

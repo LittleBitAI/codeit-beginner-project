@@ -41,6 +41,8 @@ Because groups move whole, priorities are leakage, coverage, class distribution,
 
 `"group-angle"` also gives validation one camera angle only (`data.validation_angle`, default `90`, the token third from the end) and takes that angle out of train entirely. Disjoint combinations are not enough: 79% of validation crops were indistinguishable from a train crop, 0.6% once the angle is held out. It costs a third of the training images, so such a model compares runs rather than being submitted. `split.angle_holdout` records the angle and dropped count; a category left with no training example, including one vanishing from both splits, stops the run.
 
+`data.crop_bank` (default `false`) cuts one pill per ground-truth box into `crop_bank.tar`, the optional `crop_bank_uri`; `data.crop_bank_per_class` (default 40) caps a class, drawn group by group so one combination cannot fill it. **Train split only** — a validation crop there makes every score on that dataset a look at its own answer. Built before anything is published, like the similarity pass, and sent as one tar. `ARTIFACT_FILE_NAMES` stays the five that always appear.
+
 `data.measure_validation_similarity` (default `false`) records under `split.validation_similarity` how close each validation crop is to the nearest same-class train crop. It reads raw image locations so both backends work, and runs before publishing so a failure leaves no artifacts. When off, the key is absent (`schema_version` `1.4`).
 
 With `overwrite == false`, an exact legacy set of four artifacts is the backfill case: only the missing test manifest is written. Any other partial set fails; an existing file is never replaced.

@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from typing import Any
 from src.common import LocalStorage, Storage, StorageError, create_storage
 
 from .coco import ConsolidatedDataset, consolidate
+from .crop_bank import CROP_BANK_FILE_NAME, DEFAULT_PER_CLASS, build_crop_bank
 from .errors import DatasetPreparationError
 from .progress import ProgressEmitter
 from .similarity import measure_validation_similarity
@@ -107,6 +109,9 @@ ARTIFACT_FILE_NAMES: dict[str, str] = {
     "dataset_summary_uri": "dataset_summary.json",
     "test_manifest_uri": "test_manifest.json",
 }
+# 켠 실행에서만 나오는 선택 artifact라 위 표에 넣지 않습니다. 저 표는 "언제나
+# 나오는 다섯"이라는 뜻이고, test가 그 뜻으로 개수를 셉니다.
+CROP_BANK_ARTIFACT_KEY = "crop_bank_uri"
 LEGACY_ARTIFACT_KEYS = frozenset(
     {
         "train_manifest_uri",
@@ -156,6 +161,10 @@ class PreparationSettings:
     # 켜면 이미지를 전부 열어 validation이 train과 얼마나 비슷한지 잽니다. 준비
     # 시간이 크게 늘어나므로 기본값은 꺼짐입니다.
     measure_validation_similarity: bool
+    # 켜면 train 정답 상자를 잘라 참조 crop 은행을 함께 만듭니다. 이것도 이미지를
+    # 여는 단계라 기본값은 꺼짐입니다.
+    crop_bank: bool
+    crop_bank_per_class: int
 
 
 def _data_config(config: Any) -> Mapping[str, Any]:
@@ -320,6 +329,16 @@ def resolve_settings(config: Any) -> PreparationSettings:
         raise DatasetPreparationError(
             "config['data']['measure_validation_similarity']는 true 또는 false여야 합니다."
         )
+    crop_bank = section.get("crop_bank", False)
+    if not isinstance(crop_bank, bool):
+        raise DatasetPreparationError(
+            "config['data']['crop_bank']는 true 또는 false여야 합니다."
+        )
+    per_class = section.get("crop_bank_per_class", DEFAULT_PER_CLASS)
+    if isinstance(per_class, bool) or not isinstance(per_class, int) or per_class < 1:
+        raise DatasetPreparationError(
+            "config['data']['crop_bank_per_class']는 1 이상의 정수여야 합니다."
+        )
     seed = _seed(section)
     raw_prefix = _normalized_prefix(section.get("raw_prefix"), "raw_prefix", DEFAULT_RAW_PREFIX)
     processed_root = _normalized_prefix(
@@ -341,6 +360,8 @@ def resolve_settings(config: Any) -> PreparationSettings:
         overwrite=_overwrite(section),
         split_method=split_method,
         measure_validation_similarity=measure_similarity,
+        crop_bank=crop_bank,
+        crop_bank_per_class=per_class,
         group_rule=group_rule,
         angle_rule=angle_rule,
         validation_angle=validation_angle,
@@ -928,6 +949,36 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
             ),
         )
 
+    # 이것도 이미지를 전부 여는 단계라 켠 실행만 비용을 냅니다. 유사도와 같은
+    # 이유로 **산출물을 하나라도 내보내기 전에** 여기서 끝냅니다. tar는 임시
+    # 자리에 두고, 올리는 것은 아래 publish 단계에서 함께 합니다.
+    crop_bank_summary: dict[str, Any] | None = None
+    crop_bank_archive: Path | None = None
+    crop_bank_scratch: tempfile.TemporaryDirectory[str] | None = None
+    if settings.crop_bank:
+        progress.emit("step_started", step="crop_bank")
+        group_rule = settings.group_rule or GroupRule(
+            delimiter=GROUP_KEY_DELIMITER, tokens=GROUP_KEY_TOKENS
+        )
+        group_of = {
+            image["id"]: group_rule.key(str(image["file_name"])) for image in dataset.images
+        }
+        crop_bank_scratch = tempfile.TemporaryDirectory(prefix="crop-bank-archive-")
+        crop_bank_archive = Path(crop_bank_scratch.name) / CROP_BANK_FILE_NAME
+        crop_bank_summary = build_crop_bank(
+            storage,
+            dataset.images,
+            dataset.annotations,
+            train_image_ids=split_result.train_image_ids,
+            group_of=group_of,
+            per_class=settings.crop_bank_per_class,
+            seed=settings.seed,
+            archive_path=crop_bank_archive,
+            on_progress=lambda done, total: progress.read_progress(
+                "crop_bank", done, total
+            ),
+        )
+
     progress.emit("step_started", step="publish")
     artifacts: dict[str, str] = {}
     for key, value in (
@@ -943,6 +994,17 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
                 overwrite=settings.overwrite,
             )
         )
+
+    if crop_bank_archive is not None and crop_bank_summary is not None:
+        artifacts[CROP_BANK_ARTIFACT_KEY] = publisher.artifact_uri(
+            storage.upload_file(
+                crop_bank_archive,
+                f"{settings.processed_prefix}{CROP_BANK_FILE_NAME}",
+                overwrite=settings.overwrite,
+            )
+        )
+    if crop_bank_scratch is not None:
+        crop_bank_scratch.cleanup()
 
     summary_document = _dataset_summary(
         dataset,
@@ -987,6 +1049,8 @@ def prepare_dataset(config: Any, storage: Storage) -> dict[str, Any]:
         "test_images_used": 0,
         "test_manifest_images": len(test_manifest["images"]),
     }
+    if crop_bank_summary is not None:
+        summary["crop_bank"] = crop_bank_summary
     unit = "그룹 단위" if settings.group_rule is not None else "이미지 단위"
     train_only_note = (
         ""
