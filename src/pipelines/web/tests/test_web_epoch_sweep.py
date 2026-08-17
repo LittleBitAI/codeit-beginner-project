@@ -453,6 +453,42 @@ def test_a_sweep_that_just_finished_does_not_revive_a_deleted_record(
     assert runner.status()["status"] == "succeeded"
 
 
+@pytest.mark.parametrize("broken", ["save", "share"])
+def test_neither_saving_nor_sharing_can_turn_a_finished_sweep_into_a_failure(
+    manager, monkeypatch, broken
+):
+    """전수 평가와 등록이 끝난 뒤에 남은 것은 저장과 팀 화면 알림뿐입니다.
+
+    둘 중 무엇이 실패해도 이미 잰 결과는 그대로여야 합니다. 예외가 `_finish` 밖으로
+    나가면 `_run`의 catch-all이 이미 끝난 훑기를 실패로 다시 덮거나, 상태가 영영
+    `running`에 갇혀 다음 훑기를 시작할 수 없게 됩니다.
+    """
+
+    from src.pipelines.web.jobs import store
+
+    def angry(*args, **kwargs):
+        raise RuntimeError("터졌습니다")
+
+    if broken == "save":
+        monkeypatch.setattr(store, "save_record", angry)
+    else:
+        monkeypatch.setattr(epoch_sweep.team_sync, "get_team_sync", angry)
+
+    record = _record()
+    manager._records[record.job_id] = record
+    runner = epoch_sweep.get_epoch_sweep_runner()
+    runner._state = {"status": "running", "job_id": record.job_id}
+    monkeypatch.setattr(
+        runner,
+        "_run_once",
+        lambda *args: runner._finish(record, status="succeeded", message="끝"),
+    )
+
+    runner._run(record, [], [], 5, "cpu", 1)
+
+    assert runner.status()["status"] == "succeeded"
+
+
 def test_the_attempt_number_is_written_before_the_sweep_runs(
     client, manager, monkeypatch
 ):

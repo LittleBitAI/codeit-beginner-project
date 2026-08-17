@@ -179,7 +179,8 @@ export interface EpochSweepCandidate {
 }
 
 export interface EpochSweepState {
-  status: 'idle' | 'running' | 'succeeded' | 'failed';
+  /** `interrupted`는 훑는 중에 서버가 다시 뜬 경우입니다. thread가 함께 사라집니다. */
+  status: 'idle' | 'running' | 'succeeded' | 'failed' | 'interrupted';
   job_id?: string | null;
   busy_with?: string | null;
   message?: string;

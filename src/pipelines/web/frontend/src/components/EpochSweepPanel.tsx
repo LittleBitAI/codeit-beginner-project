@@ -211,6 +211,14 @@ export function EpochSweepPanel({ job }: { job: JobRecord }) {
             {state.message ?? '원인을 알 수 없습니다.'}
           </AlertRow>
         )}
+
+        {/* 서버가 다시 뜨면 훑던 thread가 함께 사라집니다. 아무 말도 하지 않으면
+            잰 것이 없는데 끝난 것처럼 보이고, 다시 누를 이유를 알 수 없습니다. */}
+        {state?.status === 'interrupted' && (
+          <AlertRow level="warning" title="훑기가 중단됐습니다">
+            {state.message ?? '서버가 다시 시작되어 훑기가 중단됐습니다.'} 다시 눌러 주세요.
+          </AlertRow>
+        )}
       </div>
     </Panel>
   );

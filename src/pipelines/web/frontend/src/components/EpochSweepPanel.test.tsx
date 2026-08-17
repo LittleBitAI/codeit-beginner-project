@@ -111,6 +111,18 @@ describe('EpochSweepPanel', () => {
     expect(screen.getByRole('button', { name: '훑기 시작' })).toBeDisabled();
   });
 
+  // 훑기는 thread로만 돕니다. 서버가 다시 뜨면 그 thread가 함께 사라지므로, 잰 것이
+  // 없는데 끝난 것처럼 보입니다. 왜 다시 눌러야 하는지 말해 주어야 합니다.
+  it('서버가 다시 떠서 중단된 훑기를 알려 준다', async () => {
+    payload = {
+      ...payload,
+      epoch_sweep: { status: 'interrupted', message: '서버가 다시 시작되어 훑기가 중단됐습니다.' },
+    };
+    render(<EpochSweepPanel job={job()} />);
+
+    expect(await screen.findByText('훑기가 중단됐습니다')).toBeInTheDocument();
+  });
+
   it('끝난 훑기는 이긴 epoch과 그 실행 이름을 보여 준다', async () => {
     payload = {
       ...payload,

@@ -347,7 +347,9 @@ class EpochSweepRunner:
             from .jobs import store
 
             store.save_record(record)
-        except OSError:
+        except Exception:
+            # `_finish`와 같은 이유입니다. 저장이 실패해도 훑기는 돕니다. 여기서
+            # 예외가 나가면 thread도 없이 `running`인 채로 남습니다.
             pass
 
         threading.Thread(
@@ -380,11 +382,18 @@ class EpochSweepRunner:
             from .jobs import store
 
             store.save_record(record)
-        except OSError:
+        except Exception:
+            # 저장에 실패해도 상태는 끝으로 갑니다. 여기서 예외가 나가면 `_state`가
+            # 영영 `running`에 갇혀 다음 훑기를 시작할 수 없습니다.
             pass
         with self._lock:
             self._state = state
-        team_sync.get_team_sync().enqueue_update(record)
+        try:
+            team_sync.get_team_sync().enqueue_update(record)
+        except Exception:
+            # 팀 화면에 못 알리는 것과 이 훑기의 결과는 다른 이야기입니다. 예외가
+            # 나가면 `_run`의 catch-all이 이미 끝난 훑기를 실패로 다시 덮습니다.
+            pass
 
     def _run(
         self,
