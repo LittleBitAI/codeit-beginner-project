@@ -49,6 +49,7 @@ class EnsembleRunner:
         run_id: str,
         allow_copied_images: bool = False,
         overwrite: bool = False,
+        embedding_run_ids: Sequence[str] = (),
     ) -> dict[str, Any]:
         """예측이 없는 실행은 먼저 만들고, 그다음 합칩니다.
 
@@ -58,6 +59,7 @@ class EnsembleRunner:
         """
 
         from . import ensemble
+        from .embedding import rerank_settings
 
         # **추론을 걸기 전에 거절할 것은 먼저 거절합니다.** 검증을 뒤로 미루면 예측
         # 없는 후보 하나만 보내도 GPU가 9분을 돌고 나서야 "둘 이상 필요"로 실패합니다.
@@ -67,6 +69,13 @@ class EnsembleRunner:
             allow_copied_images=bool(allow_copied_images),
             overwrite=bool(overwrite),
         )
+        # 고른 embedding을 **여기서 한 번만** 풉니다. 이것이 검사이자 결과입니다.
+        #
+        # 두 번 찾으면 그 사이에 기록이 사라졌을 때 검사한 것과 실제로 쓰는 것이
+        # 갈립니다. 이름만 들고 갔다가 합칠 때 다시 찾는 것도 같은 문제였습니다 —
+        # 예측을 만드는 몇 분 사이에 기록을 지우면 checkpoint는 멀쩡한데 "기록에
+        # 없는 embedding"으로 늦게 실패하고, 그때는 추론이 이미 끝난 뒤입니다.
+        rerank = rerank_settings(embedding_run_ids)
         pending = ensemble.pending_runs(run_ids)
         with self._lock:
             if self._state.get("status") == STATUS_RUNNING:
@@ -77,6 +86,7 @@ class EnsembleRunner:
                 "status": STATUS_RUNNING,
                 "run_id": run_id,
                 "run_ids": list(run_ids),
+                "embedding_run_ids": list(embedding_run_ids),
                 "stage": "harvest" if pending else "fuse",
                 "pending": [item["run_id"] for item in pending],
                 "logs": [],
@@ -85,7 +95,14 @@ class EnsembleRunner:
 
         thread = threading.Thread(
             target=self._run_all,
-            args=(list(run_ids), run_id, bool(allow_copied_images), bool(overwrite), pending),
+            args=(
+                list(run_ids),
+                run_id,
+                bool(allow_copied_images),
+                bool(overwrite),
+                pending,
+                dict(rerank),
+            ),
             daemon=True,
         )
         thread.start()
@@ -98,6 +115,7 @@ class EnsembleRunner:
         allow_copied_images: bool,
         overwrite: bool,
         pending: list[Mapping[str, Any]],
+        rerank: dict[str, Any],
     ) -> None:
         from . import ensemble
 
@@ -126,6 +144,7 @@ class EnsembleRunner:
                 run_id=run_id,
                 allow_copied_images=allow_copied_images,
                 overwrite=overwrite,
+                rerank=rerank,
             )
         except Exception as error:  # noqa: BLE001
             self._fail(run_id, f"융합 설정을 만들지 못했습니다({type(error).__name__}).")

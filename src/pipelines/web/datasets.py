@@ -106,6 +106,8 @@ ARTIFACT_FILE_NAMES = {
 }
 TEST_MANIFEST_FILE_NAME = "test_manifest.json"
 EDA_REPORT_FILE_NAME = "report.json"
+# data가 crop 은행을 함께 만들었을 때만 있습니다. embedding 학습이 이것을 봅니다.
+CROP_BANK_FILE_NAME = "crop_bank.tar"
 
 
 def _looks_like_class_map(document: Any) -> bool:
@@ -736,6 +738,8 @@ def _group_by_dataset(entries: Sequence[str], root: str) -> list[dict[str, Any]]
                 "has_test_manifest": TEST_MANIFEST_FILE_NAME in found,
                 # 리포트가 있으면 화면이 EDA를 다시 돌릴지 판단할 수 있습니다.
                 "has_eda_report": EDA_REPORT_FILE_NAME in found,
+                # 은행이 있으면 embedding 학습을 이 dataset으로 바로 걸 수 있습니다.
+                "has_crop_bank": CROP_BANK_FILE_NAME in found,
             }
         )
     return datasets

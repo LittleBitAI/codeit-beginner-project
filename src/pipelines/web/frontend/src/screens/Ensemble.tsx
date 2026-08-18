@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api, ApiError } from '../api/client';
 import type { EnsembleCandidate, EnsembleDiagnosis, EnsembleJob } from '../api/types';
+import { EmbeddingPanel } from '../components/EmbeddingPanel';
 import { AlertRow, Button, Chip, MicroLabel, controlStyle } from '../components/primitives';
 import { color, type } from '../design/tokens';
 
@@ -106,6 +107,14 @@ export function Ensemble() {
     diagnosis.run_ids.every((item, index) => item === selected[index]);
 
   const [allowCopied, setAllowCopied] = useState(false);
+  // 합친 뒤 점수를 다시 매기는 데 쓸 embedding입니다. 비우면 detector 점수 그대로입니다.
+  const [embeddings, setEmbeddings] = useState<string[]>([]);
+
+  const toggleEmbedding = useCallback((runId: string) => {
+    setEmbeddings((current) =>
+      current.includes(runId) ? current.filter((item) => item !== runId) : [...current, runId],
+    );
+  }, []);
 
   const start = useCallback(() => {
     const runId = name.trim() || `${NAME_PREFIX}-${selected.length}-${Date.now()}`;
@@ -115,10 +124,11 @@ export function Ensemble() {
         run_ids: selected,
         run_id: runId,
         allow_copied_images: needsCopyConsent && allowCopied,
+        embedding_run_ids: embeddings,
       })
       .then(setJob)
       .catch((cause) => setError(cause instanceof Error ? cause.message : '시작하지 못했습니다.'));
-  }, [allowCopied, name, needsCopyConsent, selected]);
+  }, [allowCopied, embeddings, name, needsCopyConsent, selected]);
 
   // 도는 동안만 상태를 물어봅니다. 융합은 몇 분이라 짧게 잡아도 됩니다.
   useEffect(() => {
@@ -204,6 +214,8 @@ export function Ensemble() {
         </section>
       </div>
 
+      <EmbeddingPanel selected={embeddings} onToggle={toggleEmbedding} disabled={running} />
+
       <section style={{ display: 'grid', gap: 8 }}>
         <MicroLabel>실행</MicroLabel>
         <input
@@ -225,7 +237,11 @@ export function Ensemble() {
         ) : null}
         <div>
           <Button onClick={start} disabled={selected.length < 2 || running || !fresh}>
-            {running ? '합치는 중…' : `${selected.length}개 합치기`}
+            {running
+              ? '합치는 중…'
+              : embeddings.length > 0
+                ? `${selected.length}개 합치고 embedding ${embeddings.length}개로 재순위`
+                : `${selected.length}개 합치기`}
           </Button>
           {warnings.length > 0 ? (
             <span style={{ ...type.note, color: color.textMid, marginLeft: 10 }}>
