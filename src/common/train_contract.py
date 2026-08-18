@@ -25,6 +25,14 @@ __all__ = [
     "AUGMENTATIONS",
     "BEST_CHECKPOINT_NAME",
     "CUDA_ONLY_PRECISIONS",
+    "DEFAULT_EMBEDDING_BACKBONE",
+    "DEFAULT_TRAIN_TASK",
+    "EMBEDDING_BACKBONES",
+    "EMBEDDING_DATA_ARTIFACT_KEYS",
+    "EMBEDDING_SETTING_DEFAULTS",
+    "EMBEDDING_SETTING_KEYS",
+    "TRAIN_TASKS",
+    "TRAIN_TASK_KEY",
     "DATA_ARTIFACT_KEYS",
     "DEFAULT_ACCUMULATION_STEPS",
     "DEFAULT_ARCHITECTURE",
@@ -189,6 +197,57 @@ SETTING_KEYS = (
     "seed",
     "weight_decay",
 )
+
+#: train이 할 수 있는 일입니다. `detector`는 상자를 찾는 기존 학습이고, `embedding`은
+#: 잘라 낸 알약 crop 하나가 어떤 class인지 재는 자를 만듭니다. 둘은 입력도 설정도
+#: 다르므로 위 `SETTING_KEYS`를 함께 쓰지 않습니다 — 한 목록에 넣으면 GUI가 detector
+#: 화면에서 backbone을, 임베딩 화면에서 optimizer를 내놓게 됩니다.
+TRAIN_TASKS = ("detector", "embedding")
+DEFAULT_TRAIN_TASK = "detector"
+TRAIN_TASK_KEY = "task"
+
+#: 임베딩이 쓸 수 있는 backbone입니다. 구조가 서로 다를수록 틀리는 자리가 달라
+#: 여럿을 함께 쓸 때 값이 있습니다.
+EMBEDDING_BACKBONES = ("resnet18", "resnet34", "resnet50")
+DEFAULT_EMBEDDING_BACKBONE = "resnet18"
+
+#: 임베딩 학습을 시작하려면 있어야 하는 data artifact입니다. detector와 달리 manifest가
+#: 아니라 **잘라 둔 crop 은행**을 읽습니다.
+EMBEDDING_DATA_ARTIFACT_KEYS = ("crop_bank_uri", "class_map_uri")
+
+#: ``config["train"]``에 담아 보낼 수 있는 칸 이름입니다(`task="embedding"`일 때).
+#: detector 쪽과 같은 이유로 여기 이름만 보고 양쪽이 맞춥니다.
+EMBEDDING_SETTING_KEYS = (
+    TRAIN_TASK_KEY,
+    "backbone",
+    "batch_size",
+    "checkpoint_every",
+    "device",
+    "epochs",
+    "learning_rate",
+    "num_workers",
+    "output_dir",
+    "output_prefix",
+    "pretrained",
+    "run_id",
+    "seed",
+    "weight_decay",
+)
+
+#: 비워 두고 보냈을 때 임베딩 학습이 쓰는 값입니다. 검증된 조합을 그대로 둡니다.
+EMBEDDING_SETTING_DEFAULTS: dict[str, Any] = {
+    "backbone": DEFAULT_EMBEDDING_BACKBONE,
+    "batch_size": 32,
+    "checkpoint_every": 1,
+    "device": "cpu",
+    "epochs": 30,
+    "learning_rate": 3e-4,
+    "pretrained": True,
+    "seed": 42,
+    "weight_decay": 1e-4,
+    "output_dir": "artifacts/experiments/embeddings",
+    "output_prefix": "experiments/embeddings",
+}
 
 #: 학습 중 작업 폴더에 두는 파일입니다. 마지막 것이 이어서 학습할 대상입니다.
 WORKING_CHECKPOINT_NAMES = ("best_checkpoint.pt", "last_checkpoint.pt")
