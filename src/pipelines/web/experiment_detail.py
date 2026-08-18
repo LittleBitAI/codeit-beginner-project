@@ -150,6 +150,17 @@ def _looks_numeric(value: Any) -> bool:
     return True
 
 
+def _is_list(value: Any) -> bool:
+    """목록인지 봅니다. **글자열은 목록이 아닙니다.**
+
+    `str`과 `bytes`도 `Sequence`라, 그냥 `Sequence`로 보면 `"abc"`가 세 칸짜리
+    목록으로 통과합니다. 그러면 글자 하나하나가 class 이름이 되어, 깨진 파일에서
+    그럴듯한 진단이 나옵니다.
+    """
+
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+
+
 def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int]:
     """confusion matrix에서 **헷갈린 쌍만** 골라 잦은 순으로 냅니다.
 
@@ -164,23 +175,30 @@ def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int]:
         return [], 0
     matrix = block.get("matrix")
     labels = block.get("labels")
-    if not isinstance(matrix, Sequence) or not isinstance(labels, Sequence):
+    if not _is_list(matrix) or not _is_list(labels):
+        return [], 0
+    # **이름이 모자라면 아무것도 내지 않습니다.** 없는 자리를 index로 채우면
+    # `'1'` 같은 그럴듯한 이름이 나와, 지어낸 것이 category_id처럼 읽힙니다.
+    if len(labels) < len(matrix):
         return [], 0
     ids = block.get("category_ids")
-    id_list = list(ids) if isinstance(ids, Sequence) else []
+    id_list = list(ids) if _is_list(ids) and len(ids) >= len(matrix) else []
 
     def name_of(index: int) -> str:
-        return str(labels[index]) if index < len(labels) else str(index)
+        return str(labels[index])
 
     def id_of(index: int) -> Any:
         return id_list[index] if index < len(id_list) else None
 
     pairs: list[dict[str, Any]] = []
     for truth, row in enumerate(matrix):
-        if not isinstance(row, Sequence):
+        if not _is_list(row):
             continue
         for predicted, count in enumerate(row):
-            if truth == predicted or not isinstance(count, int) or count <= 0:
+            # bool은 int를 물려받습니다. `True`를 1건으로 세면 없던 혼동이 생깁니다.
+            if truth == predicted or isinstance(count, bool) or not isinstance(count, int):
+                continue
+            if count <= 0:
                 continue
             pairs.append(
                 {

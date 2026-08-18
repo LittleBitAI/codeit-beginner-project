@@ -923,6 +923,34 @@ def test_detail_says_how_many_confused_pairs_were_left_out(client, monkeypatch):
     assert len(evaluation["confusions"]["0.50"]) == 20
 
 
+@pytest.mark.parametrize(
+    ("broken", "why"),
+    [
+        # `str`도 `Sequence`입니다. 글자 하나하나가 class 이름이 됩니다.
+        # **행렬만큼 깁니다** — 짧으면 길이 검사에 먼저 걸려 글자열 가드를 재지
+        # 못합니다(처음 쓴 test가 그래서 통과했습니다).
+        ({"labels": "가" * 58}, "labels가 글자열"),
+        # `bool`도 `int`입니다. `True`를 1건으로 세면 없던 혼동이 생깁니다.
+        ({"matrix": [[False, True], [False, False]], "labels": ["background", "a"]}, "건수가 bool"),
+        # 이름이 모자란 자리를 index로 채우면 `'1'`이 category_id처럼 읽힙니다.
+        ({"labels": ["background"]}, "labels가 짧음"),
+    ],
+)
+def test_detail_makes_nothing_up_from_a_broken_matrix(client, monkeypatch, broken, why):
+    """깨진 파일에서 **그럴듯한 진단**이 나오면 아무도 깨진 줄 모릅니다."""
+
+    document = metrics_document()
+    document["analysis"]["confusion_matrix"]["0.50"].update(broken)
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["confusions"]["0.50"] == [], why
+    assert evaluation["confusion_counts"]["0.50"] == {"pairs": 0, "shown": 0}, why
+
+
 def test_detail_carries_the_false_positive_causes(client, monkeypatch):
     """왜 틀렸는지를 metrics.json을 직접 열어야만 볼 수 있었습니다."""
 

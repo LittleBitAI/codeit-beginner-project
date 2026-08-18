@@ -99,6 +99,31 @@ describe('오검출 진단 시트', () => {
     expect(screen.queryByText('이름을 틀림')).toBeNull();
   });
 
+  it('진단 블록이 없는 옛 평가를 0건으로 그리지 않는다', async () => {
+    // 평가 자체는 읽혔지만 이 기능 이전이라 블록이 없습니다. "헷갈린 쌍이 없다"고
+    // 적으면 착각한 적 없는 좋은 실행으로 읽힙니다. 안 잰 것과 재서 0건은 다릅니다.
+    vi.spyOn(api, 'experimentDetail').mockResolvedValue(
+      detail({ confusions: undefined, confusion_counts: undefined, score_sweep: undefined }),
+    );
+
+    render(<DiagnosisSheet runId="dino-e12" onClose={() => undefined} />);
+
+    expect(await screen.findByText(/혼동 기록이 없습니다. 이 기능 이전에 돌린 평가입니다/)).toBeTruthy();
+    expect(screen.getByText(/탐색 기록이 없습니다. 이 기능 이전에 돌린 평가입니다/)).toBeTruthy();
+    expect(screen.queryByText('헷갈린 쌍이 하나도 없습니다.')).toBeNull();
+  });
+
+  it('재서 0건인 것은 안 쟀다고 말하지 않는다', async () => {
+    // 반대쪽입니다. 실제로 하나도 헷갈리지 않은 실행을 "기록이 없다"고 적으면
+    // 평가를 다시 돌리라는 말로 읽힙니다.
+    vi.spyOn(api, 'experimentDetail').mockResolvedValue(detail());
+
+    render(<DiagnosisSheet runId="dino-e12" onClose={() => undefined} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'IoU 0.75' }));
+
+    await waitFor(() => expect(screen.getByText('헷갈린 쌍이 하나도 없습니다.')).toBeTruthy());
+  });
+
   it('평가를 못 읽은 실행에서는 빈 표를 지어내지 않는다', async () => {
     vi.spyOn(api, 'experimentDetail').mockResolvedValue({
       experiment: { run_id: 'dino-e12' },

@@ -65,9 +65,23 @@ function Section({ title, note, children }: { title: string; note?: string; chil
  * 순위로 하므로 자르는 기준을 올리면 맞힌 것까지 함께 사라집니다. 어디서 무엇을
  * 잃는지 보라는 표입니다.
  */
-function SweepTable({ rows, best }: { rows: SweepPoint[]; best: SweepPoint | null }) {
+function SweepTable({
+  rows,
+  best,
+}: {
+  /** `undefined`는 재지 않았다는 뜻, 빈 배열은 재서 아무 지점도 없었다는 뜻입니다. */
+  rows: SweepPoint[] | undefined;
+  best: SweepPoint | null | undefined;
+}) {
+  if (rows === undefined) {
+    return (
+      <div style={{ ...type.note, color: color.textMuted }}>
+        이 실행에는 탐색 기록이 없습니다. 이 기능 이전에 돌린 평가입니다.
+      </div>
+    );
+  }
   if (rows.length === 0) {
-    return <div style={{ ...type.note, color: color.textMuted }}>이 실행에는 탐색 결과가 없습니다.</div>;
+    return <div style={{ ...type.note, color: color.textMuted }}>잴 수 있는 지점이 없었습니다.</div>;
   }
   return (
     <table style={{ borderCollapse: 'collapse', width: '100%', maxWidth: 520 }}>
@@ -91,7 +105,7 @@ function SweepTable({ rows, best }: { rows: SweepPoint[]; best: SweepPoint | nul
       </thead>
       <tbody>
         {rows.map((row) => {
-          const peak = best !== null && row.threshold === best.threshold;
+          const peak = best !== null && best !== undefined && row.threshold === best.threshold;
           return (
             <tr key={row.threshold} style={{ borderTop: `1px solid ${color.border}` }}>
               <td style={{ ...type.monoValue, color: peak ? color.accent : color.textStrong, padding: '6px 10px 6px 0' }}>
@@ -134,11 +148,21 @@ function ConfusionList({
   pairs,
   counts,
 }: {
-  pairs: ConfusionPair[];
+  /** `undefined`는 **재지 않았다**는 뜻입니다. 빈 배열은 재서 0건이라는 뜻입니다. */
+  pairs: ConfusionPair[] | undefined;
   counts: { pairs: number; shown: number } | undefined;
 }) {
+  // 이 기능 이전 평가에는 블록 자체가 없습니다. 0건으로 그리면 헷갈린 적이 없는
+  // 좋은 실행으로 읽힙니다.
+  if (pairs === undefined) {
+    return (
+      <div style={{ ...type.note, color: color.textMuted }}>
+        이 실행에는 혼동 기록이 없습니다. 이 기능 이전에 돌린 평가입니다.
+      </div>
+    );
+  }
   if (pairs.length === 0) {
-    return <div style={{ ...type.note, color: color.textMuted }}>이 실행에는 혼동 기록이 없습니다.</div>;
+    return <div style={{ ...type.note, color: color.textMuted }}>헷갈린 쌍이 하나도 없습니다.</div>;
   }
   return (
     <>
@@ -241,10 +265,7 @@ function Body({ evaluation, iou }: { evaluation: ExperimentEvaluation; iou: stri
         title="자르는 기준 탐색"
         note="점수가 이 기준보다 낮은 상자를 버렸다면 어떻게 됐을지 다시 셉니다. 평가를 다시 돌린 것이 아니라 이미 잰 매칭을 잘라 본 것이라, 기준을 낮춰도 이미 잘려 나간 예측은 되살아나지 않습니다."
       >
-        <SweepTable
-          rows={evaluation.score_sweep?.[iou] ?? []}
-          best={evaluation.best_f1?.[iou] ?? null}
-        />
+        <SweepTable rows={evaluation.score_sweep?.[iou]} best={evaluation.best_f1?.[iou]} />
       </Section>
 
       <Section
@@ -252,7 +273,7 @@ function Body({ evaluation, iou }: { evaluation: ExperimentEvaluation; iou: stri
         note="정답이 무엇인데 무엇으로 봤는지입니다. class를 무시하고 매칭한 결과라 같은 자리를 다른 이름으로 읽은 것이 보입니다. 이름이 닮은 알약끼리 몰려 있으면 crop 재순위가 들 자리입니다."
       >
         <ConfusionList
-          pairs={evaluation.confusions?.[iou] ?? []}
+          pairs={evaluation.confusions?.[iou]}
           counts={evaluation.confusion_counts?.[iou]}
         />
       </Section>
