@@ -275,9 +275,9 @@ def test_a_name_already_being_used_is_refused_before_training(workspace: Path):
     """
 
     # 앞선 실행이 이름을 잡아 둔 상태를 만듭니다(끝나지는 않았습니다).
-    claim = workspace / "embeddings" / "embed-test" / "running.json"
+    claim = workspace / "embeddings" / "embed-test" / "running" / "last_checkpoint.pt"
     claim.parent.mkdir(parents=True)
-    claim.write_text(json.dumps({"run_id": "embed-test"}), encoding="utf-8")
+    claim.write_bytes("앞선 실행이 잡은 자리".encode("utf-8"))
 
     result = run(embedding_config(workspace))
 
@@ -328,7 +328,7 @@ def test_a_run_that_stops_on_a_bad_input_does_not_keep_the_name(
     result = run(embedding_config(workspace))
 
     assert result["status"] == "error"
-    claim = workspace / "embeddings" / "embed-test" / "running.json"
+    claim = workspace / "embeddings" / "embed-test" / "running" / "last_checkpoint.pt"
     assert not claim.exists(), "이름이 잡힌 채 남으면 고쳐도 다시 못 돌립니다"
 
 

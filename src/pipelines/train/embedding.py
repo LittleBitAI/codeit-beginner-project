@@ -66,9 +66,10 @@ LABEL_SMOOTHING = 0.1
 
 #: 실행 하나가 자기 이름을 잡았다는 표식과, 끝까지 갔다는 표식입니다. detector가
 #: `running/`과 `completed.json`으로 하는 일을 같은 모양으로 둡니다.
-RUNNING_MARKER = "running.json"
 COMPLETED_MARKER = "completed.json"
-#: 도는 동안의 사본입니다. 끊긴 실행에서 남는 유일한 원격 사본이기도 합니다.
+#: 도는 동안의 사본이자 **이름을 잡는 자리**입니다. 첫 조건부 쓰기가 `run_id`를
+#: 잡고, 그 순간부터 원격에 자족적인 사본이 하나 있습니다. 표식 파일을 따로 두면
+#: 이름만 잡히고 사본은 없는 사이가 벌어집니다.
 RUNNING_CHECKPOINT = "running/last_checkpoint.pt"
 
 
@@ -138,30 +139,6 @@ def _guard_completed(storage: Any, prefix: str, run_id: str) -> None:
         raise EmbeddingTrainingError(
             f"이미 끝난 실행입니다: {run_id}. 다른 run_id를 쓰세요."
         )
-
-
-def _claim_run(storage: Any, prefix: str, setting: "EmbeddingSettings") -> None:
-    """이 `run_id`를 잡습니다. 조건부 쓰기라 동시에 시작해도 하나만 이깁니다.
-
-    **설정과 입력을 다 확인한 뒤, 첫 batch 직전에** 부릅니다. 먼저 잡으면 class map이
-    틀려 멈춘 실행도 이름을 영구히 차지해, 입력을 고쳐도 같은 이름으로 다시 돌릴 수
-    없습니다.
-
-    성공해도 표식은 지우지 않습니다. 이름 하나는 한 번 씁니다. 끊긴 실행이 남긴
-    표식도 사람이 정할 일이라 여기서 치우지 않습니다.
-    """
-
-    try:
-        storage.write_json(
-            f"{prefix}/{RUNNING_MARKER}",
-            {"run_id": setting.run_id, "backbone": setting.backbone},
-            overwrite=False,
-        )
-    except StorageError as error:
-        raise EmbeddingTrainingError(
-            f"'{setting.run_id}' 이름을 잡지 못했습니다. 같은 이름의 실행이 돌고 "
-            "있거나 끊긴 채 남아 있습니다. 치울지는 사람이 정합니다."
-        ) from error
 
 
 def _published(uri: str) -> str:
@@ -605,8 +582,9 @@ def _train_embedding(
         history: list[dict[str, Any]] = []
         best_accuracy = -1.0
         best_epoch = 0
-        # 원격 사본을 마지막으로 갱신한 epoch입니다. 0이면 한 번도 못 올렸다는
-        # 뜻이고, 그 실행이 끊기면 원격에는 이름만 남습니다.
+        # 원격 사본이 담고 있는 epoch입니다. 이름을 잡는 순간 0으로 시작하고,
+        # 그 뒤로는 갱신에 성공한 epoch입니다. **원격 사본 자체가 자기 epoch을
+        # 적고 있으므로**, 이 값은 편의일 뿐 근거는 그 파일입니다.
         mirrored_epoch = 0
         started = time.time()
         # **작업 directory는 만들어 잡습니다.** 이미 있으면 중단된 앞선 실행이
@@ -622,19 +600,36 @@ def _train_embedding(
                 "그 안의 checkpoint가 유일한 사본이므로 지우거나 다른 run_id를 "
                 "쓰는 것은 사람이 정합니다."
             ) from error
-        # 설정과 입력을 다 확인하고 이 자리를 잡은 **뒤에** 이름을 잡습니다. 먼저
-        # 잡으면 입력이 틀려 멈춘 실행이 그 이름을 영구히 차지합니다.
-        try:
-            _claim_run(storage, prefix, setting)
-        except EmbeddingTrainingError:
-            # 원격 이름을 다른 실행이 먼저 잡았습니다. 방금 만든 이 빈 자리는
-            # **이 실행이 만든 것**이라 치웁니다. 남겨 두면 다음 시도가 "중단된
-            # 학습이 있다"에 막히는데, 그 안에는 아무것도 없습니다.
-            working.rmdir()
-            raise
-
         best_path = working / "best_checkpoint.pt"
         last_path = working / "last_checkpoint.pt"
+
+        # **이름 잡기와 원격 사본을 하나로 둡니다.** 아직 한 batch도 돌지 않았지만
+        # 지금 model 그대로가 자족적인 checkpoint이므로, 그것을 조건부로 올려
+        # `running/`을 만듭니다. 그 조건부 쓰기 하나가 두 가지를 다 합니다.
+        #
+        # - 진 쪽은 **첫 batch 전에** 멈춥니다.
+        # - 이긴 쪽은 그 순간부터 원격에 사본을 갖습니다. 이름만 남고 학습은
+        #   사라지는 창이 없습니다.
+        #
+        # 표식 파일을 따로 두면 그 사이가 벌어집니다. detector의 "첫 조건부 쓰기가
+        # run_id를 claim한다"와 같은 규칙입니다.
+        _save_checkpoint(
+            _checkpoint(model, setting, categories, 0, 0.0, crop_size), last_path
+        )
+        try:
+            storage.upload_file(
+                last_path, f"{prefix}/{RUNNING_CHECKPOINT}", overwrite=False
+            )
+        except (StorageError, OSError) as error:
+            # 원격 이름을 다른 실행이 먼저 잡았습니다. 방금 만든 이 자리는 **이
+            # 실행이 만든 것**이라 치웁니다. 남겨 두면 다음 시도가 "중단된 학습이
+            # 있다"에 막히는데, 그 안에는 이 실행이 방금 쓴 것밖에 없습니다.
+            last_path.unlink(missing_ok=True)
+            working.rmdir()
+            raise EmbeddingTrainingError(
+                f"'{setting.run_id}' 이름을 잡지 못했습니다. 같은 이름의 실행이 돌고 "
+                "있거나 끊긴 채 남아 있습니다. 치울지는 사람이 정합니다."
+            ) from error
 
         for epoch in range(1, setting.epochs + 1):
             model.train()
