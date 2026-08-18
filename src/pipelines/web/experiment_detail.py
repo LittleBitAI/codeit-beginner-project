@@ -291,28 +291,41 @@ def _error_causes(value: Any) -> dict[str, int] | None:
     return counts
 
 
-def _best_f1(value: Any) -> dict[str, Any] | None:
+def _best_f1(value: Any, rows: list[dict[str, Any]] | None) -> dict[str, Any] | None:
     """F1이 가장 높았던 지점입니다. 읽지 못하거나 없으면 `None`입니다.
 
     여기서 `None`은 화면에서 "최고점 표시 없음"이 됩니다. 표시가 없는 것은
     **아무 말도 하지 않는 것**이라, 다른 블록과 달리 세 상태를 따로 두지
-    않았습니다. 대신 범위를 벗어난 값은 반드시 막습니다 — `F1 최고 200%`는
-    표시가 없는 것과 달리 **틀린 말**입니다.
+    않았습니다. 대신 **틀린 표시는 반드시 막습니다** — `F1 최고 200%`도,
+    엉뚱한 줄에 붙은 "F1 최고"도 표시가 없는 것과 달리 틀린 말입니다.
+
+    화면은 threshold가 같은 줄에 표시를 붙이므로, **같은 IoU의 탐색 결과와
+    맞는지** 봅니다. 어느 지점이 최고인지 고르는 규칙까지 여기서 다시 쓰지는
+    않습니다 — 그것은 evaluate의 몫이고, 베끼면 두 곳이 갈립니다.
     """
 
-    if not isinstance(value, Mapping):
+    if not isinstance(value, Mapping) or rows is None:
         return None
-    if not _in_unit_range(value.get("threshold")):
-        return None
-    for name in ("precision", "recall", "f1"):
-        number = value.get(name)
-        if number is not None and not _in_unit_range(number):
+    # 네 값이 모두 있어야 합니다. `{"threshold": 0.1}`만 있어도 화면은 그 줄에
+    # "F1 최고"를 붙입니다.
+    for name in ("threshold", "precision", "recall", "f1"):
+        if name not in value or not _in_unit_range(value[name]):
             return None
+    threshold = float(value["threshold"])
+    f1 = float(value["f1"])
+    # 탐색 결과에 없는 지점이거나 F1이 다르면 그 표시는 거짓입니다.
+    if not any(
+        abs(float(row["threshold"]) - threshold) < 1e-9
+        and row["f1"] is not None
+        and abs(float(row["f1"]) - f1) < 1e-9
+        for row in rows
+    ):
+        return None
     return {
-        "threshold": _number(value.get("threshold")),
-        "precision": _number(value.get("precision")),
-        "recall": _number(value.get("recall")),
-        "f1": _number(value.get("f1")),
+        "threshold": _number(value["threshold"]),
+        "precision": _number(value["precision"]),
+        "recall": _number(value["recall"]),
+        "f1": _number(value["f1"]),
     }
 
 
@@ -358,6 +371,11 @@ def evaluation_block(
     confusion = _readable_block(analysis_values, "confusion_matrix")
     breakdown = _readable_block(analysis_values, "error_breakdown")
 
+    swept = (
+        None
+        if sweep is None
+        else {label: _sweep_rows(rows) for label, rows in sweep.items()}
+    )
     picked = (
         None
         if confusion is None
@@ -379,13 +397,15 @@ def evaluation_block(
         "score_threshold": _number(readable.get("score_threshold")),
         "max_detections_per_image": _number(document.get("max_detections_per_image")),
         # IoU label("0.50"/"0.75")별로 나뉩니다. 화면이 어느 쪽을 볼지 고릅니다.
-        "score_sweep": (
-            None
-            if sweep is None
-            else {label: _sweep_rows(rows) for label, rows in sweep.items()}
-        ),
+        "score_sweep": swept,
+        # 최고점은 **같은 IoU의 탐색 결과와 맞는지** 보고 냅니다.
         "best_f1": (
-            None if best is None else {label: _best_f1(value) for label, value in best.items()}
+            None
+            if best is None
+            else {
+                label: _best_f1(value, (swept or {}).get(label))
+                for label, value in best.items()
+            }
         ),
         # 행렬이 아니라 **헷갈린 쌍**입니다. 자른 개수를 함께 말하지 않으면 잘린
         # 목록이 전부로 읽힙니다. 읽지 못한 IoU는 개수가 `null`입니다 — 목록에서

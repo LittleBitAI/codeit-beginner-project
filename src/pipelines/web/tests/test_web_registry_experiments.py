@@ -1125,6 +1125,49 @@ def test_detail_does_not_mark_a_peak_it_cannot_believe(client, monkeypatch):
     assert evaluation["best_f1"]["0.50"] is None
 
 
+@pytest.mark.parametrize(
+    ("best", "why"),
+    [
+        ({"threshold": 0.5}, "값이 threshold뿐"),
+        # 탐색에 없는 지점입니다. 화면은 threshold만 맞으면 표시를 붙입니다.
+        ({"threshold": 0.3, "precision": 0.9, "recall": 0.9, "f1": 0.9}, "탐색에 없는 지점"),
+        # 지점은 있는데 F1이 다릅니다. 그 줄에 붙는 "F1 최고"는 거짓입니다.
+        ({"threshold": 0.5, "precision": 0.95, "recall": 0.93, "f1": 0.11}, "F1이 어긋남"),
+    ],
+)
+def test_detail_does_not_mark_a_peak_the_sweep_does_not_agree_with(
+    client, monkeypatch, best, why
+):
+    """엉뚱한 줄에 붙은 "F1 최고"는 표시가 없는 것과 달리 **틀린 말**입니다."""
+
+    document = metrics_document()
+    document["analysis"]["best_f1"]["0.50"] = best
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["best_f1"]["0.50"] is None, why
+
+
+def test_detail_keeps_a_peak_the_sweep_agrees_with(client, monkeypatch):
+    """맞는 최고점까지 버리면 화면에서 표시가 영영 사라집니다."""
+
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": metrics_document()}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["best_f1"]["0.50"] == {
+        "threshold": 0.5,
+        "precision": 0.95,
+        "recall": 0.93,
+        "f1": 0.94,
+    }
+
+
 def test_detail_says_it_could_not_read_the_best_f1_block(client, monkeypatch):
     """`best_f1`만 세 상태 처리를 건너뛰고 있었습니다."""
 
