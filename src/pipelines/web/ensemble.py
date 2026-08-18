@@ -654,7 +654,6 @@ def check_selection(
     run_id: str,
     allow_copied_images: bool = False,
     overwrite: bool = False,
-    embedding_run_ids: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """추론을 걸기 **전에** 거절할 것을 거절합니다.
 
@@ -670,11 +669,6 @@ def check_selection(
         raise WebError("합칠 예측이 둘 이상 필요합니다.")
     if len(set(wanted)) != len(wanted):
         raise WebError("같은 실행을 두 번 골랐습니다.")
-    # 재순위로 고른 embedding도 **첫 추론 전에** 봅니다. 합치기가 끝난 뒤에야
-    # "그 embedding은 checkpoint가 없습니다"를 알리면 그 시간이 통째로 버려집니다.
-    from .embedding import rerank_settings
-
-    rerank_settings(embedding_run_ids)
     name = str(run_id).strip()
     if not RUN_ID_PATTERN.fullmatch(name):
         raise WebError(

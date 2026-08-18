@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 import ntpath
 import posixpath
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -127,17 +128,25 @@ def _number(
     return float(value)
 
 
+#: scheme 주소인지 가릅니다. **맨 앞에서만, 두 글자 이상**이어야 합니다.
+#: 글자 어디에나 `://`가 있으면 통과시켰더니 `C://Windows/...`가 지나갔습니다 —
+#: 드라이브 글자 `C:`와 이어지는 `//`가 합쳐져 scheme처럼 보입니다. 한 글자
+#: scheme은 없고 드라이브는 언제나 한 글자라, 두 글자 이상을 요구하면 갈립니다.
+_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]+://")
+
+
 def _outside_repository(value: str) -> bool:
     """저장소 밖을 가리키는 절대 경로인지 봅니다.
 
     `s3://` 같은 scheme 주소는 **저장 계층이 판단합니다.** bucket 밖 주소를 여기서
-    가르려 들면 계층이 보는 것을 빠뜨립니다(`ensemble._storage_identity` 참고).
+    가르려 들면 계층이 보는 것을 빠뜨립니다(`ensemble._checkpoint_identity` 참고).
+    모르는 scheme은 계층이 bucket 안의 key로 볼 뿐이라 밖으로 나가지 않습니다.
     막는 것은 이 기계의 절대 경로뿐입니다 — POSIX `/`, 드라이브 `C:\\`, UNC `\\\\`.
     S3에서는 앞의 `/`가 떨어져 나가 **다른 key**가 되므로, 고른 적 없는 은행으로
     조용히 학습할 수 있습니다.
     """
 
-    if "://" in value:
+    if _SCHEME.match(value):
         return False
     return posixpath.isabs(value) or ntpath.isabs(value)
 

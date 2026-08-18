@@ -68,12 +68,13 @@ class EnsembleRunner:
             run_id=run_id,
             allow_copied_images=bool(allow_copied_images),
             overwrite=bool(overwrite),
-            embedding_run_ids=embedding_run_ids,
         )
-        # 고른 embedding을 **여기서 한 번** 풀어 들고 갑니다. 이름만 들고 갔다가
-        # 합칠 때 다시 찾으면, 예측을 만드는 몇 분 사이에 그 기록을 지운 사람이
-        # 있을 때 checkpoint는 멀쩡한데 "기록에 없는 embedding"으로 늦게 실패합니다.
-        # 그때는 detector 추론이 이미 끝난 뒤입니다.
+        # 고른 embedding을 **여기서 한 번만** 풉니다. 이것이 검사이자 결과입니다.
+        #
+        # 두 번 찾으면 그 사이에 기록이 사라졌을 때 검사한 것과 실제로 쓰는 것이
+        # 갈립니다. 이름만 들고 갔다가 합칠 때 다시 찾는 것도 같은 문제였습니다 —
+        # 예측을 만드는 몇 분 사이에 기록을 지우면 checkpoint는 멀쩡한데 "기록에
+        # 없는 embedding"으로 늦게 실패하고, 그때는 추론이 이미 끝난 뒤입니다.
         rerank = rerank_settings(embedding_run_ids)
         pending = ensemble.pending_runs(run_ids)
         with self._lock:

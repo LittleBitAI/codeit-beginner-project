@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -136,6 +137,10 @@ def test_embedding_config_refuses_a_backbone_train_cannot_build(isolated_repo):
         # UNC입니다. `..`도 없고 드라이브 글자도 없어 두 검사를 모두 지나갑니다.
         "//server/share/crop_bank.tar",
         "\\\\server\\share\\crop_bank.tar",
+        # 드라이브 글자 `C:`와 이어지는 `//`가 합쳐져 **scheme처럼 보입니다.**
+        # 글자 어디에나 `://`가 있으면 통과시키면 이것이 지나갑니다.
+        "C://Windows/crop_bank.tar",
+        "//server://share/crop_bank.tar",
     ],
 )
 def test_embedding_config_refuses_a_path_outside_the_repository(isolated_repo, uri):
@@ -328,6 +333,43 @@ def test_fusion_does_not_look_the_embeddings_up_again(monkeypatch, fake_jobs):
     )
 
     assert config["evaluate"]["rerank_checkpoint_uris"] == ["s3://bucket/r18.pt"]
+
+
+def test_the_runner_reads_the_chosen_embeddings_exactly_once(monkeypatch, fake_jobs):
+    """두 번 찾으면 **검사한 것과 실제로 쓰는 것이 갈립니다.**
+
+    그 사이에 기록을 지운 사람이 있으면, 통과한 검사와 다른 결과로 끝납니다.
+    여기서는 목록이 한 번만 답하고 그다음에는 비도록 해서 그것을 잽니다.
+    """
+
+    from src.pipelines.web import ensemble_jobs
+
+    fake_jobs.append(_record("emb-r18", checkpoint="s3://bucket/r18.pt"))
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "bucket")
+    answered: list[int] = []
+    real = embedding.list_runs
+
+    def once() -> list[dict[str, Any]]:
+        answered.append(1)
+        return real() if len(answered) == 1 else []
+
+    monkeypatch.setattr(embedding, "list_runs", once)
+    monkeypatch.setattr(ensemble, "pending_runs", lambda names: [])
+    monkeypatch.setattr(ensemble, "check_selection", lambda *args, **kwargs: [])
+    # 일꾼 thread는 띄우지 않습니다. 재는 것은 **거는 자리에서 몇 번 찾는가**이고,
+    # 살아남은 thread는 뒤따르는 test의 대기열을 건드립니다.
+    monkeypatch.setattr(
+        ensemble_jobs.threading,
+        "Thread",
+        lambda **kwargs: SimpleNamespace(start=lambda: None),
+    )
+
+    state = ensemble_jobs.EnsembleRunner().start(
+        ["dino-a", "dino-b"], run_id="fused", embedding_run_ids=["emb-r18"]
+    )
+
+    assert state["status"] == "running"
+    assert answered == [1]
 
 
 def test_automatic_evaluation_walks_past_an_embedding_run(manager, fake_jobs):
