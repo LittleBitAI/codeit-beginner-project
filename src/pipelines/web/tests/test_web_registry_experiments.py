@@ -948,6 +948,9 @@ def test_detail_says_how_many_confused_pairs_were_left_out(client, monkeypatch):
         # 0x0입니다. evaluate는 적어도 background 한 칸을 씁니다. 정사각 검사만
         # 보면 통과해 "헷갈린 쌍이 하나도 없습니다"로 그려집니다.
         ({"matrix": [], "labels": [], "category_ids": []}, "빈 행렬"),
+        # 0번이 background가 아닙니다. 화면은 그 행·열을 보통 class로 그려,
+        # 없는 것을 찾은 것과 놓친 것이 class끼리의 착각으로 읽힙니다.
+        ({"labels": ["가짜"] + [f"약{i}" for i in range(1, 58)]}, "0번이 background가 아님"),
     ],
 )
 def test_detail_makes_nothing_up_from_a_broken_matrix(client, monkeypatch, broken, why):
@@ -999,10 +1002,27 @@ def test_detail_says_it_could_not_read_the_other_blocks_either(
     assert evaluation[key]["0.50"] is None, why
 
 
+def test_detail_says_it_could_not_read_the_analysis_itself(client, monkeypatch):
+    """`analysis`가 통째로 이상하면 그 아래 전부가 "안 쟀음"으로 읽혔습니다."""
+
+    document = metrics_document()
+    document["analysis"] = "망가짐"
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["score_sweep"] is None
+    assert evaluation["confusions"] is None
+    assert evaluation["error_breakdown"] is None
+
+
 @pytest.mark.parametrize(
     "key", ["score_sweep", "confusion_matrix", "error_breakdown"]
 )
-def test_detail_says_it_could_not_read_a_whole_block(client, monkeypatch, key):
+@pytest.mark.parametrize("value", ["망가짐", None], ids=["문자열", "null"])
+def test_detail_says_it_could_not_read_a_whole_block(client, monkeypatch, key, value):
     """블록 **자체**가 깨진 경우입니다.
 
     없는 것과 같게 비워서 내면 화면이 "이 기능 이전에 돌린 평가"라고 잘못
@@ -1010,7 +1030,7 @@ def test_detail_says_it_could_not_read_a_whole_block(client, monkeypatch, key):
     """
 
     document = metrics_document()
-    document["analysis"][key] = "망가짐"
+    document["analysis"][key] = value
     stub_detail_sources(
         monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
     )
@@ -1029,6 +1049,9 @@ def test_detail_says_it_could_not_read_a_whole_block(client, monkeypatch, key):
         # evaluate는 못 잰 값을 `None`으로 씁니다(분모가 0). 그 밖의 값은 깨진
         # 것인데, 둘을 합치면 화면에서 똑같이 `-`로 그려집니다.
         ({"0.10": {"precision": "높음", "recall": 0.9, "f1": 0.9}}, "값이 문자열"),
+        # key가 아예 없습니다. `counts.get()`으로 꺼내면 일부러 쓴 `None`과
+        # 똑같이 "못 잼(-)"으로 그려집니다.
+        ({"0.10": {"recall": 0.9, "f1": 0.9}}, "key가 없음"),
     ],
 )
 def test_detail_does_not_pass_a_broken_metric_off_as_unmeasured(

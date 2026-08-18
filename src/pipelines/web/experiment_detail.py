@@ -59,6 +59,10 @@ CONFUSION_TOP_N = 20
 #: 그 IoU를 통째로 뺍니다 — 0건과 "안 쟀다"는 다른 말입니다.
 _ERROR_CAUSES: tuple[str, ...] = ("localization", "classification", "background", "duplicate")
 
+#: confusion matrix의 0번 행·열 이름입니다. evaluate의 `BACKGROUND_LABEL`을 베낀
+#: 값입니다 — 그쪽을 import할 수 없습니다. 어긋나면 목록이 비지, 틀리지는 않습니다.
+BACKGROUND_LABEL = "background"
+
 
 def _number(value: Any) -> int | float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -135,7 +139,11 @@ def _sweep_rows(sweep: Any) -> list[dict[str, Any]] | None:
             return None
         row = {"threshold": threshold}
         for name in ("precision", "recall", "f1"):
-            value = counts.get(name)
+            # key가 **없는** 것도 깨진 것입니다. evaluate는 셋을 언제나 씁니다.
+            # `counts.get()`으로 꺼내면 없는 key와 일부러 쓴 `None`이 같아집니다.
+            if name not in counts:
+                return None
+            value = counts[name]
             # `None`은 evaluate가 일부러 쓴 값입니다 — 분모가 0이라 못 잰 것입니다.
             # 그 밖의 숫자 아닌 값은 **깨진 것**이라, `_number()`에 맡기면 둘이
             # 똑같이 `-`로 그려집니다.
@@ -155,15 +163,23 @@ def _looks_numeric(value: Any) -> bool:
     return True
 
 
-def _readable_block(analysis: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
+def _readable_block(
+    analysis: Mapping[str, Any] | None, key: str
+) -> Mapping[str, Any] | None:
     """IoU별 블록을 꺼냅니다. **없으면 빈 것, 깨졌으면 `None`입니다.**
 
-    둘을 합치면 깨진 파일이 "이 기능 이전에 돌린 평가"로 설명됩니다.
+    둘을 합치면 깨진 파일이 "이 기능 이전에 돌린 평가"로 설명됩니다. `analysis`
+    자체를 읽지 못한 경우(`None`)도 마찬가지로 읽지 못한 것입니다.
+
+    **key가 없는 것과 값이 `null`인 것도 다릅니다.** evaluate는 이 자리에 언제나
+    dict를 씁니다. `null`이 보이면 파일이 상한 것이지 옛 평가가 아닙니다.
     """
 
-    value = analysis.get(key)
-    if value is None:
+    if analysis is None:
+        return None
+    if key not in analysis:
         return {}
+    value = analysis[key]
     return value if isinstance(value, Mapping) else None
 
 
@@ -202,6 +218,10 @@ def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int] 
     # 이름이 모자라면 없는 자리를 index로 채우게 되어 `'1'` 같은 그럴듯한 이름이
     # 나오고, 남으면 어느 칸이 어느 class인지 어긋납니다.
     if len(matrix) != len(labels):
+        return None
+    # 0번은 background 자리입니다. 이름이 다르면 화면이 그 행·열을 **보통 class로**
+    # 그립니다 — 없는 것을 찾은 것과 놓친 것이 class끼리의 착각으로 읽힙니다.
+    if str(labels[0]) != BACKGROUND_LABEL:
         return None
     ids = block.get("category_ids")
     id_list = list(ids) if _is_list(ids) and len(ids) >= len(matrix) else []
@@ -293,14 +313,21 @@ def evaluation_block(
     metrics = document.get("metrics")
     metric_values = metrics if isinstance(metrics, Mapping) else {}
     analysis = document.get("analysis")
-    analysis_values = analysis if isinstance(analysis, Mapping) else {}
+    # `analysis`가 통째로 이상하면 **읽지 못한 것**입니다. 빈 dict로 두면 그 아래
+    # 모든 블록이 "이 기능 이전 평가"로 설명됩니다.
+    analysis_values: Mapping[str, Any] | None
+    if "analysis" not in document:
+        analysis_values = {}
+    else:
+        analysis_values = analysis if isinstance(analysis, Mapping) else None
+    readable = analysis_values if analysis_values is not None else {}
 
-    per_class = analysis_values.get("per_class_summary")
+    per_class = readable.get("per_class_summary")
     if not isinstance(per_class, Mapping) or set(per_class) != _SUMMARY_KEYS:
         # 이 계약 이전 평가에는 블록 자체가 없습니다. 빈 표를 지어내지 않습니다.
         per_class = None
 
-    best = analysis_values.get("best_f1")
+    best = readable.get("best_f1")
     # 블록 **자체**가 깨진 경우입니다. 없는 것과 같게 `{}`로 내면 화면이 "이 기능
     # 이전 평가"라고 잘못 설명합니다. 어느 IoU가 있었는지도 알 수 없으므로
     # 블록째 `None`으로 답합니다.
@@ -326,7 +353,7 @@ def evaluation_block(
         "reason": None,
         "metrics": {key: _number(metric_values.get(key)) for key in METRIC_KEYS},
         "counts": {key: _number(document.get(key)) for key in COUNT_KEYS},
-        "score_threshold": _number(analysis_values.get("score_threshold")),
+        "score_threshold": _number(readable.get("score_threshold")),
         "max_detections_per_image": _number(document.get("max_detections_per_image")),
         # IoU label("0.50"/"0.75")별로 나뉩니다. 화면이 어느 쪽을 볼지 고릅니다.
         "score_sweep": (
