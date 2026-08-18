@@ -684,8 +684,10 @@ def _train_embedding(
             "best_epoch": best_epoch,
             "best_train_accuracy": round(best_accuracy, 6),
             "elapsed_seconds": round(time.time() - started, 1),
-            # 원격 사본을 마지막으로 갱신한 epoch입니다. 0이면 한 번도 못 올렸고,
-            # 그 실행이 끊겼다면 원격에는 이름만 남았다는 뜻입니다.
+            # 원격 사본이 담고 있는 epoch입니다. 이름을 잡을 때 epoch 0으로
+            # 시작하므로 **사본은 언제나 있습니다.** 0이면 그 뒤 갱신이 한 번도
+            # 성공하지 못했다는 뜻이고, 지금 끊기면 원격에는 학습 전 model만
+            # 남습니다.
             "running_mirror_epoch": mirrored_epoch,
             "epochs": history,
         }
@@ -732,8 +734,9 @@ def _train_embedding(
             "best_train_accuracy": round(best_accuracy, 6),
             "seed": setting.seed,
             "device": setting.device,
-            # 0이면 도는 동안 원격 사본을 한 번도 못 올렸다는 뜻입니다. 결과 자체는
-            # 온전하지만, 다음에 끊기면 원격에 아무것도 남지 않는다는 신호입니다.
+            # 원격 사본이 담고 있는 epoch입니다. 이름을 잡을 때 0으로 시작하므로
+            # **사본이 없는 경우는 없습니다.** 0으로 남았으면 도는 동안의 갱신이
+            # 한 번도 성공하지 못했다는 뜻입니다.
             "running_mirror_epoch": mirrored_epoch,
         },
         "message": (
