@@ -936,6 +936,15 @@ def test_detail_says_how_many_confused_pairs_were_left_out(client, monkeypatch):
         ({"labels": ["background"]}, "labels가 짧음"),
         # 행이 이름보다 깁니다. 없는 index를 조회하면 상세 응답이 통째로 죽습니다.
         ({"matrix": [[0, 1, 2], [0, 0, 0]], "labels": ["background", "a"]}, "행이 김"),
+        # 행이 짧습니다. 없는 칸이 조용히 0건으로 읽혀 "안 헷갈렸다"가 됩니다.
+        ({"matrix": [[0], [0, 0]], "labels": ["background", "a"]}, "행이 짧음"),
+        # **행 수가 이름보다 적습니다.** 행 길이는 다 맞아서 행 검사에 걸리지
+        # 않는데, 마지막 class의 혼동이 통째로 사라집니다. 이 경우가 없으면
+        # 정사각 검사를 지워도 아무 test가 빨개지지 않습니다.
+        (
+            {"matrix": [[0, 0, 0], [0, 0, 0]], "labels": ["background", "a", "b"]},
+            "행 수가 모자람",
+        ),
     ],
 )
 def test_detail_makes_nothing_up_from_a_broken_matrix(client, monkeypatch, broken, why):
@@ -957,6 +966,34 @@ def test_detail_makes_nothing_up_from_a_broken_matrix(client, monkeypatch, broke
     evaluation = response.json()["evaluation"]
     assert evaluation["confusion_counts"]["0.50"] is None, why
     assert "0.50" not in evaluation["confusions"], why
+
+
+@pytest.mark.parametrize(
+    ("block", "key", "why"),
+    [
+        ({"score_sweep": {"0.50": "망가짐"}}, "score_sweep", "탐색이 문자열"),
+        ({"score_sweep": {"0.50": {"0.10": "망가짐"}}}, "score_sweep", "탐색 항목이 문자열"),
+        ({"error_breakdown": {"0.50": {"localization": "많음"}}}, "error_breakdown", "원인이 문자열"),
+    ],
+)
+def test_detail_says_it_could_not_read_the_other_blocks_either(
+    client, monkeypatch, block, key, why
+):
+    """탐색과 원인에도 "읽지 못함"이 있어야 합니다.
+
+    빈 배열이면 "잴 지점이 없었다", `None`을 안 쓰면 "이 기능 이전 평가"로
+    읽힙니다. 둘 다 깨진 파일을 다른 말로 설명하는 것입니다.
+    """
+
+    document = metrics_document()
+    document["analysis"].update(block)
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation[key]["0.50"] is None, why
 
 
 def test_detail_carries_the_false_positive_causes(client, monkeypatch):

@@ -116,20 +116,23 @@ def _unavailable_history(reason: str) -> dict[str, Any]:
     return {"available": False, "reason": reason, "epochs": []}
 
 
-def _sweep_rows(sweep: Any) -> list[dict[str, Any]]:
+def _sweep_rows(sweep: Any) -> list[dict[str, Any]] | None:
     """`{"0.05": {...}}` 형태를 threshold 순 배열로 폅니다.
 
     화면은 이것을 곡선으로 그리므로 순서가 있어야 합니다. dict의 key 순서를 믿지
     않고 threshold 숫자로 다시 세웁니다.
+
+    **읽지 못하면 `None`입니다.** 빈 배열로 내면 "재 봤는데 잴 지점이 없었다"와
+    같아져, 깨진 기록이 정상 결과로 읽힙니다.
     """
 
     if not isinstance(sweep, Mapping):
-        return []
+        return None
     rows: list[dict[str, Any]] = []
     for key, counts in sweep.items():
         threshold = _number(float(key)) if _looks_numeric(key) else None
         if threshold is None or not isinstance(counts, Mapping):
-            continue
+            return None
         rows.append(
             {
                 "threshold": threshold,
@@ -179,9 +182,10 @@ def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int] 
     labels = block.get("labels")
     if not _is_list(matrix) or not _is_list(labels):
         return None
-    # **이름이 모자라면 읽지 못한 것입니다.** 없는 자리를 index로 채우면 `'1'`
-    # 같은 그럴듯한 이름이 나와, 지어낸 것이 category_id처럼 읽힙니다.
-    if len(labels) < len(matrix):
+    # **정사각이어야 합니다.** evaluate는 `labels`와 같은 크기로 씁니다.
+    # 이름이 모자라면 없는 자리를 index로 채우게 되어 `'1'` 같은 그럴듯한 이름이
+    # 나오고, 남으면 어느 칸이 어느 class인지 어긋납니다.
+    if len(matrix) != len(labels):
         return None
     ids = block.get("category_ids")
     id_list = list(ids) if _is_list(ids) and len(ids) >= len(matrix) else []
@@ -194,9 +198,9 @@ def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int] 
 
     pairs: list[dict[str, Any]] = []
     for truth, row in enumerate(matrix):
-        # 행이 이름보다 길면 읽지 못한 것입니다. 예전에는 없는 index를 그대로
-        # 조회해 `IndexError`가 상세 응답 밖으로 나갔습니다.
-        if not _is_list(row) or len(row) > len(labels):
+        # 행 길이도 같아야 합니다. 길면 없는 index를 조회해 `IndexError`가 상세
+        # 응답 밖으로 나가고, 짧으면 없는 칸이 조용히 0건으로 읽힙니다.
+        if not _is_list(row) or len(row) != len(labels):
             return None
         for predicted, count in enumerate(row):
             # 칸은 0 이상의 정수뿐입니다. `bool`은 `int`를 물려받으므로 따로

@@ -69,10 +69,17 @@ function SweepTable({
   rows,
   best,
 }: {
-  /** `undefined`는 재지 않았다는 뜻, 빈 배열은 재서 아무 지점도 없었다는 뜻입니다. */
-  rows: SweepPoint[] | undefined;
+  /** `null`은 읽지 못함, `undefined`는 안 쟀음, 빈 배열은 재서 지점이 없었음입니다. */
+  rows: SweepPoint[] | null | undefined;
   best: SweepPoint | null | undefined;
 }) {
+  if (rows === null) {
+    return (
+      <div style={{ ...type.note, color: color.textMuted }}>
+        탐색 기록을 읽지 못했습니다. 평가 결과 파일이 이 화면이 아는 모양이 아닙니다.
+      </div>
+    );
+  }
   if (rows === undefined) {
     return (
       <div style={{ ...type.note, color: color.textMuted }}>
@@ -223,7 +230,16 @@ function ConfusionList({
 }
 
 function CauseTable({ causes }: { causes: FalsePositiveCauses | null | undefined }) {
-  if (!causes) {
+  // `null`은 기록이 있는데 읽지 못한 것, `undefined`는 재지 않은 것입니다.
+  // 합쳐서 "기능 이전"이라고 적으면, 깨진 파일을 옛 평가로 잘못 설명합니다.
+  if (causes === null) {
+    return (
+      <div style={{ ...type.note, color: color.textMuted }}>
+        원인 분류를 읽지 못했습니다. 평가 결과 파일이 이 화면이 아는 모양이 아닙니다.
+      </div>
+    );
+  }
+  if (causes === undefined) {
     return (
       <div style={{ ...type.note, color: color.textMuted }}>
         이 실행에는 원인 분류가 없습니다. 이 기능 이전에 돌린 평가입니다.
