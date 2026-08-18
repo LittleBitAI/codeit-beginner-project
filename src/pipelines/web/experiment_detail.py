@@ -70,6 +70,18 @@ def _number(value: Any) -> int | float | None:
     return value if math.isfinite(value) else None
 
 
+def _in_unit_range(value: Any) -> bool:
+    """0과 1 사이인지 봅니다.
+
+    threshold도 precision·recall·F1도 evaluate에서는 전부 이 범위입니다
+    (`SWEEP_THRESHOLDS`는 0.05~0.95, 나머지는 분자/분모). 범위를 안 보면 화면이
+    `기준 1.50`, `-50%`, `200%`를 **정상 측정값처럼** 그립니다.
+    """
+
+    number = _number(value)
+    return number is not None and 0.0 <= number <= 1.0
+
+
 def _read_document(uri: str, storage_config: Mapping[str, Any]) -> Any | None:
     """artifact 문서 하나를 읽습니다. 못 읽으면 None입니다.
 
@@ -134,10 +146,11 @@ def _sweep_rows(sweep: Any) -> list[dict[str, Any]] | None:
         return None
     rows: list[dict[str, Any]] = []
     for key, counts in sweep.items():
-        threshold = _number(float(key)) if _looks_numeric(key) else None
-        if threshold is None or not isinstance(counts, Mapping):
+        if not _looks_numeric(key) or not _in_unit_range(float(key)):
             return None
-        row = {"threshold": threshold}
+        if not isinstance(counts, Mapping):
+            return None
+        row = {"threshold": _number(float(key))}
         for name in ("precision", "recall", "f1"):
             # key가 **없는** 것도 깨진 것입니다. evaluate는 셋을 언제나 씁니다.
             # `counts.get()`으로 꺼내면 없는 key와 일부러 쓴 `None`이 같아집니다.
@@ -145,9 +158,8 @@ def _sweep_rows(sweep: Any) -> list[dict[str, Any]] | None:
                 return None
             value = counts[name]
             # `None`은 evaluate가 일부러 쓴 값입니다 — 분모가 0이라 못 잰 것입니다.
-            # 그 밖의 숫자 아닌 값은 **깨진 것**이라, `_number()`에 맡기면 둘이
-            # 똑같이 `-`로 그려집니다.
-            if value is not None and _number(value) is None:
+            # 그 밖의 값은 **깨진 것**이라, 그냥 두면 둘이 똑같이 `-`로 그려집니다.
+            if value is not None and not _in_unit_range(value):
                 return None
             row[name] = _number(value)
         rows.append(row)
@@ -280,13 +292,24 @@ def _error_causes(value: Any) -> dict[str, int] | None:
 
 
 def _best_f1(value: Any) -> dict[str, Any] | None:
+    """F1이 가장 높았던 지점입니다. 읽지 못하거나 없으면 `None`입니다.
+
+    여기서 `None`은 화면에서 "최고점 표시 없음"이 됩니다. 표시가 없는 것은
+    **아무 말도 하지 않는 것**이라, 다른 블록과 달리 세 상태를 따로 두지
+    않았습니다. 대신 범위를 벗어난 값은 반드시 막습니다 — `F1 최고 200%`는
+    표시가 없는 것과 달리 **틀린 말**입니다.
+    """
+
     if not isinstance(value, Mapping):
         return None
-    threshold = _number(value.get("threshold"))
-    if threshold is None:
+    if not _in_unit_range(value.get("threshold")):
         return None
+    for name in ("precision", "recall", "f1"):
+        number = value.get(name)
+        if number is not None and not _in_unit_range(number):
+            return None
     return {
-        "threshold": threshold,
+        "threshold": _number(value.get("threshold")),
         "precision": _number(value.get("precision")),
         "recall": _number(value.get("recall")),
         "f1": _number(value.get("f1")),
@@ -327,7 +350,7 @@ def evaluation_block(
         # 이 계약 이전 평가에는 블록 자체가 없습니다. 빈 표를 지어내지 않습니다.
         per_class = None
 
-    best = readable.get("best_f1")
+    best = _readable_block(analysis_values, "best_f1")
     # 블록 **자체**가 깨진 경우입니다. 없는 것과 같게 `{}`로 내면 화면이 "이 기능
     # 이전 평가"라고 잘못 설명합니다. 어느 IoU가 있었는지도 알 수 없으므로
     # 블록째 `None`으로 답합니다.
@@ -361,10 +384,9 @@ def evaluation_block(
             if sweep is None
             else {label: _sweep_rows(rows) for label, rows in sweep.items()}
         ),
-        "best_f1": {
-            label: _best_f1(value)
-            for label, value in (best.items() if isinstance(best, Mapping) else [])
-        },
+        "best_f1": (
+            None if best is None else {label: _best_f1(value) for label, value in best.items()}
+        ),
         # 행렬이 아니라 **헷갈린 쌍**입니다. 자른 개수를 함께 말하지 않으면 잘린
         # 목록이 전부로 읽힙니다. 읽지 못한 IoU는 개수가 `null`입니다 — 목록에서
         # 빼 버리면 "이 기능 이전 평가"와, 빈 목록으로 두면 "0건"과 뒤섞입니다.

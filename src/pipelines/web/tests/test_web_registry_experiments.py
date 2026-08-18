@@ -1089,6 +1089,56 @@ def test_detail_keeps_a_measurement_evaluate_could_not_take(client, monkeypatch)
     ]
 
 
+@pytest.mark.parametrize(
+    ("sweep", "why"),
+    [
+        ({"1.50": {"precision": 0.9, "recall": 0.9, "f1": 0.9}}, "기준이 1을 넘음"),
+        ({"0.10": {"precision": 2.0, "recall": 0.9, "f1": 0.9}}, "precision이 200%"),
+        ({"0.10": {"precision": -0.5, "recall": 0.9, "f1": 0.9}}, "recall이 음수"),
+    ],
+)
+def test_detail_refuses_a_measurement_outside_its_range(client, monkeypatch, sweep, why):
+    """유한하기만 하면 통과시키면 화면이 `기준 1.50`과 `200%`를 그립니다."""
+
+    document = metrics_document()
+    document["analysis"]["score_sweep"]["0.50"] = sweep
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["score_sweep"]["0.50"] is None, why
+
+
+def test_detail_does_not_mark_a_peak_it_cannot_believe(client, monkeypatch):
+    """`F1 최고 200%`는 표시가 없는 것과 달리 **틀린 말**입니다."""
+
+    document = metrics_document()
+    document["analysis"]["best_f1"]["0.50"]["f1"] = 2.0
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["best_f1"]["0.50"] is None
+
+
+def test_detail_says_it_could_not_read_the_best_f1_block(client, monkeypatch):
+    """`best_f1`만 세 상태 처리를 건너뛰고 있었습니다."""
+
+    document = metrics_document()
+    document["analysis"]["best_f1"] = "망가짐"
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["best_f1"] is None
+
+
 def test_detail_refuses_a_negative_error_count(client, monkeypatch):
     """음수 건수를 그대로 내면 화면이 100%를 넘는 비율을 그립니다."""
 

@@ -437,7 +437,8 @@ export interface ExperimentEvaluation {
    * 읽지 못한 것, 빈 배열이면 재서 지점이 하나도 없던 것입니다.
    */
   score_sweep?: Record<string, SweepPoint[] | null> | null;
-  best_f1?: Record<string, SweepPoint | null>;
+  /** `null`은 최고점을 못 찍는다는 뜻입니다 — 표시가 없을 뿐 틀린 말은 안 합니다. */
+  best_f1?: Record<string, SweepPoint | null> | null;
   /** 헷갈린 쌍입니다. 행렬 자체는 오지 않습니다 — 118종이면 119x119입니다. */
   confusions?: Record<string, ConfusionPair[]> | null;
   /**

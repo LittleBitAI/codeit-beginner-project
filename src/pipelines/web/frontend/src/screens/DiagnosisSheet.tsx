@@ -312,7 +312,7 @@ function Body({ evaluation, iou }: { evaluation: ExperimentEvaluation; iou: stri
       >
         <SweepTable
           rows={pick(evaluation.score_sweep, iou)}
-          best={evaluation.best_f1?.[iou]}
+          best={pick(evaluation.best_f1, iou)}
         />
       </Section>
 
