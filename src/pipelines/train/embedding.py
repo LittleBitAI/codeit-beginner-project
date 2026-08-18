@@ -105,19 +105,24 @@ def _guard_storage_root(storage: Any) -> None:
         ) from error
 
 
-def _mirror_running(storage: Any, prefix: str, source: Path) -> None:
-    """도는 동안의 마지막 checkpoint를 저장소에도 둡니다.
+def _mirror_running(storage: Any, prefix: str, source: Path) -> bool:
+    """도는 동안의 마지막 checkpoint를 저장소에도 둡니다. 성공 여부를 돌려줍니다.
 
     이름만 잡고 사본을 안 올리면, runtime이 끊겼을 때 이름은 막혀 있는데 학습한
     것은 사라집니다. **하나짜리 자족적인 파일**이라 반쯤 갱신된 짝이 생기지
-    않습니다. 올리기가 실패해도 학습은 계속합니다 — 이 사본은 보험이지 결과가
-    아니고, 결과는 마지막에 attempt 자리로 갑니다.
+    않습니다.
+
+    올리기가 실패해도 학습은 멈추지 않습니다 — 이 사본은 보험이지 결과가 아니고,
+    결과는 마지막에 attempt 자리로 갑니다. 다만 **조용히 넘어가지는 않습니다.**
+    한 번도 못 올린 실행은 끊기면 원격에 아무것도 없으므로, 부르는 쪽이 그 사실을
+    결과에 적습니다.
     """
 
     try:
         storage.upload_file(source, f"{prefix}/{RUNNING_CHECKPOINT}", overwrite=True)
     except (StorageError, OSError):
-        return
+        return False
+    return True
 
 
 def _guard_completed(storage: Any, prefix: str, run_id: str) -> None:
@@ -600,6 +605,9 @@ def _train_embedding(
         history: list[dict[str, Any]] = []
         best_accuracy = -1.0
         best_epoch = 0
+        # 원격 사본을 마지막으로 갱신한 epoch입니다. 0이면 한 번도 못 올렸다는
+        # 뜻이고, 그 실행이 끊기면 원격에는 이름만 남습니다.
+        mirrored_epoch = 0
         started = time.time()
         # **작업 directory는 만들어 잡습니다.** 이미 있으면 중단된 앞선 실행이
         # 거기 있고, 그 안의 checkpoint가 그 학습의 **유일한 사본**입니다. 그대로
@@ -616,7 +624,14 @@ def _train_embedding(
             ) from error
         # 설정과 입력을 다 확인하고 이 자리를 잡은 **뒤에** 이름을 잡습니다. 먼저
         # 잡으면 입력이 틀려 멈춘 실행이 그 이름을 영구히 차지합니다.
-        _claim_run(storage, prefix, setting)
+        try:
+            _claim_run(storage, prefix, setting)
+        except EmbeddingTrainingError:
+            # 원격 이름을 다른 실행이 먼저 잡았습니다. 방금 만든 이 빈 자리는
+            # **이 실행이 만든 것**이라 치웁니다. 남겨 두면 다음 시도가 "중단된
+            # 학습이 있다"에 막히는데, 그 안에는 아무것도 없습니다.
+            working.rmdir()
+            raise
 
         best_path = working / "best_checkpoint.pt"
         last_path = working / "last_checkpoint.pt"
@@ -651,7 +666,8 @@ def _train_embedding(
                 # **저장소에도 그때그때 올려 둡니다.** 이름만 잡아 두고 사본을 안
                 # 올리면, Colab runtime이 끊겼을 때 이름은 막혀 있는데 학습한 것은
                 # 사라집니다. detector의 `running/`과 같은 자리입니다.
-                _mirror_running(storage, prefix, last_path)
+                if _mirror_running(storage, prefix, last_path):
+                    mirrored_epoch = epoch
             # **best는 주기와 무관하게 매 epoch 봅니다.** 주기 안에 두면 주기 사이에
             # 나온 가장 좋은 epoch이 best가 되지 못하고, 더 나쁜 model이 조용히
             # best_checkpoint.pt라는 이름으로 나갑니다. 쓰는 쪽은 그 이름을 믿습니다.
@@ -673,6 +689,9 @@ def _train_embedding(
             "best_epoch": best_epoch,
             "best_train_accuracy": round(best_accuracy, 6),
             "elapsed_seconds": round(time.time() - started, 1),
+            # 원격 사본을 마지막으로 갱신한 epoch입니다. 0이면 한 번도 못 올렸고,
+            # 그 실행이 끊겼다면 원격에는 이름만 남았다는 뜻입니다.
+            "running_mirror_epoch": mirrored_epoch,
             "epochs": history,
         }
 
@@ -718,6 +737,9 @@ def _train_embedding(
             "best_train_accuracy": round(best_accuracy, 6),
             "seed": setting.seed,
             "device": setting.device,
+            # 0이면 도는 동안 원격 사본을 한 번도 못 올렸다는 뜻입니다. 결과 자체는
+            # 온전하지만, 다음에 끊기면 원격에 아무것도 남지 않는다는 신호입니다.
+            "running_mirror_epoch": mirrored_epoch,
         },
         "message": (
             f"crop {len(records)}개, class {len(categories)}종으로 "

@@ -283,6 +283,30 @@ def test_a_name_already_being_used_is_refused_before_training(workspace: Path):
 
     assert result["status"] == "error"
     assert "이름을 잡지 못했습니다" in result["message"]
+    # 진 쪽이 만든 빈 자리는 치웁니다. 남기면 다음 시도가 "중단된 학습"에 막히는데
+    # 그 안에는 아무것도 없습니다.
+    assert not (workspace / "working" / ".embed-test.partial").exists()
+
+
+def test_the_result_says_whether_a_remote_copy_was_kept(workspace: Path):
+    """원격 사본을 한 번도 못 올렸으면 조용히 넘어가지 않고 결과에 적습니다.
+
+    올리기 실패는 학습을 멈추지 않습니다. 다만 그 실행이 끊기면 원격에는 이름만
+    남으므로, 사람이 그것을 알 수 있어야 합니다.
+    """
+
+    original = embedding_module._mirror_running
+    embedding_module._mirror_running = lambda *args, **kwargs: False
+    try:
+        failed = run(embedding_config(workspace, run_id="no-mirror"))
+    finally:
+        embedding_module._mirror_running = original
+    kept = run(embedding_config(workspace, run_id="with-mirror"))
+
+    assert failed["status"] == "ok", failed["message"]
+    assert failed["summary"]["running_mirror_epoch"] == 0
+    assert kept["status"] == "ok", kept["message"]
+    assert kept["summary"]["running_mirror_epoch"] >= 1
 
 
 @pytest.mark.parametrize("broken", ["class_map", "partial"])
