@@ -279,18 +279,25 @@ def test_a_name_already_being_used_is_refused_before_training(workspace: Path):
     claim.parent.mkdir(parents=True)
     claim.write_bytes("앞선 실행이 잡은 자리".encode("utf-8"))
 
-    # 진 쪽이 한 epoch이라도 돌면 이 잡기가 첫 batch 뒤로 밀린 것입니다.
-    trained = []
-    original = embedding_module._mirror_running
-    embedding_module._mirror_running = lambda *args, **kwargs: trained.append(True) or True
+    # 진 쪽이 **batch를 하나라도 꺼내면** 잡기가 첫 batch 뒤로 밀린 것입니다.
+    # epoch 단위로 세면 첫 epoch 중간으로 밀린 회귀를 놓칩니다.
+    fetched: list[bool] = []
+    original = embedding_module.DataLoader
+
+    class Watched(original):
+        def __iter__(self):
+            fetched.append(True)
+            return super().__iter__()
+
+    embedding_module.DataLoader = Watched
     try:
         result = run(embedding_config(workspace))
     finally:
-        embedding_module._mirror_running = original
+        embedding_module.DataLoader = original
 
     assert result["status"] == "error"
     assert "이름을 잡지 못했습니다" in result["message"]
-    assert trained == [], "한 epoch이라도 돌았다면 첫 batch 전에 막지 못한 것입니다"
+    assert fetched == [], "batch를 꺼냈다면 첫 batch 전에 막지 못한 것입니다"
     # 진 쪽이 만든 빈 자리는 치웁니다. 남기면 다음 시도가 "중단된 학습"에 막히는데
     # 그 안에는 아무것도 없습니다.
     assert not (workspace / "working" / ".embed-test.partial").exists()
