@@ -945,6 +945,9 @@ def test_detail_says_how_many_confused_pairs_were_left_out(client, monkeypatch):
             {"matrix": [[0, 0, 0], [0, 0, 0]], "labels": ["background", "a", "b"]},
             "행 수가 모자람",
         ),
+        # 0x0입니다. evaluate는 적어도 background 한 칸을 씁니다. 정사각 검사만
+        # 보면 통과해 "헷갈린 쌍이 하나도 없습니다"로 그려집니다.
+        ({"matrix": [], "labels": [], "category_ids": []}, "빈 행렬"),
     ],
 )
 def test_detail_makes_nothing_up_from_a_broken_matrix(client, monkeypatch, broken, why):
@@ -994,6 +997,87 @@ def test_detail_says_it_could_not_read_the_other_blocks_either(
     evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
 
     assert evaluation[key]["0.50"] is None, why
+
+
+@pytest.mark.parametrize(
+    "key", ["score_sweep", "confusion_matrix", "error_breakdown"]
+)
+def test_detail_says_it_could_not_read_a_whole_block(client, monkeypatch, key):
+    """블록 **자체**가 깨진 경우입니다.
+
+    없는 것과 같게 비워서 내면 화면이 "이 기능 이전에 돌린 평가"라고 잘못
+    설명합니다. 어느 IoU가 있었는지도 알 수 없으므로 블록째 읽지 못했다고 답합니다.
+    """
+
+    document = metrics_document()
+    document["analysis"][key] = "망가짐"
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    field = "confusions" if key == "confusion_matrix" else key
+    assert evaluation[field] is None
+    if key == "confusion_matrix":
+        assert evaluation["confusion_counts"] is None
+
+
+@pytest.mark.parametrize(
+    ("broken", "why"),
+    [
+        # evaluate는 못 잰 값을 `None`으로 씁니다(분모가 0). 그 밖의 값은 깨진
+        # 것인데, 둘을 합치면 화면에서 똑같이 `-`로 그려집니다.
+        ({"0.10": {"precision": "높음", "recall": 0.9, "f1": 0.9}}, "값이 문자열"),
+    ],
+)
+def test_detail_does_not_pass_a_broken_metric_off_as_unmeasured(
+    client, monkeypatch, broken, why
+):
+    document = metrics_document()
+    document["analysis"]["score_sweep"]["0.50"] = broken
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["score_sweep"]["0.50"] is None, why
+
+
+def test_detail_keeps_a_measurement_evaluate_could_not_take(client, monkeypatch):
+    """분모가 0이라 evaluate가 `None`으로 쓴 값은 그대로 둡니다.
+
+    이것까지 "깨졌다"고 하면 정상 평가가 통째로 읽히지 않습니다.
+    """
+
+    document = metrics_document()
+    document["analysis"]["score_sweep"]["0.50"] = {
+        "0.90": {"precision": None, "recall": None, "f1": None}
+    }
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["score_sweep"]["0.50"] == [
+        {"threshold": 0.9, "precision": None, "recall": None, "f1": None}
+    ]
+
+
+def test_detail_refuses_a_negative_error_count(client, monkeypatch):
+    """음수 건수를 그대로 내면 화면이 100%를 넘는 비율을 그립니다."""
+
+    document = metrics_document()
+    document["analysis"]["error_breakdown"]["0.50"]["duplicate"] = -3
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["error_breakdown"]["0.50"] is None
 
 
 def test_detail_carries_the_false_positive_causes(client, monkeypatch):

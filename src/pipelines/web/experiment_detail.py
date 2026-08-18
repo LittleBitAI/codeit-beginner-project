@@ -133,14 +133,16 @@ def _sweep_rows(sweep: Any) -> list[dict[str, Any]] | None:
         threshold = _number(float(key)) if _looks_numeric(key) else None
         if threshold is None or not isinstance(counts, Mapping):
             return None
-        rows.append(
-            {
-                "threshold": threshold,
-                "precision": _number(counts.get("precision")),
-                "recall": _number(counts.get("recall")),
-                "f1": _number(counts.get("f1")),
-            }
-        )
+        row = {"threshold": threshold}
+        for name in ("precision", "recall", "f1"):
+            value = counts.get(name)
+            # `None`은 evaluate가 일부러 쓴 값입니다 — 분모가 0이라 못 잰 것입니다.
+            # 그 밖의 숫자 아닌 값은 **깨진 것**이라, `_number()`에 맡기면 둘이
+            # 똑같이 `-`로 그려집니다.
+            if value is not None and _number(value) is None:
+                return None
+            row[name] = _number(value)
+        rows.append(row)
     rows.sort(key=lambda row: row["threshold"])
     return rows
 
@@ -151,6 +153,18 @@ def _looks_numeric(value: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _readable_block(analysis: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
+    """IoU별 블록을 꺼냅니다. **없으면 빈 것, 깨졌으면 `None`입니다.**
+
+    둘을 합치면 깨진 파일이 "이 기능 이전에 돌린 평가"로 설명됩니다.
+    """
+
+    value = analysis.get(key)
+    if value is None:
+        return {}
+    return value if isinstance(value, Mapping) else None
 
 
 def _is_list(value: Any) -> bool:
@@ -180,7 +194,9 @@ def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int] 
         return None
     matrix = block.get("matrix")
     labels = block.get("labels")
-    if not _is_list(matrix) or not _is_list(labels):
+    # 빈 행렬은 evaluate가 내지 않습니다 — 적어도 background 한 칸은 있습니다.
+    # 그냥 두면 "헷갈린 쌍이 하나도 없습니다"로 그려집니다.
+    if not _is_list(matrix) or not _is_list(labels) or not labels:
         return None
     # **정사각이어야 합니다.** evaluate는 `labels`와 같은 크기로 씁니다.
     # 이름이 모자라면 없는 자리를 index로 채우게 되어 `'1'` 같은 그럴듯한 이름이
@@ -226,14 +242,18 @@ def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int] 
 
 
 def _error_causes(value: Any) -> dict[str, int] | None:
-    """false positive 원인 4개를 정수로 냅니다. 하나라도 없으면 `None`입니다."""
+    """false positive 원인 4개를 정수로 냅니다. 읽지 못하면 `None`입니다.
+
+    건수는 **0 이상**입니다. 음수를 그대로 내보내면 화면이 음수 건수와 100%를
+    넘는 비율을 그립니다 — 깨진 파일이 이상한 숫자로만 드러납니다.
+    """
 
     if not isinstance(value, Mapping):
         return None
     counts: dict[str, int] = {}
     for cause in _ERROR_CAUSES:
         number = value.get(cause)
-        if isinstance(number, bool) or not isinstance(number, int):
+        if isinstance(number, bool) or not isinstance(number, int) or number < 0:
             return None
         counts[cause] = number
     return counts
@@ -280,16 +300,27 @@ def evaluation_block(
         # 이 계약 이전 평가에는 블록 자체가 없습니다. 빈 표를 지어내지 않습니다.
         per_class = None
 
-    sweep = analysis_values.get("score_sweep")
     best = analysis_values.get("best_f1")
-    confusion = analysis_values.get("confusion_matrix")
-    confusion_items = confusion.items() if isinstance(confusion, Mapping) else []
-    picked = {
-        label: _confused_pairs(block, CONFUSION_TOP_N) for label, block in confusion_items
-    }
-    breakdown = analysis_values.get("error_breakdown")
-    breakdown_items = breakdown.items() if isinstance(breakdown, Mapping) else []
-    causes = {label: _error_causes(value) for label, value in breakdown_items}
+    # 블록 **자체**가 깨진 경우입니다. 없는 것과 같게 `{}`로 내면 화면이 "이 기능
+    # 이전 평가"라고 잘못 설명합니다. 어느 IoU가 있었는지도 알 수 없으므로
+    # 블록째 `None`으로 답합니다.
+    sweep = _readable_block(analysis_values, "score_sweep")
+    confusion = _readable_block(analysis_values, "confusion_matrix")
+    breakdown = _readable_block(analysis_values, "error_breakdown")
+
+    picked = (
+        None
+        if confusion is None
+        else {
+            label: _confused_pairs(block, CONFUSION_TOP_N)
+            for label, block in confusion.items()
+        }
+    )
+    causes = (
+        None
+        if breakdown is None
+        else {label: _error_causes(value) for label, value in breakdown.items()}
+    )
     return {
         "available": True,
         "reason": None,
@@ -298,10 +329,11 @@ def evaluation_block(
         "score_threshold": _number(analysis_values.get("score_threshold")),
         "max_detections_per_image": _number(document.get("max_detections_per_image")),
         # IoU label("0.50"/"0.75")별로 나뉩니다. 화면이 어느 쪽을 볼지 고릅니다.
-        "score_sweep": {
-            label: _sweep_rows(rows)
-            for label, rows in (sweep.items() if isinstance(sweep, Mapping) else [])
-        },
+        "score_sweep": (
+            None
+            if sweep is None
+            else {label: _sweep_rows(rows) for label, rows in sweep.items()}
+        ),
         "best_f1": {
             label: _best_f1(value)
             for label, value in (best.items() if isinstance(best, Mapping) else [])
@@ -309,18 +341,22 @@ def evaluation_block(
         # 행렬이 아니라 **헷갈린 쌍**입니다. 자른 개수를 함께 말하지 않으면 잘린
         # 목록이 전부로 읽힙니다. 읽지 못한 IoU는 개수가 `null`입니다 — 목록에서
         # 빼 버리면 "이 기능 이전 평가"와, 빈 목록으로 두면 "0건"과 뒤섞입니다.
-        "confusions": {
-            label: value[0] for label, value in picked.items() if value is not None
-        },
-        "confusion_counts": {
-            label: (
-                None
-                if value is None
-                else {"pairs": value[1], "shown": len(value[0])}
-            )
-            for label, value in picked.items()
-        },
-        "error_breakdown": {label: value for label, value in causes.items()},
+        "confusions": (
+            None
+            if picked is None
+            else {label: value[0] for label, value in picked.items() if value is not None}
+        ),
+        "confusion_counts": (
+            None
+            if picked is None
+            else {
+                label: (
+                    None if value is None else {"pairs": value[1], "shown": len(value[0])}
+                )
+                for label, value in picked.items()
+            }
+        ),
+        "error_breakdown": causes,
         "per_class_summary": dict(per_class) if per_class is not None else None,
     }
 

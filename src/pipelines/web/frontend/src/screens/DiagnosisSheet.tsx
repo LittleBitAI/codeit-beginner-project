@@ -41,6 +41,20 @@ const CAUSE_NOTES: { key: keyof FalsePositiveCauses; label: string; note: string
   { key: 'background', label: '없는 것을 찾음', note: '알약이 없는 자리에 상자를 그렸습니다' },
 ];
 
+/**
+ * IoU 하나의 값을 꺼냅니다. **블록째 읽지 못한 경우를 잃지 않습니다.**
+ *
+ * 블록이 `null`이면 어느 IoU가 있었는지도 모르므로 전부 "읽지 못함"입니다.
+ * 그냥 `block?.[iou]`로 꺼내면 `undefined`가 되어 "안 쟀음"으로 읽힙니다.
+ */
+function pick<T>(
+  block: Record<string, T> | null | undefined,
+  iou: string,
+): T | null | undefined {
+  if (block === null) return null;
+  return block?.[iou];
+}
+
 const percent = (value: number | null | undefined) =>
   value === null || value === undefined ? '-' : `${(value * 100).toFixed(1)}%`;
 
@@ -296,7 +310,10 @@ function Body({ evaluation, iou }: { evaluation: ExperimentEvaluation; iou: stri
         title="자르는 기준 탐색"
         note="점수가 이 기준보다 낮은 상자를 버렸다면 어떻게 됐을지 다시 셉니다. 평가를 다시 돌린 것이 아니라 이미 잰 매칭을 잘라 본 것이라, 기준을 낮춰도 이미 잘려 나간 예측은 되살아나지 않습니다."
       >
-        <SweepTable rows={evaluation.score_sweep?.[iou]} best={evaluation.best_f1?.[iou]} />
+        <SweepTable
+          rows={pick(evaluation.score_sweep, iou)}
+          best={evaluation.best_f1?.[iou]}
+        />
       </Section>
 
       <Section
@@ -304,8 +321,8 @@ function Body({ evaluation, iou }: { evaluation: ExperimentEvaluation; iou: stri
         note="정답이 무엇인데 무엇으로 봤는지입니다. class를 무시하고 매칭한 결과라 같은 자리를 다른 이름으로 읽은 것이 보입니다. 이름이 닮은 알약끼리 몰려 있으면 crop 재순위가 들 자리입니다."
       >
         <ConfusionList
-          pairs={evaluation.confusions?.[iou]}
-          counts={evaluation.confusion_counts?.[iou]}
+          pairs={pick(evaluation.confusions, iou) ?? undefined}
+          counts={pick(evaluation.confusion_counts, iou)}
         />
       </Section>
 
@@ -313,7 +330,7 @@ function Body({ evaluation, iou }: { evaluation: ExperimentEvaluation; iou: stri
         title="틀린 상자의 원인"
         note="맞지 않은 상자를 원인별로 나눈 것입니다. 이름을 틀린 것이 많으면 분류를, 위치가 어긋난 것이 많으면 상자를, 없는 것을 찾은 것이 많으면 자르는 기준을 봐야 합니다."
       >
-        <CauseTable causes={evaluation.error_breakdown?.[iou]} />
+        <CauseTable causes={pick(evaluation.error_breakdown, iou)} />
       </Section>
     </>
   );

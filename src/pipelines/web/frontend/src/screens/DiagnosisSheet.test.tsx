@@ -154,6 +154,26 @@ describe('오검출 진단 시트', () => {
     expect(screen.queryByText(/이 기능 이전에 돌린 평가입니다/)).toBeNull();
   });
 
+  it('블록째 읽지 못한 것을 옛 평가라고 설명하지 않는다', async () => {
+    // 블록 자체가 깨지면 어느 IoU가 있었는지도 모릅니다. `null`을 그냥
+    // `?.[iou]`로 꺼내면 `undefined`가 되어 "안 쟀음"으로 읽힙니다.
+    vi.spyOn(api, 'experimentDetail').mockResolvedValue(
+      detail({
+        score_sweep: null,
+        confusions: null,
+        confusion_counts: null,
+        error_breakdown: null,
+      }),
+    );
+
+    render(<DiagnosisSheet runId="dino-e12" onClose={() => undefined} />);
+
+    expect(await screen.findByText(/탐색 기록을 읽지 못했습니다/)).toBeTruthy();
+    expect(screen.getByText(/혼동 기록을 읽지 못했습니다/)).toBeTruthy();
+    expect(screen.getByText(/원인 분류를 읽지 못했습니다/)).toBeTruthy();
+    expect(screen.queryByText(/이 기능 이전에 돌린 평가입니다/)).toBeNull();
+  });
+
   it('평가를 못 읽은 실행에서는 빈 표를 지어내지 않는다', async () => {
     vi.spyOn(api, 'experimentDetail').mockResolvedValue({
       experiment: { run_id: 'dino-e12' },
