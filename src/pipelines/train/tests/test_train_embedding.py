@@ -303,11 +303,13 @@ def test_a_name_already_being_used_is_refused_before_training(workspace: Path):
     assert not (workspace / "working" / ".embed-test.partial").exists()
 
 
-def test_the_result_says_whether_a_remote_copy_was_kept(workspace: Path):
-    """원격 사본을 한 번도 못 올렸으면 조용히 넘어가지 않고 결과에 적습니다.
+def test_the_result_says_how_current_the_remote_copy_is(workspace: Path):
+    """도는 동안의 갱신이 실패하면 조용히 넘어가지 않고 결과에 적습니다.
 
-    올리기 실패는 학습을 멈추지 않습니다. 다만 그 실행이 끊기면 원격에는 이름만
-    남으므로, 사람이 그것을 알 수 있어야 합니다.
+    사본이 사라지지는 않습니다 — 이름을 잡을 때 올린 epoch 0 사본이 있습니다.
+    다만 갱신이 한 번도 성공하지 못하면 그 사본은 **학습 전 model**에 머무르고,
+    거기서 끊기면 그것이 원격에 남는 전부입니다. 사람이 그 사실을 알 수 있어야
+    합니다.
     """
 
     original = embedding_module._mirror_running
@@ -408,15 +410,21 @@ def test_a_broken_publish_leaves_no_completion_marker_and_keeps_what_it_wrote(
     assert (published / "running" / "last_checkpoint.pt").is_file()
 
 
-def test_an_interrupted_run_leaves_a_copy_in_the_store(workspace: Path):
-    """이름만 잡고 사본을 안 올리면, 끊겼을 때 이름은 막히고 학습은 사라집니다."""
+def test_the_remote_copy_moves_forward_with_training(workspace: Path):
+    """원격 사본은 이름을 잡을 때 epoch 0으로 생기고, 학습을 따라 앞당겨집니다.
+
+    끊긴 실행에서 사람이 여는 것이 이 파일 하나이므로, 거기 적힌 epoch이 곧
+    "어디까지 갔는가"입니다.
+    """
 
     result = run(embedding_config(workspace, epochs=2, checkpoint_every=1))
 
     assert result["status"] == "ok", result["message"]
     mirrored = workspace / "embeddings" / "embed-test" / "running" / "last_checkpoint.pt"
     assert mirrored.is_file()
-    assert torch.load(mirrored, map_location="cpu")["task"] == "embedding"
+    payload = torch.load(mirrored, map_location="cpu")
+    assert payload["task"] == "embedding"
+    assert payload["epoch"] == 2, "학습을 따라 앞당겨지지 않았습니다"
 
 
 def test_a_bank_without_a_crop_size_is_refused(tmp_path: Path, monkeypatch):
