@@ -263,8 +263,66 @@ def test_published_files_are_never_overwritten(workspace: Path):
         embedding_module.build_model = original
 
     assert again["status"] == "error"
-    assert "이미 결과가 있습니다" in again["message"]
+    assert "이미 끝난 실행" in again["message"]
     assert started == [], "model을 만들었다면 학습 준비까지 간 것입니다"
+
+
+def test_a_name_already_being_used_is_refused_before_training(workspace: Path):
+    """두 runtime이 같은 이름으로 동시에 시작하면 하나만 이겨야 합니다.
+
+    이름 잡기는 조건부 쓰기입니다. 늦게 보면 둘 다 밤새 학습한 뒤 한쪽만 업로드에서
+    떨어집니다.
+    """
+
+    # 앞선 실행이 이름을 잡아 둔 상태를 만듭니다(끝나지는 않았습니다).
+    claim = workspace / "embeddings" / "embed-test" / "running.json"
+    claim.parent.mkdir(parents=True)
+    claim.write_text(json.dumps({"run_id": "embed-test"}), encoding="utf-8")
+
+    result = run(embedding_config(workspace))
+
+    assert result["status"] == "error"
+    assert "이름을 잡지 못했습니다" in result["message"]
+
+
+def test_a_broken_upload_does_not_take_the_name_of_the_next_try(workspace: Path):
+    """끊긴 게시가 고정된 이름을 차지하면 그 자리를 사람이 지워야 합니다.
+
+    attempt 자리는 실행마다 새 이름이라, 끊긴 것은 버려진 폴더로 남고 다음 실행은
+    자기 자리에 씁니다. 끝났다는 표식은 셋이 다 올라간 뒤에만 생깁니다.
+    """
+
+    result = run(embedding_config(workspace))
+
+    assert result["status"] == "ok", result["message"]
+    published = workspace / "embeddings" / "embed-test"
+    assert (published / "completed.json").is_file()
+    attempts = list((published / "attempts").iterdir())
+    assert len(attempts) == 1
+    assert result["artifacts"]["best_checkpoint_uri"].startswith(
+        f"embeddings/embed-test/attempts/{attempts[0].name}/"
+    )
+
+
+def test_a_bank_without_a_crop_size_is_refused(tmp_path: Path, monkeypatch):
+    """은행이 자기 crop 크기를 말하지 않으면 짐작하지 않습니다.
+
+    224로 짐작하면 64px 은행으로 학습하고도 checkpoint는 224라고 말합니다.
+    """
+
+    archive = tmp_path / "crop_bank.tar"
+    with tarfile.open(archive, "w") as opened:
+        payload = crop_bytes((10, 20, 30))
+        info = tarfile.TarInfo("crops/11/0.jpg")
+        info.size = len(payload)
+        opened.addfile(info, io.BytesIO(payload))
+        listing = json.dumps({"records": [{"path": "crops/11/0.jpg", "category_id": 11}]}).encode()
+        info = tarfile.TarInfo("index.json")
+        info.size = len(listing)
+        opened.addfile(info, io.BytesIO(listing))
+
+    with pytest.raises(EmbeddingTrainingError, match="crop_size"):
+        read_crop_bank(LocalReader(), str(archive), tmp_path / "out")
 
 
 def test_a_storage_root_outside_the_repository_is_refused(workspace: Path, tmp_path: Path):
@@ -289,6 +347,11 @@ def test_a_storage_root_outside_the_repository_is_refused(workspace: Path, tmp_p
 
     assert result["status"] == "error"
     assert "저장소 밖" in result["message"]
+    # **올린 뒤에 거절하면 이미 밖에 파일이 남습니다.** 그것이 이 판단의 전부입니다.
+    assert not list(outside.rglob("*.pt")), "저장소 밖에 checkpoint가 남았습니다"
+    assert not (outside / "embeddings").exists()
+    # 절대 경로가 메시지에 실리면 OS 사용자 이름이 그대로 드러납니다.
+    assert str(outside) not in result["message"]
 
 
 def test_a_half_written_checkpoint_never_replaces_a_good_one(workspace: Path):

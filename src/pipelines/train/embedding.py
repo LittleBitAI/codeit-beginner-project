@@ -23,6 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 import torch
@@ -46,9 +47,9 @@ from .dataset import REPOSITORY_ROOT
 #: crop 은행 안에서 목록이 놓이는 자리입니다. data가 만드는 tar의 규약입니다.
 INDEX_MEMBER = "index.json"
 
-#: 은행이 crop 크기를 적어 두지 않았을 때 쓰는 값입니다. **읽을 수 있으면 은행이
-#: 적은 값이 이깁니다.** 여기 상수를 checkpoint에 적으면, 다른 크기로 자른 은행으로
-#: 학습하고도 checkpoint는 224라고 말하게 됩니다.
+#: data가 만드는 은행의 crop 한 변입니다. **여기 값을 checkpoint에 적지 않습니다** —
+#: 적으면 다른 크기로 자른 은행으로 학습하고도 224라고 말하게 됩니다. 은행이 적어 둔
+#: 값을 읽고, 없으면 거절합니다. 이 상수는 test와 문서가 가리키는 기준값입니다.
 DEFAULT_CROP_SIZE = 224
 
 #: ImageNet 정규화 값입니다. backbone이 그 통계로 학습돼 있습니다.
@@ -63,9 +64,10 @@ SHIFT_RANGE = 0.08
 LABEL_SMOOTHING = 0.1
 
 
-#: 실행 하나가 내는 세 파일입니다. 이름 순서가 곧 올리는 순서이고, 마지막에 올라가는
-#: history가 "이 실행은 끝났다"는 표식 노릇을 합니다.
-PUBLISHED_NAMES = ("best_checkpoint.pt", "last_checkpoint.pt", "training_history.json")
+#: 실행 하나가 자기 이름을 잡았다는 표식과, 끝까지 갔다는 표식입니다. detector가
+#: `running/`과 `completed.json`으로 하는 일을 같은 모양으로 둡니다.
+RUNNING_MARKER = "running.json"
+COMPLETED_MARKER = "completed.json"
 
 
 def _save_checkpoint(payload: dict[str, Any], destination: Path) -> None:
@@ -81,21 +83,55 @@ def _save_checkpoint(payload: dict[str, Any], destination: Path) -> None:
     os.replace(temporary, destination)
 
 
-def _guard_published(storage: Any, setting: "EmbeddingSettings") -> None:
-    """낼 자리가 비었는지 학습을 시작하기 **전에** 봅니다."""
+def _guard_storage_root(storage: Any) -> None:
+    """저장이 어디서 일어나는지 **쓰기 전에** 봅니다.
+
+    `output_dir`이 저장소 안이어도 `storage.local.root`가 밖이면 저장은 밖에서
+    일어납니다. 올린 **뒤에** 자리를 보고 거절하면 이미 저장소 밖에 파일이 남고,
+    그 절대 경로가 오류 메시지에 실려 사용자 이름까지 드러납니다.
+    """
+
+    root = getattr(storage, "root", None)
+    if root is None:
+        # S3처럼 local 경로가 없는 backend입니다. 볼 것이 없습니다.
+        return
+    try:
+        Path(root).resolve().relative_to(REPOSITORY_ROOT)
+    except ValueError as error:
+        raise EmbeddingTrainingError(
+            "storage.local.root가 저장소 밖입니다. 저장소 안으로 두세요."
+        ) from error
+
+
+def _claim_run(storage: Any, setting: "EmbeddingSettings") -> str:
+    """이 `run_id`를 잡고, 낼 자리의 앞머리를 돌려줍니다.
+
+    학습을 시작하기 **전에** 두 가지를 봅니다. 끝난 실행인지(`completed.json`),
+    그리고 지금 다른 실행이 같은 이름을 쓰고 있는지입니다. 잡기는 조건부 쓰기라
+    두 runtime이 동시에 시작해도 하나만 이깁니다. 늦게 보면 둘 다 밤새 학습한 뒤
+    한쪽만 업로드에서 떨어집니다.
+
+    성공해도 표식은 지우지 않습니다. 이름 하나는 한 번 씁니다. 끊긴 실행이 남긴
+    표식도 사람이 정할 일이라 여기서 치우지 않습니다.
+    """
 
     prefix = f"{setting.output_prefix}/{setting.run_id}"
     try:
-        taken = [name for name in PUBLISHED_NAMES if storage.exists(f"{prefix}/{name}")]
+        if storage.exists(f"{prefix}/{COMPLETED_MARKER}"):
+            raise EmbeddingTrainingError(
+                f"이미 끝난 실행입니다: {setting.run_id}. 다른 run_id를 쓰세요."
+            )
+        storage.write_json(
+            f"{prefix}/{RUNNING_MARKER}",
+            {"run_id": setting.run_id, "backbone": setting.backbone},
+            overwrite=False,
+        )
     except StorageError as error:
         raise EmbeddingTrainingError(
-            f"낼 자리를 확인하지 못했습니다: {prefix} ({type(error).__name__})"
+            f"'{setting.run_id}' 이름을 잡지 못했습니다. 같은 이름의 실행이 돌고 "
+            "있거나 끊긴 채 남아 있습니다. 치울지는 사람이 정합니다."
         ) from error
-    if taken:
-        raise EmbeddingTrainingError(
-            f"'{prefix}'에 이미 결과가 있습니다: {', '.join(taken)}. 끝난 실행이면 "
-            "다른 run_id를 쓰고, 도중에 끊긴 실행이면 남은 것을 지울지 사람이 정합니다."
-        )
+    return prefix
 
 
 def _published(uri: str) -> str:
@@ -344,9 +380,13 @@ def read_crop_bank(storage: Any, uri: str, destination: Path) -> dict[str, Any]:
         _inside(destination, path)
         checked.append(dict(record))
 
-    crop_size = document.get("crop_size", DEFAULT_CROP_SIZE)
+    # **없으면 거절합니다.** data가 만드는 은행은 언제나 이 값을 적습니다. 없는데
+    # 224로 짐작하면 64px 은행으로 학습하고도 checkpoint는 224라고 말합니다.
+    crop_size = document.get("crop_size")
     if isinstance(crop_size, bool) or not isinstance(crop_size, int) or crop_size < 1:
-        raise EmbeddingTrainingError(f"crop 은행의 crop_size가 정수가 아닙니다: {uri}")
+        raise EmbeddingTrainingError(
+            f"crop 은행이 crop_size를 적어 두지 않았습니다: {uri}"
+        )
     return {"records": checked, "crop_size": crop_size}
 
 
@@ -495,10 +535,11 @@ def _train_embedding(
 ) -> dict[str, Any]:
     """`train_embedding`이 결정성 설정을 걸어 둔 채로 부르는 본체입니다."""
 
-    # **낼 자리가 비었는지 아무것도 하기 전에 봅니다.** 안 보면 같은 run_id로 다시
-    # 돌린 실행이 밤새 학습한 뒤 첫 업로드에서야 거절당합니다. detector도 첫 batch
-    # 전에 멈추는 것을 계약으로 둡니다.
-    _guard_published(storage, setting)
+    # **아무것도 하기 전에** 저장이 어디서 일어나는지 보고, 이 이름을 잡습니다.
+    # 늦게 보면 저장소 밖에 파일을 쓴 뒤에 거절하거나, 밤새 학습한 뒤 업로드에서야
+    # 거절합니다. detector도 첫 batch 전에 멈추는 것을 계약으로 둡니다.
+    _guard_storage_root(storage)
+    prefix = _claim_run(storage, setting)
 
     with tempfile.TemporaryDirectory(prefix="embedding-") as scratch:
         root = Path(scratch) / "bank"
@@ -602,21 +643,30 @@ def _train_embedding(
             "epochs": history,
         }
 
-        prefix = f"{setting.output_prefix}/{setting.run_id}"
+        # **한 번 쓰고 마는 attempt 자리에 올립니다.** 고정된 이름에 세 번 올리면
+        # 두 번째에서 끊겼을 때 반쪽이 그 이름을 차지해, 그 자리를 다시 쓰려면
+        # 사람이 지워야 합니다. attempt 자리는 실행마다 새 이름이라 끊긴 것은
+        # 그냥 버려진 폴더로 남습니다. detector의 게시와 같은 모양입니다.
+        attempt = f"{prefix}/attempts/{uuid4().hex}"
         artifacts = {
             "run_id": setting.run_id,
             "best_checkpoint_uri": _published(
-                storage.upload_file(best_path, f"{prefix}/best_checkpoint.pt", overwrite=False)
+                storage.upload_file(best_path, f"{attempt}/best_checkpoint.pt")
             ),
             "last_checkpoint_uri": _published(
-                storage.upload_file(last_path, f"{prefix}/last_checkpoint.pt", overwrite=False)
+                storage.upload_file(last_path, f"{attempt}/last_checkpoint.pt")
             ),
             "training_history_uri": _published(
-                storage.write_json(
-                    f"{prefix}/training_history.json", history_document, overwrite=False
-                )
+                storage.write_json(f"{attempt}/training_history.json", history_document)
             ),
         }
+        # **마지막에 끝났다는 표식을 남깁니다.** 셋이 다 올라간 뒤라야 다음 실행이
+        # "이미 끝난 이름"과 "끊긴 이름"을 구별할 수 있습니다.
+        storage.write_json(
+            f"{prefix}/{COMPLETED_MARKER}",
+            {"run_id": setting.run_id, "artifacts": artifacts},
+            overwrite=False,
+        )
         best_path.unlink(missing_ok=True)
         last_path.unlink(missing_ok=True)
         working.rmdir()
