@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from src.pipelines.evaluate import rerank as rerank_module
 from src.pipelines.evaluate.pipeline import run
 
 from conftest import write_json
@@ -274,6 +275,121 @@ def test_rerank_refuses_a_detector_checkpoint(base_config: dict, repository_root
     assert "train.task=embedding" in result["message"]
 
 
+@pytest.mark.parametrize(
+    ("margin", "expected"),
+    [
+        # margin이 1을 넘으면 점수는 **올라가야** 합니다. 1에서 자르면 가장 확신이
+        # 센 행이 확신이 보통인 행과 같은 대우를 받습니다.
+        (1.5, 0.9 * 1.25),
+        (0.5, 0.9 * 0.75),
+        # 아래로는 0에서 막습니다. 음수 점수는 제출할 수 있는 값이 아닙니다.
+        (-1.5, 0.0),
+    ],
+)
+def test_the_multiplier_follows_the_formula(
+    base_config: dict, repository_root: Path, margin: float, expected: float
+):
+    """식은 `(1 + margin) / 2`입니다. 위로 자르지 않습니다.
+
+    margin은 코사인 유사도의 차이라 2까지 갈 수 있습니다. 실제 은행으로는 1을 넘는
+    값을 만들기 어려워, 여기서는 margin 계산만 대신하고 **곱하는 규칙만** 잽니다.
+    """
+
+    _prepare(base_config, repository_root, category_ids=(3, 7))
+    bank = _write_crop_bank(repository_root / "data/test/crop_bank.tar", {3: RED, 7: BLUE})
+    _write_embedding_checkpoint(repository_root / "checkpoints/embedding.pt", [3, 7])
+    base_config["evaluate"]["rerank_checkpoint_uris"] = ["checkpoints/embedding.pt"]
+    base_config["evaluate"]["rerank_crop_bank_uri"] = bank
+    original = rerank_module._margins
+    rerank_module._margins = lambda similarity, **kwargs: torch.full(
+        (similarity.shape[0],), margin
+    )
+    try:
+        result = run(base_config)
+    finally:
+        rerank_module._margins = original
+
+    assert result["status"] == "ok", result["message"]
+    scores = _submission_scores(repository_root, result)
+    assert scores[10] == pytest.approx(expected, rel=1e-6)
+    assert scores[20] == pytest.approx(expected, rel=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("broken", "expected"),
+    [
+        ({"crop_size": None}, "crop 크기를 적어 두지 않았습니다"),
+        ({"crop_size": "224"}, "crop 크기를 적어 두지 않았습니다"),
+        ({"normalisation": None}, "normalisation이 필요합니다"),
+        ({"normalisation": {"mean": [0.5, 0.5, 0.5], "std": [0.0, 0.2, 0.2]}}, "0이 있습니다"),
+        (
+            {"normalisation": {"mean": [0.5, 0.5], "std": [0.2, 0.2, 0.2]}},
+            "유한한 숫자 셋",
+        ),
+    ],
+)
+def test_a_checkpoint_that_cannot_say_how_it_was_trained_is_refused(
+    base_config: dict, repository_root: Path, broken: dict, expected: str
+):
+    """못 쓰는 값을 그냥 지나가면 재순위가 한 행도 못 바꾸고 성공으로 끝납니다.
+
+    std에 0이 있으면 특징이 통째로 `nan`이 되고, 못 잰 margin은 건너뛰도록 되어
+    있으므로 **아무 일도 일어나지 않은 채** 성공합니다. crop 크기를 확인하지 않으면
+    다른 크기로 학습한 model에 이 은행을 먹이고도 아무 말이 없습니다.
+    """
+
+    _prepare(base_config, repository_root, category_ids=(3, 7))
+    bank = _write_crop_bank(repository_root / "data/test/crop_bank.tar", {3: RED, 7: BLUE})
+    path = repository_root / "checkpoints/embedding.pt"
+    _write_embedding_checkpoint(path, [3, 7])
+    payload = torch.load(path, map_location="cpu")
+    for key, value in broken.items():
+        if value is None:
+            payload.pop(key, None)
+        else:
+            payload[key] = value
+    torch.save(payload, path)
+    base_config["evaluate"]["rerank_checkpoint_uris"] = ["checkpoints/embedding.pt"]
+    base_config["evaluate"]["rerank_crop_bank_uri"] = bank
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert expected in result["message"]
+
+
+def test_a_missing_reference_crop_is_reported_not_raised(
+    base_config: dict, repository_root: Path
+):
+    """이 pipeline은 `run()` 밖으로 예외를 내보내지 않습니다."""
+
+    _prepare(base_config, repository_root, category_ids=(3, 7))
+    bank = _write_crop_bank(repository_root / "data/test/crop_bank.tar", {3: RED, 7: BLUE})
+    # 목록에는 있는데 tar에는 없는 crop을 만듭니다.
+    with tarfile.open(repository_root / "data/test/crop_bank.tar") as archive:
+        names = [name for name in archive.getnames() if name != "index.json"]
+        members = {name: archive.extractfile(name).read() for name in names}
+        index = json.loads(archive.extractfile("index.json").read().decode("utf-8"))
+    index["records"].append({"path": "crops/3/missing.png", "category_id": 3})
+    with tarfile.open(repository_root / "data/test/crop_bank.tar", "w") as archive:
+        payload = json.dumps(index, ensure_ascii=False).encode("utf-8")
+        info = tarfile.TarInfo("index.json")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+        for name, blob in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(blob)
+            archive.addfile(info, io.BytesIO(blob))
+    _write_embedding_checkpoint(repository_root / "checkpoints/embedding.pt", [3, 7])
+    base_config["evaluate"]["rerank_checkpoint_uris"] = ["checkpoints/embedding.pt"]
+    base_config["evaluate"]["rerank_crop_bank_uri"] = bank
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "참조 crop을 열지 못했습니다" in result["message"]
+
+
 def test_rerank_needs_reference_crops(base_config: dict, repository_root: Path):
     _prepare(base_config, repository_root, category_ids=(3, 7))
     base_config["evaluate"]["rerank_checkpoint_uris"] = ["checkpoints/embedding.pt"]
@@ -284,20 +400,33 @@ def test_rerank_needs_reference_crops(base_config: dict, repository_root: Path):
     assert "재순위에는 참조 crop이 필요합니다" in result["message"]
 
 
-def test_rerank_refuses_the_same_checkpoint_twice(base_config: dict, repository_root: Path):
+@pytest.mark.parametrize(
+    "second",
+    [
+        "checkpoints/embedding.pt",
+        # 글자는 다르지만 같은 파일입니다. 표기로만 보면 통과해, 그 model이
+        # 평균에서 두 표를 갖습니다.
+        "./checkpoints/embedding.pt",
+        "checkpoints/../checkpoints/embedding.pt",
+    ],
+)
+def test_rerank_refuses_the_same_checkpoint_twice(
+    base_config: dict, repository_root: Path, second: str
+):
     """같은 model을 두 번 넣으면 평균이 조용히 그쪽으로 기웁니다."""
 
     _prepare(base_config, repository_root, category_ids=(3, 7))
+    _write_embedding_checkpoint(repository_root / "checkpoints/embedding.pt", [3, 7])
     base_config["evaluate"]["rerank_checkpoint_uris"] = [
         "checkpoints/embedding.pt",
-        "checkpoints/embedding.pt",
+        second,
     ]
     base_config["evaluate"]["rerank_crop_bank_uri"] = "data/test/crop_bank.tar"
 
     result = run(base_config)
 
     assert result["status"] == "error"
-    assert "같은 checkpoint를 두 번" in result["message"]
+    assert "같은 checkpoint를 가리킵니다" in result["message"]
 
 
 @pytest.mark.parametrize(

@@ -413,14 +413,26 @@ def _resolve_rerank_checkpoints(value: Any) -> tuple[str, ...]:
         raise ConfigurationError(
             "evaluate.rerank_checkpoint_uris의 항목은 비어 있지 않은 문자열이어야 합니다."
         )
-    resolved = tuple(uri for uri in uris if uri is not None)
-    if len(set(resolved)) != len(resolved):
-        # 같은 model을 두 번 넣으면 그 model에 두 표를 주는 셈이라, 평균이
-        # 조용히 한쪽으로 기웁니다.
-        raise ConfigurationError(
-            "evaluate.rerank_checkpoint_uris에 같은 checkpoint를 두 번 넣을 수 없습니다."
-        )
-    return resolved
+    return tuple(uri for uri in uris if uri is not None)
+
+
+def _guard_distinct_checkpoints(store: ArtifactStore, uris: Sequence[str]) -> None:
+    """같은 checkpoint를 두 번 받지 않습니다.
+
+    **표기가 아니라 저장 신원으로 봅니다.** `a.pt`와 `./a.pt`는 글자가 다르지만 같은
+    파일이고, 그것을 둘 다 받으면 그 model이 평균에서 두 표를 갖습니다. 융합이 같은
+    이유로 쓰는 판정을 그대로 씁니다.
+    """
+
+    seen: dict[str, str] = {}
+    for uri in uris:
+        identity = str(store.artifact_identity(uri))
+        if identity in seen:
+            raise ConfigurationError(
+                f"{seen[identity]}와 {uri}가 같은 checkpoint를 가리킵니다. 한 model이 "
+                "두 표를 갖게 되어 평균이 조용히 그쪽으로 기웁니다."
+            )
+        seen[identity] = uri
 
 
 def _resolve_max_detections(value: Any) -> int | None:
@@ -720,6 +732,10 @@ def run(config: dict) -> dict:
                     f"artifact가 이미 있습니다. evaluate.overwrite를 true로 두어야 덮어씁니다: "
                     f"{store.normalize_uri(uri)}"
                 )
+
+        # 같은 checkpoint를 두 번 받았는지는 **추론을 걸기 전에** 봅니다. 나중에
+        # 보면 GPU를 다 쓴 뒤에 거절하게 됩니다.
+        _guard_distinct_checkpoints(store, settings.rerank_checkpoint_uris)
 
         records = load_manifest(store, settings.validation_manifest_uri)
         # 예측 file은 **전체** manifest를 기준으로 확인합니다. 표본에서 빠진 image를

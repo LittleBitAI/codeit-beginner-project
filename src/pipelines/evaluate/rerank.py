@@ -214,6 +214,67 @@ def _embedding_model(checkpoint: Mapping[str, Any], *, source: str, device: str)
     return model
 
 
+def _normalisation(checkpoint: Mapping[str, Any], *, source: str) -> tuple[Any, Any]:
+    """checkpoint가 적어 둔 정규화 값을 읽고 **쓸 수 있는 값인지** 봅니다.
+
+    std에 0이나 유한하지 않은 값이 있으면 특징이 통째로 `nan`이 됩니다. 그러면
+    margin도 전부 `nan`이 되고, 못 잰 margin은 건너뛰도록 되어 있으므로 **한 행도
+    바꾸지 않은 채 성공으로 끝납니다.** 재순위를 걸었는데 아무 일도 일어나지 않은
+    것을 아무도 모릅니다.
+    """
+
+    torch = _import_torch()
+    raw = checkpoint.get("normalisation")
+    if not isinstance(raw, Mapping):
+        raise InputArtifactError(f"{source}: checkpoint에 normalisation이 필요합니다.")
+    values: list[list[float]] = []
+    for key in ("mean", "std"):
+        item = raw.get(key)
+        if (
+            not isinstance(item, Sequence)
+            or isinstance(item, (str, bytes))
+            or len(item) != 3
+            or not all(
+                isinstance(number, (int, float))
+                and not isinstance(number, bool)
+                and math.isfinite(number)
+                for number in item
+            )
+        ):
+            raise InputArtifactError(
+                f"{source}: normalisation.{key}는 유한한 숫자 셋이어야 합니다."
+            )
+        values.append([float(number) for number in item])
+    if any(number == 0.0 for number in values[1]):
+        raise InputArtifactError(f"{source}: normalisation.std에 0이 있습니다.")
+    mean = torch.tensor(values[0]).view(3, 1, 1)
+    std = torch.tensor(values[1]).view(3, 1, 1)
+    return mean, std
+
+
+def _open_bank_crops(root: Path, records: Sequence[Mapping[str, Any]]) -> list[Any]:
+    """참조 crop을 엽니다. 없거나 깨진 파일도 계약 오류로 바꿉니다.
+
+    그대로 두면 `FileNotFoundError`나 `UnidentifiedImageError`가 `run()` 밖으로
+    나갑니다. 이 pipeline은 그 경계를 넘어 예외를 내보내지 않습니다.
+    """
+
+    Image = _import_image()
+    opened: list[Any] = []
+    try:
+        for record in records:
+            path = root / str(record["path"])
+            with Image.open(path) as picture:
+                opened.append(picture.convert("RGB"))
+    except (OSError, ValueError) as error:
+        for picture in opened:
+            picture.close()
+        raise InputArtifactError(
+            f"참조 crop을 열지 못했습니다 ({error.__class__.__name__}): {error}"
+        ) from error
+    return opened
+
+
 def _crop(image: Any, bbox: Sequence[float], *, size: int, margin: float) -> Any:
     """상자 하나를 은행과 같은 방식으로 잘라 같은 크기로 맞춥니다."""
 
@@ -370,21 +431,26 @@ def rerank_predictions(
         for uri in checkpoint_uris:
             checkpoint = load_checkpoint_document(store, uri, device=device)
             model = _embedding_model(checkpoint, source=uri, device=device)
-            normalisation = checkpoint.get("normalisation") or {}
-            mean = torch.tensor(list(normalisation.get("mean", (0.485, 0.456, 0.406))))
-            std = torch.tensor(list(normalisation.get("std", (0.229, 0.224, 0.225))))
-            mean, std = mean.view(3, 1, 1), std.view(3, 1, 1)
+            mean, std = _normalisation(checkpoint, source=uri)
+            # **크기는 반드시 대조합니다.** 없거나 정수가 아니라고 건너뛰면, 다른
+            # 크기로 학습한 model에 이 은행의 crop을 먹이고도 아무 말이 없습니다.
+            # 그 어긋남은 오류가 아니라 조금 낮은 점수로만 드러납니다.
             checkpoint_size = checkpoint.get("crop_size")
-            if isinstance(checkpoint_size, int) and checkpoint_size != crop_size:
+            if (
+                not isinstance(checkpoint_size, int)
+                or isinstance(checkpoint_size, bool)
+                or checkpoint_size < 1
+            ):
+                raise InputArtifactError(
+                    f"{uri}: checkpoint가 학습한 crop 크기를 적어 두지 않았습니다."
+                )
+            if checkpoint_size != crop_size:
                 raise InputArtifactError(
                     f"{uri}: checkpoint는 {checkpoint_size}px crop으로 학습했는데 은행은 "
                     f"{crop_size}px입니다."
                 )
 
-            bank_crops = [
-                Image.open(root / "bank" / record["path"]).convert("RGB")
-                for record in bank_records
-            ]
+            bank_crops = _open_bank_crops(root / "bank", bank_records)
             reference = _embed_all(
                 model,
                 bank_crops,
@@ -425,9 +491,14 @@ def rerank_predictions(
         value = float(margin[position])
         if not math.isfinite(value):
             continue
-        # 유사도 차이는 -2..2까지 갈 수 있습니다. 곱하는 값이 음수가 되면 제출할
-        # 수 없는 점수가 나오므로 0..1로 자릅니다.
-        multiplier = min(1.0, max(0.0, (1.0 + value) / 2.0))
+        # 식은 `(1 + margin) / 2`이고 **위로 자르지 않습니다.** 유사도 차이는 2까지
+        # 갈 수 있어 곱하는 값이 1을 넘을 수 있는데, 거기서 1로 자르면 가장 확신이
+        # 센 행이 확신이 보통인 행과 같은 대우를 받습니다. 대회 점수를 낸 실험에도
+        # 자르기가 없었습니다.
+        #
+        # 아래로만 0에서 막습니다. margin이 -1보다 작다는 것은 "다른 class 쪽이
+        # 확실히 가깝다"는 뜻이고, 음수 점수는 제출할 수 있는 값이 아닙니다.
+        multiplier = max(0.0, (1.0 + value) / 2.0)
         rows[index]["score"] = float(rows[index]["score"]) * multiplier
         values.append(value)
         reranked += 1
