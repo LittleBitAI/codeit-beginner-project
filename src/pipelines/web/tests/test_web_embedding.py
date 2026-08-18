@@ -96,6 +96,30 @@ def test_embedding_config_needs_reference_crops(isolated_repo):
     assert [item["field"] for item in error.value.as_list()] == ["crop_bank_uri"]
 
 
+@pytest.mark.parametrize(
+    "learning_rate",
+    [
+        # `nan`은 어느 비교에도 걸리지 않습니다. 크기만 재면 그대로 통과해,
+        # loss가 처음부터 `nan`인 학습이 밤새 GPU를 잡습니다.
+        float("nan"),
+        float("inf"),
+        # python 정수는 크기 제한이 없어, `float()`로 바꾸는 자리에서 검사가
+        # 스스로 터집니다.
+        10**400,
+    ],
+    ids=["nan", "inf", "overflow"],
+)
+def test_embedding_config_refuses_a_learning_rate_that_is_not_a_number(
+    isolated_repo, learning_rate
+):
+    """숫자처럼 보이지만 학습을 못 하는 값입니다. 대기열에 넣기 전에 거절합니다."""
+
+    with pytest.raises(WebValidationError) as error:
+        embedding.build_config(_payload(learning_rate=learning_rate))
+
+    assert [item["field"] for item in error.value.as_list()] == ["learning_rate"]
+
+
 def test_embedding_config_refuses_a_backbone_train_cannot_build(isolated_repo):
     with pytest.raises(WebValidationError) as error:
         embedding.build_config(_payload(backbone="resnet101"))

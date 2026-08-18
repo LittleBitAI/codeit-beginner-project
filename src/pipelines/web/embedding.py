@@ -15,6 +15,7 @@ detector 설정 화면(`train_config.py`)과 칸을 섞지 않습니다. embeddi
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -86,6 +87,19 @@ def _positive_integer(
     return value
 
 
+def _finite(value: int | float) -> bool:
+    """유한한 숫자인지 봅니다. **검사가 스스로 터지지 않게** 합니다.
+
+    python 정수는 크기 제한이 없어서 `10**400` 같은 값을 `float()`로 바꾸면
+    `OverflowError`가 납니다. 거절하려던 값 때문에 검사가 그 자리에서 죽습니다.
+    """
+
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
+
+
 def _number(
     errors: list[FieldError],
     payload: Mapping[str, Any],
@@ -98,8 +112,11 @@ def _number(
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         collect(errors, field, f"{label}은(는) 숫자여야 합니다.")
         return float(DEFAULTS[field])
-    if value < 0 or (value == 0 and not allow_zero):
-        collect(errors, field, f"{label}은(는) 0보다 커야 합니다.")
+    # 유한성을 먼저 봅니다. `nan`은 어느 비교에도 걸리지 않아, 크기만 재면
+    # 그대로 통과해 learning rate가 `nan`인 학습이 대기열에 들어갑니다.
+    if not _finite(value) or value < 0 or (value == 0 and not allow_zero):
+        bound = "0 이상" if allow_zero else "0보다 큰"
+        collect(errors, field, f"{label}은(는) {bound} 유한한 숫자여야 합니다.")
         return float(DEFAULTS[field])
     return float(value)
 
