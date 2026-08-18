@@ -68,6 +68,8 @@ LABEL_SMOOTHING = 0.1
 #: `running/`과 `completed.json`으로 하는 일을 같은 모양으로 둡니다.
 RUNNING_MARKER = "running.json"
 COMPLETED_MARKER = "completed.json"
+#: 도는 동안의 사본입니다. 끊긴 실행에서 남는 유일한 원격 사본이기도 합니다.
+RUNNING_CHECKPOINT = "running/last_checkpoint.pt"
 
 
 def _save_checkpoint(payload: dict[str, Any], destination: Path) -> None:
@@ -103,24 +105,48 @@ def _guard_storage_root(storage: Any) -> None:
         ) from error
 
 
-def _claim_run(storage: Any, setting: "EmbeddingSettings") -> str:
-    """이 `run_id`를 잡고, 낼 자리의 앞머리를 돌려줍니다.
+def _mirror_running(storage: Any, prefix: str, source: Path) -> None:
+    """도는 동안의 마지막 checkpoint를 저장소에도 둡니다.
 
-    학습을 시작하기 **전에** 두 가지를 봅니다. 끝난 실행인지(`completed.json`),
-    그리고 지금 다른 실행이 같은 이름을 쓰고 있는지입니다. 잡기는 조건부 쓰기라
-    두 runtime이 동시에 시작해도 하나만 이깁니다. 늦게 보면 둘 다 밤새 학습한 뒤
-    한쪽만 업로드에서 떨어집니다.
+    이름만 잡고 사본을 안 올리면, runtime이 끊겼을 때 이름은 막혀 있는데 학습한
+    것은 사라집니다. **하나짜리 자족적인 파일**이라 반쯤 갱신된 짝이 생기지
+    않습니다. 올리기가 실패해도 학습은 계속합니다 — 이 사본은 보험이지 결과가
+    아니고, 결과는 마지막에 attempt 자리로 갑니다.
+    """
+
+    try:
+        storage.upload_file(source, f"{prefix}/{RUNNING_CHECKPOINT}", overwrite=True)
+    except (StorageError, OSError):
+        return
+
+
+def _guard_completed(storage: Any, prefix: str, run_id: str) -> None:
+    """이미 끝난 이름인지 봅니다. 읽기만 하므로 아무것도 남기지 않습니다."""
+
+    try:
+        finished = storage.exists(f"{prefix}/{COMPLETED_MARKER}")
+    except StorageError as error:
+        raise EmbeddingTrainingError(
+            f"낼 자리를 확인하지 못했습니다: {prefix} ({type(error).__name__})"
+        ) from error
+    if finished:
+        raise EmbeddingTrainingError(
+            f"이미 끝난 실행입니다: {run_id}. 다른 run_id를 쓰세요."
+        )
+
+
+def _claim_run(storage: Any, prefix: str, setting: "EmbeddingSettings") -> None:
+    """이 `run_id`를 잡습니다. 조건부 쓰기라 동시에 시작해도 하나만 이깁니다.
+
+    **설정과 입력을 다 확인한 뒤, 첫 batch 직전에** 부릅니다. 먼저 잡으면 class map이
+    틀려 멈춘 실행도 이름을 영구히 차지해, 입력을 고쳐도 같은 이름으로 다시 돌릴 수
+    없습니다.
 
     성공해도 표식은 지우지 않습니다. 이름 하나는 한 번 씁니다. 끊긴 실행이 남긴
     표식도 사람이 정할 일이라 여기서 치우지 않습니다.
     """
 
-    prefix = f"{setting.output_prefix}/{setting.run_id}"
     try:
-        if storage.exists(f"{prefix}/{COMPLETED_MARKER}"):
-            raise EmbeddingTrainingError(
-                f"이미 끝난 실행입니다: {setting.run_id}. 다른 run_id를 쓰세요."
-            )
         storage.write_json(
             f"{prefix}/{RUNNING_MARKER}",
             {"run_id": setting.run_id, "backbone": setting.backbone},
@@ -131,7 +157,6 @@ def _claim_run(storage: Any, setting: "EmbeddingSettings") -> str:
             f"'{setting.run_id}' 이름을 잡지 못했습니다. 같은 이름의 실행이 돌고 "
             "있거나 끊긴 채 남아 있습니다. 치울지는 사람이 정합니다."
         ) from error
-    return prefix
 
 
 def _published(uri: str) -> str:
@@ -535,11 +560,11 @@ def _train_embedding(
 ) -> dict[str, Any]:
     """`train_embedding`이 결정성 설정을 걸어 둔 채로 부르는 본체입니다."""
 
-    # **아무것도 하기 전에** 저장이 어디서 일어나는지 보고, 이 이름을 잡습니다.
-    # 늦게 보면 저장소 밖에 파일을 쓴 뒤에 거절하거나, 밤새 학습한 뒤 업로드에서야
-    # 거절합니다. detector도 첫 batch 전에 멈추는 것을 계약으로 둡니다.
+    # **아무것도 쓰기 전에** 저장이 어디서 일어나는지 봅니다. 늦게 보면 저장소
+    # 밖에 파일을 쓴 뒤에 거절합니다.
     _guard_storage_root(storage)
-    prefix = _claim_run(storage, setting)
+    prefix = f"{setting.output_prefix}/{setting.run_id}"
+    _guard_completed(storage, prefix, setting.run_id)
 
     with tempfile.TemporaryDirectory(prefix="embedding-") as scratch:
         root = Path(scratch) / "bank"
@@ -589,6 +614,10 @@ def _train_embedding(
                 "그 안의 checkpoint가 유일한 사본이므로 지우거나 다른 run_id를 "
                 "쓰는 것은 사람이 정합니다."
             ) from error
+        # 설정과 입력을 다 확인하고 이 자리를 잡은 **뒤에** 이름을 잡습니다. 먼저
+        # 잡으면 입력이 틀려 멈춘 실행이 그 이름을 영구히 차지합니다.
+        _claim_run(storage, prefix, setting)
+
         best_path = working / "best_checkpoint.pt"
         last_path = working / "last_checkpoint.pt"
 
@@ -619,6 +648,10 @@ def _train_embedding(
                 _save_checkpoint(
                     _checkpoint(model, setting, categories, epoch, accuracy, crop_size),last_path
                 )
+                # **저장소에도 그때그때 올려 둡니다.** 이름만 잡아 두고 사본을 안
+                # 올리면, Colab runtime이 끊겼을 때 이름은 막혀 있는데 학습한 것은
+                # 사라집니다. detector의 `running/`과 같은 자리입니다.
+                _mirror_running(storage, prefix, last_path)
             # **best는 주기와 무관하게 매 epoch 봅니다.** 주기 안에 두면 주기 사이에
             # 나온 가장 좋은 epoch이 best가 되지 못하고, 더 나쁜 model이 조용히
             # best_checkpoint.pt라는 이름으로 나갑니다. 쓰는 쪽은 그 이름을 믿습니다.

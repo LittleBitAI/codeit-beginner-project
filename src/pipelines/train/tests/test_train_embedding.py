@@ -17,7 +17,7 @@ import pytest
 import torch
 from PIL import Image
 
-from src.common import train_contract
+from src.common import StorageError, train_contract
 from src.pipelines.train import run
 from src.pipelines.train import embedding as embedding_module
 from src.pipelines.train.embedding import (
@@ -285,12 +285,31 @@ def test_a_name_already_being_used_is_refused_before_training(workspace: Path):
     assert "이름을 잡지 못했습니다" in result["message"]
 
 
-def test_a_broken_upload_does_not_take_the_name_of_the_next_try(workspace: Path):
-    """끊긴 게시가 고정된 이름을 차지하면 그 자리를 사람이 지워야 합니다.
+@pytest.mark.parametrize("broken", ["class_map", "partial"])
+def test_a_run_that_stops_on_a_bad_input_does_not_keep_the_name(
+    workspace: Path, broken: str
+):
+    """입력이 틀려 멈춘 실행이 이름을 차지하면, 고친 뒤 같은 이름으로 못 돌립니다.
 
-    attempt 자리는 실행마다 새 이름이라, 끊긴 것은 버려진 폴더로 남고 다음 실행은
-    자기 자리에 씁니다. 끝났다는 표식은 셋이 다 올라간 뒤에만 생깁니다.
+    이름 잡기는 설정과 입력을 다 확인한 **뒤에** 와야 합니다.
     """
+
+    if broken == "class_map":
+        (workspace / "class_map.json").write_text(
+            json.dumps({"77": "다른 dataset"}, ensure_ascii=False), encoding="utf-8"
+        )
+    else:
+        (workspace / "working" / ".embed-test.partial").mkdir(parents=True)
+
+    result = run(embedding_config(workspace))
+
+    assert result["status"] == "error"
+    claim = workspace / "embeddings" / "embed-test" / "running.json"
+    assert not claim.exists(), "이름이 잡힌 채 남으면 고쳐도 다시 못 돌립니다"
+
+
+def test_publishing_lands_in_one_attempt_with_a_marker_written_last(workspace: Path):
+    """정상 게시의 모양입니다. 표식은 셋이 다 올라간 뒤에만 생깁니다."""
 
     result = run(embedding_config(workspace))
 
@@ -302,6 +321,63 @@ def test_a_broken_upload_does_not_take_the_name_of_the_next_try(workspace: Path)
     assert result["artifacts"]["best_checkpoint_uri"].startswith(
         f"embeddings/embed-test/attempts/{attempts[0].name}/"
     )
+
+
+def test_a_broken_publish_leaves_no_completion_marker_and_keeps_what_it_wrote(
+    workspace: Path,
+):
+    """게시 도중 끊기면 무엇이 남고 무엇이 남지 않아야 하는가.
+
+    - 끝났다는 표식은 **생기면 안 됩니다.** 생기면 반쪽짜리 결과가 완성된 것으로
+      읽힙니다.
+    - 먼저 올라간 것은 버려진 attempt 자리에 남습니다. 고정된 이름을 차지하지
+      않으므로 다음 attempt는 자기 자리에 씁니다.
+    - 도는 동안 올려 둔 사본은 그대로 있어야 합니다. 끊긴 실행에서 이것이 유일한
+      원격 사본입니다.
+    """
+
+    uploads = []
+    original = embedding_module.create_storage
+
+    def broken(config):
+        storage = original(config)
+        real = storage.upload_file
+
+        def upload(source, destination, **kwargs):
+            uploads.append(str(destination))
+            if str(destination).endswith("last_checkpoint.pt") and "attempts/" in str(
+                destination
+            ):
+                raise StorageError("업로드가 끊겼습니다")
+            return real(source, destination, **kwargs)
+
+        storage.upload_file = upload
+        return storage
+
+    embedding_module.create_storage = broken
+    try:
+        result = run(embedding_config(workspace))
+    finally:
+        embedding_module.create_storage = original
+
+    assert result["status"] == "error"
+    published = workspace / "embeddings" / "embed-test"
+    assert not (published / "completed.json").exists()
+    attempts = list((published / "attempts").iterdir())
+    assert len(attempts) == 1
+    assert (attempts[0] / "best_checkpoint.pt").is_file(), "먼저 올린 것은 남습니다"
+    assert (published / "running" / "last_checkpoint.pt").is_file()
+
+
+def test_an_interrupted_run_leaves_a_copy_in_the_store(workspace: Path):
+    """이름만 잡고 사본을 안 올리면, 끊겼을 때 이름은 막히고 학습은 사라집니다."""
+
+    result = run(embedding_config(workspace, epochs=2, checkpoint_every=1))
+
+    assert result["status"] == "ok", result["message"]
+    mirrored = workspace / "embeddings" / "embed-test" / "running" / "last_checkpoint.pt"
+    assert mirrored.is_file()
+    assert torch.load(mirrored, map_location="cpu")["task"] == "embedding"
 
 
 def test_a_bank_without_a_crop_size_is_refused(tmp_path: Path, monkeypatch):
