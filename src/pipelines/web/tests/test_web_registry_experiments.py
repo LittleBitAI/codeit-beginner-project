@@ -934,10 +934,16 @@ def test_detail_says_how_many_confused_pairs_were_left_out(client, monkeypatch):
         ({"matrix": [[False, True], [False, False]], "labels": ["background", "a"]}, "건수가 bool"),
         # 이름이 모자란 자리를 index로 채우면 `'1'`이 category_id처럼 읽힙니다.
         ({"labels": ["background"]}, "labels가 짧음"),
+        # 행이 이름보다 깁니다. 없는 index를 조회하면 상세 응답이 통째로 죽습니다.
+        ({"matrix": [[0, 1, 2], [0, 0, 0]], "labels": ["background", "a"]}, "행이 김"),
     ],
 )
 def test_detail_makes_nothing_up_from_a_broken_matrix(client, monkeypatch, broken, why):
-    """깨진 파일에서 **그럴듯한 진단**이 나오면 아무도 깨진 줄 모릅니다."""
+    """깨진 파일에서 **그럴듯한 진단**이 나오면 아무도 깨진 줄 모릅니다.
+
+    빈 목록으로 내지도 않습니다. 그러면 "재 보니 하나도 안 헷갈렸다"와 같아져,
+    깨진 파일이 좋은 결과로 읽힙니다. 읽지 못한 것은 읽지 못했다고 말합니다.
+    """
 
     document = metrics_document()
     document["analysis"]["confusion_matrix"]["0.50"].update(broken)
@@ -945,10 +951,12 @@ def test_detail_makes_nothing_up_from_a_broken_matrix(client, monkeypatch, broke
         monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
     )
 
-    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+    response = client.get("/api/train/experiments/done")
 
-    assert evaluation["confusions"]["0.50"] == [], why
-    assert evaluation["confusion_counts"]["0.50"] == {"pairs": 0, "shown": 0}, why
+    assert response.status_code == 200, why
+    evaluation = response.json()["evaluation"]
+    assert evaluation["confusion_counts"]["0.50"] is None, why
+    assert "0.50" not in evaluation["confusions"], why
 
 
 def test_detail_carries_the_false_positive_causes(client, monkeypatch):

@@ -148,10 +148,25 @@ function ConfusionList({
   pairs,
   counts,
 }: {
-  /** `undefined`는 **재지 않았다**는 뜻입니다. 빈 배열은 재서 0건이라는 뜻입니다. */
+  /**
+   * 세 가지가 다릅니다.
+   *
+   * - `counts`가 `null`: 기록은 있는데 **읽지 못했습니다**(파일이 깨졌습니다).
+   * - `pairs`가 `undefined`: 이 기능 이전이라 **재지 않았습니다**.
+   * - `pairs`가 빈 배열: **재 봤고 하나도 안 헷갈렸습니다**.
+   *
+   * 셋을 합치면 깨진 파일이 좋은 결과로 읽힙니다.
+   */
   pairs: ConfusionPair[] | undefined;
-  counts: { pairs: number; shown: number } | undefined;
+  counts: { pairs: number; shown: number } | null | undefined;
 }) {
+  if (counts === null) {
+    return (
+      <div style={{ ...type.note, color: color.textMuted }}>
+        혼동 기록을 읽지 못했습니다. 평가 결과 파일이 이 화면이 아는 모양이 아닙니다.
+      </div>
+    );
+  }
   // 이 기능 이전 평가에는 블록 자체가 없습니다. 0건으로 그리면 헷갈린 적이 없는
   // 좋은 실행으로 읽힙니다.
   if (pairs === undefined) {

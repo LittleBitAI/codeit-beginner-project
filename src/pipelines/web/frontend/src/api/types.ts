@@ -435,8 +435,11 @@ export interface ExperimentEvaluation {
   best_f1?: Record<string, SweepPoint | null>;
   /** 헷갈린 쌍입니다. 행렬 자체는 오지 않습니다 — 118종이면 119x119입니다. */
   confusions?: Record<string, ConfusionPair[]>;
-  /** 그 목록이 상위 몇 개로 잘렸는지. 말하지 않으면 잘린 것이 전부로 읽힙니다. */
-  confusion_counts?: Record<string, { pairs: number; shown: number }>;
+  /**
+   * 그 목록이 상위 몇 개로 잘렸는지. 말하지 않으면 잘린 것이 전부로 읽힙니다.
+   * `null`은 기록은 있는데 **읽지 못했다**는 뜻이라, 재서 0건과 다릅니다.
+   */
+  confusion_counts?: Record<string, { pairs: number; shown: number } | null>;
   /** false positive를 원인별로 나눈 건수. 재지 않았으면 null입니다. */
   error_breakdown?: Record<string, FalsePositiveCauses | null>;
   per_class_summary?: {

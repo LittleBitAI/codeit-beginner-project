@@ -124,6 +124,22 @@ describe('오검출 진단 시트', () => {
     await waitFor(() => expect(screen.getByText('헷갈린 쌍이 하나도 없습니다.')).toBeTruthy());
   });
 
+  it('읽지 못한 기록을 0건이라고 말하지 않는다', async () => {
+    // 파일이 깨져 서버가 읽지 못한 경우입니다. "하나도 안 헷갈렸다"고 적으면
+    // 깨진 줄 모른 채 좋은 결과로 읽습니다.
+    vi.spyOn(api, 'experimentDetail').mockResolvedValue(
+      detail({
+        confusions: { '0.75': [] },
+        confusion_counts: { '0.50': null, '0.75': { pairs: 0, shown: 0 } },
+      }),
+    );
+
+    render(<DiagnosisSheet runId="dino-e12" onClose={() => undefined} />);
+
+    expect(await screen.findByText(/혼동 기록을 읽지 못했습니다/)).toBeTruthy();
+    expect(screen.queryByText('헷갈린 쌍이 하나도 없습니다.')).toBeNull();
+  });
+
   it('평가를 못 읽은 실행에서는 빈 표를 지어내지 않는다', async () => {
     vi.spyOn(api, 'experimentDetail').mockResolvedValue({
       experiment: { run_id: 'dino-e12' },

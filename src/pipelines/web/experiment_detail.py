@@ -161,10 +161,12 @@ def _is_list(value: Any) -> bool:
     return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
 
 
-def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int]:
+def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int] | None:
     """confusion matrix에서 **헷갈린 쌍만** 골라 잦은 순으로 냅니다.
 
     돌려주는 것은 (상위 목록, 전체 쌍 수)입니다. 행렬 자체는 내지 않습니다.
+    **읽지 못하면 `None`입니다** — 빈 목록으로 내면 "재 보니 하나도 안 헷갈렸다"와
+    같아져, 깨진 파일이 좋은 결과로 읽힙니다.
 
     대각선은 맞힌 것이라 뺍니다. 0번 행·열(background)은 **뺄 수 없습니다** —
     0행은 없는 것을 찾은 것이고 0열은 놓친 것이라, 빼면 왜 틀렸는지의 절반이
@@ -172,15 +174,15 @@ def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int]:
     """
 
     if not isinstance(block, Mapping):
-        return [], 0
+        return None
     matrix = block.get("matrix")
     labels = block.get("labels")
     if not _is_list(matrix) or not _is_list(labels):
-        return [], 0
-    # **이름이 모자라면 아무것도 내지 않습니다.** 없는 자리를 index로 채우면
-    # `'1'` 같은 그럴듯한 이름이 나와, 지어낸 것이 category_id처럼 읽힙니다.
+        return None
+    # **이름이 모자라면 읽지 못한 것입니다.** 없는 자리를 index로 채우면 `'1'`
+    # 같은 그럴듯한 이름이 나와, 지어낸 것이 category_id처럼 읽힙니다.
     if len(labels) < len(matrix):
-        return [], 0
+        return None
     ids = block.get("category_ids")
     id_list = list(ids) if _is_list(ids) and len(ids) >= len(matrix) else []
 
@@ -192,13 +194,17 @@ def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int]:
 
     pairs: list[dict[str, Any]] = []
     for truth, row in enumerate(matrix):
-        if not _is_list(row):
-            continue
+        # 행이 이름보다 길면 읽지 못한 것입니다. 예전에는 없는 index를 그대로
+        # 조회해 `IndexError`가 상세 응답 밖으로 나갔습니다.
+        if not _is_list(row) or len(row) > len(labels):
+            return None
         for predicted, count in enumerate(row):
-            # bool은 int를 물려받습니다. `True`를 1건으로 세면 없던 혼동이 생깁니다.
-            if truth == predicted or isinstance(count, bool) or not isinstance(count, int):
-                continue
-            if count <= 0:
+            # 칸은 0 이상의 정수뿐입니다. `bool`은 `int`를 물려받으므로 따로
+            # 막습니다 — `True`를 1건으로 세면 없던 혼동이 생깁니다. 그 밖의
+            # 값이 보이면 이 파일은 우리가 아는 모양이 아닙니다.
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                return None
+            if truth == predicted or count == 0:
                 continue
             pairs.append(
                 {
@@ -297,11 +303,18 @@ def evaluation_block(
             for label, value in (best.items() if isinstance(best, Mapping) else [])
         },
         # 행렬이 아니라 **헷갈린 쌍**입니다. 자른 개수를 함께 말하지 않으면 잘린
-        # 목록이 전부로 읽힙니다.
-        "confusions": {label: rows for label, (rows, _) in picked.items()},
+        # 목록이 전부로 읽힙니다. 읽지 못한 IoU는 개수가 `null`입니다 — 목록에서
+        # 빼 버리면 "이 기능 이전 평가"와, 빈 목록으로 두면 "0건"과 뒤섞입니다.
+        "confusions": {
+            label: value[0] for label, value in picked.items() if value is not None
+        },
         "confusion_counts": {
-            label: {"pairs": total, "shown": len(rows)}
-            for label, (rows, total) in picked.items()
+            label: (
+                None
+                if value is None
+                else {"pairs": value[1], "shown": len(value[0])}
+            )
+            for label, value in picked.items()
         },
         "error_breakdown": {label: value for label, value in causes.items()},
         "per_class_summary": dict(per_class) if per_class is not None else None,
