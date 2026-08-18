@@ -33,6 +33,7 @@ from .predictor import (
     predict_record_groups_with_checkpoint,
 )
 from .progress import ProgressEmitter
+from .rerank import rerank_predictions
 from .storage_io import ArtifactStore, join_uri
 from .submission import render_submission_csv
 
@@ -90,6 +91,10 @@ class Settings:
     max_detections_per_image: int | None
     # 제출 CSV에서 뺄 category id입니다. 대회에 없는 보조 class를 여기에 넣습니다.
     submission_excluded_category_ids: frozenset[int]
+    # crop embedding으로 제출 점수를 다시 매길 때 쓸 checkpoint들입니다. 비어 있으면
+    # 지금까지와 똑같이 detector 점수를 그대로 냅니다.
+    rerank_checkpoint_uris: tuple[str, ...]
+    rerank_crop_bank_uri: str | None
     # validation 지표에서 뺄 category id입니다. 채점되지 않는 class를 평균에 넣으면
     # 로컬 mAP와 대회 점수가 서로 다른 class 집합을 재게 됩니다.
     metrics_excluded_category_ids: frozenset[int]
@@ -241,6 +246,14 @@ def _prediction_source(
             "주세요."
         )
 
+    # 점수를 다시 매긴 파일도 받지 않습니다. 융합은 detector가 낸 점수를 견주는
+    # 일인데, 한 파일만 embedding으로 고쳐져 있으면 그 파일의 점수만 다른 자로 잰
+    # 값이 됩니다. 재순위는 합친 **뒤에** 한 번만 합니다.
+    if document.get("rerank") is not None:
+        raise InputArtifactError(
+            f"{uri}: 점수를 다시 매긴 예측은 합칠 수 없습니다 — 합친 뒤에 재순위하세요."
+        )
+
     checkpoint = document.get("checkpoint_uri")
     if not isinstance(checkpoint, str) or not checkpoint.strip():
         raise InputArtifactError(
@@ -384,6 +397,44 @@ def _resolve_prediction_inputs(value: Any) -> tuple[str, ...]:
     return tuple(uri for uri in uris if uri is not None)
 
 
+def _resolve_rerank_checkpoints(value: Any) -> tuple[str, ...]:
+    """재순위에 쓸 embedding checkpoint 목록을 읽습니다.
+
+    합칠 예측과 달리 **하나만 주어도 됩니다.** 하나로도 점수는 달라지고, 여럿을
+    주면 margin을 평균 냅니다. 비어 있으면 재순위를 하지 않습니다.
+    """
+
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ConfigurationError("evaluate.rerank_checkpoint_uris는 URI의 list여야 합니다.")
+    uris = [_optional_uri(item, "evaluate.rerank_checkpoint_uris의 항목") for item in value]
+    if any(uri is None for uri in uris):
+        raise ConfigurationError(
+            "evaluate.rerank_checkpoint_uris의 항목은 비어 있지 않은 문자열이어야 합니다."
+        )
+    return tuple(uri for uri in uris if uri is not None)
+
+
+def _guard_distinct_checkpoints(store: ArtifactStore, uris: Sequence[str]) -> None:
+    """같은 checkpoint를 두 번 받지 않습니다.
+
+    **표기가 아니라 저장 신원으로 봅니다.** `a.pt`와 `./a.pt`는 글자가 다르지만 같은
+    파일이고, 그것을 둘 다 받으면 그 model이 평균에서 두 표를 갖습니다. 융합이 같은
+    이유로 쓰는 판정을 그대로 씁니다.
+    """
+
+    seen: dict[str, str] = {}
+    for uri in uris:
+        identity = str(store.artifact_identity(uri))
+        if identity in seen:
+            raise ConfigurationError(
+                f"{seen[identity]}와 {uri}가 같은 checkpoint를 가리킵니다. 한 model이 "
+                "두 표를 갖게 되어 평균이 조용히 그쪽으로 기웁니다."
+            )
+        seen[identity] = uri
+
+
 def _resolve_max_detections(value: Any) -> int | None:
     if value is None:
         return DEFAULT_MAX_DETECTIONS_PER_IMAGE
@@ -500,6 +551,24 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
     ):
         raise ConfigurationError("evaluate.score_threshold는 0 이상 1 이하의 숫자여야 합니다.")
 
+    rerank_checkpoint_uris = _resolve_rerank_checkpoints(
+        settings.get("rerank_checkpoint_uris")
+    )
+    rerank_crop_bank_uri = _resolve_uri(
+        settings, inputs, key="rerank_crop_bank_uri", stage="data", stage_key="crop_bank_uri"
+    )
+    if rerank_checkpoint_uris and rerank_crop_bank_uri is None:
+        raise ConfigurationError(
+            "재순위에는 참조 crop이 필요합니다. evaluate.rerank_crop_bank_uri 또는 "
+            "inputs.data.crop_bank_uri를 설정하세요."
+        )
+    if rerank_checkpoint_uris and test_manifest_uri is None:
+        # 재순위는 제출 CSV와 그 짝인 test 예측만 바꿉니다. validation 지표를 함께
+        # 바꾸면 같은 문서 안에서 두 숫자가 서로 다른 규칙으로 만들어집니다.
+        raise ConfigurationError(
+            "evaluate.rerank_checkpoint_uris는 test_manifest_uri가 있을 때만 쓸 수 있습니다."
+        )
+
     submission_excluded_category_ids = _resolve_excluded_category_ids(
         settings.get("submission_excluded_category_ids")
     )
@@ -569,6 +638,8 @@ def resolve_settings(config: Mapping[str, Any]) -> Settings:
         score_threshold=float(score_threshold),
         max_detections_per_image=_resolve_max_detections(settings.get("max_detections_per_image")),
         submission_excluded_category_ids=submission_excluded_category_ids,
+        rerank_checkpoint_uris=rerank_checkpoint_uris,
+        rerank_crop_bank_uri=rerank_crop_bank_uri,
         metrics_excluded_category_ids=metrics_excluded_category_ids,
         device=device,
         seed=seed,
@@ -661,6 +732,10 @@ def run(config: dict) -> dict:
                     f"artifact가 이미 있습니다. evaluate.overwrite를 true로 두어야 덮어씁니다: "
                     f"{store.normalize_uri(uri)}"
                 )
+
+        # 같은 checkpoint를 두 번 받았는지는 **추론을 걸기 전에** 봅니다. 나중에
+        # 보면 GPU를 다 쓴 뒤에 거절하게 됩니다.
+        _guard_distinct_checkpoints(store, settings.rerank_checkpoint_uris)
 
         records = load_manifest(store, settings.validation_manifest_uri)
         # 예측 file은 **전체** manifest를 기준으로 확인합니다. 표본에서 빠진 image를
@@ -819,6 +894,7 @@ def run(config: dict) -> dict:
             if test_group_index is not None
             else fused_test_predictions
         )
+        rerank_summary: dict[str, Any] | None = None
         if raw_test_predictions is not None:
             # 제외는 test 경로에만 적용합니다. validation 지표에는 보조 class도
             # 남아 있어야 "대회 밖 알약을 알약으로 잡았는가"를 볼 수 있습니다.
@@ -828,6 +904,26 @@ def run(config: dict) -> dict:
                 max_detections_per_image=settings.max_detections_per_image,
                 excluded_category_ids=settings.submission_excluded_category_ids,
             )
+            # 재순위는 **거른 뒤**에 옵니다. 남길 상자를 고르는 일은 detector 점수가
+            # 하고, embedding은 그렇게 남은 상자의 점수만 고쳐 class 안 순위를
+            # 바꿉니다. 먼저 재순위를 하면 상한 4개 안에 드는 상자 자체가 달라지는데,
+            # 그 순서로 만든 제출은 대회 점수가 더 낮았습니다.
+            if settings.rerank_checkpoint_uris and test_records is not None:
+                progress.emit(
+                    "rerank_started",
+                    checkpoints=len(settings.rerank_checkpoint_uris),
+                    rows=len(test_predictions),
+                )
+                test_predictions, rerank_summary = rerank_predictions(
+                    store,
+                    test_predictions,
+                    records=test_records,
+                    checkpoint_uris=settings.rerank_checkpoint_uris,
+                    crop_bank_uri=str(settings.rerank_crop_bank_uri),
+                    device=settings.device,
+                    on_progress=progress.predict_progress,
+                )
+                progress.emit("rerank_finished", **rerank_summary)
             submission_text = render_submission_csv(
                 test_predictions,
                 category_ids=test_category_ids,
@@ -902,6 +998,10 @@ def run(config: dict) -> dict:
                 "submission_excluded_category_ids": sorted(
                     settings.submission_excluded_category_ids
                 ),
+                # 점수를 다시 매긴 파일인지 적습니다. 이것이 없으면 detector가 낸
+                # 점수와 embedding이 고친 점수를 같은 값으로 읽게 되고, 이 파일을
+                # 다시 합치는 쪽이 두 번 고친 점수를 만듭니다.
+                "rerank": rerank_summary,
                 "prediction_count": len(test_predictions),
                 "predictions": [
                     _public_prediction(prediction) for prediction in test_predictions

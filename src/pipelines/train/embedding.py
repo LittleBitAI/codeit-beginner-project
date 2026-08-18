@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import json
+import ntpath
+import os
 import random
 import tarfile
 import tempfile
@@ -21,6 +23,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import numpy as np
 import torch
@@ -44,8 +47,10 @@ from .dataset import REPOSITORY_ROOT
 #: crop 은행 안에서 목록이 놓이는 자리입니다. data가 만드는 tar의 규약입니다.
 INDEX_MEMBER = "index.json"
 
-#: 학습에 쓰는 crop 한 변입니다. 은행이 이 크기로 잘라 둡니다.
-CROP_SIZE = 224
+#: data가 만드는 은행의 crop 한 변입니다. **여기 값을 checkpoint에 적지 않습니다** —
+#: 적으면 다른 크기로 자른 은행으로 학습하고도 224라고 말하게 됩니다. 은행이 적어 둔
+#: 값을 읽고, 없으면 거절합니다. 이 상수는 test와 문서가 가리키는 기준값입니다.
+DEFAULT_CROP_SIZE = 224
 
 #: ImageNet 정규화 값입니다. backbone이 그 통계로 학습돼 있습니다.
 MEAN = (0.485, 0.456, 0.406)
@@ -57,6 +62,83 @@ SHIFT_RANGE = 0.08
 
 #: label smoothing은 특징을 한 점에 몰지 않게 해 참조와의 거리를 재기 좋게 만듭니다.
 LABEL_SMOOTHING = 0.1
+
+
+#: 실행 하나가 자기 이름을 잡았다는 표식과, 끝까지 갔다는 표식입니다. detector가
+#: `running/`과 `completed.json`으로 하는 일을 같은 모양으로 둡니다.
+COMPLETED_MARKER = "completed.json"
+#: 도는 동안의 사본이자 **이름을 잡는 자리**입니다. 첫 조건부 쓰기가 `run_id`를
+#: 잡고, 그 순간부터 원격에 자족적인 사본이 하나 있습니다. 표식 파일을 따로 두면
+#: 이름만 잡히고 사본은 없는 사이가 벌어집니다.
+RUNNING_CHECKPOINT = "running/last_checkpoint.pt"
+
+
+def _save_checkpoint(payload: dict[str, Any], destination: Path) -> None:
+    """임시 file에 쓰고 제자리로 옮깁니다.
+
+    같은 경로에 바로 쓰면 쓰는 도중 죽었을 때 **앞서 멀쩡했던 checkpoint까지**
+    반쪽이 됩니다. 30 epoch짜리 학습에서 그 파일이 유일한 사본입니다. detector도
+    같은 이유로 임시 file을 거칩니다.
+    """
+
+    temporary = destination.with_name(f".{destination.name}.writing")
+    torch.save(payload, temporary)
+    os.replace(temporary, destination)
+
+
+def _guard_storage_root(storage: Any) -> None:
+    """저장이 어디서 일어나는지 **쓰기 전에** 봅니다.
+
+    `output_dir`이 저장소 안이어도 `storage.local.root`가 밖이면 저장은 밖에서
+    일어납니다. 올린 **뒤에** 자리를 보고 거절하면 이미 저장소 밖에 파일이 남고,
+    그 절대 경로가 오류 메시지에 실려 사용자 이름까지 드러납니다.
+    """
+
+    root = getattr(storage, "root", None)
+    if root is None:
+        # S3처럼 local 경로가 없는 backend입니다. 볼 것이 없습니다.
+        return
+    try:
+        Path(root).resolve().relative_to(REPOSITORY_ROOT)
+    except ValueError as error:
+        raise EmbeddingTrainingError(
+            "storage.local.root가 저장소 밖입니다. 저장소 안으로 두세요."
+        ) from error
+
+
+def _mirror_running(storage: Any, prefix: str, source: Path) -> bool:
+    """도는 동안의 마지막 checkpoint를 저장소에도 둡니다. 성공 여부를 돌려줍니다.
+
+    이름을 잡을 때 epoch 0 사본이 이미 올라가 있으므로 **원격이 비는 경우는
+    없습니다.** 여기서 하는 일은 그 사본을 지금 epoch으로 앞당기는 것입니다.
+    **하나짜리 자족적인 파일**이라 반쯤 갱신된 짝이 생기지 않습니다.
+
+    올리기가 실패해도 학습은 멈추지 않습니다 — 이 사본은 보험이지 결과가 아니고,
+    결과는 마지막에 attempt 자리로 갑니다. 다만 **조용히 넘어가지는 않습니다.**
+    갱신이 계속 실패하면 원격 사본이 옛 epoch에 머무르므로, 부르는 쪽이 마지막으로
+    성공한 epoch을 결과에 적습니다. 그 파일 자체도 자기 epoch을 적고 있습니다.
+    """
+
+    try:
+        storage.upload_file(source, f"{prefix}/{RUNNING_CHECKPOINT}", overwrite=True)
+    except (StorageError, OSError):
+        return False
+    return True
+
+
+def _guard_completed(storage: Any, prefix: str, run_id: str) -> None:
+    """이미 끝난 이름인지 봅니다. 읽기만 하므로 아무것도 남기지 않습니다."""
+
+    try:
+        finished = storage.exists(f"{prefix}/{COMPLETED_MARKER}")
+    except StorageError as error:
+        raise EmbeddingTrainingError(
+            f"낼 자리를 확인하지 못했습니다: {prefix} ({type(error).__name__})"
+        ) from error
+    if finished:
+        raise EmbeddingTrainingError(
+            f"이미 끝난 실행입니다: {run_id}. 다른 run_id를 쓰세요."
+        )
 
 
 def _published(uri: str) -> str:
@@ -75,9 +157,15 @@ def _published(uri: str) -> str:
         return path.as_posix()
     try:
         return path.resolve().relative_to(REPOSITORY_ROOT).as_posix()
-    except ValueError:
-        # 저장소 밖은 애초에 막혀 있습니다. 여기까지 오면 지어내지 않고 그대로 둡니다.
-        return path.as_posix()
+    except ValueError as error:
+        # **절대 경로로 돌려주지 않습니다.** `output_dir`은 저장소 안이라도
+        # `storage.local.root`가 밖이면 저장은 밖에서 일어납니다. 그때 그 경로를
+        # 그대로 내보내면 다른 컴퓨터에서 못 여는 URI와 OS 사용자 이름이 결과에
+        # 실려 나갑니다. detector도 이 자리에서 조용히 넘어가지 않습니다.
+        raise EmbeddingTrainingError(
+            "저장 위치가 저장소 밖입니다. storage.local.root를 저장소 안으로 "
+            f"두세요: {path.as_posix()}"
+        ) from error
 
 
 class EmbeddingTrainingError(RuntimeError):
@@ -101,6 +189,30 @@ class EmbeddingSettings:
     checkpoint_every: int
     output_dir: str
     output_prefix: str
+
+
+def _repository_path(raw: Mapping[str, Any], name: str) -> str:
+    """저장소 안을 가리키는 상대 경로만 받습니다.
+
+    detector가 `train.output_dir`에 거는 것과 같은 규칙입니다. 막지 않으면 절대
+    경로나 `..`로 저장소 **밖에** checkpoint를 쓰고, 그 자리가 그대로 artifact URI가
+    되어 남의 컴퓨터 경로와 사용자 이름까지 결과에 실려 나갑니다.
+    """
+
+    value = raw.get(name, EMBEDDING_SETTING_DEFAULTS[name])
+    if not isinstance(value, str) or not value.strip():
+        raise EmbeddingTrainingError(f"train.{name}은 비어 있지 않은 문자열이어야 합니다.")
+    text = value.strip()
+    candidate = Path(text)
+    if candidate.is_absolute() or ntpath.isabs(text):
+        raise EmbeddingTrainingError(f"train.{name}은 저장소 기준 상대 경로여야 합니다.")
+    try:
+        (REPOSITORY_ROOT / candidate).resolve().relative_to(REPOSITORY_ROOT)
+    except ValueError as error:
+        raise EmbeddingTrainingError(
+            f"train.{name}이 저장소 밖을 가리킵니다: {text}"
+        ) from error
+    return text
 
 
 def _positive_int(raw: Mapping[str, Any], name: str) -> int:
@@ -131,7 +243,9 @@ def settings(config: Mapping[str, Any]) -> EmbeddingSettings:
         )
 
     run_id = raw.get("run_id")
-    if not isinstance(run_id, str) or not RUN_ID_PATTERN.match(run_id):
+    # `match`가 아니라 `fullmatch`입니다. python의 `$`는 **끝의 줄바꿈 앞에서도**
+    # 맞으므로, `match`로는 `name\n`이 통과해 그 이름이 경로에 실려 갑니다.
+    if not isinstance(run_id, str) or not RUN_ID_PATTERN.fullmatch(run_id):
         raise EmbeddingTrainingError("train.run_id가 이름 규칙에 맞지 않습니다.")
 
     backbone = raw.get("backbone", DEFAULT_EMBEDDING_BACKBONE)
@@ -170,10 +284,8 @@ def settings(config: Mapping[str, Any]) -> EmbeddingSettings:
         num_workers=workers,
         pretrained=pretrained,
         checkpoint_every=_positive_int(raw, "checkpoint_every"),
-        output_dir=str(raw.get("output_dir", EMBEDDING_SETTING_DEFAULTS["output_dir"])),
-        output_prefix=str(
-            raw.get("output_prefix", EMBEDDING_SETTING_DEFAULTS["output_prefix"])
-        ),
+        output_dir=_repository_path(raw, "output_dir"),
+        output_prefix=_repository_path(raw, "output_prefix"),
     )
 
 
@@ -192,11 +304,51 @@ def data_inputs(config: Mapping[str, Any]) -> dict[str, str]:
     return {key: str(data[key]) for key in EMBEDDING_DATA_ARTIFACT_KEYS}
 
 
-def read_crop_bank(storage: Any, uri: str, destination: Path) -> list[dict[str, Any]]:
-    """crop 은행 tar를 풀어 목록을 돌려줍니다.
+def _inside(destination: Path, name: str) -> Path:
+    """푼 자리 안을 가리키는 경로인지 확인하고 그 경로를 돌려줍니다.
+
+    **문자열 앞자리 비교로는 부족합니다.** `dest`와 `dest-evil`은 앞자리가 같아
+    통과합니다. 경계는 경로 단위로 봐야 하므로 `relative_to`에 맡깁니다.
+    """
+
+    if ntpath.isabs(name) or Path(name).is_absolute():
+        raise EmbeddingTrainingError(f"crop 은행에 절대 경로가 있습니다: {name}")
+    root = destination.resolve()
+    target = (destination / name).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as error:
+        raise EmbeddingTrainingError(
+            f"crop 은행에 폴더 밖을 가리키는 경로가 있습니다: {name}"
+        ) from error
+    return target
+
+
+def _safe_member(member: tarfile.TarInfo, destination: Path) -> None:
+    """푸는 항목 하나를 검사합니다.
+
+    이름만 봐서는 모자랍니다. symlink와 hardlink는 **가리키는 곳**으로 나갈 수 있고,
+    device나 fifo는 애초에 crop 은행에 있을 이유가 없습니다. 은행은 우리가 만들지만
+    읽는 쪽은 남이 만든 파일도 받습니다.
+    """
+
+    if not (member.isfile() or member.isdir()):
+        raise EmbeddingTrainingError(
+            f"crop 은행에 보통 파일이 아닌 항목이 있습니다: {member.name}"
+        )
+    _inside(destination, member.name)
+    if member.linkname:
+        _inside(destination, member.linkname)
+
+
+def read_crop_bank(storage: Any, uri: str, destination: Path) -> dict[str, Any]:
+    """crop 은행 tar를 풀어 **목록 문서를** 돌려줍니다.
 
     data가 만든 파일 규약을 여기서 다시 적습니다. pipeline끼리는 import하지 않으므로
     manifest field 이름을 옮겨 적는 것과 같은 방식입니다.
+
+    `records`만 돌려주지 않는 것은 은행이 자기 `crop_size`를 적어 두기 때문입니다.
+    그 값을 버리면 학습한 크기와 checkpoint에 적는 크기가 갈릴 수 있습니다.
     """
 
     destination.mkdir(parents=True, exist_ok=True)
@@ -205,11 +357,7 @@ def read_crop_bank(storage: Any, uri: str, destination: Path) -> list[dict[str, 
         storage.download_file(uri, archive)
         with tarfile.open(archive) as opened:
             for member in opened.getmembers():
-                target = (destination / member.name).resolve()
-                if not str(target).startswith(str(destination.resolve())):
-                    raise EmbeddingTrainingError(
-                        f"crop 은행에 위험한 경로가 있습니다: {member.name}"
-                    )
+                _safe_member(member, destination)
             opened.extractall(destination)
         document = json.loads((destination / INDEX_MEMBER).read_text(encoding="utf-8"))
     except (StorageError, OSError, ValueError, tarfile.TarError) as error:
@@ -221,7 +369,68 @@ def read_crop_bank(storage: Any, uri: str, destination: Path) -> list[dict[str, 
     records = document.get("records") if isinstance(document, Mapping) else None
     if not records:
         raise EmbeddingTrainingError(f"crop 은행이 비어 있습니다: {uri}")
-    return [dict(record) for record in records]
+
+    checked: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise EmbeddingTrainingError(f"crop 은행 항목이 object가 아닙니다: {uri}")
+        path = record.get("path")
+        category_id = record.get("category_id")
+        if not isinstance(path, str) or not path:
+            raise EmbeddingTrainingError(f"crop 은행 항목에 path가 없습니다: {uri}")
+        if not isinstance(category_id, int) or isinstance(category_id, bool):
+            raise EmbeddingTrainingError(
+                f"crop 은행 항목의 category_id가 정수가 아닙니다: {uri}"
+            )
+        # tar을 안전하게 풀었어도 **목록이 다른 곳을 가리킬 수 있습니다.** 여는 것은
+        # 학습 중이라, 여기서 안 막으면 저장소 밖 파일을 batch마다 읽습니다.
+        _inside(destination, path)
+        checked.append(dict(record))
+
+    # **없으면 거절합니다.** data가 만드는 은행은 언제나 이 값을 적습니다. 없는데
+    # 224로 짐작하면 64px 은행으로 학습하고도 checkpoint는 224라고 말합니다.
+    crop_size = document.get("crop_size")
+    if isinstance(crop_size, bool) or not isinstance(crop_size, int) or crop_size < 1:
+        raise EmbeddingTrainingError(
+            f"crop 은행이 crop_size를 적어 두지 않았습니다: {uri}"
+        )
+    return {"records": checked, "crop_size": crop_size}
+
+
+def check_class_map(storage: Any, uri: str, categories: list[int]) -> None:
+    """은행의 class가 정말 그 dataset의 class인지 봅니다.
+
+    이 입력을 필수로 두고 읽지 않으면, 다른 dataset의 class map을 붙여도 학습이
+    그냥 성공합니다. 그러면 checkpoint의 `category_ids`가 어느 dataset의 것인지
+    아무도 보증하지 않은 채 재순위까지 흘러갑니다.
+
+    이름은 쓰지 않고 **id 집합만** 봅니다. 학습에는 이름이 필요 없고, 여기서 이름까지
+    맞추라고 하면 표기가 조금 다른 판을 이유 없이 막습니다.
+    """
+
+    try:
+        document = storage.read_json(uri)
+    except (StorageError, OSError, ValueError) as error:
+        raise EmbeddingTrainingError(
+            f"class map을 읽지 못했습니다: {uri} ({type(error).__name__})"
+        ) from error
+    if not isinstance(document, Mapping) or not document:
+        raise EmbeddingTrainingError(f"class map이 비어 있습니다: {uri}")
+
+    # data가 내는 두 형태를 모두 받습니다: {"7": "pill"}과 {"pill": 7}.
+    known: set[int] = set()
+    for key, value in document.items():
+        for candidate in (key, value):
+            if isinstance(candidate, int) and not isinstance(candidate, bool):
+                known.add(candidate)
+            elif isinstance(candidate, str) and candidate.strip().lstrip("-").isdigit():
+                known.add(int(candidate))
+    missing = sorted(set(categories) - known)
+    if missing:
+        raise EmbeddingTrainingError(
+            "crop 은행의 class가 class map에 없습니다. 다른 dataset의 값을 짝지은 "
+            f"것은 아닌지 확인하세요: {', '.join(str(item) for item in missing[:5])}"
+        )
 
 
 class CropDataset(Dataset):
@@ -271,6 +480,7 @@ def _checkpoint(
     categories: list[int],
     epoch: int,
     accuracy: float,
+    crop_size: int,
 ) -> dict[str, Any]:
     """쓰는 쪽이 이 하나만 읽고 model을 되살릴 수 있어야 합니다."""
 
@@ -280,7 +490,9 @@ def _checkpoint(
         # 학습한 class 순서입니다. 이것이 없으면 head를 되살릴 수 없고, 특징만 쓰는
         # 쪽도 자기가 몇 종을 본 model인지 알 수 없습니다.
         "category_ids": list(categories),
-        "crop_size": CROP_SIZE,
+        # **은행이 적은 값입니다.** 상수를 적으면 다른 크기로 자른 은행으로 학습하고도
+        # 224라고 말하게 되고, 쓰는 쪽은 그 값으로 시험 crop을 자릅니다.
+        "crop_size": crop_size,
         "normalisation": {"mean": list(MEAN), "std": list(STD)},
         "epoch": epoch,
         "train_accuracy": accuracy,
@@ -304,19 +516,49 @@ def train_embedding(config: Mapping[str, Any]) -> dict[str, Any]:
     inputs = data_inputs(config)
     storage = create_storage(config)
 
+    # detector와 같은 규칙입니다(`trainer.py`). seed만 심고 algorithm mode를 두지
+    # 않으면 CUDA가 비결정 kernel을 골라, 같은 seed로 돌린 두 실행의 checkpoint가
+    # 달라집니다. 전역 상태이므로 끝나면 되돌립니다.
+    previous_deterministic = torch.are_deterministic_algorithms_enabled()
+    previous_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
     random.seed(setting.seed)
     np.random.seed(setting.seed)
     torch.manual_seed(setting.seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+
+    try:
+        return _train_embedding(config, setting, inputs, storage)
+    finally:
+        torch.use_deterministic_algorithms(
+            previous_deterministic, warn_only=previous_warn_only
+        )
+
+
+def _train_embedding(
+    config: Mapping[str, Any],
+    setting: EmbeddingSettings,
+    inputs: dict[str, str],
+    storage: Any,
+) -> dict[str, Any]:
+    """`train_embedding`이 결정성 설정을 걸어 둔 채로 부르는 본체입니다."""
+
+    # **아무것도 쓰기 전에** 저장이 어디서 일어나는지 봅니다. 늦게 보면 저장소
+    # 밖에 파일을 쓴 뒤에 거절합니다.
+    _guard_storage_root(storage)
+    prefix = f"{setting.output_prefix}/{setting.run_id}"
+    _guard_completed(storage, prefix, setting.run_id)
 
     with tempfile.TemporaryDirectory(prefix="embedding-") as scratch:
         root = Path(scratch) / "bank"
-        records = read_crop_bank(storage, inputs["crop_bank_uri"], root)
+        bank = read_crop_bank(storage, inputs["crop_bank_uri"], root)
+        records, crop_size = bank["records"], bank["crop_size"]
         categories = sorted({int(record["category_id"]) for record in records})
         labels = {category: index for index, category in enumerate(categories)}
         if len(categories) < 2:
             raise EmbeddingTrainingError(
                 "임베딩은 class가 둘 이상이어야 학습할 수 있습니다."
             )
+        check_class_map(storage, inputs["class_map_uri"], categories)
 
         device = torch.device(setting.device)
         model = build_model(
@@ -340,11 +582,54 @@ def train_embedding(config: Mapping[str, Any]) -> dict[str, Any]:
         history: list[dict[str, Any]] = []
         best_accuracy = -1.0
         best_epoch = 0
+        # 원격 사본이 담고 있는 epoch입니다. 이름을 잡는 순간 0으로 시작하고,
+        # 그 뒤로는 갱신에 성공한 epoch입니다. **원격 사본 자체가 자기 epoch을
+        # 적고 있으므로**, 이 값은 편의일 뿐 근거는 그 파일입니다.
+        mirrored_epoch = 0
         started = time.time()
-        working = Path(setting.output_dir) / f".{setting.run_id}.partial"
-        working.mkdir(parents=True, exist_ok=True)
+        # **작업 directory는 만들어 잡습니다.** 이미 있으면 중단된 앞선 실행이
+        # 거기 있고, 그 안의 checkpoint가 그 학습의 **유일한 사본**입니다. 그대로
+        # 이어 쓰면 다시 돌린 사람이 앞선 밤을 지웁니다. `exist_ok=False`라야
+        # 만들기와 확인이 한 번에 일어나, 두 실행이 동시에 시작해도 하나만 잡습니다.
+        working = REPOSITORY_ROOT / setting.output_dir / f".{setting.run_id}.partial"
+        try:
+            working.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as error:
+            raise EmbeddingTrainingError(
+                f"같은 이름의 중단된 학습이 남아 있습니다: {setting.run_id}. "
+                "그 안의 checkpoint가 유일한 사본이므로 지우거나 다른 run_id를 "
+                "쓰는 것은 사람이 정합니다."
+            ) from error
         best_path = working / "best_checkpoint.pt"
         last_path = working / "last_checkpoint.pt"
+
+        # **이름 잡기와 원격 사본을 하나로 둡니다.** 아직 한 batch도 돌지 않았지만
+        # 지금 model 그대로가 자족적인 checkpoint이므로, 그것을 조건부로 올려
+        # `running/`을 만듭니다. 그 조건부 쓰기 하나가 두 가지를 다 합니다.
+        #
+        # - 진 쪽은 **첫 batch 전에** 멈춥니다.
+        # - 이긴 쪽은 그 순간부터 원격에 사본을 갖습니다. 이름만 남고 학습은
+        #   사라지는 창이 없습니다.
+        #
+        # 표식 파일을 따로 두면 그 사이가 벌어집니다. detector의 "첫 조건부 쓰기가
+        # run_id를 claim한다"와 같은 규칙입니다.
+        _save_checkpoint(
+            _checkpoint(model, setting, categories, 0, 0.0, crop_size), last_path
+        )
+        try:
+            storage.upload_file(
+                last_path, f"{prefix}/{RUNNING_CHECKPOINT}", overwrite=False
+            )
+        except (StorageError, OSError) as error:
+            # 원격 이름을 다른 실행이 먼저 잡았습니다. 방금 만든 이 자리는 **이
+            # 실행이 만든 것**이라 치웁니다. 남겨 두면 다음 시도가 "중단된 학습이
+            # 있다"에 막히는데, 그 안에는 이 실행이 방금 쓴 것밖에 없습니다.
+            last_path.unlink(missing_ok=True)
+            working.rmdir()
+            raise EmbeddingTrainingError(
+                f"'{setting.run_id}' 이름을 잡지 못했습니다. 같은 이름의 실행이 돌고 "
+                "있거나 끊긴 채 남아 있습니다. 치울지는 사람이 정합니다."
+            ) from error
 
         for epoch in range(1, setting.epochs + 1):
             model.train()
@@ -370,12 +655,22 @@ def train_embedding(config: Mapping[str, Any]) -> dict[str, Any]:
                 }
             )
             if epoch % setting.checkpoint_every == 0 or epoch == setting.epochs:
-                torch.save(_checkpoint(model, setting, categories, epoch, accuracy), last_path)
-                if accuracy > best_accuracy:
-                    best_accuracy, best_epoch = accuracy, epoch
-                    torch.save(
-                        _checkpoint(model, setting, categories, epoch, accuracy), best_path
-                    )
+                _save_checkpoint(
+                    _checkpoint(model, setting, categories, epoch, accuracy, crop_size),last_path
+                )
+                # **원격 사본을 지금 epoch으로 앞당깁니다.** 이름을 잡을 때 올린
+                # epoch 0 사본이 이미 있으므로 원격이 비지는 않지만, 여기서 갱신하지
+                # 않으면 Colab runtime이 끊겼을 때 학습 전 model만 남습니다.
+                if _mirror_running(storage, prefix, last_path):
+                    mirrored_epoch = epoch
+            # **best는 주기와 무관하게 매 epoch 봅니다.** 주기 안에 두면 주기 사이에
+            # 나온 가장 좋은 epoch이 best가 되지 못하고, 더 나쁜 model이 조용히
+            # best_checkpoint.pt라는 이름으로 나갑니다. 쓰는 쪽은 그 이름을 믿습니다.
+            if accuracy > best_accuracy:
+                best_accuracy, best_epoch = accuracy, epoch
+                _save_checkpoint(
+                    _checkpoint(model, setting, categories, epoch, accuracy, crop_size),best_path
+                )
 
         if not best_path.exists():
             raise EmbeddingTrainingError("checkpoint를 하나도 남기지 못했습니다.")
@@ -389,24 +684,38 @@ def train_embedding(config: Mapping[str, Any]) -> dict[str, Any]:
             "best_epoch": best_epoch,
             "best_train_accuracy": round(best_accuracy, 6),
             "elapsed_seconds": round(time.time() - started, 1),
+            # 원격 사본이 담고 있는 epoch입니다. 이름을 잡을 때 epoch 0으로
+            # 시작하므로 **사본은 언제나 있습니다.** 0이면 그 뒤 갱신이 한 번도
+            # 성공하지 못했다는 뜻이고, 지금 끊기면 원격에는 학습 전 model만
+            # 남습니다.
+            "running_mirror_epoch": mirrored_epoch,
             "epochs": history,
         }
 
-        prefix = f"{setting.output_prefix}/{setting.run_id}"
+        # **한 번 쓰고 마는 attempt 자리에 올립니다.** 고정된 이름에 세 번 올리면
+        # 두 번째에서 끊겼을 때 반쪽이 그 이름을 차지해, 그 자리를 다시 쓰려면
+        # 사람이 지워야 합니다. attempt 자리는 실행마다 새 이름이라 끊긴 것은
+        # 그냥 버려진 폴더로 남습니다. detector의 게시와 같은 모양입니다.
+        attempt = f"{prefix}/attempts/{uuid4().hex}"
         artifacts = {
             "run_id": setting.run_id,
             "best_checkpoint_uri": _published(
-                storage.upload_file(best_path, f"{prefix}/best_checkpoint.pt", overwrite=False)
+                storage.upload_file(best_path, f"{attempt}/best_checkpoint.pt")
             ),
             "last_checkpoint_uri": _published(
-                storage.upload_file(last_path, f"{prefix}/last_checkpoint.pt", overwrite=False)
+                storage.upload_file(last_path, f"{attempt}/last_checkpoint.pt")
             ),
             "training_history_uri": _published(
-                storage.write_json(
-                    f"{prefix}/training_history.json", history_document, overwrite=False
-                )
+                storage.write_json(f"{attempt}/training_history.json", history_document)
             ),
         }
+        # **마지막에 끝났다는 표식을 남깁니다.** 셋이 다 올라간 뒤라야 다음 실행이
+        # "이미 끝난 이름"과 "끊긴 이름"을 구별할 수 있습니다.
+        storage.write_json(
+            f"{prefix}/{COMPLETED_MARKER}",
+            {"run_id": setting.run_id, "artifacts": artifacts},
+            overwrite=False,
+        )
         best_path.unlink(missing_ok=True)
         last_path.unlink(missing_ok=True)
         working.rmdir()
@@ -425,6 +734,10 @@ def train_embedding(config: Mapping[str, Any]) -> dict[str, Any]:
             "best_train_accuracy": round(best_accuracy, 6),
             "seed": setting.seed,
             "device": setting.device,
+            # 원격 사본이 담고 있는 epoch입니다. 이름을 잡을 때 0으로 시작하므로
+            # **사본이 없는 경우는 없습니다.** 0으로 남았으면 도는 동안의 갱신이
+            # 한 번도 성공하지 못했다는 뜻입니다.
+            "running_mirror_epoch": mirrored_epoch,
         },
         "message": (
             f"crop {len(records)}개, class {len(categories)}종으로 "
