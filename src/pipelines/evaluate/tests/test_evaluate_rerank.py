@@ -48,7 +48,9 @@ def _write_crop_bank(
     colours: dict[int, tuple[int, int, int]],
     *,
     per_class: int = 2,
-    escaping: bool = False,
+    escaping: str | None = None,
+    linking: bool = False,
+    listing_escapes: bool = False,
 ) -> str:
     """data가 만드는 것과 같은 모양의 crop 은행 tar을 만듭니다."""
 
@@ -60,6 +62,9 @@ def _write_crop_bank(
             name = f"crops/{category_id}/{index}.png"
             payloads[name] = _crop_bytes(colour)
             records.append({"path": name, "category_id": category_id})
+    if listing_escapes:
+        # tar은 멀쩡한데 **목록만** 밖을 가리키는 경우입니다.
+        records.append({"path": "../../secret.png", "category_id": 3})
     document = {
         "version": 1,
         "crop_size": CROP_SIZE,
@@ -79,9 +84,16 @@ def _write_crop_bank(
             archive.addfile(info, io.BytesIO(payload))
         if escaping:
             escape = b"stolen"
-            info = tarfile.TarInfo("../escaped.txt")
+            info = tarfile.TarInfo(escaping)
             info.size = len(escape)
             archive.addfile(info, io.BytesIO(escape))
+        if linking:
+            # 이름은 폴더 안이라 경계 검사를 통과하지만, 푸는 순간 link가 되어
+            # 그 뒤 쓰기가 밖으로 나갑니다.
+            info = tarfile.TarInfo("crops/looks-fine.png")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "../../outside.png"
+            archive.addfile(info)
     return str(path)
 
 
@@ -288,14 +300,27 @@ def test_rerank_refuses_the_same_checkpoint_twice(base_config: dict, repository_
     assert "같은 checkpoint를 두 번" in result["message"]
 
 
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        ({"escaping": "../escaped.txt"}, "폴더 밖을 가리키는 항목"),
+        # 푸는 자리가 `bank`일 때 `bank-evil`은 **문자열 앞자리가 같습니다.**
+        # startswith로 경계를 보면 이것이 통과합니다.
+        ({"escaping": "../bank-evil/escaped.txt"}, "폴더 밖을 가리키는 항목"),
+        ({"linking": True}, "보통 파일이 아닌 항목"),
+        # tar은 멀쩡한데 목록만 밖을 가리키는 경우입니다. 그 경로를 여는 것은
+        # 재순위 도중이라, 여기서 안 막으면 batch마다 저장소 밖 파일을 읽습니다.
+        ({"listing_escapes": True}, "폴더 밖을 가리키는 항목"),
+    ],
+)
 def test_rerank_refuses_a_crop_bank_that_reaches_outside_its_folder(
-    base_config: dict, repository_root: Path
+    base_config: dict, repository_root: Path, kind: dict, expected: str
 ):
-    """tar 안의 `../`는 푸는 쪽 file을 덮어씁니다."""
+    """남이 만든 tar을 그대로 푸는 습관을 남기지 않습니다."""
 
     _prepare(base_config, repository_root, category_ids=(3, 7))
     bank = _write_crop_bank(
-        repository_root / "data/test/crop_bank.tar", {3: RED, 7: BLUE}, escaping=True
+        repository_root / "data/test/crop_bank.tar", {3: RED, 7: BLUE}, **kind
     )
     _write_embedding_checkpoint(repository_root / "checkpoints/embedding.pt", [3, 7])
     base_config["evaluate"]["rerank_checkpoint_uris"] = ["checkpoints/embedding.pt"]
@@ -304,7 +329,7 @@ def test_rerank_refuses_a_crop_bank_that_reaches_outside_its_folder(
     result = run(base_config)
 
     assert result["status"] == "error"
-    assert "폴더 밖을 가리키는 항목" in result["message"]
+    assert expected in result["message"]
 
 
 def test_fusion_refuses_predictions_whose_scores_were_already_reranked(

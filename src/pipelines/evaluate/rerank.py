@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import math
+import ntpath
 import tarfile
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -71,6 +72,44 @@ def _import_image() -> Any:
     return Image
 
 
+def _inside(destination: Path, name: str) -> Path:
+    """푼 자리 안을 가리키는 경로인지 확인하고 그 경로를 돌려줍니다.
+
+    **문자열 앞자리 비교로는 부족합니다.** 푸는 자리가 `bank`이면 `bank-evil`은
+    앞자리가 같아 통과합니다. 경계는 경로 단위로 봐야 하므로 `relative_to`에
+    맡깁니다.
+    """
+
+    if ntpath.isabs(name) or Path(name).is_absolute():
+        raise InputArtifactError(f"crop 은행에 절대 경로가 있습니다: {name}")
+    root = destination.resolve()
+    target = (destination / name).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as error:
+        raise InputArtifactError(
+            f"crop 은행에 폴더 밖을 가리키는 항목이 있습니다: {name}"
+        ) from error
+    return target
+
+
+def _safe_member(member: tarfile.TarInfo, destination: Path) -> None:
+    """푸는 항목 하나를 검사합니다.
+
+    이름만 봐서는 모자랍니다. symlink와 hardlink는 **가리키는 곳**으로 나갈 수 있고,
+    device나 fifo는 애초에 crop 은행에 있을 이유가 없습니다. 은행은 data가 만들지만
+    이 함수는 남이 만든 파일도 받습니다.
+    """
+
+    if not (member.isfile() or member.isdir()):
+        raise InputArtifactError(
+            f"crop 은행에 보통 파일이 아닌 항목이 있습니다: {member.name}"
+        )
+    _inside(destination, member.name)
+    if member.linkname:
+        _inside(destination, member.linkname)
+
+
 def load_crop_bank(store: ArtifactStore, uri: str, destination: Path) -> dict[str, Any]:
     """crop 은행 tar을 내려받아 풀고 목록 문서를 돌려줍니다.
 
@@ -84,11 +123,7 @@ def load_crop_bank(store: ArtifactStore, uri: str, destination: Path) -> dict[st
     try:
         with tarfile.open(archive_path) as archive:
             for member in archive.getmembers():
-                target = (destination / member.name).resolve()
-                if not str(target).startswith(str(destination.resolve())):
-                    raise InputArtifactError(
-                        f"crop 은행에 폴더 밖을 가리키는 항목이 있습니다: {member.name}"
-                    )
+                _safe_member(member, destination)
             archive.extractall(destination)
         document = json.loads((destination / CROP_BANK_INDEX).read_text(encoding="utf-8"))
     except (OSError, ValueError, tarfile.TarError) as error:
@@ -103,10 +138,15 @@ def load_crop_bank(store: ArtifactStore, uri: str, destination: Path) -> dict[st
         if (
             not isinstance(record, Mapping)
             or not isinstance(record.get("path"), str)
+            or not record.get("path")
             or not isinstance(record.get("category_id"), int)
             or isinstance(record.get("category_id"), bool)
         ):
             raise InputArtifactError(f"crop 은행 항목의 형식이 올바르지 않습니다: {uri}")
+        # tar을 안전하게 풀었어도 **목록이 다른 곳을 가리킬 수 있습니다.** 그 경로를
+        # 여는 것은 재순위 도중이라, 여기서 안 막으면 저장소 밖 파일을 batch마다
+        # 읽습니다.
+        _inside(destination, str(record["path"]))
     return dict(document)
 
 
