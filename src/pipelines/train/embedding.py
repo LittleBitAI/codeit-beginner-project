@@ -658,9 +658,9 @@ def _train_embedding(
                 _save_checkpoint(
                     _checkpoint(model, setting, categories, epoch, accuracy, crop_size),last_path
                 )
-                # **저장소에도 그때그때 올려 둡니다.** 이름만 잡아 두고 사본을 안
-                # 올리면, Colab runtime이 끊겼을 때 이름은 막혀 있는데 학습한 것은
-                # 사라집니다. detector의 `running/`과 같은 자리입니다.
+                # **원격 사본을 지금 epoch으로 앞당깁니다.** 이름을 잡을 때 올린
+                # epoch 0 사본이 이미 있으므로 원격이 비지는 않지만, 여기서 갱신하지
+                # 않으면 Colab runtime이 끊겼을 때 학습 전 model만 남습니다.
                 if _mirror_running(storage, prefix, last_path):
                     mirrored_epoch = epoch
             # **best는 주기와 무관하게 매 epoch 봅니다.** 주기 안에 두면 주기 사이에
