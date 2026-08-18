@@ -245,8 +245,12 @@ def _normalisation(checkpoint: Mapping[str, Any], *, source: str) -> tuple[Any, 
                 f"{source}: normalisation.{key}는 유한한 숫자 셋이어야 합니다."
             )
         values.append([float(number) for number in item])
-    if any(number == 0.0 for number in values[1]):
-        raise InputArtifactError(f"{source}: normalisation.std에 0이 있습니다.")
+    # 0뿐 아니라 **음수도 막습니다.** 음수 std는 그 channel의 방향을 뒤집어, 오류
+    # 없이 특징만 틀어집니다. 표준편차는 정의상 0보다 큽니다.
+    if any(number <= 0.0 for number in values[1]):
+        raise InputArtifactError(
+            f"{source}: normalisation.std는 모두 0보다 커야 합니다."
+        )
     mean = torch.tensor(values[0]).view(3, 1, 1)
     std = torch.tensor(values[1]).view(3, 1, 1)
     return mean, std
@@ -306,19 +310,28 @@ def _stack(crops: Sequence[Any], *, mean: Any, std: Any) -> Any:
 
 
 def _embed(model: Any, batch: Any, *, device: str) -> Any:
-    """8-way TTA로 특징을 뽑아 하나로 모읍니다. 결과는 L2 정규화된 vector입니다."""
+    """8-way TTA로 특징을 뽑아 하나로 모읍니다. 결과는 L2 정규화된 vector입니다.
+
+    torch가 내는 실패는 계약 오류로 바꿉니다. GPU가 모자라거나 kernel이 터지면
+    `RuntimeError`가 나는데, 그대로 두면 `run()` 경계를 넘어 나갑니다.
+    """
 
     torch = _import_torch()
     total = None
-    for flip in TTA_FLIPS:
-        base = torch.flip(batch, dims=[3]) if flip else batch
-        for turns in range(TTA_TURNS):
-            view = torch.rot90(base, turns, dims=[2, 3]) if turns else base
-            with torch.inference_mode():
-                features = model(view.to(torch.device(device)))
-            features = torch.nn.functional.normalize(features.float().cpu(), dim=1)
-            total = features if total is None else total + features
-    return torch.nn.functional.normalize(total, dim=1)
+    try:
+        for flip in TTA_FLIPS:
+            base = torch.flip(batch, dims=[3]) if flip else batch
+            for turns in range(TTA_TURNS):
+                view = torch.rot90(base, turns, dims=[2, 3]) if turns else base
+                with torch.inference_mode():
+                    features = model(view.to(torch.device(device)))
+                features = torch.nn.functional.normalize(features.float().cpu(), dim=1)
+                total = features if total is None else total + features
+        return torch.nn.functional.normalize(total, dim=1)
+    except (RuntimeError, ValueError, MemoryError) as error:
+        raise PredictionError(
+            f"재순위 추론에 실패했습니다 ({error.__class__.__name__}): {error}"
+        ) from error
 
 
 def _embed_all(
@@ -341,16 +354,20 @@ def _embed_all(
 
 
 def _margins(similarity: Any, *, bank_categories: Sequence[int], categories: Sequence[int]) -> Any:
-    """행마다 `자기 class 최고 유사도 - 다른 class 최고 유사도`를 냅니다.
+    """행마다 `자기 class 최고 유사도 - 다른 class 최고 유사도`와, **잴 수 있었는지**를 냅니다.
 
     은행에 없는 class는 잴 수 없습니다. 그때 0을 넣으면 "재 봤더니 확신이
-    없더라"가 되어 점수가 반으로 깎이므로 `nan`으로 두고, 부르는 쪽이 그 행의
-    점수를 그대로 둡니다.
+    없더라"가 되어 점수가 반으로 깎이므로 부르는 쪽이 그 행의 점수를 그대로 둡니다.
+
+    "재지 못했다"와 "재려다 값이 망가졌다"를 **따로 냅니다.** 둘을 `nan` 하나로
+    합치면, model이 발산해 특징이 전부 `nan`이 된 실행이 "참조가 없는 class뿐이었다"와
+    구별되지 않아 한 행도 바꾸지 않은 채 성공으로 끝납니다.
     """
 
     torch = _import_torch()
     bank = torch.tensor(list(bank_categories))
-    result = torch.full((similarity.shape[0],), float("nan"))
+    result = torch.zeros(similarity.shape[0])
+    measurable = torch.zeros(similarity.shape[0], dtype=torch.bool)
     for index, category_id in enumerate(categories):
         own_columns = bank == category_id
         if not bool(own_columns.any()):
@@ -361,7 +378,8 @@ def _margins(similarity: Any, *, bank_categories: Sequence[int], categories: Seq
             # class가 하나뿐인 은행에서는 비교 대상이 없습니다.
             continue
         result[index] = row[own_columns].max() - row[other_columns].max()
-    return result
+        measurable[index] = True
+    return result, measurable
 
 
 def rerank_predictions(
@@ -484,22 +502,31 @@ def rerank_predictions(
             )
             del model, reference, embedded
 
-    margin = torch.stack(collected).mean(dim=0)
+    margin = torch.stack([item[0] for item in collected]).mean(dim=0)
+    # 한 checkpoint라도 재지 못한 행은 재지 못한 것으로 봅니다. 평균에 넣으면 그
+    # checkpoint의 0이 다른 checkpoint의 판단을 희석합니다.
+    measurable = torch.stack([item[1] for item in collected]).all(dim=0)
     reranked = 0
     values: list[float] = []
     for position, index in enumerate(wanted):
+        if not bool(measurable[position]):
+            # 참조 crop이 없는 class입니다. 못 잰 것을 0으로 적으면 그 행의 점수가
+            # 절반이 되어, "재지 못했다"가 "확신이 없다"로 조용히 바뀝니다.
+            continue
         value = float(margin[position])
         if not math.isfinite(value):
-            continue
-        # 식은 `(1 + margin) / 2`이고 **위로 자르지 않습니다.** 유사도 차이는 2까지
-        # 갈 수 있어 곱하는 값이 1을 넘을 수 있는데, 거기서 1로 자르면 가장 확신이
-        # 센 행이 확신이 보통인 행과 같은 대우를 받습니다. 대회 점수를 낸 실험에도
-        # 자르기가 없었습니다.
-        #
-        # 아래로만 0에서 막습니다. margin이 -1보다 작다는 것은 "다른 class 쪽이
-        # 확실히 가깝다"는 뜻이고, 음수 점수는 제출할 수 있는 값이 아닙니다.
-        multiplier = max(0.0, (1.0 + value) / 2.0)
-        rows[index]["score"] = float(rows[index]["score"]) * multiplier
+            # 잴 수 있는 행인데 값이 망가졌습니다. model이 발산했거나 checkpoint가
+            # 깨진 것이고, 조용히 건너뛰면 아무것도 바꾸지 않은 채 성공합니다.
+            raise PredictionError(
+                "재순위 margin이 숫자가 아닙니다. checkpoint의 가중치나 정규화 값을 "
+                "확인하세요."
+            )
+        # 식은 `(1 + margin) / 2`이고 **자르지 않습니다.** 유사도 차이는 -2..2까지
+        # 가므로 곱하는 값은 -0.5..1.5입니다. 위에서 자르면 가장 확신이 센 행이
+        # 보통인 행과 같아지고, 아래에서 0으로 막으면 "확실히 다른 class"인 행들이
+        # 전부 같은 점수로 뭉쳐 그 사이 순서가 사라집니다. 채점은 순서로 하므로 그
+        # 순서가 곧 점수입니다. 제출 계약에도 점수 범위 규칙은 없습니다.
+        rows[index]["score"] = float(rows[index]["score"]) * (1.0 + value) / 2.0
         values.append(value)
         reranked += 1
 

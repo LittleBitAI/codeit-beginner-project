@@ -282,8 +282,9 @@ def test_rerank_refuses_a_detector_checkpoint(base_config: dict, repository_root
         # 센 행이 확신이 보통인 행과 같은 대우를 받습니다.
         (1.5, 0.9 * 1.25),
         (0.5, 0.9 * 0.75),
-        # 아래로는 0에서 막습니다. 음수 점수는 제출할 수 있는 값이 아닙니다.
-        (-1.5, 0.0),
+        # 아래로도 자르지 않습니다. 0에서 막으면 "확실히 다른 class"인 행들이 전부
+        # 같은 점수로 뭉쳐 그 사이 순서가 사라지는데, 채점은 순서로 합니다.
+        (-1.5, 0.9 * -0.25),
     ],
 )
 def test_the_multiplier_follows_the_formula(
@@ -301,8 +302,9 @@ def test_the_multiplier_follows_the_formula(
     base_config["evaluate"]["rerank_checkpoint_uris"] = ["checkpoints/embedding.pt"]
     base_config["evaluate"]["rerank_crop_bank_uri"] = bank
     original = rerank_module._margins
-    rerank_module._margins = lambda similarity, **kwargs: torch.full(
-        (similarity.shape[0],), margin
+    rerank_module._margins = lambda similarity, **kwargs: (
+        torch.full((similarity.shape[0],), margin),
+        torch.ones(similarity.shape[0], dtype=torch.bool),
     )
     try:
         result = run(base_config)
@@ -321,7 +323,9 @@ def test_the_multiplier_follows_the_formula(
         ({"crop_size": None}, "crop 크기를 적어 두지 않았습니다"),
         ({"crop_size": "224"}, "crop 크기를 적어 두지 않았습니다"),
         ({"normalisation": None}, "normalisation이 필요합니다"),
-        ({"normalisation": {"mean": [0.5, 0.5, 0.5], "std": [0.0, 0.2, 0.2]}}, "0이 있습니다"),
+        ({"normalisation": {"mean": [0.5, 0.5, 0.5], "std": [0.0, 0.2, 0.2]}}, "0보다 커야"),
+        # 음수 std는 그 channel의 방향을 뒤집어, 오류 없이 특징만 틀어집니다.
+        ({"normalisation": {"mean": [0.5, 0.5, 0.5], "std": [-0.2, 0.2, 0.2]}}, "0보다 커야"),
         (
             {"normalisation": {"mean": [0.5, 0.5], "std": [0.2, 0.2, 0.2]}},
             "유한한 숫자 셋",
@@ -356,6 +360,85 @@ def test_a_checkpoint_that_cannot_say_how_it_was_trained_is_refused(
 
     assert result["status"] == "error"
     assert expected in result["message"]
+
+
+def test_a_margin_that_is_not_a_number_stops_the_run(
+    base_config: dict, repository_root: Path
+):
+    """"재지 못했다"와 "재려다 망가졌다"를 같게 다루면 조용한 무동작이 됩니다.
+
+    model이 발산해 특징이 전부 `nan`이 되면 margin도 `nan`이 되는데, 그것을 참조 없는
+    class와 같게 건너뛰면 **한 행도 바꾸지 않은 채 성공으로** 끝납니다.
+    """
+
+    _prepare(base_config, repository_root, category_ids=(3, 7))
+    bank = _write_crop_bank(repository_root / "data/test/crop_bank.tar", {3: RED, 7: BLUE})
+    _write_embedding_checkpoint(repository_root / "checkpoints/embedding.pt", [3, 7])
+    base_config["evaluate"]["rerank_checkpoint_uris"] = ["checkpoints/embedding.pt"]
+    base_config["evaluate"]["rerank_crop_bank_uri"] = bank
+    original = rerank_module._margins
+    rerank_module._margins = lambda similarity, **kwargs: (
+        torch.full((similarity.shape[0],), float("nan")),
+        torch.ones(similarity.shape[0], dtype=torch.bool),
+    )
+    try:
+        result = run(base_config)
+    finally:
+        rerank_module._margins = original
+
+    assert result["status"] == "error"
+    assert "숫자가 아닙니다" in result["message"]
+
+
+def test_an_unmeasurable_row_is_left_alone_not_treated_as_broken(
+    base_config: dict, repository_root: Path
+):
+    """참조가 없는 class는 오류가 아니라 그냥 두는 것이 맞습니다."""
+
+    # 은행은 3과 5를 알고, 예측은 3과 7입니다. 7은 참조가 없습니다.
+    _prepare(base_config, repository_root, category_ids=(3, 7))
+    bank = _write_crop_bank(repository_root / "data/test/crop_bank.tar", {3: RED, 5: BLUE})
+    _write_embedding_checkpoint(repository_root / "checkpoints/embedding.pt", [3, 5])
+    base_config["evaluate"]["rerank_checkpoint_uris"] = ["checkpoints/embedding.pt"]
+    base_config["evaluate"]["rerank_crop_bank_uri"] = bank
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+    scores = _submission_scores(repository_root, result)
+    assert scores[20] == pytest.approx(0.9)
+
+
+def test_an_inference_failure_is_reported_not_raised(
+    base_config: dict, repository_root: Path
+):
+    """GPU가 모자라거나 kernel이 터지면 `RuntimeError`가 납니다.
+
+    그대로 두면 `run()` 경계를 넘어 나갑니다. 이 pipeline은 실패를 status=error로
+    돌려주지, 예외를 내보내지 않습니다.
+    """
+
+    _prepare(base_config, repository_root, category_ids=(3, 7))
+    bank = _write_crop_bank(repository_root / "data/test/crop_bank.tar", {3: RED, 7: BLUE})
+    _write_embedding_checkpoint(repository_root / "checkpoints/embedding.pt", [3, 7])
+    base_config["evaluate"]["rerank_checkpoint_uris"] = ["checkpoints/embedding.pt"]
+    base_config["evaluate"]["rerank_crop_bank_uri"] = bank
+
+    def exploding(*args, **kwargs):
+        def model(_batch):
+            raise RuntimeError("CUDA out of memory")
+
+        return model
+
+    original = rerank_module._embedding_model
+    rerank_module._embedding_model = exploding
+    try:
+        result = run(base_config)
+    finally:
+        rerank_module._embedding_model = original
+
+    assert result["status"] == "error"
+    assert "재순위 추론에 실패했습니다" in result["message"]
 
 
 def test_a_missing_reference_crop_is_reported_not_raised(
