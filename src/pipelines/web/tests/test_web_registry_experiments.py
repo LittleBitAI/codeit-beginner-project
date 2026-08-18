@@ -1133,6 +1133,9 @@ def test_detail_does_not_mark_a_peak_it_cannot_believe(client, monkeypatch):
         ({"threshold": 0.3, "precision": 0.9, "recall": 0.9, "f1": 0.9}, "탐색에 없는 지점"),
         # 지점은 있는데 F1이 다릅니다. 그 줄에 붙는 "F1 최고"는 거짓입니다.
         ({"threshold": 0.5, "precision": 0.95, "recall": 0.93, "f1": 0.11}, "F1이 어긋남"),
+        # **그 줄의 값과는 맞는데 더 높은 줄이 있습니다.** 0.10의 F1이 0.88로
+        # 더 높으므로 0.05를 "최고"라고 하면 거짓입니다.
+        ({"threshold": 0.05, "precision": 0.7, "recall": 1.0, "f1": 0.82}, "더 높은 줄이 있음"),
     ],
 )
 def test_detail_does_not_mark_a_peak_the_sweep_does_not_agree_with(

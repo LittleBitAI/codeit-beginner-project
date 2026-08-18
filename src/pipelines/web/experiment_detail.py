@@ -321,6 +321,11 @@ def _best_f1(value: Any, rows: list[dict[str, Any]] | None) -> dict[str, Any] | 
         for row in rows
     ):
         return None
+    # **더 높은 F1이 있으면 "최고"가 아닙니다.** 표시가 주장하는 것이 그것이므로
+    # 이것까지 봐야 참이 됩니다. 동률 중 어느 지점을 고르는지는 evaluate의
+    # 규칙이라 여기서 다시 쓰지 않습니다 — 어느 쪽을 골라도 표시는 참입니다.
+    if any(row["f1"] is not None and float(row["f1"]) > f1 + 1e-9 for row in rows):
+        return None
     return {
         "threshold": _number(value["threshold"]),
         "precision": _number(value["precision"]),
