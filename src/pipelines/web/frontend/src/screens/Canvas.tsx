@@ -694,6 +694,7 @@ export function Canvas({
   loading,
   onScoreSaved,
   onNewExperiment,
+  onOpenDiagnosis,
 }: {
   datasetKey: string | null;
   /** 왼쪽에서 고른 dataset의 기록만 넘어옵니다. */
@@ -713,6 +714,13 @@ export function Canvas({
    * 초안을 직접 만지면 이 화면만 따로 그려 보는 것도 못 하게 됩니다.
    */
   onNewExperiment: (settings: Record<string, string>) => void;
+  /**
+   * 그 실행이 왜 틀렸는지 보는 시트를 엽니다.
+   *
+   * 시트는 App이 들고 있습니다. 이 화면이 직접 그리면 견주기 화면 안에 실행 하나짜리
+   * 진단이 섞여, 어느 실행의 착각인지 흐려집니다.
+   */
+  onOpenDiagnosis: (runId: string) => void;
 }) {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -1102,6 +1110,14 @@ export function Canvas({
                       여럿을 겹쳤을 때만 내면, 기록에서 실행 하나를 눌러 들어온 사람은
                       끝내 못 봅니다. */}
                   <WeakClassTable experiments={compared} />
+                  {/* 약한 class를 본 다음 오는 질문이 "왜 약한가"입니다. 그 답은
+                      혼동과 오검출 원인에 있는데, 지금까지 metrics.json을 직접
+                      열어야만 볼 수 있었습니다. */}
+                  <div style={{ marginTop: 18 }}>
+                    <LinkAction onClick={() => onOpenDiagnosis(compared[0]!.run_id)}>
+                      왜 틀렸는지 진단 보기 →
+                    </LinkAction>
+                  </div>
                 </>
               ) : (
                 <div style={{ paddingTop: 26, borderTop: `1px solid ${color.border}` }}>

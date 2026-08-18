@@ -107,7 +107,11 @@ function MonitorStub() {
   return <div>모니터 화면 {jobId}</div>;
 }
 
-function show(records: RunRecord[], runs = ['run-a']) {
+function show(
+  records: RunRecord[],
+  runs = ['run-a'],
+  onOpenDiagnosis: (runId: string) => void = () => {},
+) {
   return render(
     <MemoryRouter initialEntries={[`/canvas?${runs.map((id) => `run=${id}`).join('&')}`]}>
       <Routes>
@@ -120,6 +124,7 @@ function show(records: RunRecord[], runs = ['run-a']) {
               loading={false}
               onScoreSaved={() => {}}
               onNewExperiment={() => {}}
+              onOpenDiagnosis={onOpenDiagnosis}
             />
           }
         />
@@ -154,6 +159,17 @@ describe('약한 class 표', () => {
     expect(screen.queryByText('0.000')).toBeNull();
     // 그 자리에 무엇이 적히는지까지 봅니다. 안 적히는 것만 보면 빈 칸도 통과합니다.
     expect(screen.getByText('미측정')).toBeTruthy();
+  });
+
+  it('약한 class를 본 자리에서 왜 틀렸는지로 이어 준다', async () => {
+    // 진단 시트를 만들어 두어도 여기서 이어 주지 않으면 아무도 닿지 못합니다.
+    // 어느 실행인지까지 봅니다 — 엉뚱한 실행의 진단을 열면 조용히 틀립니다.
+    const opened: string[] = [];
+    show([record()], ['run-a'], (runId) => opened.push(runId));
+
+    fireEvent.click(await screen.findByText('왜 틀렸는지 진단 보기 →'));
+
+    expect(opened).toEqual(['run-a']);
   });
 
   it('이 컴퓨터가 돌린 실행이면 그 job의 로그 화면으로 보낸다', async () => {

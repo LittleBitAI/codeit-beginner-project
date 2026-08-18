@@ -50,6 +50,15 @@ _SUMMARY_KEYS = frozenset(
     {"min_truth_count", "top_n", "counts", "weak", "sparse", "unmeasured"}
 )
 
+#: 화면에 보낼 헷갈린 쌍의 수입니다. 대회 118종이면 행렬은 119x119이고 비대각선
+#: 칸만 14,042개입니다. 그대로 보내면 칸 하나가 1px이라 아무것도 못 읽습니다.
+#: 사람이 묻는 것은 "무엇을 무엇으로 착각하는가"이므로 잦은 것부터 자릅니다.
+CONFUSION_TOP_N = 20
+
+#: evaluate가 false positive를 나누는 이름입니다. 값이 없으면 0으로 채우지 않고
+#: 그 IoU를 통째로 뺍니다 — 0건과 "안 쟀다"는 다른 말입니다.
+_ERROR_CAUSES: tuple[str, ...] = ("localization", "classification", "background", "duplicate")
+
 
 def _number(value: Any) -> int | float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -94,6 +103,9 @@ def _unavailable_evaluation(reason: str) -> dict[str, Any]:
         "max_detections_per_image": None,
         "score_sweep": {},
         "best_f1": {},
+        "confusions": {},
+        "confusion_counts": {},
+        "error_breakdown": {},
         "per_class_summary": None,
     }
 
@@ -136,6 +148,67 @@ def _looks_numeric(value: Any) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int]:
+    """confusion matrix에서 **헷갈린 쌍만** 골라 잦은 순으로 냅니다.
+
+    돌려주는 것은 (상위 목록, 전체 쌍 수)입니다. 행렬 자체는 내지 않습니다.
+
+    대각선은 맞힌 것이라 뺍니다. 0번 행·열(background)은 **뺄 수 없습니다** —
+    0행은 없는 것을 찾은 것이고 0열은 놓친 것이라, 빼면 왜 틀렸는지의 절반이
+    사라집니다.
+    """
+
+    if not isinstance(block, Mapping):
+        return [], 0
+    matrix = block.get("matrix")
+    labels = block.get("labels")
+    if not isinstance(matrix, Sequence) or not isinstance(labels, Sequence):
+        return [], 0
+    ids = block.get("category_ids")
+    id_list = list(ids) if isinstance(ids, Sequence) else []
+
+    def name_of(index: int) -> str:
+        return str(labels[index]) if index < len(labels) else str(index)
+
+    def id_of(index: int) -> Any:
+        return id_list[index] if index < len(id_list) else None
+
+    pairs: list[dict[str, Any]] = []
+    for truth, row in enumerate(matrix):
+        if not isinstance(row, Sequence):
+            continue
+        for predicted, count in enumerate(row):
+            if truth == predicted or not isinstance(count, int) or count <= 0:
+                continue
+            pairs.append(
+                {
+                    "truth_id": id_of(truth),
+                    "truth": name_of(truth),
+                    "predicted_id": id_of(predicted),
+                    "predicted": name_of(predicted),
+                    "count": count,
+                }
+            )
+    # 건수 내림차순, 같으면 이름 순입니다. 같은 자료로 두 번 그리면 순서가 같아야
+    # 사람이 "바뀐 것"과 "다시 그린 것"을 구별합니다.
+    pairs.sort(key=lambda row: (-row["count"], str(row["truth"]), str(row["predicted"])))
+    return pairs[:top_n], len(pairs)
+
+
+def _error_causes(value: Any) -> dict[str, int] | None:
+    """false positive 원인 4개를 정수로 냅니다. 하나라도 없으면 `None`입니다."""
+
+    if not isinstance(value, Mapping):
+        return None
+    counts: dict[str, int] = {}
+    for cause in _ERROR_CAUSES:
+        number = value.get(cause)
+        if isinstance(number, bool) or not isinstance(number, int):
+            return None
+        counts[cause] = number
+    return counts
 
 
 def _best_f1(value: Any) -> dict[str, Any] | None:
@@ -181,6 +254,14 @@ def evaluation_block(
 
     sweep = analysis_values.get("score_sweep")
     best = analysis_values.get("best_f1")
+    confusion = analysis_values.get("confusion_matrix")
+    confusion_items = confusion.items() if isinstance(confusion, Mapping) else []
+    picked = {
+        label: _confused_pairs(block, CONFUSION_TOP_N) for label, block in confusion_items
+    }
+    breakdown = analysis_values.get("error_breakdown")
+    breakdown_items = breakdown.items() if isinstance(breakdown, Mapping) else []
+    causes = {label: _error_causes(value) for label, value in breakdown_items}
     return {
         "available": True,
         "reason": None,
@@ -197,6 +278,14 @@ def evaluation_block(
             label: _best_f1(value)
             for label, value in (best.items() if isinstance(best, Mapping) else [])
         },
+        # 행렬이 아니라 **헷갈린 쌍**입니다. 자른 개수를 함께 말하지 않으면 잘린
+        # 목록이 전부로 읽힙니다.
+        "confusions": {label: rows for label, (rows, _) in picked.items()},
+        "confusion_counts": {
+            label: {"pairs": total, "shown": len(rows)}
+            for label, (rows, total) in picked.items()
+        },
+        "error_breakdown": {label: value for label, value in causes.items()},
         "per_class_summary": dict(per_class) if per_class is not None else None,
     }
 

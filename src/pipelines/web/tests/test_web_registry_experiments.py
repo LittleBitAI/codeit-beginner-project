@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src.common import ExperimentNameError
@@ -523,6 +525,32 @@ def test_experiment_list_names_the_dataset_folder(client, monkeypatch):
 # --- 실험 하나 상세 -------------------------------------------------------------
 
 
+def confusion_matrix() -> dict:
+    """evaluate의 `build_confusion_matrix` 결과와 같은 모양입니다.
+
+    0번은 background입니다. 대각선은 맞힌 것, 비대각선은 class를 혼동한 것,
+    0행은 없는 것을 찾은 것(FP), 0열은 놓친 것(FN)입니다.
+    """
+
+    size = 58
+    matrix = [[0] * size for _ in range(size)]
+    for index in range(1, size):
+        matrix[index][index] = 100  # 맞힌 것. 헷갈린 쌍이 아닙니다.
+    matrix[1][2] = 41  # class 1을 2로 봤습니다. 가장 잦습니다.
+    matrix[3][4] = 33
+    matrix[0][5] = 22  # 없는 것을 5로 찾았습니다.
+    matrix[6][0] = 19  # 6을 놓쳤습니다.
+    # **상한을 넘겨 둡니다.** 쌍이 상한보다 적으면 "몇 개가 잘렸는가"를 재는 test가
+    # 무엇을 세든 통과합니다.
+    for offset in range(30):
+        matrix[10 + offset][11 + offset] = 3
+    return {
+        "labels": ["background"] + [f"약{index}" for index in range(1, size)],
+        "category_ids": [None] + list(range(1, size)),
+        "matrix": matrix,
+    }
+
+
 def metrics_document() -> dict:
     """evaluate가 쓰는 metrics.json에서 상세 화면이 읽는 부분만 담았습니다."""
 
@@ -546,8 +574,18 @@ def metrics_document() -> dict:
         "analysis": {
             "score_threshold": 0.5,
             "by_iou": {"0.50": {"tp": 1, "fp": 2, "fn": 3}},
-            # 화면에 보내면 안 되는 큰 블록들입니다.
-            "confusion_matrix": {"0.50": [[0] * 58 for _ in range(58)]},
+            # evaluate가 내는 모양 그대로입니다. 0번 행·열이 background입니다.
+            # 화면에는 행렬을 통째로 보내지 않고 헷갈린 쌍만 골라 보냅니다.
+            "confusion_matrix": {"0.50": confusion_matrix()},
+            "error_breakdown": {
+                "0.50": {
+                    "localization": 12,
+                    "classification": 34,
+                    "background": 5,
+                    "duplicate": 7,
+                }
+            },
+            # 화면에 보내면 안 되는 큰 블록입니다.
             "per_image": {"0.50": [{"image_id": index} for index in range(2100)]},
             "score_sweep": {
                 "0.50": {
@@ -846,6 +884,59 @@ def test_detail_shows_settings_even_when_the_result_files_are_gone(client, monke
     assert payload["evaluation"]["available"] is False
     assert payload["evaluation"]["reason"]
     assert payload["history"]["available"] is False
+
+
+def test_detail_carries_the_confused_pairs_not_the_whole_matrix(client, monkeypatch):
+    """119x119 행렬은 화면에서 칸 하나가 1px입니다. 헷갈린 쌍만 골라 보냅니다.
+
+    background 행과 열도 함께 옵니다. 없는 것을 찾은 것과 놓친 것이 빠지면 왜
+    틀렸는지의 절반이 사라집니다.
+    """
+
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": metrics_document()}
+    )
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    pairs = evaluation["confusions"]["0.50"]
+    assert [(row["truth"], row["predicted"], row["count"]) for row in pairs[:4]] == [
+        ("약1", "약2", 41),
+        ("약3", "약4", 33),
+        ("background", "약5", 22),
+        ("약6", "background", 19),
+    ]
+    # 대각선은 맞힌 것이라 헷갈린 쌍이 아닙니다.
+    assert all(row["truth"] != row["predicted"] for row in pairs)
+    # 행렬 자체는 어디에도 실리지 않습니다.
+    assert "matrix" not in json.dumps(evaluation)
+
+
+def test_detail_says_how_many_confused_pairs_were_left_out(client, monkeypatch):
+    """상위 몇 개만 왔는지 말하지 않으면, 잘린 목록이 전부로 읽힙니다."""
+
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": metrics_document()}
+    )
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["confusion_counts"]["0.50"] == {"pairs": 34, "shown": 20}
+    assert len(evaluation["confusions"]["0.50"]) == 20
+
+
+def test_detail_carries_the_false_positive_causes(client, monkeypatch):
+    """왜 틀렸는지를 metrics.json을 직접 열어야만 볼 수 있었습니다."""
+
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": metrics_document()}
+    )
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["error_breakdown"]["0.50"] == {
+        "localization": 12,
+        "classification": 34,
+        "background": 5,
+        "duplicate": 7,
+    }
 
 
 def test_detail_reports_404_for_an_unregistered_run(client, monkeypatch):
