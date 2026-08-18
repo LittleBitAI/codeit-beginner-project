@@ -136,7 +136,7 @@ function show(onScoreSaved = () => {}) {
         datasetKey="v5"
         records={[record()]}
         loading={false}
-        onScoreSaved={onScoreSaved} onNewExperiment={() => {}}
+        onScoreSaved={onScoreSaved} onNewExperiment={() => {}} onOpenDiagnosis={() => {}}
       />
     </MemoryRouter>,
   );

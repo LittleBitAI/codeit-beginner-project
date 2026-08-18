@@ -394,6 +394,28 @@ export interface WeakClassRow {
  *
  * confusion matrix와 per_image는 담기지 않습니다. 그 둘까지 넣으면 650KB입니다.
  */
+/**
+ * 정답이 무엇인데 무엇으로 봤는지, 그리고 몇 건인지.
+ *
+ * `background`는 class가 아니라 "없음"입니다. 정답이 background면 없는 것을
+ * 찾아낸 것이고, 예측이 background면 놓친 것입니다.
+ */
+export interface ConfusionPair {
+  truth_id: number | null;
+  truth: string;
+  predicted_id: number | null;
+  predicted: string;
+  count: number;
+}
+
+/** evaluate가 나누는 false positive의 원인 넷입니다. */
+export interface FalsePositiveCauses {
+  localization: number;
+  classification: number;
+  background: number;
+  duplicate: number;
+}
+
 export interface ExperimentEvaluation {
   available: boolean;
   reason: string | null;
@@ -408,9 +430,24 @@ export interface ExperimentEvaluation {
   counts?: Record<string, number | null>;
   score_threshold?: number | null;
   max_detections_per_image?: number | null;
-  /** IoU label("0.50"/"0.75")별로 나뉩니다. */
-  score_sweep?: Record<string, SweepPoint[]>;
-  best_f1?: Record<string, SweepPoint | null>;
+  /**
+   * IoU label("0.50"/"0.75")별로 나뉩니다.
+   *
+   * 세 상태가 다릅니다. key가 없으면 재지 않은 것, `null`이면 기록은 있는데
+   * 읽지 못한 것, 빈 배열이면 재서 지점이 하나도 없던 것입니다.
+   */
+  score_sweep?: Record<string, SweepPoint[] | null> | null;
+  /** `null`은 최고점을 못 찍는다는 뜻입니다 — 표시가 없을 뿐 틀린 말은 안 합니다. */
+  best_f1?: Record<string, SweepPoint | null> | null;
+  /** 헷갈린 쌍입니다. 행렬 자체는 오지 않습니다 — 118종이면 119x119입니다. */
+  confusions?: Record<string, ConfusionPair[]> | null;
+  /**
+   * 그 목록이 상위 몇 개로 잘렸는지. 말하지 않으면 잘린 것이 전부로 읽힙니다.
+   * `null`은 기록은 있는데 **읽지 못했다**는 뜻이라, 재서 0건과 다릅니다.
+   */
+  confusion_counts?: Record<string, { pairs: number; shown: number } | null> | null;
+  /** false positive를 원인별로 나눈 건수. */
+  error_breakdown?: Record<string, FalsePositiveCauses | null> | null;
   per_class_summary?: {
     min_truth_count: number;
     top_n: number;

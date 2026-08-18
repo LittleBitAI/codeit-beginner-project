@@ -50,11 +50,36 @@ _SUMMARY_KEYS = frozenset(
     {"min_truth_count", "top_n", "counts", "weak", "sparse", "unmeasured"}
 )
 
+#: 화면에 보낼 헷갈린 쌍의 수입니다. 대회 118종이면 행렬은 119x119이고 비대각선
+#: 칸만 14,042개입니다. 그대로 보내면 칸 하나가 1px이라 아무것도 못 읽습니다.
+#: 사람이 묻는 것은 "무엇을 무엇으로 착각하는가"이므로 잦은 것부터 자릅니다.
+CONFUSION_TOP_N = 20
+
+#: evaluate가 false positive를 나누는 이름입니다. 값이 없으면 0으로 채우지 않고
+#: 그 IoU를 통째로 뺍니다 — 0건과 "안 쟀다"는 다른 말입니다.
+_ERROR_CAUSES: tuple[str, ...] = ("localization", "classification", "background", "duplicate")
+
+#: confusion matrix의 0번 행·열 이름입니다. evaluate의 `BACKGROUND_LABEL`을 베낀
+#: 값입니다 — 그쪽을 import할 수 없습니다. 어긋나면 목록이 비지, 틀리지는 않습니다.
+BACKGROUND_LABEL = "background"
+
 
 def _number(value: Any) -> int | float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return value if math.isfinite(value) else None
+
+
+def _in_unit_range(value: Any) -> bool:
+    """0과 1 사이인지 봅니다.
+
+    threshold도 precision·recall·F1도 evaluate에서는 전부 이 범위입니다
+    (`SWEEP_THRESHOLDS`는 0.05~0.95, 나머지는 분자/분모). 범위를 안 보면 화면이
+    `기준 1.50`, `-50%`, `200%`를 **정상 측정값처럼** 그립니다.
+    """
+
+    number = _number(value)
+    return number is not None and 0.0 <= number <= 1.0
 
 
 def _read_document(uri: str, storage_config: Mapping[str, Any]) -> Any | None:
@@ -94,6 +119,9 @@ def _unavailable_evaluation(reason: str) -> dict[str, Any]:
         "max_detections_per_image": None,
         "score_sweep": {},
         "best_f1": {},
+        "confusions": {},
+        "confusion_counts": {},
+        "error_breakdown": {},
         "per_class_summary": None,
     }
 
@@ -104,28 +132,37 @@ def _unavailable_history(reason: str) -> dict[str, Any]:
     return {"available": False, "reason": reason, "epochs": []}
 
 
-def _sweep_rows(sweep: Any) -> list[dict[str, Any]]:
+def _sweep_rows(sweep: Any) -> list[dict[str, Any]] | None:
     """`{"0.05": {...}}` 형태를 threshold 순 배열로 폅니다.
 
     화면은 이것을 곡선으로 그리므로 순서가 있어야 합니다. dict의 key 순서를 믿지
     않고 threshold 숫자로 다시 세웁니다.
+
+    **읽지 못하면 `None`입니다.** 빈 배열로 내면 "재 봤는데 잴 지점이 없었다"와
+    같아져, 깨진 기록이 정상 결과로 읽힙니다.
     """
 
     if not isinstance(sweep, Mapping):
-        return []
+        return None
     rows: list[dict[str, Any]] = []
     for key, counts in sweep.items():
-        threshold = _number(float(key)) if _looks_numeric(key) else None
-        if threshold is None or not isinstance(counts, Mapping):
-            continue
-        rows.append(
-            {
-                "threshold": threshold,
-                "precision": _number(counts.get("precision")),
-                "recall": _number(counts.get("recall")),
-                "f1": _number(counts.get("f1")),
-            }
-        )
+        if not _looks_numeric(key) or not _in_unit_range(float(key)):
+            return None
+        if not isinstance(counts, Mapping):
+            return None
+        row = {"threshold": _number(float(key))}
+        for name in ("precision", "recall", "f1"):
+            # key가 **없는** 것도 깨진 것입니다. evaluate는 셋을 언제나 씁니다.
+            # `counts.get()`으로 꺼내면 없는 key와 일부러 쓴 `None`이 같아집니다.
+            if name not in counts:
+                return None
+            value = counts[name]
+            # `None`은 evaluate가 일부러 쓴 값입니다 — 분모가 0이라 못 잰 것입니다.
+            # 그 밖의 값은 **깨진 것**이라, 그냥 두면 둘이 똑같이 `-`로 그려집니다.
+            if value is not None and not _in_unit_range(value):
+                return None
+            row[name] = _number(value)
+        rows.append(row)
     rows.sort(key=lambda row: row["threshold"])
     return rows
 
@@ -138,17 +175,162 @@ def _looks_numeric(value: Any) -> bool:
     return True
 
 
-def _best_f1(value: Any) -> dict[str, Any] | None:
+def _readable_block(
+    analysis: Mapping[str, Any] | None, key: str
+) -> Mapping[str, Any] | None:
+    """IoU별 블록을 꺼냅니다. **없으면 빈 것, 깨졌으면 `None`입니다.**
+
+    둘을 합치면 깨진 파일이 "이 기능 이전에 돌린 평가"로 설명됩니다. `analysis`
+    자체를 읽지 못한 경우(`None`)도 마찬가지로 읽지 못한 것입니다.
+
+    **key가 없는 것과 값이 `null`인 것도 다릅니다.** evaluate는 이 자리에 언제나
+    dict를 씁니다. `null`이 보이면 파일이 상한 것이지 옛 평가가 아닙니다.
+    """
+
+    if analysis is None:
+        return None
+    if key not in analysis:
+        return {}
+    value = analysis[key]
+    return value if isinstance(value, Mapping) else None
+
+
+def _is_list(value: Any) -> bool:
+    """목록인지 봅니다. **글자열은 목록이 아닙니다.**
+
+    `str`과 `bytes`도 `Sequence`라, 그냥 `Sequence`로 보면 `"abc"`가 세 칸짜리
+    목록으로 통과합니다. 그러면 글자 하나하나가 class 이름이 되어, 깨진 파일에서
+    그럴듯한 진단이 나옵니다.
+    """
+
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+
+
+def _confused_pairs(block: Any, top_n: int) -> tuple[list[dict[str, Any]], int] | None:
+    """confusion matrix에서 **헷갈린 쌍만** 골라 잦은 순으로 냅니다.
+
+    돌려주는 것은 (상위 목록, 전체 쌍 수)입니다. 행렬 자체는 내지 않습니다.
+    **읽지 못하면 `None`입니다** — 빈 목록으로 내면 "재 보니 하나도 안 헷갈렸다"와
+    같아져, 깨진 파일이 좋은 결과로 읽힙니다.
+
+    대각선은 맞힌 것이라 뺍니다. 0번 행·열(background)은 **뺄 수 없습니다** —
+    0행은 없는 것을 찾은 것이고 0열은 놓친 것이라, 빼면 왜 틀렸는지의 절반이
+    사라집니다.
+    """
+
+    if not isinstance(block, Mapping):
+        return None
+    matrix = block.get("matrix")
+    labels = block.get("labels")
+    # 빈 행렬은 evaluate가 내지 않습니다 — 적어도 background 한 칸은 있습니다.
+    # 그냥 두면 "헷갈린 쌍이 하나도 없습니다"로 그려집니다.
+    if not _is_list(matrix) or not _is_list(labels) or not labels:
+        return None
+    # **정사각이어야 합니다.** evaluate는 `labels`와 같은 크기로 씁니다.
+    # 이름이 모자라면 없는 자리를 index로 채우게 되어 `'1'` 같은 그럴듯한 이름이
+    # 나오고, 남으면 어느 칸이 어느 class인지 어긋납니다.
+    if len(matrix) != len(labels):
+        return None
+    # 0번은 background 자리입니다. 이름이 다르면 화면이 그 행·열을 **보통 class로**
+    # 그립니다 — 없는 것을 찾은 것과 놓친 것이 class끼리의 착각으로 읽힙니다.
+    if str(labels[0]) != BACKGROUND_LABEL:
+        return None
+    ids = block.get("category_ids")
+    id_list = list(ids) if _is_list(ids) and len(ids) >= len(matrix) else []
+
+    def name_of(index: int) -> str:
+        return str(labels[index])
+
+    def id_of(index: int) -> Any:
+        return id_list[index] if index < len(id_list) else None
+
+    pairs: list[dict[str, Any]] = []
+    for truth, row in enumerate(matrix):
+        # 행 길이도 같아야 합니다. 길면 없는 index를 조회해 `IndexError`가 상세
+        # 응답 밖으로 나가고, 짧으면 없는 칸이 조용히 0건으로 읽힙니다.
+        if not _is_list(row) or len(row) != len(labels):
+            return None
+        for predicted, count in enumerate(row):
+            # 칸은 0 이상의 정수뿐입니다. `bool`은 `int`를 물려받으므로 따로
+            # 막습니다 — `True`를 1건으로 세면 없던 혼동이 생깁니다. 그 밖의
+            # 값이 보이면 이 파일은 우리가 아는 모양이 아닙니다.
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                return None
+            if truth == predicted or count == 0:
+                continue
+            pairs.append(
+                {
+                    "truth_id": id_of(truth),
+                    "truth": name_of(truth),
+                    "predicted_id": id_of(predicted),
+                    "predicted": name_of(predicted),
+                    "count": count,
+                }
+            )
+    # 건수 내림차순, 같으면 이름 순입니다. 같은 자료로 두 번 그리면 순서가 같아야
+    # 사람이 "바뀐 것"과 "다시 그린 것"을 구별합니다.
+    pairs.sort(key=lambda row: (-row["count"], str(row["truth"]), str(row["predicted"])))
+    return pairs[:top_n], len(pairs)
+
+
+def _error_causes(value: Any) -> dict[str, int] | None:
+    """false positive 원인 4개를 정수로 냅니다. 읽지 못하면 `None`입니다.
+
+    건수는 **0 이상**입니다. 음수를 그대로 내보내면 화면이 음수 건수와 100%를
+    넘는 비율을 그립니다 — 깨진 파일이 이상한 숫자로만 드러납니다.
+    """
+
     if not isinstance(value, Mapping):
         return None
-    threshold = _number(value.get("threshold"))
-    if threshold is None:
+    counts: dict[str, int] = {}
+    for cause in _ERROR_CAUSES:
+        number = value.get(cause)
+        if isinstance(number, bool) or not isinstance(number, int) or number < 0:
+            return None
+        counts[cause] = number
+    return counts
+
+
+def _best_f1(value: Any, rows: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    """F1이 가장 높았던 지점입니다. 읽지 못하거나 없으면 `None`입니다.
+
+    여기서 `None`은 화면에서 "최고점 표시 없음"이 됩니다. 표시가 없는 것은
+    **아무 말도 하지 않는 것**이라, 다른 블록과 달리 세 상태를 따로 두지
+    않았습니다. 대신 **틀린 표시는 반드시 막습니다** — `F1 최고 200%`도,
+    엉뚱한 줄에 붙은 "F1 최고"도 표시가 없는 것과 달리 틀린 말입니다.
+
+    화면은 threshold가 같은 줄에 표시를 붙이므로, **같은 IoU의 탐색 결과와
+    맞는지** 봅니다. 어느 지점이 최고인지 고르는 규칙까지 여기서 다시 쓰지는
+    않습니다 — 그것은 evaluate의 몫이고, 베끼면 두 곳이 갈립니다.
+    """
+
+    if not isinstance(value, Mapping) or rows is None:
+        return None
+    # 네 값이 모두 있어야 합니다. `{"threshold": 0.1}`만 있어도 화면은 그 줄에
+    # "F1 최고"를 붙입니다.
+    for name in ("threshold", "precision", "recall", "f1"):
+        if name not in value or not _in_unit_range(value[name]):
+            return None
+    threshold = float(value["threshold"])
+    f1 = float(value["f1"])
+    # 탐색 결과에 없는 지점이거나 F1이 다르면 그 표시는 거짓입니다.
+    if not any(
+        abs(float(row["threshold"]) - threshold) < 1e-9
+        and row["f1"] is not None
+        and abs(float(row["f1"]) - f1) < 1e-9
+        for row in rows
+    ):
+        return None
+    # **더 높은 F1이 있으면 "최고"가 아닙니다.** 표시가 주장하는 것이 그것이므로
+    # 이것까지 봐야 참이 됩니다. 동률 중 어느 지점을 고르는지는 evaluate의
+    # 규칙이라 여기서 다시 쓰지 않습니다 — 어느 쪽을 골라도 표시는 참입니다.
+    if any(row["f1"] is not None and float(row["f1"]) > f1 + 1e-9 for row in rows):
         return None
     return {
-        "threshold": threshold,
-        "precision": _number(value.get("precision")),
-        "recall": _number(value.get("recall")),
-        "f1": _number(value.get("f1")),
+        "threshold": _number(value["threshold"]),
+        "precision": _number(value["precision"]),
+        "recall": _number(value["recall"]),
+        "f1": _number(value["f1"]),
     }
 
 
@@ -172,31 +354,83 @@ def evaluation_block(
     metrics = document.get("metrics")
     metric_values = metrics if isinstance(metrics, Mapping) else {}
     analysis = document.get("analysis")
-    analysis_values = analysis if isinstance(analysis, Mapping) else {}
+    # `analysis`가 통째로 이상하면 **읽지 못한 것**입니다. 빈 dict로 두면 그 아래
+    # 모든 블록이 "이 기능 이전 평가"로 설명됩니다.
+    analysis_values: Mapping[str, Any] | None
+    if "analysis" not in document:
+        analysis_values = {}
+    else:
+        analysis_values = analysis if isinstance(analysis, Mapping) else None
+    readable = analysis_values if analysis_values is not None else {}
 
-    per_class = analysis_values.get("per_class_summary")
+    per_class = readable.get("per_class_summary")
     if not isinstance(per_class, Mapping) or set(per_class) != _SUMMARY_KEYS:
         # 이 계약 이전 평가에는 블록 자체가 없습니다. 빈 표를 지어내지 않습니다.
         per_class = None
 
-    sweep = analysis_values.get("score_sweep")
-    best = analysis_values.get("best_f1")
+    best = _readable_block(analysis_values, "best_f1")
+    # 블록 **자체**가 깨진 경우입니다. 없는 것과 같게 `{}`로 내면 화면이 "이 기능
+    # 이전 평가"라고 잘못 설명합니다. 어느 IoU가 있었는지도 알 수 없으므로
+    # 블록째 `None`으로 답합니다.
+    sweep = _readable_block(analysis_values, "score_sweep")
+    confusion = _readable_block(analysis_values, "confusion_matrix")
+    breakdown = _readable_block(analysis_values, "error_breakdown")
+
+    swept = (
+        None
+        if sweep is None
+        else {label: _sweep_rows(rows) for label, rows in sweep.items()}
+    )
+    picked = (
+        None
+        if confusion is None
+        else {
+            label: _confused_pairs(block, CONFUSION_TOP_N)
+            for label, block in confusion.items()
+        }
+    )
+    causes = (
+        None
+        if breakdown is None
+        else {label: _error_causes(value) for label, value in breakdown.items()}
+    )
     return {
         "available": True,
         "reason": None,
         "metrics": {key: _number(metric_values.get(key)) for key in METRIC_KEYS},
         "counts": {key: _number(document.get(key)) for key in COUNT_KEYS},
-        "score_threshold": _number(analysis_values.get("score_threshold")),
+        "score_threshold": _number(readable.get("score_threshold")),
         "max_detections_per_image": _number(document.get("max_detections_per_image")),
         # IoU label("0.50"/"0.75")별로 나뉩니다. 화면이 어느 쪽을 볼지 고릅니다.
-        "score_sweep": {
-            label: _sweep_rows(rows)
-            for label, rows in (sweep.items() if isinstance(sweep, Mapping) else [])
-        },
-        "best_f1": {
-            label: _best_f1(value)
-            for label, value in (best.items() if isinstance(best, Mapping) else [])
-        },
+        "score_sweep": swept,
+        # 최고점은 **같은 IoU의 탐색 결과와 맞는지** 보고 냅니다.
+        "best_f1": (
+            None
+            if best is None
+            else {
+                label: _best_f1(value, (swept or {}).get(label))
+                for label, value in best.items()
+            }
+        ),
+        # 행렬이 아니라 **헷갈린 쌍**입니다. 자른 개수를 함께 말하지 않으면 잘린
+        # 목록이 전부로 읽힙니다. 읽지 못한 IoU는 개수가 `null`입니다 — 목록에서
+        # 빼 버리면 "이 기능 이전 평가"와, 빈 목록으로 두면 "0건"과 뒤섞입니다.
+        "confusions": (
+            None
+            if picked is None
+            else {label: value[0] for label, value in picked.items() if value is not None}
+        ),
+        "confusion_counts": (
+            None
+            if picked is None
+            else {
+                label: (
+                    None if value is None else {"pairs": value[1], "shown": len(value[0])}
+                )
+                for label, value in picked.items()
+            }
+        ),
+        "error_breakdown": causes,
         "per_class_summary": dict(per_class) if per_class is not None else None,
     }
 

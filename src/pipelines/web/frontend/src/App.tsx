@@ -20,6 +20,7 @@ import { Canvas } from './screens/Canvas';
 import { Home } from './screens/Home';
 import { Live } from './screens/Live';
 import { NewExperimentSheet } from './screens/NewExperimentSheet';
+import { DiagnosisSheet } from './screens/DiagnosisSheet';
 import { EdaSheet } from './screens/EdaSheet';
 import { Ensemble } from './screens/Ensemble';
 import { PrepareSheet } from './screens/PrepareSheet';
@@ -42,7 +43,7 @@ export function App() {
   );
 }
 
-type SheetKey = 'new' | 'settings' | 'prepare' | 'eda' | null;
+type SheetKey = 'new' | 'settings' | 'prepare' | 'eda' | 'diagnosis' | null;
 
 function Shell() {
   // 목록은 3초마다, 설정 정의와 전처리 선택은 필요할 때만 읽습니다.
@@ -61,6 +62,8 @@ function Shell() {
   const { draft, setDataFields, setTrainFields } = useDraft();
 
   const [sheet, setSheet] = useState<SheetKey>(null);
+  // 진단은 실행 하나에 대한 것이라 어느 실행인지 함께 들고 있어야 합니다.
+  const [diagnosisRun, setDiagnosisRun] = useState<string | null>(null);
   // 기록 화면에서 사람이 고른 dataset. 아직 안 골랐으면 기록이 가장 많은 것을 씁니다.
   // **보는 대상일 뿐입니다** — 학습에 실려 갈 데이터는 아래 `selected`가 정합니다.
   const [pickedDataset, setPickedDataset] = useState<string | null>(null);
@@ -195,6 +198,10 @@ function Shell() {
                 setTrainFields(settings);
                 setSheet('new');
               }}
+              onOpenDiagnosis={(runId) => {
+                setDiagnosisRun(runId);
+                setSheet('diagnosis');
+              }}
             />
           }
         />
@@ -238,6 +245,9 @@ function Shell() {
         />
       )}
       {sheet === 'eda' && <EdaSheet onClose={() => setSheet(null)} />}
+      {sheet === 'diagnosis' && diagnosisRun !== null && (
+        <DiagnosisSheet runId={diagnosisRun} onClose={() => setSheet(null)} />
+      )}
       {sheet === 'prepare' && (
         <PrepareSheet
           source={selected}

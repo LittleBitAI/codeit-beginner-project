@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src.common import ExperimentNameError
@@ -523,6 +525,32 @@ def test_experiment_list_names_the_dataset_folder(client, monkeypatch):
 # --- 실험 하나 상세 -------------------------------------------------------------
 
 
+def confusion_matrix() -> dict:
+    """evaluate의 `build_confusion_matrix` 결과와 같은 모양입니다.
+
+    0번은 background입니다. 대각선은 맞힌 것, 비대각선은 class를 혼동한 것,
+    0행은 없는 것을 찾은 것(FP), 0열은 놓친 것(FN)입니다.
+    """
+
+    size = 58
+    matrix = [[0] * size for _ in range(size)]
+    for index in range(1, size):
+        matrix[index][index] = 100  # 맞힌 것. 헷갈린 쌍이 아닙니다.
+    matrix[1][2] = 41  # class 1을 2로 봤습니다. 가장 잦습니다.
+    matrix[3][4] = 33
+    matrix[0][5] = 22  # 없는 것을 5로 찾았습니다.
+    matrix[6][0] = 19  # 6을 놓쳤습니다.
+    # **상한을 넘겨 둡니다.** 쌍이 상한보다 적으면 "몇 개가 잘렸는가"를 재는 test가
+    # 무엇을 세든 통과합니다.
+    for offset in range(30):
+        matrix[10 + offset][11 + offset] = 3
+    return {
+        "labels": ["background"] + [f"약{index}" for index in range(1, size)],
+        "category_ids": [None] + list(range(1, size)),
+        "matrix": matrix,
+    }
+
+
 def metrics_document() -> dict:
     """evaluate가 쓰는 metrics.json에서 상세 화면이 읽는 부분만 담았습니다."""
 
@@ -546,8 +574,18 @@ def metrics_document() -> dict:
         "analysis": {
             "score_threshold": 0.5,
             "by_iou": {"0.50": {"tp": 1, "fp": 2, "fn": 3}},
-            # 화면에 보내면 안 되는 큰 블록들입니다.
-            "confusion_matrix": {"0.50": [[0] * 58 for _ in range(58)]},
+            # evaluate가 내는 모양 그대로입니다. 0번 행·열이 background입니다.
+            # 화면에는 행렬을 통째로 보내지 않고 헷갈린 쌍만 골라 보냅니다.
+            "confusion_matrix": {"0.50": confusion_matrix()},
+            "error_breakdown": {
+                "0.50": {
+                    "localization": 12,
+                    "classification": 34,
+                    "background": 5,
+                    "duplicate": 7,
+                }
+            },
+            # 화면에 보내면 안 되는 큰 블록입니다.
             "per_image": {"0.50": [{"image_id": index} for index in range(2100)]},
             "score_sweep": {
                 "0.50": {
@@ -846,6 +884,335 @@ def test_detail_shows_settings_even_when_the_result_files_are_gone(client, monke
     assert payload["evaluation"]["available"] is False
     assert payload["evaluation"]["reason"]
     assert payload["history"]["available"] is False
+
+
+def test_detail_carries_the_confused_pairs_not_the_whole_matrix(client, monkeypatch):
+    """119x119 행렬은 화면에서 칸 하나가 1px입니다. 헷갈린 쌍만 골라 보냅니다.
+
+    background 행과 열도 함께 옵니다. 없는 것을 찾은 것과 놓친 것이 빠지면 왜
+    틀렸는지의 절반이 사라집니다.
+    """
+
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": metrics_document()}
+    )
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    pairs = evaluation["confusions"]["0.50"]
+    assert [(row["truth"], row["predicted"], row["count"]) for row in pairs[:4]] == [
+        ("약1", "약2", 41),
+        ("약3", "약4", 33),
+        ("background", "약5", 22),
+        ("약6", "background", 19),
+    ]
+    # 대각선은 맞힌 것이라 헷갈린 쌍이 아닙니다.
+    assert all(row["truth"] != row["predicted"] for row in pairs)
+    # 행렬 자체는 어디에도 실리지 않습니다.
+    assert "matrix" not in json.dumps(evaluation)
+
+
+def test_detail_says_how_many_confused_pairs_were_left_out(client, monkeypatch):
+    """상위 몇 개만 왔는지 말하지 않으면, 잘린 목록이 전부로 읽힙니다."""
+
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": metrics_document()}
+    )
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["confusion_counts"]["0.50"] == {"pairs": 34, "shown": 20}
+    assert len(evaluation["confusions"]["0.50"]) == 20
+
+
+@pytest.mark.parametrize(
+    ("broken", "why"),
+    [
+        # `str`도 `Sequence`입니다. 글자 하나하나가 class 이름이 됩니다.
+        # **행렬만큼 깁니다** — 짧으면 길이 검사에 먼저 걸려 글자열 가드를 재지
+        # 못합니다(처음 쓴 test가 그래서 통과했습니다).
+        ({"labels": "가" * 58}, "labels가 글자열"),
+        # `bool`도 `int`입니다. `True`를 1건으로 세면 없던 혼동이 생깁니다.
+        ({"matrix": [[False, True], [False, False]], "labels": ["background", "a"]}, "건수가 bool"),
+        # 이름이 모자란 자리를 index로 채우면 `'1'`이 category_id처럼 읽힙니다.
+        ({"labels": ["background"]}, "labels가 짧음"),
+        # 행이 이름보다 깁니다. 없는 index를 조회하면 상세 응답이 통째로 죽습니다.
+        ({"matrix": [[0, 1, 2], [0, 0, 0]], "labels": ["background", "a"]}, "행이 김"),
+        # 행이 짧습니다. 없는 칸이 조용히 0건으로 읽혀 "안 헷갈렸다"가 됩니다.
+        ({"matrix": [[0], [0, 0]], "labels": ["background", "a"]}, "행이 짧음"),
+        # **행 수가 이름보다 적습니다.** 행 길이는 다 맞아서 행 검사에 걸리지
+        # 않는데, 마지막 class의 혼동이 통째로 사라집니다. 이 경우가 없으면
+        # 정사각 검사를 지워도 아무 test가 빨개지지 않습니다.
+        (
+            {"matrix": [[0, 0, 0], [0, 0, 0]], "labels": ["background", "a", "b"]},
+            "행 수가 모자람",
+        ),
+        # 0x0입니다. evaluate는 적어도 background 한 칸을 씁니다. 정사각 검사만
+        # 보면 통과해 "헷갈린 쌍이 하나도 없습니다"로 그려집니다.
+        ({"matrix": [], "labels": [], "category_ids": []}, "빈 행렬"),
+        # 0번이 background가 아닙니다. 화면은 그 행·열을 보통 class로 그려,
+        # 없는 것을 찾은 것과 놓친 것이 class끼리의 착각으로 읽힙니다.
+        ({"labels": ["가짜"] + [f"약{i}" for i in range(1, 58)]}, "0번이 background가 아님"),
+    ],
+)
+def test_detail_makes_nothing_up_from_a_broken_matrix(client, monkeypatch, broken, why):
+    """깨진 파일에서 **그럴듯한 진단**이 나오면 아무도 깨진 줄 모릅니다.
+
+    빈 목록으로 내지도 않습니다. 그러면 "재 보니 하나도 안 헷갈렸다"와 같아져,
+    깨진 파일이 좋은 결과로 읽힙니다. 읽지 못한 것은 읽지 못했다고 말합니다.
+    """
+
+    document = metrics_document()
+    document["analysis"]["confusion_matrix"]["0.50"].update(broken)
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    response = client.get("/api/train/experiments/done")
+
+    assert response.status_code == 200, why
+    evaluation = response.json()["evaluation"]
+    assert evaluation["confusion_counts"]["0.50"] is None, why
+    assert "0.50" not in evaluation["confusions"], why
+
+
+@pytest.mark.parametrize(
+    ("block", "key", "why"),
+    [
+        ({"score_sweep": {"0.50": "망가짐"}}, "score_sweep", "탐색이 문자열"),
+        ({"score_sweep": {"0.50": {"0.10": "망가짐"}}}, "score_sweep", "탐색 항목이 문자열"),
+        ({"error_breakdown": {"0.50": {"localization": "많음"}}}, "error_breakdown", "원인이 문자열"),
+    ],
+)
+def test_detail_says_it_could_not_read_the_other_blocks_either(
+    client, monkeypatch, block, key, why
+):
+    """탐색과 원인에도 "읽지 못함"이 있어야 합니다.
+
+    빈 배열이면 "잴 지점이 없었다", `None`을 안 쓰면 "이 기능 이전 평가"로
+    읽힙니다. 둘 다 깨진 파일을 다른 말로 설명하는 것입니다.
+    """
+
+    document = metrics_document()
+    document["analysis"].update(block)
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation[key]["0.50"] is None, why
+
+
+def test_detail_says_it_could_not_read_the_analysis_itself(client, monkeypatch):
+    """`analysis`가 통째로 이상하면 그 아래 전부가 "안 쟀음"으로 읽혔습니다."""
+
+    document = metrics_document()
+    document["analysis"] = "망가짐"
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["score_sweep"] is None
+    assert evaluation["confusions"] is None
+    assert evaluation["error_breakdown"] is None
+
+
+@pytest.mark.parametrize(
+    "key", ["score_sweep", "confusion_matrix", "error_breakdown"]
+)
+@pytest.mark.parametrize("value", ["망가짐", None], ids=["문자열", "null"])
+def test_detail_says_it_could_not_read_a_whole_block(client, monkeypatch, key, value):
+    """블록 **자체**가 깨진 경우입니다.
+
+    없는 것과 같게 비워서 내면 화면이 "이 기능 이전에 돌린 평가"라고 잘못
+    설명합니다. 어느 IoU가 있었는지도 알 수 없으므로 블록째 읽지 못했다고 답합니다.
+    """
+
+    document = metrics_document()
+    document["analysis"][key] = value
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    field = "confusions" if key == "confusion_matrix" else key
+    assert evaluation[field] is None
+    if key == "confusion_matrix":
+        assert evaluation["confusion_counts"] is None
+
+
+@pytest.mark.parametrize(
+    ("broken", "why"),
+    [
+        # evaluate는 못 잰 값을 `None`으로 씁니다(분모가 0). 그 밖의 값은 깨진
+        # 것인데, 둘을 합치면 화면에서 똑같이 `-`로 그려집니다.
+        ({"0.10": {"precision": "높음", "recall": 0.9, "f1": 0.9}}, "값이 문자열"),
+        # key가 아예 없습니다. `counts.get()`으로 꺼내면 일부러 쓴 `None`과
+        # 똑같이 "못 잼(-)"으로 그려집니다.
+        ({"0.10": {"recall": 0.9, "f1": 0.9}}, "key가 없음"),
+    ],
+)
+def test_detail_does_not_pass_a_broken_metric_off_as_unmeasured(
+    client, monkeypatch, broken, why
+):
+    document = metrics_document()
+    document["analysis"]["score_sweep"]["0.50"] = broken
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["score_sweep"]["0.50"] is None, why
+
+
+def test_detail_keeps_a_measurement_evaluate_could_not_take(client, monkeypatch):
+    """분모가 0이라 evaluate가 `None`으로 쓴 값은 그대로 둡니다.
+
+    이것까지 "깨졌다"고 하면 정상 평가가 통째로 읽히지 않습니다.
+    """
+
+    document = metrics_document()
+    document["analysis"]["score_sweep"]["0.50"] = {
+        "0.90": {"precision": None, "recall": None, "f1": None}
+    }
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["score_sweep"]["0.50"] == [
+        {"threshold": 0.9, "precision": None, "recall": None, "f1": None}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("sweep", "why"),
+    [
+        ({"1.50": {"precision": 0.9, "recall": 0.9, "f1": 0.9}}, "기준이 1을 넘음"),
+        ({"0.10": {"precision": 2.0, "recall": 0.9, "f1": 0.9}}, "precision이 200%"),
+        ({"0.10": {"precision": -0.5, "recall": 0.9, "f1": 0.9}}, "recall이 음수"),
+    ],
+)
+def test_detail_refuses_a_measurement_outside_its_range(client, monkeypatch, sweep, why):
+    """유한하기만 하면 통과시키면 화면이 `기준 1.50`과 `200%`를 그립니다."""
+
+    document = metrics_document()
+    document["analysis"]["score_sweep"]["0.50"] = sweep
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["score_sweep"]["0.50"] is None, why
+
+
+def test_detail_does_not_mark_a_peak_it_cannot_believe(client, monkeypatch):
+    """`F1 최고 200%`는 표시가 없는 것과 달리 **틀린 말**입니다."""
+
+    document = metrics_document()
+    document["analysis"]["best_f1"]["0.50"]["f1"] = 2.0
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["best_f1"]["0.50"] is None
+
+
+@pytest.mark.parametrize(
+    ("best", "why"),
+    [
+        ({"threshold": 0.5}, "값이 threshold뿐"),
+        # 탐색에 없는 지점입니다. 화면은 threshold만 맞으면 표시를 붙입니다.
+        ({"threshold": 0.3, "precision": 0.9, "recall": 0.9, "f1": 0.9}, "탐색에 없는 지점"),
+        # 지점은 있는데 F1이 다릅니다. 그 줄에 붙는 "F1 최고"는 거짓입니다.
+        ({"threshold": 0.5, "precision": 0.95, "recall": 0.93, "f1": 0.11}, "F1이 어긋남"),
+        # **그 줄의 값과는 맞는데 더 높은 줄이 있습니다.** 0.10의 F1이 0.88로
+        # 더 높으므로 0.05를 "최고"라고 하면 거짓입니다.
+        ({"threshold": 0.05, "precision": 0.7, "recall": 1.0, "f1": 0.82}, "더 높은 줄이 있음"),
+    ],
+)
+def test_detail_does_not_mark_a_peak_the_sweep_does_not_agree_with(
+    client, monkeypatch, best, why
+):
+    """엉뚱한 줄에 붙은 "F1 최고"는 표시가 없는 것과 달리 **틀린 말**입니다."""
+
+    document = metrics_document()
+    document["analysis"]["best_f1"]["0.50"] = best
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["best_f1"]["0.50"] is None, why
+
+
+def test_detail_keeps_a_peak_the_sweep_agrees_with(client, monkeypatch):
+    """맞는 최고점까지 버리면 화면에서 표시가 영영 사라집니다."""
+
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": metrics_document()}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["best_f1"]["0.50"] == {
+        "threshold": 0.5,
+        "precision": 0.95,
+        "recall": 0.93,
+        "f1": 0.94,
+    }
+
+
+def test_detail_says_it_could_not_read_the_best_f1_block(client, monkeypatch):
+    """`best_f1`만 세 상태 처리를 건너뛰고 있었습니다."""
+
+    document = metrics_document()
+    document["analysis"]["best_f1"] = "망가짐"
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["best_f1"] is None
+
+
+def test_detail_refuses_a_negative_error_count(client, monkeypatch):
+    """음수 건수를 그대로 내면 화면이 100%를 넘는 비율을 그립니다."""
+
+    document = metrics_document()
+    document["analysis"]["error_breakdown"]["0.50"]["duplicate"] = -3
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": document}
+    )
+
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["error_breakdown"]["0.50"] is None
+
+
+def test_detail_carries_the_false_positive_causes(client, monkeypatch):
+    """왜 틀렸는지를 metrics.json을 직접 열어야만 볼 수 있었습니다."""
+
+    stub_detail_sources(
+        monkeypatch, "done", {"artifacts/evaluate/done/metrics.json": metrics_document()}
+    )
+    evaluation = client.get("/api/train/experiments/done").json()["evaluation"]
+
+    assert evaluation["error_breakdown"]["0.50"] == {
+        "localization": 12,
+        "classification": 34,
+        "background": 5,
+        "duplicate": 7,
+    }
 
 
 def test_detail_reports_404_for_an_unregistered_run(client, monkeypatch):
