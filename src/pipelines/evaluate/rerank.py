@@ -32,7 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from .errors import InputArtifactError, PredictionError
+from .errors import EvaluateError, InputArtifactError, PredictionError
 from .predictor import load_checkpoint_document
 from .storage_io import ArtifactStore
 
@@ -162,7 +162,9 @@ def _ratio(document: Mapping[str, Any], key: str, *, source: str) -> float:
     value = document.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InputArtifactError(f"{source}: {key}는 숫자여야 합니다: {value!r}")
-    if not math.isfinite(value) or value < 0:
+    # 여기도 `_is_finite_number`를 씁니다. 은행 문서는 JSON이라 자릿수 제한이 없는
+    # 정수가 들어올 수 있고, 맨 `math.isfinite`는 그 값에서 스스로 터집니다.
+    if not _is_finite_number(value) or value < 0:
         raise InputArtifactError(f"{source}: {key}는 0 이상의 유한한 값이어야 합니다.")
     return float(value)
 
@@ -508,6 +510,11 @@ def rerank_predictions(
                     ),
                 )
                 similarity = embedded @ reference.T
+            except EvaluateError:
+                # 우리가 일부러 낸 오류는 그대로 둡니다. `EvaluateError`는
+                # `RuntimeError`를 물려받으므로, 이 줄이 없으면 "은행이 이상하다"는
+                # 말이 "추론이 실패했다"로 덧씌워져 나갑니다.
+                raise
             except (RuntimeError, ValueError, MemoryError) as error:
                 raise PredictionError(
                     f"재순위 추론에 실패했습니다 ({error.__class__.__name__}): {error}"
