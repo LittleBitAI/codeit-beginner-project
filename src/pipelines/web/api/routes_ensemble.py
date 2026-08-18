@@ -15,6 +15,7 @@ from fastapi import APIRouter, Body
 from pydantic import BaseModel, Field
 
 from .. import ensemble
+from ..embedding import MAX_RERANK_MODELS
 from ..ensemble_jobs import get_ensemble_runner
 
 
@@ -36,8 +37,9 @@ class StartRequest(SelectionRequest):
     allow_copied_images: bool = False
     overwrite: bool = False
     # 합친 뒤 점수를 다시 매기는 데 쓸 embedding 학습들입니다. 비우면 지금까지처럼
-    # detector 점수를 그대로 냅니다.
-    embedding_run_ids: list[str] = Field(default_factory=list, max_length=8)
+    # detector 점수를 그대로 냅니다. 상한은 `embedding.py`가 정합니다 — 여기에
+    # 숫자를 다시 적으면 한쪽만 고쳐졌을 때 형식 검사와 실제 검사가 갈립니다.
+    embedding_run_ids: list[str] = Field(default_factory=list, max_length=MAX_RERANK_MODELS)
 
 
 @router.get("/candidates")

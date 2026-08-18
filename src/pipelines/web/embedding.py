@@ -16,6 +16,8 @@ detector 설정 화면(`train_config.py`)과 칸을 섞지 않습니다. embeddi
 from __future__ import annotations
 
 import math
+import ntpath
+import posixpath
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -45,6 +47,10 @@ DEFAULTS = _contract.EMBEDDING_SETTING_DEFAULTS
 DATA_KEYS = _contract.EMBEDDING_DATA_ARTIFACT_KEYS
 
 _DEVICES = ("cpu", "cuda")
+#: `numpy.random.seed()`가 받는 상한입니다. 여기서 막지 않으면 web 검사는
+#: 통과하고 학습이 시작된 뒤에야 `ValueError`로 죽습니다 — 그때는 GPU를 잡은
+#: 뒤입니다.
+MAX_SEED = 2**32 - 1
 #: 한 번에 고를 수 있는 embedding 수입니다. 재순위는 고른 수만큼 시험 crop을 다시
 #: 훑으므로, 여덟 개를 고르면 여덟 배 걸립니다.
 MAX_RERANK_MODELS = 8
@@ -101,24 +107,39 @@ def _finite(value: int | float) -> bool:
 
 
 def _number(
-    errors: list[FieldError],
-    payload: Mapping[str, Any],
-    field: str,
-    label: str,
-    *,
-    allow_zero: bool = False,
+    errors: list[FieldError], payload: Mapping[str, Any], field: str, label: str
 ) -> float:
+    """0보다 큰 유한한 숫자입니다. **train이 받는 것과 같은 규칙입니다.**
+
+    train의 `_positive_number()`는 0을 거절합니다. 여기서 0을 받아 주면 대기열에
+    들어간 뒤 자기 차례가 와서야 실패하고, 그것을 밤에 발견합니다.
+    """
+
     value = payload.get(field, DEFAULTS[field])
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         collect(errors, field, f"{label}은(는) 숫자여야 합니다.")
         return float(DEFAULTS[field])
     # 유한성을 먼저 봅니다. `nan`은 어느 비교에도 걸리지 않아, 크기만 재면
     # 그대로 통과해 learning rate가 `nan`인 학습이 대기열에 들어갑니다.
-    if not _finite(value) or value < 0 or (value == 0 and not allow_zero):
-        bound = "0 이상" if allow_zero else "0보다 큰"
-        collect(errors, field, f"{label}은(는) {bound} 유한한 숫자여야 합니다.")
+    if not _finite(value) or value <= 0:
+        collect(errors, field, f"{label}은(는) 0보다 큰 유한한 숫자여야 합니다.")
         return float(DEFAULTS[field])
     return float(value)
+
+
+def _outside_repository(value: str) -> bool:
+    """저장소 밖을 가리키는 절대 경로인지 봅니다.
+
+    `s3://` 같은 scheme 주소는 **저장 계층이 판단합니다.** bucket 밖 주소를 여기서
+    가르려 들면 계층이 보는 것을 빠뜨립니다(`ensemble._storage_identity` 참고).
+    막는 것은 이 기계의 절대 경로뿐입니다 — POSIX `/`, 드라이브 `C:\\`, UNC `\\\\`.
+    S3에서는 앞의 `/`가 떨어져 나가 **다른 key**가 되므로, 고른 적 없는 은행으로
+    조용히 학습할 수 있습니다.
+    """
+
+    if "://" in value:
+        return False
+    return posixpath.isabs(value) or ntpath.isabs(value)
 
 
 def build_config(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -152,14 +173,14 @@ def build_config(payload: Mapping[str, Any]) -> dict[str, Any]:
         pretrained = bool(DEFAULTS["pretrained"])
 
     seed = payload.get("seed", DEFAULTS["seed"])
-    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
-        collect(errors, "seed", "0 이상의 정수여야 합니다.")
+    if not isinstance(seed, int) or isinstance(seed, bool) or not 0 <= seed <= MAX_SEED:
+        collect(errors, "seed", f"0 이상 {MAX_SEED} 이하의 정수여야 합니다.")
         seed = int(DEFAULTS["seed"])
 
     epochs = _positive_integer(errors, payload, "epochs", "epoch 수")
     batch_size = _positive_integer(errors, payload, "batch_size", "batch 크기")
     learning_rate = _number(errors, payload, "learning_rate", "learning rate")
-    weight_decay = _number(errors, payload, "weight_decay", "weight decay", allow_zero=True)
+    weight_decay = _number(errors, payload, "weight_decay", "weight decay")
 
     data_inputs: dict[str, str] = {}
     for key in DATA_KEYS:
@@ -169,6 +190,9 @@ def build_config(payload: Mapping[str, Any]) -> dict[str, Any]:
             continue
         if ".." in value.replace("\\", "/").split("/"):
             collect(errors, key, "상위 폴더를 가리킬 수 없습니다.")
+            continue
+        if _outside_repository(value):
+            collect(errors, key, "저장소 안의 상대 경로여야 합니다.")
             continue
         data_inputs[key] = value
 
@@ -269,16 +293,23 @@ def rerank_settings(run_ids: Sequence[str]) -> dict[str, Any]:
     if unready:
         raise WebError(f"아직 checkpoint가 없는 embedding입니다: {', '.join(unready)}")
 
-    banks = {item["crop_bank_uri"] for item in selected}
+    banks = [item["crop_bank_uri"] for item in selected]
     if None in banks:
         raise WebError("어느 crop 은행으로 학습했는지 모르는 embedding이 있습니다.")
-    if len(banks) > 1:
+
+    # 글자로 견주지 않습니다. 같은 S3 객체를 상대 key와 `s3://` 주소로 적으면
+    # 글자는 다르고 파일은 같아서, 함께 쓸 수 있는 것을 거절합니다. 이 화면이
+    # checkpoint 중복을 가릴 때 쓰는 것과 **같은 저장 계층**에 맡깁니다.
+    from .ensemble import _checkpoint_identity
+
+    identities = {_checkpoint_identity(str(bank)): str(bank) for bank in banks}
+    if len(identities) > 1:
         raise WebError(
             "서로 다른 crop 은행으로 학습한 embedding은 함께 쓸 수 없습니다: "
-            f"{', '.join(sorted(str(bank) for bank in banks))}"
+            f"{', '.join(sorted(identities.values()))}"
         )
 
     return {
         "rerank_checkpoint_uris": [str(item["checkpoint_uri"]) for item in selected],
-        "rerank_crop_bank_uri": str(banks.pop()),
+        "rerank_crop_bank_uri": str(banks[0]),
     }

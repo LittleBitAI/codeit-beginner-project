@@ -90,7 +90,7 @@ def _storage_config() -> dict[str, Any]:
 
 
 def _checkpoint_identity(uri: str) -> str:
-    """checkpoint의 신원입니다. 표기가 달라도 같은 파일이면 같은 값입니다.
+    """저장소가 보는 신원입니다. 표기가 달라도 같은 파일이면 같은 값입니다.
 
     **규칙을 새로 적지 않고 공용 저장 계층에 맡깁니다.** 직접 풀었더니 계층과 반대로
     움직였습니다 — S3에서 `a//x.pt`와 `a/x.pt`는 서로 **다른** key인데 같다고 보았고,
@@ -852,7 +852,7 @@ def build_fusion_config(
     allow_copied_images: bool = False,
     max_detections_per_image: int = _SUBMISSION_LIMIT,
     overwrite: bool = False,
-    embedding_run_ids: Sequence[str] = (),
+    rerank: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """고른 실행들을 합치는 evaluate config를 만듭니다.
 
@@ -918,9 +918,9 @@ def build_fusion_config(
         settings["predictions_input_uri"] = anchor["predictions_uri"]
     # 재순위는 합친 **뒤에** 한 번만 겁니다. evaluate가 거르기까지 끝낸 제출 행의
     # 점수만 고치므로, 어느 상자를 남길지는 지금까지처럼 detector가 정합니다.
-    from .embedding import rerank_settings
-
-    settings.update(rerank_settings(embedding_run_ids))
+    # 어떤 checkpoint와 은행을 쓸지는 **시작할 때 이미 정해져** 들어옵니다 —
+    # 여기서 이름으로 다시 찾으면 그사이 기록이 사라졌을 때 늦게 실패합니다.
+    settings.update(rerank or {})
 
     return {
         "project": {"name": "pill-object-detection"},

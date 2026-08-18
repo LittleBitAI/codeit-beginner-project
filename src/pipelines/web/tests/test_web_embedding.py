@@ -127,6 +127,63 @@ def test_embedding_config_refuses_a_backbone_train_cannot_build(isolated_repo):
     assert [item["field"] for item in error.value.as_list()] == ["backbone"]
 
 
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "/etc/passwd",
+        "C:/Windows/crop_bank.tar",
+        "C:\\Windows\\crop_bank.tar",
+        # UNC입니다. `..`도 없고 드라이브 글자도 없어 두 검사를 모두 지나갑니다.
+        "//server/share/crop_bank.tar",
+        "\\\\server\\share\\crop_bank.tar",
+    ],
+)
+def test_embedding_config_refuses_a_path_outside_the_repository(isolated_repo, uri):
+    """S3에서는 앞의 `/`가 떨어져 **다른 key**가 됩니다.
+
+    고른 적 없는 은행으로 조용히 학습하게 되고, 절대 경로가 응답에도 실립니다.
+    """
+
+    with pytest.raises(WebValidationError) as error:
+        embedding.build_config(_payload(crop_bank_uri=uri))
+
+    assert [item["field"] for item in error.value.as_list()] == ["crop_bank_uri"]
+
+
+def test_embedding_config_still_takes_a_storage_address(isolated_repo):
+    """`s3://`는 저장 계층이 판단합니다. 여기서 막으면 팀 저장소를 못 씁니다."""
+
+    config = embedding.build_config(
+        _payload(
+            crop_bank_uri="s3://bucket/v5/crop_bank.tar",
+            class_map_uri="s3://bucket/v5/class_map.json",
+        )
+    )
+
+    assert config["inputs"]["data"]["crop_bank_uri"] == "s3://bucket/v5/crop_bank.tar"
+
+
+def test_embedding_config_refuses_a_seed_numpy_cannot_use(isolated_repo):
+    """`numpy.random.seed()`는 2**32 이상을 거절합니다.
+
+    여기서 막지 않으면 학습이 시작된 **뒤에** 죽습니다. 그때는 GPU를 잡은 뒤입니다.
+    """
+
+    with pytest.raises(WebValidationError) as error:
+        embedding.build_config(_payload(seed=embedding.MAX_SEED + 1))
+
+    assert [item["field"] for item in error.value.as_list()] == ["seed"]
+
+
+def test_embedding_config_refuses_a_weight_decay_train_will_refuse(isolated_repo):
+    """train의 `_positive_number()`는 0을 거절합니다. 화면이 먼저 거절해야 합니다."""
+
+    with pytest.raises(WebValidationError) as error:
+        embedding.build_config(_payload(weight_decay=0))
+
+    assert [item["field"] for item in error.value.as_list()] == ["weight_decay"]
+
+
 def test_embedding_list_leaves_out_detector_training(fake_jobs):
     """detector 학습이 재순위 후보로 뜨면 고른 사람이 알 방법이 없습니다."""
 
@@ -161,6 +218,23 @@ def test_rerank_settings_refuse_two_different_crop_banks(fake_jobs):
         embedding.rerank_settings(["emb-r18", "emb-r34"])
 
     assert "서로 다른 crop 은행" in str(error.value)
+
+
+def test_rerank_settings_read_the_same_bank_written_two_ways(monkeypatch, fake_jobs):
+    """같은 S3 객체를 상대 key와 `s3://` 주소로 적으면 글자만 다릅니다.
+
+    글자로 견주면 함께 쓸 수 있는 것을 거절합니다. 저장 계층에 맡깁니다.
+    """
+
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "bucket")
+    fake_jobs.append(_record("emb-r18", crop_bank="v5/crop_bank.tar"))
+    fake_jobs.append(
+        _record("emb-r34", crop_bank="s3://bucket/v5/crop_bank.tar", backbone="resnet34")
+    )
+
+    settings = embedding.rerank_settings(["emb-r18", "emb-r34"])
+
+    assert settings["rerank_crop_bank_uri"] == "v5/crop_bank.tar"
 
 
 def test_rerank_settings_refuse_an_embedding_without_a_checkpoint(fake_jobs):
@@ -205,11 +279,55 @@ def test_fusion_config_carries_the_chosen_embeddings(monkeypatch, fake_jobs):
     monkeypatch.setattr(ensemble, "list_candidates", lambda: list(candidates))
 
     config = ensemble.build_fusion_config(
-        ["dino-a", "dino-b"], run_id="fused", embedding_run_ids=["emb-r18"]
+        ["dino-a", "dino-b"],
+        run_id="fused",
+        rerank=embedding.rerank_settings(["emb-r18"]),
     )
 
     assert config["evaluate"]["rerank_checkpoint_uris"] == ["s3://bucket/r18.pt"]
     assert config["evaluate"]["rerank_crop_bank_uri"] == "datasets/v5/crop_bank.tar"
+
+
+def test_fusion_does_not_look_the_embeddings_up_again(monkeypatch, fake_jobs):
+    """합치는 자리에서 이름으로 다시 찾으면 **늦게** 실패합니다.
+
+    detector 예측을 만드는 몇 분 사이에 그 기록을 지운 사람이 있으면, checkpoint는
+    멀쩡한데 "기록에 없는 embedding"으로 끝납니다. 그때는 추론이 이미 끝난 뒤라
+    그 시간이 통째로 버려집니다. 그래서 걸 때 한 번 풀어 들고 갑니다.
+    """
+
+    candidates = [
+        {
+            "run_id": name,
+            "checkpoint_uri": f"s3://bucket/{name}/best.pt",
+            "test_predictions_uri": f"s3://bucket/{name}/test_predictions.json",
+            "ready": True,
+            "dataset_label": "v5",
+            "kaggle_score": 0.6,
+            "created_at": None,
+            "data_inputs": {
+                "validation_manifest_uri": "s3://bucket/v/validation_manifest.json",
+                "test_manifest_uri": "s3://bucket/v/test_manifest.json",
+                "class_map_uri": "s3://bucket/v/class_map.json",
+            },
+            "predictions_uri": None,
+        }
+        for name in ("dino-a", "dino-b")
+    ]
+    monkeypatch.setattr(ensemble, "list_candidates", lambda: list(candidates))
+    # 기록은 하나도 남아 있지 않습니다. 이름으로 찾는다면 여기서 실패합니다.
+    assert embedding.list_runs() == []
+
+    config = ensemble.build_fusion_config(
+        ["dino-a", "dino-b"],
+        run_id="fused",
+        rerank={
+            "rerank_checkpoint_uris": ["s3://bucket/r18.pt"],
+            "rerank_crop_bank_uri": "datasets/v5/crop_bank.tar",
+        },
+    )
+
+    assert config["evaluate"]["rerank_checkpoint_uris"] == ["s3://bucket/r18.pt"]
 
 
 def test_automatic_evaluation_walks_past_an_embedding_run(manager, fake_jobs):

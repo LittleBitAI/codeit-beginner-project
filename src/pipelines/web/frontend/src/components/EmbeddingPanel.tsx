@@ -14,6 +14,7 @@ import { api } from '../api/client';
 import type { EmbeddingDefaults, EmbeddingRun, ProcessedDataset } from '../api/types';
 import { AlertRow, Button, MicroLabel, controlStyle } from './primitives';
 import { color, type } from '../design/tokens';
+import { useTeam } from '../team/TeamContext';
 
 /** 은행과 class map은 전처리 폴더 안에서 이 이름으로 놓입니다(data pipeline). */
 const CROP_BANK_FILE = 'crop_bank.tar';
@@ -27,6 +28,7 @@ interface Props {
 }
 
 export function EmbeddingPanel({ selected, onToggle, disabled = false }: Props) {
+  const team = useTeam();
   const [runs, setRuns] = useState<EmbeddingRun[]>([]);
   const [defaults, setDefaults] = useState<EmbeddingDefaults | null>(null);
   const [datasets, setDatasets] = useState<ProcessedDataset[]>([]);
@@ -71,25 +73,29 @@ export function EmbeddingPanel({ selected, onToggle, disabled = false }: Props) 
     };
   }, []);
 
-  const start = useCallback(() => {
+  const start = useCallback(async () => {
     setError(null);
     setNotice(null);
-    api
-      .startEmbedding({
-        crop_bank_uri: `${directory}${CROP_BANK_FILE}`,
-        class_map_uri: `${directory}${CLASS_MAP_FILE}`,
-        backbone: backbone || undefined,
-        run_id: name.trim() || undefined,
-      })
-      .then((result) => {
-        setNotice(`${result.run_id} 학습을 걸었습니다. 진행은 모니터 화면에서 봅니다.`);
-        setName('');
-        refresh();
-      })
-      .catch((cause) =>
-        setError(cause instanceof Error ? cause.message : '학습을 걸지 못했습니다.'),
+    try {
+      // 학습 화면과 같은 token을 보냅니다. 이 학습도 같은 대기열을 지나므로,
+      // token 없이 넣으면 꺼내 시작할 때 팀 기록을 못 만들어 거절당합니다.
+      const token = await team.getAccessToken();
+      const result = await api.startEmbedding(
+        {
+          crop_bank_uri: `${directory}${CROP_BANK_FILE}`,
+          class_map_uri: `${directory}${CLASS_MAP_FILE}`,
+          backbone: backbone || undefined,
+          run_id: name.trim() || undefined,
+        },
+        token,
       );
-  }, [backbone, directory, name, refresh]);
+      setNotice(`${result.run_id} 학습을 걸었습니다. 진행은 모니터 화면에서 봅니다.`);
+      setName('');
+      refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '학습을 걸지 못했습니다.');
+    }
+  }, [backbone, directory, name, refresh, team]);
 
   return (
     <section style={{ display: 'grid', gap: 8 }}>

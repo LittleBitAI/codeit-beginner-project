@@ -59,6 +59,7 @@ class EnsembleRunner:
         """
 
         from . import ensemble
+        from .embedding import rerank_settings
 
         # **추론을 걸기 전에 거절할 것은 먼저 거절합니다.** 검증을 뒤로 미루면 예측
         # 없는 후보 하나만 보내도 GPU가 9분을 돌고 나서야 "둘 이상 필요"로 실패합니다.
@@ -69,6 +70,11 @@ class EnsembleRunner:
             overwrite=bool(overwrite),
             embedding_run_ids=embedding_run_ids,
         )
+        # 고른 embedding을 **여기서 한 번** 풀어 들고 갑니다. 이름만 들고 갔다가
+        # 합칠 때 다시 찾으면, 예측을 만드는 몇 분 사이에 그 기록을 지운 사람이
+        # 있을 때 checkpoint는 멀쩡한데 "기록에 없는 embedding"으로 늦게 실패합니다.
+        # 그때는 detector 추론이 이미 끝난 뒤입니다.
+        rerank = rerank_settings(embedding_run_ids)
         pending = ensemble.pending_runs(run_ids)
         with self._lock:
             if self._state.get("status") == STATUS_RUNNING:
@@ -94,7 +100,7 @@ class EnsembleRunner:
                 bool(allow_copied_images),
                 bool(overwrite),
                 pending,
-                list(embedding_run_ids),
+                dict(rerank),
             ),
             daemon=True,
         )
@@ -108,7 +114,7 @@ class EnsembleRunner:
         allow_copied_images: bool,
         overwrite: bool,
         pending: list[Mapping[str, Any]],
-        embedding_run_ids: list[str],
+        rerank: dict[str, Any],
     ) -> None:
         from . import ensemble
 
@@ -137,7 +143,7 @@ class EnsembleRunner:
                 run_id=run_id,
                 allow_copied_images=allow_copied_images,
                 overwrite=overwrite,
-                embedding_run_ids=embedding_run_ids,
+                rerank=rerank,
             )
         except Exception as error:  # noqa: BLE001
             self._fail(run_id, f"융합 설정을 만들지 못했습니다({type(error).__name__}).")

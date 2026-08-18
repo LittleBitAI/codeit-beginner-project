@@ -153,15 +153,22 @@ export const api = {
 
   embeddingDefaults: () => request<EmbeddingDefaults>('/api/embedding/defaults'),
 
-  startEmbedding: (payload: {
-    crop_bank_uri: string;
-    class_map_uri: string;
-    run_id?: string;
-    backbone?: string;
-    epochs?: number;
-  }) =>
+  // 학습 시작과 같은 login token을 보냅니다. 대기열에서 꺼내 실제로 시작할 때 팀
+  // 기록을 만들어야 하는데, token이 없으면 이미 로그인한 사람도 거절당하고 그
+  // 항목에서 대기열이 멈춥니다.
+  startEmbedding: (
+    payload: {
+      crop_bank_uri: string;
+      class_map_uri: string;
+      run_id?: string;
+      backbone?: string;
+      epochs?: number;
+    },
+    accessToken?: string | null,
+  ) =>
     request<{ config_id: string; run_id: string }>('/api/embedding/jobs', {
       method: 'POST',
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
       body: JSON.stringify(payload),
     }),
 

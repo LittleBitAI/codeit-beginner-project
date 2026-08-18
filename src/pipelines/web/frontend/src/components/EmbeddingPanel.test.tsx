@@ -13,6 +13,16 @@ import { api } from '../api/client';
 import type { EmbeddingRun, ProcessedDataset } from '../api/types';
 import { EmbeddingPanel } from './EmbeddingPanel';
 
+// 로그인한 사람으로 그립니다. 이 학습도 학습 대기열을 지나므로 token 없이 넣으면
+// 꺼내 시작할 때 팀 기록을 못 만들어 거절당하고, 그 항목에서 대기열이 멈춥니다.
+vi.mock('../team/TeamContext', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../team/TeamContext')>();
+  return {
+    ...actual,
+    useTeam: () => ({ ...actual.useTeam(), getAccessToken: async () => 'login-token' }),
+  };
+});
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -103,6 +113,24 @@ describe('재순위 embedding 칸', () => {
       crop_bank_uri: 'datasets/pill_detection/processed/v5-seed42-8020-group/crop_bank.tar',
       class_map_uri: 'datasets/pill_detection/processed/v5-seed42-8020-group/class_map.json',
     });
+  });
+
+  it('학습 화면과 같은 login token을 함께 보낸다', async () => {
+    // 없으면 대기열이 그 항목을 꺼낼 때 거절당하고 거기서 멈춥니다.
+    stub([]);
+    const start = vi
+      .spyOn(api, 'startEmbedding')
+      .mockResolvedValue({ config_id: 'c1', run_id: 'web-emb' });
+
+    render(<EmbeddingPanel selected={[]} onToggle={() => undefined} />);
+    fireEvent.click(await screen.findByRole('button', { name: '새 embedding 학습' }));
+    fireEvent.change(await screen.findByLabelText('crop 은행'), {
+      target: { value: 'datasets/pill_detection/processed/v5-seed42-8020-group/' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '학습 걸기' }));
+
+    await waitFor(() => expect(start).toHaveBeenCalled());
+    expect(start.mock.calls[0]?.[1]).toBe('login-token');
   });
 
   it('은행이 없는 전처리 폴더는 고르는 자리에 두지 않는다', async () => {
