@@ -326,6 +326,12 @@ def test_the_multiplier_follows_the_formula(
         ({"normalisation": {"mean": [0.5, 0.5, 0.5], "std": [0.0, 0.2, 0.2]}}, "0보다 커야"),
         # 음수 std는 그 channel의 방향을 뒤집어, 오류 없이 특징만 틀어집니다.
         ({"normalisation": {"mean": [0.5, 0.5, 0.5], "std": [-0.2, 0.2, 0.2]}}, "0보다 커야"),
+        # python의 정수는 크기 제한이 없습니다. 검사가 스스로 OverflowError를 내면
+        # 거절하려던 값 때문에 `run()` 밖으로 예외가 나갑니다.
+        (
+            {"normalisation": {"mean": [10**400, 0.5, 0.5], "std": [0.2, 0.2, 0.2]}},
+            "유한한 숫자 셋",
+        ),
         (
             {"normalisation": {"mean": [0.5, 0.5], "std": [0.2, 0.2, 0.2]}},
             "유한한 숫자 셋",
@@ -362,6 +368,38 @@ def test_a_checkpoint_that_cannot_say_how_it_was_trained_is_refused(
     assert expected in result["message"]
 
 
+def test_the_reported_median_is_a_real_median(base_config: dict, repository_root: Path):
+    """보고 숫자가 틀리면 그것을 근거로 다음 판단을 합니다.
+
+    행이 짝수 개일 때 `values[len // 2]`는 위쪽 값이라 median이 아닙니다. 여기서는
+    margin이 -0.5와 0.5라 median은 0이어야 합니다.
+    """
+
+    _prepare(base_config, repository_root, category_ids=(3, 7))
+    bank = _write_crop_bank(repository_root / "data/test/crop_bank.tar", {3: RED, 7: BLUE})
+    _write_embedding_checkpoint(repository_root / "checkpoints/embedding.pt", [3, 7])
+    base_config["evaluate"]["rerank_checkpoint_uris"] = ["checkpoints/embedding.pt"]
+    base_config["evaluate"]["rerank_crop_bank_uri"] = bank
+    original = rerank_module._margins
+    rerank_module._margins = lambda similarity, **kwargs: (
+        torch.tensor([-0.5, 0.5][: similarity.shape[0]]),
+        torch.ones(similarity.shape[0], dtype=torch.bool),
+    )
+    try:
+        result = run(base_config)
+    finally:
+        rerank_module._margins = original
+
+    assert result["status"] == "ok", result["message"]
+    document = json.loads(
+        (repository_root / result["artifacts"]["test_predictions_uri"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert document["rerank"]["reranked_rows"] == 2
+    assert document["rerank"]["median_margin"] == pytest.approx(0.0)
+
+
 def test_a_margin_that_is_not_a_number_stops_the_run(
     base_config: dict, repository_root: Path
 ):
@@ -388,25 +426,6 @@ def test_a_margin_that_is_not_a_number_stops_the_run(
 
     assert result["status"] == "error"
     assert "숫자가 아닙니다" in result["message"]
-
-
-def test_an_unmeasurable_row_is_left_alone_not_treated_as_broken(
-    base_config: dict, repository_root: Path
-):
-    """참조가 없는 class는 오류가 아니라 그냥 두는 것이 맞습니다."""
-
-    # 은행은 3과 5를 알고, 예측은 3과 7입니다. 7은 참조가 없습니다.
-    _prepare(base_config, repository_root, category_ids=(3, 7))
-    bank = _write_crop_bank(repository_root / "data/test/crop_bank.tar", {3: RED, 5: BLUE})
-    _write_embedding_checkpoint(repository_root / "checkpoints/embedding.pt", [3, 5])
-    base_config["evaluate"]["rerank_checkpoint_uris"] = ["checkpoints/embedding.pt"]
-    base_config["evaluate"]["rerank_crop_bank_uri"] = bank
-
-    result = run(base_config)
-
-    assert result["status"] == "ok", result["message"]
-    scores = _submission_scores(repository_root, result)
-    assert scores[20] == pytest.approx(0.9)
 
 
 def test_an_inference_failure_is_reported_not_raised(

@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import math
 import ntpath
+import statistics
 import tarfile
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
@@ -214,6 +215,22 @@ def _embedding_model(checkpoint: Mapping[str, Any], *, source: str, device: str)
     return model
 
 
+def _is_finite_number(value: Any) -> bool:
+    """유한한 숫자인지 봅니다. **검사가 스스로 터지지 않게** 합니다.
+
+    python의 정수는 크기 제한이 없어서, `10**400` 같은 값에 `math.isfinite`를 부르면
+    `OverflowError`가 납니다. 잘못된 checkpoint를 거절하려던 검사가 그 자리에서
+    `run()` 밖으로 나가 버립니다.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
+
+
 def _normalisation(checkpoint: Mapping[str, Any], *, source: str) -> tuple[Any, Any]:
     """checkpoint가 적어 둔 정규화 값을 읽고 **쓸 수 있는 값인지** 봅니다.
 
@@ -234,12 +251,7 @@ def _normalisation(checkpoint: Mapping[str, Any], *, source: str) -> tuple[Any, 
             not isinstance(item, Sequence)
             or isinstance(item, (str, bytes))
             or len(item) != 3
-            or not all(
-                isinstance(number, (int, float))
-                and not isinstance(number, bool)
-                and math.isfinite(number)
-                for number in item
-            )
+            or not all(_is_finite_number(number) for number in item)
         ):
             raise InputArtifactError(
                 f"{source}: normalisation.{key}는 유한한 숫자 셋이어야 합니다."
@@ -312,26 +324,21 @@ def _stack(crops: Sequence[Any], *, mean: Any, std: Any) -> Any:
 def _embed(model: Any, batch: Any, *, device: str) -> Any:
     """8-way TTA로 특징을 뽑아 하나로 모읍니다. 결과는 L2 정규화된 vector입니다.
 
-    torch가 내는 실패는 계약 오류로 바꿉니다. GPU가 모자라거나 kernel이 터지면
-    `RuntimeError`가 나는데, 그대로 두면 `run()` 경계를 넘어 나갑니다.
+    실패를 계약 오류로 바꾸는 일은 부르는 쪽이 합니다 — 여기만 감싸면 batch를
+    쌓거나 이어 붙이는 자리에서 난 오류가 그대로 빠져나갑니다.
     """
 
     torch = _import_torch()
     total = None
-    try:
-        for flip in TTA_FLIPS:
-            base = torch.flip(batch, dims=[3]) if flip else batch
-            for turns in range(TTA_TURNS):
-                view = torch.rot90(base, turns, dims=[2, 3]) if turns else base
-                with torch.inference_mode():
-                    features = model(view.to(torch.device(device)))
-                features = torch.nn.functional.normalize(features.float().cpu(), dim=1)
-                total = features if total is None else total + features
-        return torch.nn.functional.normalize(total, dim=1)
-    except (RuntimeError, ValueError, MemoryError) as error:
-        raise PredictionError(
-            f"재순위 추론에 실패했습니다 ({error.__class__.__name__}): {error}"
-        ) from error
+    for flip in TTA_FLIPS:
+        base = torch.flip(batch, dims=[3]) if flip else batch
+        for turns in range(TTA_TURNS):
+            view = torch.rot90(base, turns, dims=[2, 3]) if turns else base
+            with torch.inference_mode():
+                features = model(view.to(torch.device(device)))
+            features = torch.nn.functional.normalize(features.float().cpu(), dim=1)
+            total = features if total is None else total + features
+    return torch.nn.functional.normalize(total, dim=1)
 
 
 def _embed_all(
@@ -469,38 +476,50 @@ def rerank_predictions(
                 )
 
             bank_crops = _open_bank_crops(root / "bank", bank_records)
-            reference = _embed_all(
-                model,
-                bank_crops,
-                device=device,
-                mean=mean,
-                std=std,
-                on_progress=(
-                    None if on_progress is None
-                    else lambda done, total: on_progress("rerank_reference", done, total)
-                ),
-            )
-            for picture in bank_crops:
-                picture.close()
-            embedded = _embed_all(
-                model,
-                [crops[index] for index in wanted],
-                device=device,
-                mean=mean,
-                std=std,
-                on_progress=(
-                    None if on_progress is None
-                    else lambda done, total: on_progress("rerank_embed", done, total)
-                ),
-            )
+            # **특징을 뽑는 구간 전체를 감쌉니다.** 터지는 곳이 model 호출만은
+            # 아닙니다. batch를 쌓는 자리, 이어 붙이는 자리, 유사도 행렬을 만드는
+            # 자리 모두 메모리를 크게 쓰고, 거기서 난 오류도 `run()` 밖으로 나가면
+            # 안 됩니다.
+            try:
+                reference = _embed_all(
+                    model,
+                    bank_crops,
+                    device=device,
+                    mean=mean,
+                    std=std,
+                    on_progress=(
+                        None if on_progress is None
+                        else lambda done, total: on_progress(
+                            "rerank_reference", done, total
+                        )
+                    ),
+                )
+                for picture in bank_crops:
+                    picture.close()
+                embedded = _embed_all(
+                    model,
+                    [crops[index] for index in wanted],
+                    device=device,
+                    mean=mean,
+                    std=std,
+                    on_progress=(
+                        None if on_progress is None
+                        else lambda done, total: on_progress("rerank_embed", done, total)
+                    ),
+                )
+                similarity = embedded @ reference.T
+            except (RuntimeError, ValueError, MemoryError) as error:
+                raise PredictionError(
+                    f"재순위 추론에 실패했습니다 ({error.__class__.__name__}): {error}"
+                ) from error
             collected.append(
                 _margins(
-                    embedded @ reference.T,
+                    similarity,
                     bank_categories=[record["category_id"] for record in bank_records],
                     categories=[rows[index]["category_id"] for index in wanted],
                 )
             )
-            del model, reference, embedded
+            del model, reference, embedded, similarity
 
     margin = torch.stack([item[0] for item in collected]).mean(dim=0)
     # 한 checkpoint라도 재지 못한 행은 재지 못한 것으로 봅니다. 평균에 넣으면 그
@@ -537,7 +556,9 @@ def rerank_predictions(
         "checkpoints": list(checkpoint_uris),
         "reference_crops": len(bank_records),
         "crop_bank_uri": store.normalize_uri(crop_bank_uri),
-        "median_margin": values[len(values) // 2] if values else None,
+        # 짝수 개일 때 가운데 두 값의 평균입니다. `values[len // 2]`는 위쪽 값이라
+        # median이 아니고, 보고 숫자가 틀리면 그것을 근거로 다음 판단을 합니다.
+        "median_margin": statistics.median(values) if values else None,
         "negative_margin_rows": sum(1 for value in values if value < 0),
     }
     return rows, summary
