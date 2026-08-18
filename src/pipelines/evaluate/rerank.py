@@ -32,7 +32,7 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from .errors import EvaluateError, InputArtifactError, PredictionError
+from .errors import InputArtifactError, PredictionError
 from .predictor import load_checkpoint_document
 from .storage_io import ArtifactStore
 
@@ -510,11 +510,6 @@ def rerank_predictions(
                     ),
                 )
                 similarity = embedded @ reference.T
-            except EvaluateError:
-                # 우리가 일부러 낸 오류는 그대로 둡니다. `EvaluateError`는
-                # `RuntimeError`를 물려받으므로, 이 줄이 없으면 "은행이 이상하다"는
-                # 말이 "추론이 실패했다"로 덧씌워져 나갑니다.
-                raise
             except (RuntimeError, ValueError, MemoryError) as error:
                 raise PredictionError(
                     f"재순위 추론에 실패했습니다 ({error.__class__.__name__}): {error}"

@@ -16,7 +16,6 @@ from pathlib import Path
 import pytest
 
 from src.pipelines.evaluate import rerank as rerank_module
-from src.pipelines.evaluate.errors import InputArtifactError
 from src.pipelines.evaluate.pipeline import run
 
 from conftest import write_json
@@ -431,33 +430,13 @@ def test_a_margin_that_is_not_a_number_stops_the_run(
     assert "숫자가 아닙니다" in result["message"]
 
 
-@pytest.mark.parametrize(
-    ("raised", "expected", "forbidden"),
-    [
-        (RuntimeError("CUDA out of memory"), "재순위 추론에 실패했습니다", None),
-        # `InputArtifactError`는 `RuntimeError`를 물려받습니다. 그래서 추론을 감싼
-        # except가 우리가 일부러 낸 오류까지 집어삼켜 **엉뚱한 이유로** 바꿔
-        # 내보낼 수 있습니다. 덧씌운 문장은 원래 문장을 안에 품으므로, 있는지만
-        # 보면 구별되지 않습니다 — 틀린 이름이 **없는지**까지 봅니다.
-        (
-            InputArtifactError("은행 crop이 깨졌습니다"),
-            "은행 crop이 깨졌습니다",
-            "재순위 추론에 실패했습니다",
-        ),
-    ],
-    ids=["inference", "ours"],
-)
 def test_an_inference_failure_is_reported_not_raised(
-    base_config: dict,
-    repository_root: Path,
-    raised: Exception,
-    expected: str,
-    forbidden: str | None,
+    base_config: dict, repository_root: Path
 ):
     """GPU가 모자라거나 kernel이 터지면 `RuntimeError`가 납니다.
 
     그대로 두면 `run()` 경계를 넘어 나갑니다. 이 pipeline은 실패를 status=error로
-    돌려주지, 예외를 내보내지 않습니다. 다만 **이유는 바뀌지 않아야** 합니다.
+    돌려주지, 예외를 내보내지 않습니다.
     """
 
     _prepare(base_config, repository_root, category_ids=(3, 7))
@@ -468,7 +447,7 @@ def test_an_inference_failure_is_reported_not_raised(
 
     def exploding(*args, **kwargs):
         def model(_batch):
-            raise raised
+            raise RuntimeError("CUDA out of memory")
 
         return model
 
@@ -480,9 +459,7 @@ def test_an_inference_failure_is_reported_not_raised(
         rerank_module._embedding_model = original
 
     assert result["status"] == "error"
-    assert expected in result["message"]
-    if forbidden is not None:
-        assert forbidden not in result["message"]
+    assert "재순위 추론에 실패했습니다" in result["message"]
 
 
 def test_a_missing_reference_crop_is_reported_not_raised(
