@@ -33,7 +33,16 @@ BACKEND_NAME = "mmdetection"
 # 이름은 train과 함께 쓰는 계약이 정합니다(`src/common/train_contract.py`). 여기서는
 # 그 이름의 checkpoint를 어떤 model로 되살릴지만 정합니다.
 DINO_ARCHITECTURE = "dino_r50_4scale"
-DINO_SWIN_ARCHITECTURE = "dino_swin_b_4scale"
+DINO_SWIN_T_ARCHITECTURE = "dino_swin_t_4scale"
+DINO_SWIN_B_ARCHITECTURE = "dino_swin_b_4scale"
+DINO_SWIN_L_ARCHITECTURE = "dino_swin_l_5scale"
+#: backbone만 다른 DINO 갈래입니다. train의 `DINO_ARCHITECTURES`와 같아야 합니다.
+DINO_ARCHITECTURES = (
+    DINO_ARCHITECTURE,
+    DINO_SWIN_T_ARCHITECTURE,
+    DINO_SWIN_B_ARCHITECTURE,
+    DINO_SWIN_L_ARCHITECTURE,
+)
 CASCADE_ARCHITECTURE = "cascade_rcnn_swin_t_fpn"
 MODEL_CONFIG_SCHEMA_VERSION = 1
 PAD_MULTIPLE = 32
@@ -59,23 +68,46 @@ def _data_preprocessor() -> dict[str, Any]:
     }
 
 
-#: Swin-B 단계별 출력 채널입니다. train의 `_SWIN_B_CHANNELS`와 같은 값이어야 합니다.
-_SWIN_B_CHANNELS = (128, 256, 512, 1024)
-
-
-def _swin_b_backbone() -> dict[str, Any]:
-    """train의 `_swin_b_backbone()`과 같은 모양입니다.
-
-    한 값이라도 어긋나면 checkpoint를 싣지 못하거나(모양이 다를 때) **멈추지 않고
-    점수만 나빠집니다**(`window_size`처럼 모양이 같은 값일 때).
-    """
-
-    return {
-        "type": "SwinTransformer",
-        "embed_dims": _SWIN_B_CHANNELS[0],
+#: train의 `_SWIN_VARIANTS`와 같은 값이어야 합니다. 한 값이라도 어긋나면 checkpoint를
+#: 싣지 못하거나(모양이 다를 때), **멈추지 않고 점수만 나빠집니다**(`window_size`처럼
+#: 모양은 같고 뜻만 다른 값일 때). `tests/test_mmdetection_config_agreement.py`가 두
+#: 벌을 대조합니다.
+_SWIN_VARIANTS: dict[str, dict[str, Any]] = {
+    DINO_SWIN_T_ARCHITECTURE: {
+        "embed_dims": 96,
+        "depths": [2, 2, 6, 2],
+        "num_heads": [3, 6, 12, 24],
+        "window_size": 7,
+    },
+    DINO_SWIN_B_ARCHITECTURE: {
+        "embed_dims": 128,
         "depths": [2, 2, 18, 2],
         "num_heads": [4, 8, 16, 32],
         "window_size": 7,
+    },
+    DINO_SWIN_L_ARCHITECTURE: {
+        "embed_dims": 192,
+        "depths": [2, 2, 18, 2],
+        "num_heads": [6, 12, 24, 48],
+        "window_size": 12,
+    },
+}
+_FIVE_SCALE_ARCHITECTURES = (DINO_SWIN_L_ARCHITECTURE,)
+
+
+def _dino_levels(architecture: str) -> int:
+    return 5 if architecture in _FIVE_SCALE_ARCHITECTURES else 4
+
+
+def _swin_backbone(architecture: str) -> dict[str, Any]:
+    variant = _SWIN_VARIANTS[architecture]
+    levels = _dino_levels(architecture)
+    return {
+        "type": "SwinTransformer",
+        "embed_dims": variant["embed_dims"],
+        "depths": list(variant["depths"]),
+        "num_heads": list(variant["num_heads"]),
+        "window_size": variant["window_size"],
         "mlp_ratio": 4,
         "qkv_bias": True,
         "qk_scale": None,
@@ -83,22 +115,33 @@ def _swin_b_backbone() -> dict[str, Any]:
         "attn_drop_rate": 0.0,
         "drop_path_rate": 0.2,
         "patch_norm": True,
-        "out_indices": (1, 2, 3),
+        "out_indices": (0, 1, 2, 3) if levels == 5 else (1, 2, 3),
         "with_cp": True,
         "convert_weights": False,
         "init_cfg": None,
     }
 
 
-def _dino_config(num_classes: int, *, swin: bool = False) -> dict[str, Any]:
-    return {
+def _dino_in_channels(architecture: str) -> list[int]:
+    if architecture == DINO_ARCHITECTURE:
+        return [512, 1024, 2048]
+    first = _SWIN_VARIANTS[architecture]["embed_dims"]
+    stages = [first * 2**step for step in range(4)]
+    return stages if _dino_levels(architecture) == 5 else stages[1:]
+
+
+def _dino_config(
+    num_classes: int, *, architecture: str = DINO_ARCHITECTURE
+) -> dict[str, Any]:
+    levels = _dino_levels(architecture)
+    config: dict[str, Any] = {
         "type": "DINO",
         "num_queries": 900,
         "with_box_refine": True,
         "as_two_stage": True,
         "data_preprocessor": _data_preprocessor(),
-        "backbone": _swin_b_backbone()
-        if swin
+        "backbone": _swin_backbone(architecture)
+        if architecture != DINO_ARCHITECTURE
         else {
             "type": "ResNet",
             "depth": 50,
@@ -113,17 +156,17 @@ def _dino_config(num_classes: int, *, swin: bool = False) -> dict[str, Any]:
         },
         "neck": {
             "type": "ChannelMapper",
-            "in_channels": list(_SWIN_B_CHANNELS[1:]) if swin else [512, 1024, 2048],
+            "in_channels": _dino_in_channels(architecture),
             "kernel_size": 1,
             "out_channels": 256,
             "act_cfg": None,
             "norm_cfg": {"type": "GN", "num_groups": 32},
-            "num_outs": 4,
+            "num_outs": levels,
         },
         "encoder": {
             "num_layers": 6,
             "layer_cfg": {
-                "self_attn_cfg": {"embed_dims": 256, "num_levels": 4, "dropout": 0.0},
+                "self_attn_cfg": {"embed_dims": 256, "num_levels": levels, "dropout": 0.0},
                 "ffn_cfg": {
                     "embed_dims": 256,
                     "feedforward_channels": 2048,
@@ -136,7 +179,7 @@ def _dino_config(num_classes: int, *, swin: bool = False) -> dict[str, Any]:
             "return_intermediate": True,
             "layer_cfg": {
                 "self_attn_cfg": {"embed_dims": 256, "num_heads": 8, "dropout": 0.0},
-                "cross_attn_cfg": {"embed_dims": 256, "num_levels": 4, "dropout": 0.0},
+                "cross_attn_cfg": {"embed_dims": 256, "num_levels": levels, "dropout": 0.0},
                 "ffn_cfg": {
                     "embed_dims": 256,
                     "feedforward_channels": 2048,
@@ -186,6 +229,10 @@ def _dino_config(num_classes: int, *, swin: bool = False) -> dict[str, Any]:
         },
         "test_cfg": {"max_per_img": 300},
     }
+    # 넷은 DINO의 기본값이라 4scale에서는 적지 않습니다. train과 같은 규칙입니다.
+    if levels != 4:
+        config["num_feature_levels"] = levels
+    return config
 
 
 def _cascade_bbox_head(num_classes: int, target_stds: Sequence[float]) -> dict[str, Any]:
@@ -361,10 +408,8 @@ def build_detector_config(
 ) -> dict[str, Any]:
     """train이 학습한 것과 같은 모양의 detector 설정을 만듭니다."""
 
-    if architecture == DINO_ARCHITECTURE:
-        return _dino_config(foreground_classes)
-    if architecture == DINO_SWIN_ARCHITECTURE:
-        return _dino_config(foreground_classes, swin=True)
+    if architecture in DINO_ARCHITECTURES:
+        return _dino_config(foreground_classes, architecture=architecture)
     if architecture == CASCADE_ARCHITECTURE:
         return _cascade_config(foreground_classes)
     raise PredictionError(

@@ -17,7 +17,7 @@ You own `src/pipelines/web/`. Never import data, train, evaluate, or registry. T
 
 You cannot import train, so every value you both must agree on lives in `src/common/train_contract.py`: model and optimizer names, optimizer profiles, precision and schedule tables, the 8GB combination, settings defaults. Read them from there and never re-type them here — they were copied once, watched by a test that parsed train's source, and a name drifted anyway. Train owns them; ask first.
 
-`train_config.py` still mirrors train's **rules** — which values are refused, which key belongs to which selection — because the GUI must refuse before the GPU is busy. The MMDetection pair carries its own: `input_size` goes only to those architectures, and the 8GB combination is enforced here so the wrong box is named on screen.
+`train_config.py` still mirrors train's **rules** — which values are refused, which key belongs to which selection — because the GUI must refuse before the GPU is busy. The MMDetection ones carry their own: `input_size` goes only to those architectures, and the 8GB combination is enforced here so the wrong box is named on screen.
 
 ## Interface
 

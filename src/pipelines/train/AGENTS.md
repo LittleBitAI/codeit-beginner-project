@@ -37,8 +37,8 @@ Published files are never overwritten, and a run stops before its first batch wh
 
 ## Configurable Training
 
-- Architectures come from the contract; never accept arbitrary builder names. Three are MMDetection, via `mmdetection_adapter.py`.
-- The MMDetection trio only fits 8GB at `device="cuda"`, `precision="amp"`, `optimizer="AdamW"`, `batch_size=1`; anything else is refused before the first batch, not partway through the night. `input_size` is theirs alone, refused with a torchvision architecture, not ignored.
+- Architectures come from the contract; never accept arbitrary builder names. MMDetection ones go via `mmdetection_adapter.py`.
+- The MMDetection ones need `device="cuda"`, `precision="amp"`, `optimizer="AdamW"`, `batch_size=1`; anything else is refused before the first batch, not partway through the night. GPU cost sits with it. `input_size` is theirs alone, refused with a torchvision architecture, not ignored.
 - Their checkpoints carry `backend` and `model_config` for evaluate; no `backend` still reads as torchvision, which keeps older ones loadable.
 - `num_workers` defaults to a few on CUDA, `0` on CPU and wherever `WORKERS_ARE_SPAWNED`: a spawned worker gets the dataset by pickle, which its S3 client cannot do. A **forked** worker inherits that client, which boto3 cannot share; `give_worker_its_own_storage` reconnects it.
 - A missing optimizer means legacy SGD; new callers send AdamW. Reject optimizer- or schedule-specific settings the selection does not use; never ignore them.

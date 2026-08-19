@@ -22,9 +22,11 @@ from typing import Any
 
 __all__ = [
     "ARCHITECTURES",
+    "ARCHITECTURE_BACKBONES",
     "AUGMENTATIONS",
     "BEST_CHECKPOINT_NAME",
     "CUDA_ONLY_PRECISIONS",
+    "DEFAULT_ARCHITECTURE_BACKBONES",
     "DEFAULT_EMBEDDING_BACKBONE",
     "DEFAULT_TRAIN_TASK",
     "EMBEDDING_BACKBONES",
@@ -83,9 +85,25 @@ DEFAULT_ARCHITECTURE = "fasterrcnn_mobilenet_v3_large_320_fpn"
 #: MMDetection으로 학습하는 model입니다. 아래 제약이 이 셋에만 걸립니다.
 MMDETECTION_ARCHITECTURES = (
     "dino_r50_4scale",
+    "dino_swin_t_4scale",
     "dino_swin_b_4scale",
+    "dino_swin_l_5scale",
     "cascade_rcnn_swin_t_fpn",
 )
+#: 화면이 model 한 칸이 아니라 **model + backbone 두 칸**으로 보여 주는 갈래입니다.
+#: 저장되고 checkpoint에 남는 값은 여전히 architecture 이름 **하나뿐**입니다 — 값이
+#: 둘이면 서로 어긋날 수 있고, 어긋난 쪽은 멈추지 않고 점수만 나빠집니다. 그래서 화면은
+#: 두 칸을 그리고 보내기 전에 이 표로 이름 하나를 만듭니다.
+ARCHITECTURE_BACKBONES: dict[str, dict[str, str]] = {
+    "dino": {
+        "resnet50": "dino_r50_4scale",
+        "swin_t": "dino_swin_t_4scale",
+        "swin_b": "dino_swin_b_4scale",
+        "swin_l": "dino_swin_l_5scale",
+    },
+}
+#: 그 갈래를 골랐을 때 처음 놓이는 backbone입니다. 기존 실행이 쓰던 것과 같습니다.
+DEFAULT_ARCHITECTURE_BACKBONES: dict[str, str] = {"dino": "resnet50"}
 ARCHITECTURES = (
     DEFAULT_ARCHITECTURE,
     "fasterrcnn_resnet50_fpn_v2",
@@ -94,6 +112,11 @@ ARCHITECTURES = (
 )
 #: MMDetection model이 8GB에서 도는 유일한 조합입니다. 다른 값이면 학습을 시작한 뒤
 #: 메모리로 터지므로, GUI는 대기열에 넣기 전에 같은 이유로 막습니다.
+#:
+#: **이 조합을 지켜도 backbone이 크면 8GB로 모자랍니다.** 1280px·batch 1·amp로 잰 최고
+#: 사용량은 resnet50 2.98 GiB, swin_t 3.32, swin_b 3.81, **swin_l 11.21**입니다
+#: (2026-08-19, RTX 3080 10GB). swin_l은 10GB 카드에서도 넘쳐 공유 메모리로 밀리므로
+#: 더 큰 GPU에서 돌리거나 `input_size`를 낮춰야 합니다.
 MMDETECTION_REQUIRED = {
     "device": "cuda",
     "precision": "amp",

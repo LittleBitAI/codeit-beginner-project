@@ -508,12 +508,11 @@ def test_every_mmdetection_name_in_the_shared_contract_has_a_config_here():
 
     from src.pipelines.train.mmdetection_adapter import (
         CASCADE_ARCHITECTURE,
-        DINO_ARCHITECTURE,
-        DINO_SWIN_ARCHITECTURE,
+        DINO_ARCHITECTURES,
         build_mmdetection_config,
     )
 
-    assert {DINO_ARCHITECTURE, DINO_SWIN_ARCHITECTURE, CASCADE_ARCHITECTURE} == set(
+    assert {*DINO_ARCHITECTURES, CASCADE_ARCHITECTURE} == set(
         train_contract.MMDETECTION_ARCHITECTURES
     )
     # DINO 두 갈래는 `type`이 같으므로 설정 전체를 견줍니다. 이름만 늘고 설정이 같으면

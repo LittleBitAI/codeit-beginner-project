@@ -22,7 +22,17 @@ from .errors import TrainError
 # 있습니다. 여기서는 그 이름이 어떤 config와 checkpoint를 뜻하는지만 정합니다. 이름을
 # 계약에서 풀어 받지 않는 것은 순서가 바뀌면 model이 조용히 뒤바뀌기 때문입니다.
 DINO_ARCHITECTURE = "dino_r50_4scale"
-DINO_SWIN_ARCHITECTURE = "dino_swin_b_4scale"
+DINO_SWIN_T_ARCHITECTURE = "dino_swin_t_4scale"
+DINO_SWIN_B_ARCHITECTURE = "dino_swin_b_4scale"
+DINO_SWIN_L_ARCHITECTURE = "dino_swin_l_5scale"
+#: backbone만 다른 DINO 갈래입니다. 화면은 이것을 "model=dino + backbone" 두 칸으로
+#: 보여 주지만, 저장되는 값은 여기 이름 하나뿐입니다.
+DINO_ARCHITECTURES = (
+    DINO_ARCHITECTURE,
+    DINO_SWIN_T_ARCHITECTURE,
+    DINO_SWIN_B_ARCHITECTURE,
+    DINO_SWIN_L_ARCHITECTURE,
+)
 CASCADE_ARCHITECTURE = "cascade_rcnn_swin_t_fpn"
 PAD_MULTIPLE = 32
 MODEL_CONFIG_SCHEMA_VERSION = 1
@@ -44,11 +54,29 @@ SWIN_B_CHECKPOINT = (
     "https://github.com/SwinTransformer/storage/releases/download/v1.0.2/"
     "cascade_mask_rcnn_swin_base_patch4_window7.pth"
 )
-#: DINO-Swin은 공개 checkpoint가 하나로 오지 않습니다. MMDetection이 내놓는 DINO는
-#: Swin-L뿐이라, backbone은 Swin-B 검출 checkpoint에서, encoder·decoder·head는 같은
-#: 4scale R50 DINO에서 가져옵니다. 둘은 모두 256채널이라 모양이 그대로 맞고, 어긋나는
-#: neck만 빼면 됩니다. 순서가 중요합니다 — 뒤에 오는 것이 이미 실린 이름을 덮습니다.
-DINO_SWIN_CHECKPOINTS = (SWIN_B_CHECKPOINT, DINO_CHECKPOINT)
+DINO_SWIN_L_CHECKPOINT = (
+    "https://download.openmmlab.com/mmdetection/v3.0/dino/"
+    "dino-5scale_swin-l_8xb2-12e_coco/"
+    "dino-5scale_swin-l_8xb2-12e_coco_20230228_072924-a654145f.pth"
+)
+#: MMDetection이 DINO로 내놓는 Swin은 **L 하나뿐**입니다. T와 B는 DINO checkpoint가
+#: 없어서 backbone과 transformer를 서로 다른 곳에서 모읍니다 — backbone은 Swin 저장소의
+#: 검출 checkpoint에서, encoder·decoder·head는 같은 4scale R50 DINO에서. 둘 다 256채널
+#: 이라 모양이 그대로 맞고 어긋나는 neck만 빼면 됩니다. **순서가 중요합니다** — 뒤에
+#: 오는 것이 이미 실린 이름을 덮습니다. L은 제 DINO checkpoint 하나로 끝납니다.
+DINO_PRETRAINED_SOURCES: dict[str, tuple[str, ...]] = {
+    DINO_ARCHITECTURE: (DINO_CHECKPOINT,),
+    DINO_SWIN_T_ARCHITECTURE: (CASCADE_CHECKPOINT, DINO_CHECKPOINT),
+    DINO_SWIN_B_ARCHITECTURE: (SWIN_B_CHECKPOINT, DINO_CHECKPOINT),
+    DINO_SWIN_L_ARCHITECTURE: (DINO_SWIN_L_CHECKPOINT,),
+}
+#: 이름이 옛 Swin 저장소 규약인 checkpoint를 쓰는 architecture입니다. MMDetection이
+#: 직접 내놓는 것(L)은 이미 MMDetection 3 이름이라 바꾸면 가중치가 섞입니다.
+LEGACY_SWIN_NAME_ARCHITECTURES = (
+    CASCADE_ARCHITECTURE,
+    DINO_SWIN_T_ARCHITECTURE,
+    DINO_SWIN_B_ARCHITECTURE,
+)
 
 
 def _data_preprocessor() -> dict[str, Any]:
@@ -62,24 +90,54 @@ def _data_preprocessor() -> dict[str, Any]:
     }
 
 
-#: Swin-B 단계별 출력 채널입니다. embed_dims 128이 단계마다 두 배가 됩니다.
-_SWIN_B_CHANNELS = (128, 256, 512, 1024)
-
-
-def _swin_b_backbone() -> dict[str, Any]:
-    """DINO에 붙이는 Swin-B입니다.
-
-    ``out_indices``는 R50과 같은 뒤 세 단계입니다 — 4scale을 그대로 두려는 것이고,
-    그래야 encoder·decoder의 ``num_levels``와 R50 DINO checkpoint를 손대지 않습니다.
-    ``convert_weights``는 :func:`_load_pretrained`가 직접 이름을 고치므로 꺼 둡니다.
-    """
-
-    return {
-        "type": "SwinTransformer",
-        "embed_dims": _SWIN_B_CHANNELS[0],
+#: Swin 갈래마다 다른 값입니다. 나머지 backbone 설정은 셋이 같습니다. `embed_dims`는
+#: 첫 단계 채널이고 단계마다 두 배가 됩니다.
+_SWIN_VARIANTS: dict[str, dict[str, Any]] = {
+    DINO_SWIN_T_ARCHITECTURE: {
+        "embed_dims": 96,
+        "depths": [2, 2, 6, 2],
+        "num_heads": [3, 6, 12, 24],
+        "window_size": 7,
+    },
+    DINO_SWIN_B_ARCHITECTURE: {
+        "embed_dims": 128,
         "depths": [2, 2, 18, 2],
         "num_heads": [4, 8, 16, 32],
         "window_size": 7,
+    },
+    DINO_SWIN_L_ARCHITECTURE: {
+        "embed_dims": 192,
+        "depths": [2, 2, 18, 2],
+        "num_heads": [6, 12, 24, 48],
+        "window_size": 12,
+    },
+}
+#: feature level이 다섯인 갈래입니다. backbone의 첫 단계까지 neck에 넣고, encoder와
+#: decoder도 그만큼 봅니다. 나머지는 넷이고, 넷은 DINO의 기본값입니다.
+_FIVE_SCALE_ARCHITECTURES = (DINO_SWIN_L_ARCHITECTURE,)
+
+
+def _dino_levels(architecture: str) -> int:
+    return 5 if architecture in _FIVE_SCALE_ARCHITECTURES else 4
+
+
+def _swin_backbone(architecture: str) -> dict[str, Any]:
+    """DINO에 붙이는 Swin입니다.
+
+    4scale은 R50과 같은 뒤 세 단계만 내보냅니다 — 그래야 encoder·decoder와 R50 DINO
+    checkpoint를 손대지 않습니다. 5scale은 네 단계를 모두 내보냅니다.
+    ``convert_weights``는 :func:`_load_pretrained`가 이름을 직접 다루므로 꺼 둡니다 —
+    옛 Swin 저장소 규약이면 고쳐 싣고, MMDetection이 낸 것이면 그대로 싣습니다.
+    """
+
+    variant = _SWIN_VARIANTS[architecture]
+    levels = _dino_levels(architecture)
+    return {
+        "type": "SwinTransformer",
+        "embed_dims": variant["embed_dims"],
+        "depths": list(variant["depths"]),
+        "num_heads": list(variant["num_heads"]),
+        "window_size": variant["window_size"],
         "mlp_ratio": 4,
         "qkv_bias": True,
         "qk_scale": None,
@@ -87,22 +145,35 @@ def _swin_b_backbone() -> dict[str, Any]:
         "attn_drop_rate": 0.0,
         "drop_path_rate": 0.2,
         "patch_norm": True,
-        "out_indices": (1, 2, 3),
+        "out_indices": (0, 1, 2, 3) if levels == 5 else (1, 2, 3),
         "with_cp": True,
         "convert_weights": False,
         "init_cfg": None,
     }
 
 
-def _dino_config(num_classes: int, *, swin: bool = False) -> dict[str, Any]:
-    return {
+def _dino_in_channels(architecture: str) -> list[int]:
+    """neck이 받는 채널입니다. backbone이 내보내는 단계와 개수가 같아야 합니다."""
+
+    if architecture == DINO_ARCHITECTURE:
+        return [512, 1024, 2048]
+    first = _SWIN_VARIANTS[architecture]["embed_dims"]
+    stages = [first * 2**step for step in range(4)]
+    return stages if _dino_levels(architecture) == 5 else stages[1:]
+
+
+def _dino_config(
+    num_classes: int, *, architecture: str = DINO_ARCHITECTURE
+) -> dict[str, Any]:
+    levels = _dino_levels(architecture)
+    config: dict[str, Any] = {
         "type": "DINO",
         "num_queries": 900,
         "with_box_refine": True,
         "as_two_stage": True,
         "data_preprocessor": _data_preprocessor(),
-        "backbone": _swin_b_backbone()
-        if swin
+        "backbone": _swin_backbone(architecture)
+        if architecture != DINO_ARCHITECTURE
         else {
             "type": "ResNet",
             "depth": 50,
@@ -117,19 +188,19 @@ def _dino_config(num_classes: int, *, swin: bool = False) -> dict[str, Any]:
         },
         "neck": {
             "type": "ChannelMapper",
-            "in_channels": list(_SWIN_B_CHANNELS[1:]) if swin else [512, 1024, 2048],
+            "in_channels": _dino_in_channels(architecture),
             "kernel_size": 1,
             "out_channels": 256,
             "act_cfg": None,
             "norm_cfg": {"type": "GN", "num_groups": 32},
-            "num_outs": 4,
+            "num_outs": levels,
         },
         "encoder": {
             "num_layers": 6,
             "layer_cfg": {
                 "self_attn_cfg": {
                     "embed_dims": 256,
-                    "num_levels": 4,
+                    "num_levels": levels,
                     "dropout": 0.0,
                 },
                 "ffn_cfg": {
@@ -150,7 +221,7 @@ def _dino_config(num_classes: int, *, swin: bool = False) -> dict[str, Any]:
                 },
                 "cross_attn_cfg": {
                     "embed_dims": 256,
-                    "num_levels": 4,
+                    "num_levels": levels,
                     "dropout": 0.0,
                 },
                 "ffn_cfg": {
@@ -202,6 +273,11 @@ def _dino_config(num_classes: int, *, swin: bool = False) -> dict[str, Any]:
         },
         "test_cfg": {"max_per_img": 300},
     }
+    # 넷은 DINO의 기본값입니다. 4scale에서는 지금까지 만들던 설정을 한 글자도 바꾸지
+    # 않으려고 적지 않습니다 — 리더보드가 전부 그 설정 위에 서 있습니다.
+    if levels != 4:
+        config["num_feature_levels"] = levels
+    return config
 
 
 def _cascade_bbox_head(num_classes: int, target_stds: Sequence[float]) -> dict[str, Any]:
@@ -407,10 +483,8 @@ def build_mmdetection_config(
         raise ValueError(f"unsupported MMDetection architecture: {architecture}")
     if foreground_classes < 1:
         raise ValueError("foreground_classes must be positive")
-    if architecture == DINO_ARCHITECTURE:
-        return _dino_config(foreground_classes)
-    if architecture == DINO_SWIN_ARCHITECTURE:
-        return _dino_config(foreground_classes, swin=True)
+    if architecture in DINO_ARCHITECTURES:
+        return _dino_config(foreground_classes, architecture=architecture)
     if architecture == CASCADE_ARCHITECTURE:
         return _cascade_config(foreground_classes)
     # 계약에 이름이 하나 더 늘었는데 여기 config가 없으면, 그것을 조용히 cascade로
@@ -561,10 +635,11 @@ class MMDetectionAdapter(nn.Module):
 
 
 def _allowed_pretrained_key(architecture: str, key: str) -> bool:
-    if architecture in (DINO_ARCHITECTURE, DINO_SWIN_ARCHITECTURE):
-        # R50 DINO의 neck은 입력 채널이 [512, 1024, 2048]이라 Swin-B의 것과 어긋납니다.
-        # 1x1 conv 세 개뿐이라 새로 초기화합니다. 빼지 않으면 모양 불일치로 멈춥니다.
-        if architecture == DINO_SWIN_ARCHITECTURE and key.startswith("neck."):
+    if architecture in DINO_ARCHITECTURES:
+        # R50 DINO의 neck은 입력 채널이 [512, 1024, 2048]이라 Swin 것과 어긋납니다.
+        # T·B는 그 checkpoint에서 transformer를 가져오므로 neck만 새로 초기화합니다
+        # (1x1 conv 몇 개뿐입니다). L은 제 DINO checkpoint 하나로 와서 neck도 맞습니다.
+        if key.startswith("neck.") and len(_pretrained_sources(architecture)) > 1:
             return True
         return "bbox_head.cls_branches" in key or "label_embedding" in key
     return (
@@ -600,10 +675,9 @@ def _modern_backbone_entry(
     바꾸는 규칙은 ``mmdet.models.backbones.swin.swin_converter``와 같습니다.
     """
 
-    if architecture not in (
-        CASCADE_ARCHITECTURE,
-        DINO_SWIN_ARCHITECTURE,
-    ) or not name.startswith("backbone."):
+    if architecture not in LEGACY_SWIN_NAME_ARCHITECTURES or not name.startswith(
+        "backbone."
+    ):
         return name, value
     inner = name.removeprefix("backbone.")
     if inner.startswith("patch_embed"):
@@ -624,11 +698,7 @@ def _modern_backbone_entry(
 
 
 def _pretrained_sources(architecture: str) -> tuple[str, ...]:
-    if architecture == DINO_ARCHITECTURE:
-        return (DINO_CHECKPOINT,)
-    if architecture == DINO_SWIN_ARCHITECTURE:
-        return DINO_SWIN_CHECKPOINTS
-    return (CASCADE_CHECKPOINT,)
+    return DINO_PRETRAINED_SOURCES.get(architecture, (CASCADE_CHECKPOINT,))
 
 
 def _load_pretrained(detector: nn.Module, architecture: str, loader: Any) -> None:
@@ -659,13 +729,17 @@ def _load_pretrained(detector: nn.Module, architecture: str, loader: Any) -> Non
             "MMDetection pretrained state shape mismatch: " + ", ".join(sorted(mismatched))
         )
     # 이름이 어긋난 항목은 위에서 조용히 걸러집니다. 그대로 두면 `pretrained=true`인데
-    # backbone이 비어 있는 채로 밤새 학습합니다. 그 실패는 끝나야 보이므로 여기서 셉니다.
+    # 그 자리가 빈 채로 밤새 학습합니다. 그 실패는 끝나야 보이므로 여기서 셉니다.
+    # 일부러 뺀 자리(class 수에 딸린 head, 채널이 어긋나는 neck)는 위와 같은 규칙으로
+    # 가려내므로, 여기서 세는 것은 **채워졌어야 하는데 비어 있는 자리뿐**입니다.
     missing = sorted(
-        name for name in expected if name.startswith("backbone.") and name not in filtered
+        name
+        for name in expected
+        if name not in filtered and not _allowed_pretrained_key(architecture, name)
     )
     if missing:
         raise TrainError(
-            f"MMDetection pretrained backbone is incomplete ({len(missing)} keys "
+            f"MMDetection pretrained state is incomplete ({len(missing)} keys "
             f"unfilled, first {missing[0]}); training would silently start from scratch"
         )
     detector.load_state_dict(filtered, strict=False)

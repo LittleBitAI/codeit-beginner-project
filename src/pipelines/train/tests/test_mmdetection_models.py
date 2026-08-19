@@ -14,7 +14,7 @@ from torch import nn
 from src.pipelines.train.errors import TrainError
 from src.pipelines.train.mmdetection_adapter import (
     DINO_CHECKPOINT,
-    DINO_SWIN_CHECKPOINTS,
+    DINO_PRETRAINED_SOURCES,
     MMDETECTION_ARCHITECTURES,
     SWIN_B_CHECKPOINT,
     MMDetectionAdapter,
@@ -275,16 +275,39 @@ class _SourceLoader:
         return {"state_dict": dict(self.states[source])}
 
 
-def test_dino_swin_swaps_the_backbone_and_the_channels_it_feeds_only():
+@pytest.mark.parametrize(
+    ("architecture", "in_channels"),
+    [
+        ("dino_swin_t_4scale", [192, 384, 768]),
+        ("dino_swin_b_4scale", [256, 512, 1024]),
+    ],
+)
+def test_four_scale_swin_swaps_the_backbone_and_the_channels_it_feeds_only(
+    architecture: str, in_channels: list[int]
+):
     r50 = build_mmdetection_config("dino_r50_4scale", foreground_classes=3)
-    swin = build_mmdetection_config("dino_swin_b_4scale", foreground_classes=3)
+    swin = build_mmdetection_config(architecture, foreground_classes=3)
 
     assert swin["backbone"]["type"] == "SwinTransformer"
-    assert swin["neck"]["in_channels"] == [256, 512, 1024]
+    assert swin["neck"]["in_channels"] == in_channels
     # 4scale을 그대로 두어야 R50 DINO의 encoder·decoder를 실을 수 있습니다.
     assert swin["neck"]["num_outs"] == r50["neck"]["num_outs"]
     assert swin["encoder"] == r50["encoder"]
     assert swin["decoder"] == r50["decoder"]
+    assert "num_feature_levels" not in swin
+
+
+def test_swin_l_is_five_scale_all_the_way_through():
+    """한 자리만 넷으로 남으면 model이 만들어지지 않거나 조용히 다른 것이 됩니다."""
+
+    swin = build_mmdetection_config("dino_swin_l_5scale", foreground_classes=3)
+
+    assert swin["num_feature_levels"] == 5
+    assert swin["backbone"]["out_indices"] == (0, 1, 2, 3)
+    assert swin["neck"]["in_channels"] == [192, 384, 768, 1536]
+    assert swin["neck"]["num_outs"] == 5
+    assert swin["encoder"]["layer_cfg"]["self_attn_cfg"]["num_levels"] == 5
+    assert swin["decoder"]["layer_cfg"]["cross_attn_cfg"]["num_levels"] == 5
 
 
 def test_dino_swin_takes_backbone_and_transformer_from_different_checkpoints():
@@ -313,7 +336,7 @@ def test_dino_swin_takes_backbone_and_transformer_from_different_checkpoints():
 
     _prepare_detector(detector, "dino_swin_b_4scale", pretrained=True, loader=loader)
 
-    assert loader.sources == list(DINO_SWIN_CHECKPOINTS)
+    assert loader.sources == list(DINO_PRETRAINED_SOURCES["dino_swin_b_4scale"])
     assert torch.equal(
         detector.loaded["backbone.stages.0.blocks.0.attn.w_msa.qkv.weight"],
         torch.full((2,), 3.0),
@@ -330,7 +353,7 @@ def test_a_backbone_that_does_not_fill_stops_the_run_instead_of_training_scratch
         {"backbone.stages.0.blocks.0.norm1.weight": torch.zeros(2)}
     )
     loader = _SourceLoader(
-        {source: {"backbone.gone.weight": torch.ones(2)} for source in DINO_SWIN_CHECKPOINTS}
+        {source: {"backbone.gone.weight": torch.ones(2)} for source in DINO_PRETRAINED_SOURCES["dino_swin_b_4scale"]}
     )
 
     with pytest.raises(TrainError):
