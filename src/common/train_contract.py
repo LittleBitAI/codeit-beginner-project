@@ -94,11 +94,12 @@ ARCHITECTURES = (
     "retinanet_resnet50_fpn_v2",
     *MMDETECTION_ARCHITECTURES,
 )
-#: MMDetection model에 **이 저장소가 지원하는 하나뿐인 조합**입니다. 메모리만의
-#: 이유는 아닙니다 — `batch_size=1`과 `amp`는 메모리 때문이지만, `AdamW`는 DETR 계열이
-#: 그것으로 수렴하기 때문이고(오히려 SGD보다 optimizer state를 더 씁니다), `cuda`는
-#: mmcv의 CUDA op이 CPU로 dispatch되지 않기 때문입니다. 다른 조합을 재 본 적이 없어
-#: 받지 않고, GUI도 대기열에 넣기 전에 같은 이유로 막습니다.
+#: MMDetection model에 **이 저장소가 지원하는 하나뿐인 조합**입니다. 이유가 값마다
+#: 다릅니다 — `batch_size=1`과 `amp`는 메모리 때문이고, `AdamW`는 DETR 계열이 그것으로
+#: 수렴하기 때문이며(메모리로는 오히려 SGD보다 optimizer state를 더 씁니다), `cuda`는
+#: `amp`가 CUDA에서만 되기 때문입니다(`CUDA_ONLY_PRECISIONS`). **CPU에서 아예 안 도는
+#: 것은 아닙니다** — test는 CPU에서 다섯 detector를 만들어 loss까지 봅니다. 다만 그
+#: 조합으로 학습을 재 본 적이 없어 받지 않고, GUI도 같은 이유로 미리 막습니다.
 #:
 #: **이 조합이 메모리를 보장하지는 않습니다.** 1280px·batch 1·amp로 잰 최고
 #: 사용량은 resnet50 2.98 GiB, swin_t 3.32, swin_b 3.81, **swin_l 11.21**입니다

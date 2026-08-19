@@ -15,9 +15,9 @@ You own `src/pipelines/web/`. Never import data, train, evaluate, or registry. T
 - **Running a pipeline** happens only by subprocess, through `build_argv()` in `jobs/runner.py`, which builds `python -m src.main_pipeline --only <stage>` for the stages in `ALLOWED_STAGES`. Never `shell=True`, never let user input reach argv.
 - **Reading an experiment record** happens only through `read_experiment_record()` in `src/common`. No `open`, no `Path`.
 
-You cannot import train, so every value you both must agree on lives in `src/common/train_contract.py`: model and optimizer names, optimizer profiles, precision and schedule tables, the 8GB combination, settings defaults. Read them from there and never re-type them here — they were copied once, watched by a test that parsed train's source, and a name drifted anyway. Train owns them; ask first.
+You cannot import train, so every value you both must agree on lives in `src/common/train_contract.py`: model and optimizer names, optimizer profiles, precision and schedule tables, the only combination, settings defaults. Read them from there and never re-type them here — they were copied once, watched by a test that parsed train's source, and a name drifted anyway. Train owns them; ask first.
 
-`train_config.py` still mirrors train's **rules** — which values are refused, which key belongs to which selection — because the GUI must refuse before the GPU is busy. The MMDetection ones carry their own: `input_size` goes only to those architectures, and the 8GB combination is enforced here so the wrong box is named on screen.
+`train_config.py` still mirrors train's **rules** — which values are refused, which key belongs to which selection — because the GUI must refuse before the GPU is busy. The MMDetection ones carry their own: `input_size` goes only to those architectures, and the only combination is enforced here so the wrong box is named on screen.
 
 ## Interface
 
