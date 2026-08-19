@@ -114,11 +114,25 @@ def test_the_form_says_eight_for_models_that_default_to_eight():
 
 
 def test_the_form_offers_every_architecture_the_contract_names():
-    """고를 수 있는 모델은 계약이 정합니다. 화면이 그중 하나를 빠뜨리면 안 됩니다."""
+    """고를 수 있는 모델은 계약이 정합니다. 화면이 그중 하나를 빠뜨리면 안 됩니다.
+
+    **`choices`는 계약의 진짜 이름 그대로입니다.** 화면이 backbone 갈래를 이름 하나로
+    접어 보여 주지만 그 접기는 화면 안에서만 일어납니다 — 여기에 접힌 이름을 실으면
+    이 목록을 그대로 보내는 다른 소비자가 서버에게 거절당합니다.
+    """
 
     choices = {spec["name"]: spec for spec in field_specs()}
+    spec = choices["architecture"]
 
-    assert choices["architecture"]["choices"] == list(ARCHITECTURES)
+    assert spec["choices"] == list(ARCHITECTURES)
+    # 갈래 이름은 화면에만 있습니다. 계약 이름과 겹치면 화면이 접은 것인지 진짜
+    # 모델인지 가릴 수 없습니다.
+    assert set(spec["backbones"]).isdisjoint(ARCHITECTURES)
+    # 표가 가리키는 이름은 전부 계약에 있어야 합니다. 없는 이름을 고르면 서버가
+    # 거절하는데, 화면에는 고를 수 있는 것처럼 보입니다.
+    for family, table in spec["backbones"].items():
+        assert set(table.values()) <= set(ARCHITECTURES), family
+        assert spec["backbone_defaults"][family] in table
     assert "input_size" in choices
     assert "gradient_accumulation_steps" in choices
 

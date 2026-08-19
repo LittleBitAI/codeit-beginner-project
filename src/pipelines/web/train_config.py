@@ -43,8 +43,10 @@ from .paths import (
     resolve_within_repo,
 )
 from .train_capabilities import (
+    ARCHITECTURE_BACKBONES,
     CUDA_ONLY_PRECISIONS,
     DEFAULT_ACCUMULATION_STEPS,
+    DEFAULT_ARCHITECTURE_BACKBONES,
     DEFAULT_INPUT_SIZE,
     MMDETECTION_ARCHITECTURES,
     MMDETECTION_REQUIRED,
@@ -155,6 +157,13 @@ OPTIMIZER_PROFILES = _contract.OPTIMIZER_PROFILES
 _FIELD_LABELS = {
     "run_id": ("실행 이름", "실행 결과가 저장되는 directory 이름으로 그대로 쓰입니다."),
     "architecture": ("모델", "학습에 사용할 object detection architecture입니다."),
+    "backbone": (
+        "Backbone",
+        "고른 모델의 특징 추출기입니다. 나머지 구조는 그대로 두고 이것만 바꿉니다."
+        " resnet50이 지금까지 쓰던 것입니다. 1280px·batch 1·amp 기준 GPU 사용량은"
+        " resnet50 3.0GB, swin_t 3.3GB, swin_b 3.8GB이고 swin_l은 11.2GB라 10GB"
+        " 카드에서는 모자랍니다.",
+    ),
     "optimizer": ("Optimizer", "가중치를 갱신할 optimizer와 관련 수치 항목을 선택합니다."),
     "augmentation": (
         "증강 preset",
@@ -421,16 +430,28 @@ def field_specs() -> list[dict[str, Any]]:
         ("lr_scheduler", DEFAULT_LR_SCHEDULER, SUPPORTED_LR_SCHEDULERS),
     ):
         label, hint = _FIELD_LABELS[name]
-        specs.append(
-            {
-                "name": name,
-                "type": "enum",
-                "default": default,
-                "choices": list(choices),
-                "label": label,
-                "hint": hint,
+        spec = {
+            "name": name,
+            "type": "enum",
+            "default": default,
+            "choices": list(choices),
+            "label": label,
+            "hint": hint,
+        }
+        # backbone만 다른 갈래를 묶은 표입니다. 화면은 이것으로 model 목록을 접고
+        # backbone 칸을 하나 더 그린 뒤, 보내기 전에 architecture 이름 하나로
+        # 합칩니다. **`choices`는 계약의 진짜 이름 그대로 둡니다** — 접힌 이름을
+        # 실으면 그 목록을 그대로 보내는 다른 소비자가 서버에게 거절당합니다.
+        # 보내는 값이 둘로 늘지 않는 것도 핵심입니다 — 둘이면 서로 어긋날 수 있습니다.
+        if name == "architecture":
+            backbone_label, backbone_hint = _FIELD_LABELS["backbone"]
+            spec["backbones"] = {
+                family: dict(table) for family, table in ARCHITECTURE_BACKBONES.items()
             }
-        )
+            spec["backbone_defaults"] = dict(DEFAULT_ARCHITECTURE_BACKBONES)
+            spec["backbone_label"] = backbone_label
+            spec["backbone_hint"] = backbone_hint
+        specs.append(spec)
     label, hint = _FIELD_LABELS["run_id"]
     specs.append(
         {
