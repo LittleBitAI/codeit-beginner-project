@@ -35,10 +35,36 @@ FAILED src/pipelines/evaluate/tests/test_evaluate_mmdetection.py::
 있었습니다. 이 PR이 다섯으로 늘리므로 개수를 빼고 같이 고쳤습니다.)
 
 web은 다릅니다. 화면은 계약 목록을 그대로 읽어 내놓으므로 이름이 늘어도 초록입니다.
-그래서 **이 PR에 web 동작 변경은 없습니다.** `web/CLAUDE.md`·`web/AGENTS.md`·
-`web/train_config.py`에 한 줄씩, 개수를 못 박아 두어 이 PR 때문에 낡아 버린 주석
-셋만 고쳤습니다("MMDetection pair" → "ones", "두 모델" → "model"). 그대로 두면 문서가
-틀린 개수를 말하게 됩니다.
+그래서 **이 PR에 web 동작 변경은 없습니다.** 다만 **이 PR이 낡게 만든 설명은
+고쳤습니다** — 네 파일에서 더한 줄과 지운 줄을 합쳐 20줄이고, 전부 주석·문서·docstring·
+test 이름입니다:
+
+| 파일 | 무엇 |
+| --- | --- |
+| `web/CLAUDE.md`, `web/AGENTS.md` | "MMDetection pair" → "ones", "the 8GB combination" → "the only combination"(각 2곳) |
+| `web/train_config.py` | 개수를 못 박은 주석과 "8GB에서 돌리려면"이라던 화면 오류 메시지 |
+| `web/tests/test_web_train_contract.py` | test 이름 `..._do_not_fit_8gb` → `..._refuses_unsupported_combinations`, docstring 둘 |
+
+그대로 두면 문서와 화면이 틀린 개수와 틀린 근거를 말하게 됩니다. 근거를 바꾼 이유는
+아래 "지원 범위" 절에 있습니다.
+
+## 지원 범위 — `MMDETECTION_REQUIRED`의 근거를 바로잡았습니다
+
+`{device: cuda, precision: amp, optimizer: AdamW, batch_size: 1}`을 저장소 곳곳에서
+**"8GB에서 도는 조합"**이라고 설명해 왔습니다. 이 PR이 그것을 무너뜨립니다 —
+`dino_swin_l_5scale`은 1280px·batch 1·amp로 **11.21 GiB**입니다.
+
+근거를 다시 재 보니 애초에 메모리 이야기가 아니었습니다. 값마다 이유가 다릅니다:
+
+- `batch_size=1`, `amp` — 메모리 때문
+- `AdamW` — DETR 계열이 그것으로 수렴하기 때문. **메모리로는 오히려 SGD보다 optimizer
+  state를 더 씁니다**
+- `cuda` — `amp`가 CUDA에서만 되기 때문(`CUDA_ONLY_PRECISIONS`). CPU에서 model이 아예
+  안 만들어지는 것은 아닙니다 — test가 CPU에서 다섯 detector의 loss까지 봅니다
+
+그래서 **"이 저장소가 지원하는(=재 본) 하나뿐인 조합"**으로 바꿨습니다. 계약·train·
+web의 주석과 화면 오류 메시지, test 이름까지 같은 표현으로 맞췄습니다. 동작은 그대로
+입니다 — 거절하는 조합도, 거절하는 자리도 바뀌지 않았습니다.
 
 ## evaluate에서 바꾼 것
 
@@ -76,7 +102,7 @@ pipeline은 서로를 import하지 않으므로 같은 설정이 두 곳에 따�
 새 실험 화면의 model 목록에 `dino_r50_4scale`·`dino_swin_t_4scale`·
 `dino_swin_b_4scale`·`dino_swin_l_5scale`가 그대로 나옵니다. 화면 코드는 계약 목록을
 그대로 읽으므로 **화면 동작을 고칠 것이 없습니다** — web에서 바꾼 것은 "왜 쪼갤 수
-없었는가" 절에 적은 개수 주석 세 줄뿐입니다.
+없었는가" 절의 표에 적은 주석·문서·docstring·test 이름뿐입니다.
 
 목록을 model 한 칸과 backbone 한 칸으로 접는 화면은 이 PR에 넣지 않았습니다. CI를
 초록으로 유지하는 데 필요하지 않고 `src/pipelines/web/`은 제 영역이 아니기 때문입니다.

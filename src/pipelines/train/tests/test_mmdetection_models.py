@@ -1,4 +1,8 @@
-"""MMDetection adapter와 그 architecture를 아직 고를 수 없게 막는 문 test입니다."""
+"""MMDetection adapter와 그 architecture를 지키는 문 test입니다.
+
+계약에 있는 이름만 고를 수 있고, 그 이름이 실제로 서로 다른 detector를 만들며,
+`MMDETECTION_REQUIRED` 밖의 조합은 첫 batch 전에 거절되는지를 봅니다.
+"""
 
 from __future__ import annotations
 
