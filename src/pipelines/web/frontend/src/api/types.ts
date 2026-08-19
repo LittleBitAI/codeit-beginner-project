@@ -929,8 +929,11 @@ export interface EnsembleJob {
   run_id?: string;
   /** 합친 뒤 점수를 다시 매기는 데 쓴 embedding들입니다. */
   embedding_run_ids?: string[];
-  /** 예측을 만드는 중(`harvest`)인지 합치는 중(`fuse`)인지. */
-  stage?: 'harvest' | 'fuse';
+  /**
+   * 예측을 만드는 중(`harvest`)인지, 합치는 중(`fuse`)인지, 실행 하나를 다시 매기는
+   * 중(`rerank`)인지.
+   */
+  stage?: 'harvest' | 'fuse' | 'rerank';
   pending?: string[];
   harvesting?: string;
   harvest_progress?: [number, number];

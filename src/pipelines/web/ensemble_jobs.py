@@ -108,6 +108,51 @@ class EnsembleRunner:
         thread.start()
         return state
 
+    def start_rerank(
+        self,
+        run_ids: Sequence[str],
+        *,
+        run_id: str,
+        embedding_run_ids: Sequence[str],
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """실행 하나의 제출을 embedding 여럿으로 다시 매깁니다.
+
+        합치지 않으므로 harvest 단계가 없습니다 — evaluate 한 번이 test 추론과 재순위와
+        제출까지 합니다. 대신 GPU를 씁니다. 자리는 융합과 같이 씁니다: 둘 다 같은
+        출력 자리에 쓰므로 한 번에 하나만 돌아야 합니다.
+        """
+
+        from . import ensemble
+        from .embedding import rerank_settings
+
+        # 융합과 같은 차례입니다 — 고른 embedding을 여기서 한 번만 풀고, 그 결과를
+        # 그대로 씁니다. 이름만 들고 갔다가 나중에 다시 찾으면 그사이 기록이 사라졌을 때
+        # 검사한 것과 실제로 쓰는 것이 갈립니다.
+        rerank = rerank_settings(embedding_run_ids)
+        candidate = ensemble.check_rerank_selection(
+            run_ids, run_id=run_id, overwrite=bool(overwrite)
+        )
+        config = ensemble.build_rerank_config(
+            candidate, run_id=run_id, rerank=rerank, overwrite=bool(overwrite)
+        )
+
+        with self._lock:
+            if self._state.get("status") == STATUS_RUNNING:
+                raise JobConflictError(f"이미 도는 중입니다: {self._state.get('run_id')}")
+            self._state = {
+                "status": STATUS_RUNNING,
+                "run_id": run_id,
+                "run_ids": [str(candidate["run_id"])],
+                "embedding_run_ids": list(embedding_run_ids),
+                "stage": "rerank",
+                "logs": [],
+            }
+            state = dict(self._state)
+
+        threading.Thread(target=self._run, args=(config, run_id), daemon=True).start()
+        return state
+
     def _run_all(
         self,
         run_ids: list[str],

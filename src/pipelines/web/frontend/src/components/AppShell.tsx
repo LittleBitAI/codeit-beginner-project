@@ -75,6 +75,23 @@ function IconRecords() {
   );
 }
 
+/** 흩어진 점과 그 사이의 선 — crop을 견주는 embedding 공간입니다. */
+function IconEmbedding() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style={iconBox}>
+      <circle cx="4.2" cy="4.6" r="1.5" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="11.6" cy="6.2" r="1.5" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="6.8" cy="11.8" r="1.5" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M5.7 5 10.1 5.9M4.9 6.1 6.2 10.3"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 /** 여러 갈래가 하나로 모이는 모양입니다 — 실행 여럿을 제출 하나로 합칩니다. */
 function IconEnsemble() {
   return (
@@ -211,6 +228,7 @@ export function AppShell({
   running,
   onOpenPrepare,
   onOpenEda,
+  onOpenEmbedding,
   onOpenSettings,
 }: {
   children: ReactNode;
@@ -219,6 +237,7 @@ export function AppShell({
   running: boolean;
   onOpenPrepare: () => void;
   onOpenEda: () => void;
+  onOpenEmbedding: () => void;
   onOpenSettings: () => void;
 }) {
   const navigate = useNavigate();
@@ -288,6 +307,12 @@ export function AppShell({
           onClick={() => navigate('/records')}
         >
           기록
+        </RailItem>
+        {/* 앙상블 바로 앞입니다. 여기서 학습해 둔 것을 그 화면이 고르기 때문입니다.
+            예전에는 앙상블 화면 안에 있었는데, 고르는 자리에 몇 시간짜리 학습 버튼이
+            함께 있어 무엇을 누르는 화면인지 알 수 없었습니다. */}
+        <RailItem icon={<IconEmbedding />} onClick={onOpenEmbedding}>
+          embedding 학습
         </RailItem>
         {/* 기록 바로 뒤입니다. 끝난 실행을 골라 합치는 일이라, 기록이 있어야
             시작되는 다음 순서이기 때문입니다. */}
