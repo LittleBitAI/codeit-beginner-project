@@ -309,6 +309,25 @@ describe('앙상블 화면', () => {
     expect(screen.queryByRole('button', { name: /학습/ })).toBeNull();
   });
 
+  it('끝나면 제출 CSV가 어디에 놓였는지 말한다', async () => {
+    // 자동으로 Kaggle에 올라가지 않습니다. 자리를 말해 주지 않으면 만들어 놓고도
+    // 무엇을 올려야 할지 알 수 없습니다.
+    vi.spyOn(api, 'ensembleCandidates').mockResolvedValue({ candidates: [candidate()] });
+    vi.spyOn(api, 'ensembleStatus').mockResolvedValue({
+      status: 'succeeded',
+      run_id: 'rerank-1',
+      message: '평가 완료',
+      artifacts: { submission_uri: 'artifacts/ensemble/rerank-1/submission.csv' },
+    });
+    stubEmbeddings();
+
+    render(<Ensemble />);
+
+    expect(
+      await screen.findByText(/artifacts\/ensemble\/rerank-1\/submission\.csv/),
+    ).toBeTruthy();
+  });
+
   it('추론 중인지 합치는 중인지 구분해 보여 준다', async () => {
     // 45개를 고르면 GPU가 몇 시간 돕니다. 어느 단계인지 안 보이면 멈춘 줄 압니다.
     vi.spyOn(api, 'ensembleCandidates').mockResolvedValue({ candidates: [candidate()] });

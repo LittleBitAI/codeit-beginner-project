@@ -179,6 +179,9 @@ export function Ensemble() {
   }, [running]);
 
   const pairs = diagnosis?.diversity?.pairs ?? [];
+  // 성공했을 때만 있습니다. evaluate가 실제로 쓴 자리를 그대로 받습니다 — 화면이
+  // 이름으로 다시 지어내면 저장 backend가 바뀔 때 없는 파일을 가리킵니다.
+  const submissionUri = job?.artifacts?.submission_uri;
   const picker = (
     <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
       {candidates.map((item) => (
@@ -441,6 +444,13 @@ export function Ensemble() {
               : job.stage === 'rerank'
                 ? 'test 추론과 재순위를 도는 중…'
                 : '합치는 중…'}
+          {/* 끝났는데 어디에 놓였는지 말하지 않으면, 제출할 파일을 사람이 찾아
+              헤맵니다. 자동으로 Kaggle에 올라가지는 않습니다. */}
+          {typeof submissionUri === 'string' ? (
+            <div style={{ ...type.monoId, color: color.textMid, marginTop: 6 }}>
+              제출 CSV: {submissionUri}
+            </div>
+          ) : null}
         </AlertRow>
       ) : null}
     </div>
