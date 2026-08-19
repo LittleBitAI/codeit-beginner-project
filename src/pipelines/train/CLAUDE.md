@@ -11,7 +11,7 @@ Trains a config-selected detector, or a crop embedding, and writes checkpoints p
 
 You own `src/pipelines/train/`. Do not edit another pipeline and never import one; `src/common` is the only shared code available. `config["inputs"]` is read-only.
 
-Web cannot import you, so values you both agree on live in `src/common/train_contract.py`: model, optimizer, precision and schedule tables, the only combination, defaults. **You own that file** — a name added there is offered by the GUI at once, so add it only once you accept it, and never re-type its values here.
+Web cannot import you, so values you both agree on live in `src/common/train_contract.py`: model, optimizer, precision and schedule tables, the one combination, defaults. **You own that file** — a name added there is offered by the GUI at once, so add it only once you accept it, and never re-type its values here.
 
 ## Interface
 
