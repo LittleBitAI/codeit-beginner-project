@@ -44,23 +44,28 @@ PR로 올립니다."* 이 PR이 그 별도 PR이고, 내용은 #197의 commit `a
 | --- | --- |
 | `src/common/train_contract.py` | `ARCHITECTURE_BACKBONES`(갈래 → backbone → architecture 이름)와 `DEFAULT_ARCHITECTURE_BACKBONES`. 값이 아니라 **화면이 접었다 펴는 표**입니다 |
 | `web/train_capabilities.py` | 위 둘을 그대로 재수출 |
-| `web/train_config.py` | `_architecture_choices()`가 갈래를 이름 하나로 접고, `architecture` spec에 `backbones`·`backbone_defaults`·label·hint를 실어 보냅니다 |
+| `web/train_config.py` | `architecture` spec에 `backbones`·`backbone_defaults`·label·hint를 실어 보냅니다. **`choices`는 계약 목록 그대로 둡니다** |
 | `web/frontend/src/api/types.ts` | `FieldSpec`에 `backbones` 계열 optional 필드 |
 | `web/frontend/src/screens/NewExperimentSheet.tsx` | `backbones`가 있는 enum spec을 select 둘로 그립니다. 2열 grid의 칸 두 개를 차지합니다 |
-| `web/frontend/src/lib/architectureBackbone.ts` (+ test) | 합치고 나누는 표 조회 |
-| `web/tests/test_web_train_contract.py` | 목록을 그대로 견주는 대신 **닿을 수 있는지**를 봅니다 |
+| `web/frontend/src/lib/architectureBackbone.ts` (+ test) | 목록을 접는 `displayChoices()`와 합치고 나누는 표 조회 |
+| `web/tests/test_web_train_contract.py` | `choices`가 계약 목록 그대로인지, 갈래 이름이 계약 이름과 겹치지 않는지, 표가 가리키는 이름이 전부 계약에 있는지 |
 
 ## 조심한 자리
 
 - **같은 갈래를 다시 골라도 backbone을 기본값으로 되돌리지 않습니다.** 되돌리면 사람은
   `swin_b`를 골라 둔 채 `resnet50`을 학습합니다. `architectureForFamily()`가 지금 값이
   이미 그 갈래면 그대로 둡니다. test가 이 경우를 따로 지킵니다.
-- **접어 둔 이름은 화면에만 있습니다.** `dino`는 계약의 architecture 이름이 아니고,
-  서버로 새어 나가면 거절됩니다. `test_the_form_offers_every_architecture_the_contract_names`가
-  접힌 이름과 계약 이름이 겹치지 않는지 확인합니다.
-- **접었다가 표에 넣지 않으면 그 모델이 화면에서 사라집니다.** 사라진 것은 아무도
-  눈치채지 못하므로, 같은 test가 **계약의 모든 이름에 닿을 수 있는지**를 봅니다.
-  변이로 확인했습니다 — 모델 하나를 목록에서 빠뜨리면 그 test가 빨개집니다.
+- **접는 일은 화면 안에서만 일어납니다.** 서버가 내려 주는 `choices`는 계약의 진짜
+  architecture 이름 그대로입니다. 거기에 `dino`를 실으면 그 목록을 그대로 보내는 다른
+  소비자(generic form, API 이용자)가 서버에게 거절당합니다 —
+  `normalize_train_settings({"architecture": "dino"})`는 실패합니다. 그래서 접기는
+  `displayChoices()`가 화면에서만 합니다.
+  `test_the_form_offers_every_architecture_the_contract_names`가 `choices`를 계약
+  목록과 그대로 견주고, 갈래 이름이 계약 이름과 겹치지 않는지도 봅니다.
+- **표에 없는 이름은 접히지 않고 그대로 나옵니다.** 계약에 architecture가 늘었는데
+  표에 넣지 않아도 화면에서 사라지지는 않습니다 — 긴 이름 그대로 목록에 섭니다.
+  표가 가리키는 이름이 전부 계약에 있는지는 test가 봅니다(없는 이름을 가리키면
+  화면에는 고를 수 있게 보이는데 서버가 거절합니다).
 - backbone 칸의 안내에 실측 GPU 사용량을 적었습니다(resnet50 3.0GB / swin_t 3.3 /
   swin_b 3.8 / **swin_l 11.2**). swin_l은 10GB 카드에 모자라며, **막지 않고 알리기만**
   합니다.

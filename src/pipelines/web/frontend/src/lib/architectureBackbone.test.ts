@@ -4,6 +4,7 @@ import {
   architectureForFamily,
   architectureOf,
   backboneOf,
+  displayChoices,
   familyOf,
 } from './architectureBackbone';
 
@@ -21,6 +22,25 @@ describe('architectureBackbone', () => {
     expect(familyOf(TABLE, 'dino_swin_b_4scale')).toBe('dino');
     expect(backboneOf(TABLE, 'dino_swin_b_4scale')).toBe('swin_b');
     expect(architectureOf(TABLE, 'dino', 'swin_b')).toBe('dino_swin_b_4scale');
+  });
+
+  it('모델 목록을 갈래 하나로 접되 순서와 나머지는 그대로 둔다', () => {
+    // 서버가 주는 choices는 계약의 진짜 이름입니다. 접는 일은 여기서만 합니다 —
+    // 서버 목록에 접힌 이름을 실으면 그것을 그대로 보내는 소비자가 거절당합니다.
+    expect(
+      displayChoices(TABLE, [
+        'fasterrcnn_resnet50_fpn_v2',
+        'dino_r50_4scale',
+        'dino_swin_t_4scale',
+        'dino_swin_b_4scale',
+        'cascade_rcnn_swin_t_fpn',
+      ]),
+    ).toEqual(['fasterrcnn_resnet50_fpn_v2', 'dino', 'cascade_rcnn_swin_t_fpn']);
+  });
+
+  it('표에 없는 이름은 접지 않고 그대로 보여 준다', () => {
+    // 계약에 이름이 늘었는데 표에 넣지 않아도 화면에서 사라지지 않습니다.
+    expect(displayChoices(TABLE, ['dino_swin_l_5scale'])).toEqual(['dino_swin_l_5scale']);
   });
 
   it('접히지 않는 모델은 그대로 둔다', () => {

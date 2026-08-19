@@ -24,6 +24,22 @@ export function backboneOf(table: BackboneTable, architecture: string): string |
   return Object.keys(entries).find((backbone) => entries[backbone] === architecture);
 }
 
+/**
+ * 모델 칸에 세울 목록입니다. 갈래에 속한 이름들을 갈래 이름 하나로 접습니다.
+ *
+ * **접는 일은 화면에서만 합니다.** 서버가 내려 주는 `choices`는 계약의 진짜
+ * architecture 이름 그대로여야 합니다 — 거기에 `dino` 같은 접힌 이름을 실으면 그
+ * 목록을 그대로 보내는 다른 소비자가 서버에게 거절당합니다.
+ */
+export function displayChoices(table: BackboneTable, choices: string[]): string[] {
+  const shown: string[] = [];
+  for (const choice of choices) {
+    const label = familyOf(table, choice) ?? choice;
+    if (!shown.includes(label)) shown.push(label);
+  }
+  return shown;
+}
+
 /** 갈래와 backbone을 architecture 이름으로 합칩니다. 표에 없으면 undefined입니다. */
 export function architectureOf(
   table: BackboneTable,

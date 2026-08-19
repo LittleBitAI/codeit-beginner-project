@@ -26,6 +26,7 @@ import {
   architectureForFamily,
   architectureOf,
   backboneOf,
+  displayChoices,
   familyOf,
 } from '../lib/architectureBackbone';
 import { ALL_DATA_KEYS } from '../lib/dataKeys';
@@ -332,7 +333,7 @@ function TrainField({
             }
             style={style}
           >
-            {(spec.choices ?? []).map((choice) => (
+            {displayChoices(table, spec.choices ?? []).map((choice) => (
               <option key={choice} value={choice}>
                 {choice}
               </option>

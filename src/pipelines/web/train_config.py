@@ -406,26 +406,6 @@ def generate_settings_run_id(
     return candidate if RUN_ID_PATTERN.fullmatch(candidate) else generate_run_id()
 
 
-def _architecture_choices() -> list[str]:
-    """화면이 고르는 목록입니다. backbone만 다른 갈래는 이름 하나로 접습니다.
-
-    접힌 이름(`dino`)은 **화면에만** 있습니다. 서버가 받는 값은 언제나 계약의 진짜
-    architecture 이름이라, 저장·checkpoint·기록의 모양은 그대로입니다.
-    """
-
-    families = {
-        architecture: family
-        for family, table in ARCHITECTURE_BACKBONES.items()
-        for architecture in table.values()
-    }
-    choices: list[str] = []
-    for architecture in SUPPORTED_ARCHITECTURES:
-        display = families.get(architecture, architecture)
-        if display not in choices:
-            choices.append(display)
-    return choices
-
-
 def field_specs() -> list[dict[str, Any]]:
     """새 실험 화면이 form을 그릴 때 쓰는 필드 정의입니다."""
 
@@ -443,7 +423,7 @@ def field_specs() -> list[dict[str, Any]]:
 
     specs: list[dict[str, Any]] = []
     for name, default, choices in (
-        ("architecture", LEGACY_ARCHITECTURE, _architecture_choices()),
+        ("architecture", LEGACY_ARCHITECTURE, SUPPORTED_ARCHITECTURES),
         ("optimizer", NEW_EXPERIMENT_OPTIMIZER, SUPPORTED_OPTIMIZERS),
         ("augmentation", DEFAULT_AUGMENTATION, SUPPORTED_AUGMENTATIONS),
         ("precision", form_precision, SUPPORTED_PRECISIONS),
@@ -458,9 +438,11 @@ def field_specs() -> list[dict[str, Any]]:
             "label": label,
             "hint": hint,
         }
-        # 접어 둔 갈래를 다시 펴는 표입니다. 화면은 이것으로 backbone 칸을 하나 더
-        # 그리고, 보내기 전에 architecture 이름 하나로 합칩니다. 보내는 값이 둘로
-        # 늘지 않는 것이 핵심입니다 — 둘이면 서로 어긋날 수 있습니다.
+        # backbone만 다른 갈래를 묶은 표입니다. 화면은 이것으로 model 목록을 접고
+        # backbone 칸을 하나 더 그린 뒤, 보내기 전에 architecture 이름 하나로
+        # 합칩니다. **`choices`는 계약의 진짜 이름 그대로 둡니다** — 접힌 이름을
+        # 실으면 그 목록을 그대로 보내는 다른 소비자가 서버에게 거절당합니다.
+        # 보내는 값이 둘로 늘지 않는 것도 핵심입니다 — 둘이면 서로 어긋날 수 있습니다.
         if name == "architecture":
             backbone_label, backbone_hint = _FIELD_LABELS["backbone"]
             spec["backbones"] = {
