@@ -2,15 +2,15 @@
 
 ## 무엇을 했는가
 
-DINO의 backbone을 새 실험 화면에서 고를 수 있게 했습니다. 계약의 architecture 이름이
-넷으로 갈립니다.
+DINO를 backbone이 다른 갈래 넷으로 나눴습니다. 계약의 architecture 이름이 그만큼
+늘어나고, 새 실험 화면의 model 목록에 그대로 나옵니다.
 
-| 화면 backbone | architecture 이름 | scale |
+| architecture 이름 | backbone | scale |
 | --- | --- | --- |
-| `resnet50` (기본, 기존) | `dino_r50_4scale` | 4 |
-| `swin_t` | `dino_swin_t_4scale` | 4 |
-| `swin_b` | `dino_swin_b_4scale` | 4 |
-| `swin_l` | `dino_swin_l_5scale` | 5 |
+| `dino_r50_4scale` (기존) | ResNet-50 | 4 |
+| `dino_swin_t_4scale` | Swin-T | 4 |
+| `dino_swin_b_4scale` | Swin-B | 4 |
+| `dino_swin_l_5scale` | Swin-L | 5 |
 
 점수를 올린 축 가운데 필요한 크기(+0.014)의 전례가 있는 것은 아키텍처뿐이고
 (frcnn → DINO가 +0.012), 현재 리더보드는 전부 ResNet-50 위에 서 있습니다.
@@ -70,11 +70,12 @@ pipeline은 서로를 import하지 않으므로 같은
 
 새 실험 화면의 model 목록에 `dino_r50_4scale`·`dino_swin_t_4scale`·
 `dino_swin_b_4scale`·`dino_swin_l_5scale`가 그대로 나옵니다. 화면 코드는 계약 목록을
-그대로 읽으므로 web 쪽에 손댈 것이 없습니다.
+그대로 읽으므로 **화면 동작을 고칠 것이 없습니다** — web에서 바꾼 것은 "왜 쪼갤 수
+없었는가" 절에 적은 개수 주석 세 줄뿐입니다.
 
-그 목록을 **`model=dino` + `backbone` 두 칸으로 접는 것**은 이 PR에 넣지 않았습니다.
-CI를 초록으로 유지하는 데 필요하지 않고, `src/pipelines/web/`은 제 영역이 아니기
-때문입니다. 별도 PR로 올립니다.
+목록을 model 한 칸과 backbone 한 칸으로 접는 화면은 이 PR에 넣지 않았습니다. CI를
+초록으로 유지하는 데 필요하지 않고 `src/pipelines/web/`은 제 영역이 아니기 때문입니다.
+별도 PR로 올립니다.
 
 **설정 값이 하나라는 것이 이 설계의 핵심입니다.** `backbone`을 별도 설정으로 두면
 architecture와 어긋날 수 있고, 어긋난 쪽은 멈추지 않고 점수만 나빠집니다. 값이 하나라

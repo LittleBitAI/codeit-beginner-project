@@ -25,8 +25,9 @@ DINO_ARCHITECTURE = "dino_r50_4scale"
 DINO_SWIN_T_ARCHITECTURE = "dino_swin_t_4scale"
 DINO_SWIN_B_ARCHITECTURE = "dino_swin_b_4scale"
 DINO_SWIN_L_ARCHITECTURE = "dino_swin_l_5scale"
-#: backbone만 다른 DINO 갈래입니다. 화면은 이것을 "model=dino + backbone" 두 칸으로
-#: 보여 주지만, 저장되는 값은 여기 이름 하나뿐입니다.
+#: backbone만 다른 DINO 갈래입니다. 화면은 이 이름을 그대로 목록에 내놓고, 저장되고
+#: checkpoint에 남는 값도 이 이름 하나뿐입니다 — backbone을 따로 두면 서로 어긋날 수
+#: 있고, 어긋난 쪽은 멈추지 않고 점수만 나빠집니다.
 DINO_ARCHITECTURES = (
     DINO_ARCHITECTURE,
     DINO_SWIN_T_ARCHITECTURE,
