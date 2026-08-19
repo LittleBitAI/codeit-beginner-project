@@ -28,15 +28,24 @@ def _payload(**overrides: Any) -> dict[str, Any]:
     return payload
 
 
+#: `checkpoint`를 주지 않았다는 표시입니다. `None`은 "checkpoint가 없는 학습"이라는
+#: 뜻으로 이미 쓰이고 있어서 둘을 가릅니다.
+_AUTO_CHECKPOINT = object()
+
+
 def _record(
     run_id: str,
     *,
     task: str | None = "embedding",
     status: str = "succeeded",
-    checkpoint: str | None = "artifacts/embeddings/best.pt",
+    # 실행마다 자기 자리에 남깁니다. 하나로 고정하면 서로 다른 학습이 같은 파일을
+    # 가리키는 셈이라, 중복 checkpoint 검사가 엉뚱한 test에서 먼저 걸립니다.
+    checkpoint: str | None | object = _AUTO_CHECKPOINT,
     crop_bank: str | None = "datasets/v5/crop_bank.tar",
     backbone: str = "resnet18",
 ) -> JobRecord:
+    if checkpoint is _AUTO_CHECKPOINT:
+        checkpoint = f"artifacts/embeddings/{run_id}/best_checkpoint.pt"
     settings: dict[str, Any] = {"run_id": run_id, "backbone": backbone}
     if task is not None:
         settings["task"] = task
@@ -243,6 +252,24 @@ def test_rerank_settings_read_the_same_bank_written_two_ways(monkeypatch, fake_j
     settings = embedding.rerank_settings(["emb-r18", "emb-r34"])
 
     assert settings["rerank_crop_bank_uri"] == "v5/crop_bank.tar"
+
+
+def test_rerank_settings_refuse_one_checkpoint_under_two_names(monkeypatch, fake_jobs):
+    """이름이 달라도 같은 파일이면 그 embedding이 margin 평균에서 두 표를 갖습니다.
+
+    evaluate도 같은 판정을 하지만(`_guard_distinct_checkpoints`) 그때는 융합 갈래가
+    harvest로 GPU를 이미 쓴 뒤입니다. **글자가 아니라 저장 신원으로** 견줍니다 —
+    같은 객체를 `s3://` 주소와 상대 key로 적으면 글자만 다릅니다.
+    """
+
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "bucket")
+    fake_jobs.append(_record("emb-r18", checkpoint="s3://bucket/r18.pt"))
+    fake_jobs.append(_record("emb-copy", checkpoint="r18.pt", backbone="resnet34"))
+
+    with pytest.raises(WebError) as error:
+        embedding.rerank_settings(["emb-r18", "emb-copy"])
+
+    assert "같은 checkpoint" in str(error.value)
 
 
 def test_rerank_settings_refuse_a_checkpoint_the_storage_cannot_read(monkeypatch, fake_jobs):
