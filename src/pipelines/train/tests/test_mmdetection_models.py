@@ -468,7 +468,7 @@ def pretend_cuda(monkeypatch):
 
 
 def _mmdetection_raw(**overrides):
-    """8GB 제약을 갖춘 최소 설정입니다. 그것 말고를 보고 싶을 때 씁니다."""
+    """`MMDETECTION_REQUIRED`를 갖춘 최소 설정입니다. 그것 말고를 보고 싶을 때 씁니다."""
 
     raw = {
         "run_id": "t",
@@ -647,7 +647,7 @@ def test_training_config_records_input_size_only_for_mmdetection(pretend_cuda):
 
 
 def test_new_models_default_to_accumulating_eight_microbatches(pretend_cuda):
-    """제안서 013이 정한 값입니다. 8GB에서 batch 1이라 그만큼 모아야 쓸 만합니다."""
+    """제안서 013이 정한 값입니다. batch 1로만 도니 그만큼 모아야 쓸 만합니다."""
 
     settings = _settings(_mmdetection_raw())
 

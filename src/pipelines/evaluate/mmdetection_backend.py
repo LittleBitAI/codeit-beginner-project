@@ -7,14 +7,23 @@ train을 import하지 않습니다(소유 경계). detector 설정과 전처리�
 ## 옮겨 적은 값이 어긋나면
 
 `model_config.schema_version`이 **detector 설정과 전처리 두 가지 모두**를 함께
-가리킵니다. train이 detector 설정값이나 전처리를 바꾸면 이 번호를 올려야 하고, 그러면
-옛 번호를 읽는 이쪽이 멈춥니다.
+가리킵니다. train이 둘 중 무엇을 바꾸든 이 번호를 올려야 하고, 그러면 옛 번호를 읽는
+이쪽이 멈춥니다. 그중 detector 설정은 아래처럼 test가 따로 대조하므로, 번호가 혼자
+지키는 것은 전처리 쪽입니다.
 
 번호에 기대는 이유는 자동으로 잡히지 않기 때문입니다. module 구조가 달라지면
 state_dict 모양이 맞지 않아 곧바로 실패하지만, NMS threshold·score threshold·정규화
 상수·positional encoding처럼 **값만 달라진 경우에는 state_dict가 그대로 맞습니다.**
-그때는 오류 없이 점수만 조용히 나빠집니다. 그래서 번호를 올리는 것이 train의 의무이고,
-두 source를 직접 대조하는 test는 train의 adapter가 main에 들어온 뒤에 추가합니다.
+그때는 오류 없이 점수만 조용히 나빠집니다.
+
+**detector 설정은 이제 `tests/test_mmdetection_config_agreement.py`가 직접 대조합니다**
+— 계약의 모든 architecture에 대해 train의 `build_mmdetection_config()`와 여기
+`build_detector_config()`의 key 집합과 값이 같은지 봅니다. 그 test는 두 pipeline을 함께
+import할 수 있는 root `tests/`에 있습니다.
+
+`schema_version`이 여전히 맡는 것은 **전처리 쪽**입니다. `model_config`의 입력 크기와
+`resize`·`pad_multiple`은 model dict에 없어서 위 대조로는 보이지 않습니다. 그것을
+train이 바꾸면 번호를 올려야 하고, 그러면 옛 번호를 읽는 이쪽이 멈춥니다.
 
 `backend` key가 없는 checkpoint는 지금까지처럼 torchvision으로 읽습니다.
 """

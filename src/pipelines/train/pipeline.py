@@ -443,8 +443,8 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         ),
         # microbatch를 몇 개 모아 한 번 갱신할지입니다. 1이면 지금까지와 같습니다.
         # web이 이 기본값을 먼저 복제해 두었습니다(PR 143).
-        # 기본값이 architecture에 따라 다릅니다. 8GB에서 batch 1로 도는 MMDetection
-        # model은 그만큼 모아야 쓸 만한 유효 batch가 됩니다. 기존 모델은 1입니다.
+        # 기본값이 architecture에 따라 다릅니다. batch 1로만 도는 MMDetection model은
+        # 그만큼 모아야 쓸 만한 유효 batch가 됩니다. 기존 모델은 1입니다.
         "gradient_accumulation_steps": _integer(
             raw,
             "gradient_accumulation_steps",
@@ -553,9 +553,8 @@ def _checkpoint_payload(
     }
 
 
-# 작은 GPU에서 batch 1로 돌 가능성이 있는 유일한 조합입니다(필요조건이지 충분조건은
-# 아닙니다 — backbone이 크면 지켜도 모자랍니다). 학습을 시작한 뒤 메모리로 터지면 그
-# 밤을 통째로 버리므로 첫 batch 전에 막습니다.
+# 이 저장소가 지원하는 하나뿐인 조합입니다. 재 보지 않은 조합으로 밤을 통째로 버리지
+# 않도록 첫 batch 전에 막습니다. 근거는 계약의 `MMDETECTION_REQUIRED`에 있습니다.
 _MMDETECTION_REQUIRED = _contract.MMDETECTION_REQUIRED
 
 
@@ -577,7 +576,7 @@ def _check_mmdetection_settings(settings: Mapping[str, Any], raw: Mapping[str, A
         if value != required:
             raise ValueError(
                 f"train.{name} must be {required!r} for {settings['architecture']} "
-                "because no other value has a chance of fitting a small GPU"
+                "because that is the only combination this repository supports"
             )
 
 
