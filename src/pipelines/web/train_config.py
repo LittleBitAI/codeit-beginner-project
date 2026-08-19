@@ -43,10 +43,8 @@ from .paths import (
     resolve_within_repo,
 )
 from .train_capabilities import (
-    ARCHITECTURE_BACKBONES,
     CUDA_ONLY_PRECISIONS,
     DEFAULT_ACCUMULATION_STEPS,
-    DEFAULT_ARCHITECTURE_BACKBONES,
     DEFAULT_INPUT_SIZE,
     MMDETECTION_ARCHITECTURES,
     MMDETECTION_REQUIRED,
@@ -157,13 +155,6 @@ OPTIMIZER_PROFILES = _contract.OPTIMIZER_PROFILES
 _FIELD_LABELS = {
     "run_id": ("실행 이름", "실행 결과가 저장되는 directory 이름으로 그대로 쓰입니다."),
     "architecture": ("모델", "학습에 사용할 object detection architecture입니다."),
-    "backbone": (
-        "Backbone",
-        "고른 모델의 특징 추출기입니다. 나머지 구조는 그대로 두고 이것만 바꿉니다."
-        " resnet50이 지금까지 쓰던 것입니다. 1280px·batch 1·amp 기준 GPU 사용량은"
-        " resnet50 3.0GB, swin_t 3.3GB, swin_b 3.8GB이고 swin_l은 11.2GB라 10GB"
-        " 카드에서는 모자랍니다.",
-    ),
     "optimizer": ("Optimizer", "가중치를 갱신할 optimizer와 관련 수치 항목을 선택합니다."),
     "augmentation": (
         "증강 preset",
@@ -406,26 +397,6 @@ def generate_settings_run_id(
     return candidate if RUN_ID_PATTERN.fullmatch(candidate) else generate_run_id()
 
 
-def _architecture_choices() -> list[str]:
-    """화면이 고르는 목록입니다. backbone만 다른 갈래는 이름 하나로 접습니다.
-
-    접힌 이름(`dino`)은 **화면에만** 있습니다. 서버가 받는 값은 언제나 계약의 진짜
-    architecture 이름이라, 저장·checkpoint·기록의 모양은 그대로입니다.
-    """
-
-    families = {
-        architecture: family
-        for family, table in ARCHITECTURE_BACKBONES.items()
-        for architecture in table.values()
-    }
-    choices: list[str] = []
-    for architecture in SUPPORTED_ARCHITECTURES:
-        display = families.get(architecture, architecture)
-        if display not in choices:
-            choices.append(display)
-    return choices
-
-
 def field_specs() -> list[dict[str, Any]]:
     """새 실험 화면이 form을 그릴 때 쓰는 필드 정의입니다."""
 
@@ -443,33 +414,23 @@ def field_specs() -> list[dict[str, Any]]:
 
     specs: list[dict[str, Any]] = []
     for name, default, choices in (
-        ("architecture", LEGACY_ARCHITECTURE, _architecture_choices()),
+        ("architecture", LEGACY_ARCHITECTURE, SUPPORTED_ARCHITECTURES),
         ("optimizer", NEW_EXPERIMENT_OPTIMIZER, SUPPORTED_OPTIMIZERS),
         ("augmentation", DEFAULT_AUGMENTATION, SUPPORTED_AUGMENTATIONS),
         ("precision", form_precision, SUPPORTED_PRECISIONS),
         ("lr_scheduler", DEFAULT_LR_SCHEDULER, SUPPORTED_LR_SCHEDULERS),
     ):
         label, hint = _FIELD_LABELS[name]
-        spec = {
-            "name": name,
-            "type": "enum",
-            "default": default,
-            "choices": list(choices),
-            "label": label,
-            "hint": hint,
-        }
-        # 접어 둔 갈래를 다시 펴는 표입니다. 화면은 이것으로 backbone 칸을 하나 더
-        # 그리고, 보내기 전에 architecture 이름 하나로 합칩니다. 보내는 값이 둘로
-        # 늘지 않는 것이 핵심입니다 — 둘이면 서로 어긋날 수 있습니다.
-        if name == "architecture":
-            backbone_label, backbone_hint = _FIELD_LABELS["backbone"]
-            spec["backbones"] = {
-                family: dict(table) for family, table in ARCHITECTURE_BACKBONES.items()
+        specs.append(
+            {
+                "name": name,
+                "type": "enum",
+                "default": default,
+                "choices": list(choices),
+                "label": label,
+                "hint": hint,
             }
-            spec["backbone_defaults"] = dict(DEFAULT_ARCHITECTURE_BACKBONES)
-            spec["backbone_label"] = backbone_label
-            spec["backbone_hint"] = backbone_hint
-        specs.append(spec)
+        )
     label, hint = _FIELD_LABELS["run_id"]
     specs.append(
         {

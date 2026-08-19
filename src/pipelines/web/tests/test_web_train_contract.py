@@ -114,24 +114,11 @@ def test_the_form_says_eight_for_models_that_default_to_eight():
 
 
 def test_the_form_offers_every_architecture_the_contract_names():
-    """고를 수 있는 모델은 계약이 정합니다. 화면이 그중 하나를 빠뜨리면 안 됩니다.
-
-    backbone만 다른 갈래는 목록에서 이름 하나로 접히므로, 목록을 그대로 견주는 대신
-    **닿을 수 있는지**를 봅니다. 접어 두고 표에 넣지 않으면 그 모델은 화면에서 사라지고,
-    사라진 것은 아무도 눈치채지 못합니다.
-    """
+    """고를 수 있는 모델은 계약이 정합니다. 화면이 그중 하나를 빠뜨리면 안 됩니다."""
 
     choices = {spec["name"]: spec for spec in field_specs()}
-    spec = choices["architecture"]
-    reachable = set(spec["choices"])
-    for table in spec["backbones"].values():
-        reachable.update(table.values())
 
-    assert reachable == set(ARCHITECTURES) | set(spec["backbones"])
-    # 접힌 이름은 화면에만 있습니다. 서버가 받는 값은 언제나 계약의 진짜 이름입니다.
-    assert set(spec["backbones"]).isdisjoint(ARCHITECTURES)
-    for family, backbone in spec["backbone_defaults"].items():
-        assert backbone in spec["backbones"][family]
+    assert choices["architecture"]["choices"] == list(ARCHITECTURES)
     assert "input_size" in choices
     assert "gradient_accumulation_steps" in choices
 

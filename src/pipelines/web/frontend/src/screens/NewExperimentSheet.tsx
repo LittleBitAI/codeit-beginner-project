@@ -22,12 +22,6 @@ import {
   invalidControlStyle,
 } from '../components/primitives';
 import { color, font, type } from '../design/tokens';
-import {
-  architectureForFamily,
-  architectureOf,
-  backboneOf,
-  familyOf,
-} from '../lib/architectureBackbone';
 import { ALL_DATA_KEYS } from '../lib/dataKeys';
 import { dataMatchesSource } from '../lib/dataSource';
 import {
@@ -310,53 +304,6 @@ function TrainField({
           ))}
         </select>
       </Field>
-    );
-  }
-
-  if (spec.type === 'enum' && spec.backbones) {
-    // 두 칸으로 보이지만 값은 architecture 이름 **하나**입니다. 어느 쪽을 바꾸든 표를
-    // 거쳐 다시 하나로 합쳐 올립니다. 값을 둘로 늘리면 서로 어긋날 수 있고, 어긋난
-    // 쪽은 멈추지 않고 점수만 나빠집니다.
-    const table = spec.backbones;
-    const defaults = spec.backbone_defaults ?? {};
-    const selected = value || (typeof spec.default === 'string' ? spec.default : '');
-    const family = familyOf(table, selected);
-    const entries = family === undefined ? undefined : table[family];
-    return (
-      <>
-        <Field label={spec.label} hint={spec.hint} error={error}>
-          <select
-            value={family ?? selected}
-            onChange={(event) =>
-              onChange(architectureForFamily(table, defaults, event.target.value, selected))
-            }
-            style={style}
-          >
-            {(spec.choices ?? []).map((choice) => (
-              <option key={choice} value={choice}>
-                {choice}
-              </option>
-            ))}
-          </select>
-        </Field>
-        {family !== undefined && entries !== undefined ? (
-          <Field label={spec.backbone_label ?? 'Backbone'} hint={spec.backbone_hint}>
-            <select
-              value={backboneOf(table, selected) ?? ''}
-              onChange={(event) =>
-                onChange(architectureOf(table, family, event.target.value) ?? selected)
-              }
-              style={controlStyle}
-            >
-              {Object.keys(entries).map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </Field>
-        ) : null}
-      </>
     );
   }
 
