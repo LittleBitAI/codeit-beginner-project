@@ -28,9 +28,11 @@ FAILED src/pipelines/evaluate/tests/test_evaluate_mmdetection.py::
        test_this_pipeline_can_build_every_mmdetection_model_the_contract_names
 ```
 
-그 test의 docstring이 이 상황을 그대로 적어 두었습니다 — *"계약에 세 번째 이름이
-생기면 GUI는 그것을 내놓고 train은 학습까지 마치는데, 평가만 마지막에 거부합니다 —
-밤새 학습한 뒤에."* **묶으라고 설계된 문**이라 train 쪽만 올리면 CI가 빨간 채 남습니다.
+그 test의 docstring이 이 상황을 그대로 적어 두었습니다 — *"계약에 이름이 하나 늘었는데
+여기 config가 없으면 GUI는 그것을 내놓고 train은 학습까지 마치는데, 평가만 마지막에
+거부합니다 — 밤새 학습한 뒤에."* **묶으라고 설계된 문**이라 train 쪽만 올리면 CI가
+빨간 채 남습니다. (그 문장은 architecture가 둘이던 때 쓰여 "세 번째 이름"이라고 되어
+있었습니다. 이 PR이 다섯으로 늘리므로 개수를 빼고 같이 고쳤습니다.)
 
 web은 다릅니다. 화면은 계약 목록을 그대로 읽어 내놓으므로 이름이 늘어도 초록입니다.
 그래서 **이 PR에 web 동작 변경은 없습니다.** `web/CLAUDE.md`·`web/AGENTS.md`·
@@ -44,9 +46,11 @@ web은 다릅니다. 화면은 계약 목록을 그대로 읽어 내놓으므로
 train의 `_SWIN_VARIANTS`, `_swin_backbone()`, `_dino_in_channels()`, `_dino_levels()`를
 그대로 옮긴 것입니다.
 
-- 4scale 갈래는 backbone이 뒤 세 단계만 내보내고(`out_indices=(1,2,3)`) 나머지
-  구조가 R50과 **완전히 같습니다.** `num_feature_levels`는 적지 않습니다 — 넷이 DINO의
-  기본값이라, 지금까지 리더보드를 만든 4scale 설정을 한 글자도 바꾸지 않으려는 것입니다.
+- 4scale 갈래는 backbone이 뒤 세 단계만 내보내고(`out_indices=(1,2,3)`),
+  **backbone과 `neck.in_channels` 둘만 R50과 다릅니다.** 그 밖의 encoder·decoder·
+  head·`neck.num_outs`는 완전히 같습니다. `num_feature_levels`는 적지 않습니다 —
+  넷이 DINO의 기본값이라, 지금까지 리더보드를 만든 4scale 설정을 한 글자도 바꾸지
+  않으려는 것입니다.
 - 5scale(`swin_l`)만 `out_indices=(0,1,2,3)`, `neck.num_outs=5`,
   encoder `self_attn_cfg.num_levels=5`, decoder `cross_attn_cfg.num_levels=5`,
   `num_feature_levels=5`입니다. **한 자리만 넷으로 남으면 model이 만들어지지 않거나
