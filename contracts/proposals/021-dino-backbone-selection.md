@@ -33,7 +33,10 @@ FAILED src/pipelines/evaluate/tests/test_evaluate_mmdetection.py::
 밤새 학습한 뒤에."* **묶으라고 설계된 문**이라 train 쪽만 올리면 CI가 빨간 채 남습니다.
 
 web은 다릅니다. 화면은 계약 목록을 그대로 읽어 내놓으므로 이름이 늘어도 초록입니다.
-그래서 이 PR에는 web 변경이 없습니다.
+그래서 **이 PR에 web 동작 변경은 없습니다.** `web/CLAUDE.md`·`web/AGENTS.md`·
+`web/train_config.py`에 한 줄씩, 개수를 못 박아 두어 이 PR 때문에 낡아 버린 주석
+셋만 고쳤습니다("MMDetection pair" → "ones", "두 모델" → "model"). 그대로 두면 문서가
+틀린 개수를 말하게 됩니다.
 
 ## evaluate에서 바꾼 것
 
@@ -52,7 +55,10 @@ train의 `_SWIN_VARIANTS`, `_swin_backbone()`, `_dino_in_channels()`, `_dino_lev
 ## 두 벌이 갈라지지 않게 한 장치
 
 `tests/test_mmdetection_config_agreement.py`가 계약의 모든 이름에 대해 train과
-evaluate가 만든 설정의 공통 key를 견줍니다. pipeline은 서로를 import하지 않으므로 같은
+evaluate가 만든 설정의 **key 집합이 같은지, 그리고 모든 값이 같은지**를 견줍니다.
+교집합만 견주면 한쪽에서 key가 통째로 사라진 것을 놓칩니다 — `test_cfg`가 빠지면
+DINO의 `max_per_img`가 300에서 MMDetection 기본값 100으로 조용히 줄어듭니다.
+pipeline은 서로를 import하지 않으므로 같은
 설정이 두 곳에 따로 있고, `window_size`처럼 **모양은 같은데 뜻이 다른 값**이 어긋나면
 지금까지는 멈추지 않고 점수만 나빠졌습니다. root `tests/`가 두 pipeline을 함께 볼 수
 있는 유일한 자리입니다.
