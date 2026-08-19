@@ -22,9 +22,11 @@ from typing import Any
 
 __all__ = [
     "ARCHITECTURES",
+    "ARCHITECTURE_BACKBONES",
     "AUGMENTATIONS",
     "BEST_CHECKPOINT_NAME",
     "CUDA_ONLY_PRECISIONS",
+    "DEFAULT_ARCHITECTURE_BACKBONES",
     "DEFAULT_EMBEDDING_BACKBONE",
     "DEFAULT_TRAIN_TASK",
     "EMBEDDING_BACKBONES",
@@ -88,6 +90,20 @@ MMDETECTION_ARCHITECTURES = (
     "dino_swin_l_5scale",
     "cascade_rcnn_swin_t_fpn",
 )
+#: 화면이 model 한 칸이 아니라 **model + backbone 두 칸**으로 보여 주는 갈래입니다.
+#: 저장되고 checkpoint에 남는 값은 여전히 architecture 이름 **하나뿐**입니다 — 값이
+#: 둘이면 서로 어긋날 수 있고, 어긋난 쪽은 멈추지 않고 점수만 나빠집니다. 그래서 화면은
+#: 두 칸을 그리고 보내기 전에 이 표로 이름 하나를 만듭니다.
+ARCHITECTURE_BACKBONES: dict[str, dict[str, str]] = {
+    "dino": {
+        "resnet50": "dino_r50_4scale",
+        "swin_t": "dino_swin_t_4scale",
+        "swin_b": "dino_swin_b_4scale",
+        "swin_l": "dino_swin_l_5scale",
+    },
+}
+#: 그 갈래를 골랐을 때 처음 놓이는 backbone입니다. 기존 실행이 쓰던 것과 같습니다.
+DEFAULT_ARCHITECTURE_BACKBONES: dict[str, str] = {"dino": "resnet50"}
 ARCHITECTURES = (
     DEFAULT_ARCHITECTURE,
     "fasterrcnn_resnet50_fpn_v2",
