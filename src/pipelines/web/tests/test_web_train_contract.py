@@ -285,7 +285,7 @@ def test_gradient_accumulation_does_not_change_the_automatic_run_name():
 
 
 def _mmdetection_request(**overrides):
-    """8GB 제약을 갖춘 최소 요청입니다."""
+    """`MMDETECTION_REQUIRED`를 갖춘 최소 요청입니다."""
 
     raw = {
         "architecture": "dino_r50_4scale",
@@ -332,10 +332,14 @@ def test_a_torchvision_run_sends_no_input_size():
         ("batch_size", 2),
     ],
 )
-def test_mmdetection_refuses_combinations_that_do_not_fit_8gb(
+def test_mmdetection_refuses_unsupported_combinations(
     monkeypatch, field, value
 ):
-    """학습을 시작한 뒤 메모리로 터지면 그 밤을 통째로 버립니다."""
+    """지원 범위 밖의 조합을 화면에서 먼저 막습니다.
+
+    메모리 적합성을 재는 것이 아닙니다. `MMDETECTION_REQUIRED`가 이 저장소가 재 본
+    하나뿐인 조합이고, 재 본 적 없는 조합으로 밤을 버리지 않으려고 막습니다.
+    """
 
     monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
 

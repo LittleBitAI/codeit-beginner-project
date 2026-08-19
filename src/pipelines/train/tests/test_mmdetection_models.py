@@ -1,4 +1,8 @@
-"""MMDetection adapter와 그 architecture를 아직 고를 수 없게 막는 문 test입니다."""
+"""MMDetection adapter와 그 architecture를 지키는 문 test입니다.
+
+계약에 있는 이름만 고를 수 있고, 그 이름이 실제로 서로 다른 detector를 만들며,
+`MMDETECTION_REQUIRED` 밖의 조합은 첫 batch 전에 거절되는지를 봅니다.
+"""
 
 from __future__ import annotations
 
@@ -11,8 +15,12 @@ import torch
 import torchvision
 from torch import nn
 
+from src.pipelines.train.errors import TrainError
 from src.pipelines.train.mmdetection_adapter import (
+    DINO_CHECKPOINT,
+    DINO_PRETRAINED_SOURCES,
     MMDETECTION_ARCHITECTURES,
+    SWIN_B_CHECKPOINT,
     MMDetectionAdapter,
     _prepare_detector,
     _shimmed_mmcv_version,
@@ -33,6 +41,7 @@ from src.pipelines.train.pipeline import _checkpoint_payload, _settings
     ("architecture", "detector_type"),
     [
         ("dino_r50_4scale", "DINO"),
+        ("dino_swin_b_4scale", "DINO"),
         ("cascade_rcnn_swin_t_fpn", "CascadeRCNN"),
     ],
 )
@@ -43,7 +52,7 @@ def test_mmdetection_architectures_build_allowlisted_bbox_configs(
 
     assert architecture in MMDETECTION_ARCHITECTURES
     assert config["type"] == detector_type
-    if architecture == "dino_r50_4scale":
+    if detector_type == "DINO":
         assert config["bbox_head"]["num_classes"] == 3
     else:
         assert [head["num_classes"] for head in config["roi_head"]["bbox_head"]] == [
@@ -258,6 +267,102 @@ def test_legacy_swin_checkpoint_keys_are_converted_before_filtering():
     )
 
 
+class _SourceLoader:
+    """source마다 다른 state를 주는 loader입니다."""
+
+    def __init__(self, states: Mapping[str, Mapping[str, torch.Tensor]]) -> None:
+        self.states = dict(states)
+        self.sources: list[str] = []
+
+    def load_checkpoint(self, source: str, map_location: str = "cpu"):
+        self.sources.append(source)
+        return {"state_dict": dict(self.states[source])}
+
+
+@pytest.mark.parametrize(
+    ("architecture", "in_channels"),
+    [
+        ("dino_swin_t_4scale", [192, 384, 768]),
+        ("dino_swin_b_4scale", [256, 512, 1024]),
+    ],
+)
+def test_four_scale_swin_swaps_the_backbone_and_the_channels_it_feeds_only(
+    architecture: str, in_channels: list[int]
+):
+    r50 = build_mmdetection_config("dino_r50_4scale", foreground_classes=3)
+    swin = build_mmdetection_config(architecture, foreground_classes=3)
+
+    assert swin["backbone"]["type"] == "SwinTransformer"
+    assert swin["neck"]["in_channels"] == in_channels
+    # 4scale을 그대로 두어야 R50 DINO의 encoder·decoder를 실을 수 있습니다.
+    assert swin["neck"]["num_outs"] == r50["neck"]["num_outs"]
+    assert swin["encoder"] == r50["encoder"]
+    assert swin["decoder"] == r50["decoder"]
+    assert "num_feature_levels" not in swin
+
+
+def test_swin_l_is_five_scale_all_the_way_through():
+    """한 자리만 넷으로 남으면 model이 만들어지지 않거나 조용히 다른 것이 됩니다."""
+
+    swin = build_mmdetection_config("dino_swin_l_5scale", foreground_classes=3)
+
+    assert swin["num_feature_levels"] == 5
+    assert swin["backbone"]["out_indices"] == (0, 1, 2, 3)
+    assert swin["neck"]["in_channels"] == [192, 384, 768, 1536]
+    assert swin["neck"]["num_outs"] == 5
+    assert swin["encoder"]["layer_cfg"]["self_attn_cfg"]["num_levels"] == 5
+    assert swin["decoder"]["layer_cfg"]["cross_attn_cfg"]["num_levels"] == 5
+
+
+def test_dino_swin_takes_backbone_and_transformer_from_different_checkpoints():
+    """MMDetection이 내놓는 DINO는 Swin-L뿐이라 Swin-B는 두 곳에서 모읍니다."""
+
+    detector = _RecordingDetector(
+        {
+            "backbone.patch_embed.projection.weight": torch.zeros(2),
+            "backbone.stages.0.blocks.0.attn.w_msa.qkv.weight": torch.zeros(2),
+            "neck.convs.0.conv.weight": torch.zeros((256, 256, 1, 1)),
+            "encoder.layers.0.ffn.layers.0.0.weight": torch.zeros(2),
+        }
+    )
+    loader = _SourceLoader(
+        {
+            SWIN_B_CHECKPOINT: {
+                "backbone.patch_embed.proj.weight": torch.ones(2),
+                "backbone.layers.0.blocks.0.attn.qkv.weight": torch.full((2,), 3.0),
+            },
+            DINO_CHECKPOINT: {
+                "neck.convs.0.conv.weight": torch.zeros((256, 512, 1, 1)),
+                "encoder.layers.0.ffn.layers.0.0.weight": torch.full((2,), 7.0),
+            },
+        }
+    )
+
+    _prepare_detector(detector, "dino_swin_b_4scale", pretrained=True, loader=loader)
+
+    assert torch.equal(
+        detector.loaded["backbone.stages.0.blocks.0.attn.w_msa.qkv.weight"],
+        torch.full((2,), 3.0),
+    )
+    assert torch.equal(
+        detector.loaded["encoder.layers.0.ffn.layers.0.0.weight"], torch.full((2,), 7.0)
+    )
+    # 입력 채널이 달라 모양이 어긋나는 neck은 멈추지 않고 빠집니다.
+    assert "neck.convs.0.conv.weight" not in detector.loaded
+
+
+def test_a_backbone_that_does_not_fill_stops_the_run_instead_of_training_scratch():
+    detector = _RecordingDetector(
+        {"backbone.stages.0.blocks.0.norm1.weight": torch.zeros(2)}
+    )
+    loader = _SourceLoader(
+        {source: {"backbone.gone.weight": torch.ones(2)} for source in DINO_PRETRAINED_SOURCES["dino_swin_b_4scale"]}
+    )
+
+    with pytest.raises(TrainError):
+        _prepare_detector(detector, "dino_swin_b_4scale", pretrained=True, loader=loader)
+
+
 MMDETECTION_PACKAGES = ("mmcv", "mmdet", "mmengine")
 
 
@@ -356,7 +461,7 @@ def test_mmdetection_amp_uses_fp16_for_mmcv_cuda_ops(pretend_cuda, architecture:
 def pretend_cuda(monkeypatch):
     """GPU가 없는 곳에서도 같은 결과가 나오게 합니다.
 
-    두 모델은 device가 cuda여야 하는데 CI runner에는 GPU가 없습니다. 실제로 CUDA를
+    MMDetection model은 device가 cuda여야 하는데 CI runner에는 GPU가 없습니다. 실제로 CUDA를
     쓰는 test가 아니라 설정 검증만 보는 test이므로 확인 함수만 바꿉니다.
     """
 
@@ -367,7 +472,7 @@ def pretend_cuda(monkeypatch):
 
 
 def _mmdetection_raw(**overrides):
-    """8GB 제약을 갖춘 최소 설정입니다. 그것 말고를 보고 싶을 때 씁니다."""
+    """`MMDETECTION_REQUIRED`를 갖춘 최소 설정입니다. 그것 말고를 보고 싶을 때 씁니다."""
 
     raw = {
         "run_id": "t",
@@ -420,8 +525,8 @@ def test_input_size_is_refused_with_a_torchvision_architecture():
         ("batch_size", 2),
     ],
 )
-def test_mmdetection_refuses_combinations_that_do_not_fit_8gb(pretend_cuda, field, value):
-    """8GB에서 도는 조합만 받습니다. 학습을 시작한 뒤 터지면 밤을 버립니다."""
+def test_mmdetection_refuses_unsupported_combinations(pretend_cuda, field, value):
+    """지원하는 조합만 받습니다. 재 본 적 없는 조합으로 시작해 터지면 밤을 버립니다."""
 
     raw = {
         "run_id": "t",
@@ -546,7 +651,7 @@ def test_training_config_records_input_size_only_for_mmdetection(pretend_cuda):
 
 
 def test_new_models_default_to_accumulating_eight_microbatches(pretend_cuda):
-    """제안서 013이 정한 값입니다. 8GB에서 batch 1이라 그만큼 모아야 쓸 만합니다."""
+    """제안서 013이 정한 값입니다. batch 1로만 도니 그만큼 모아야 쓸 만합니다."""
 
     settings = _settings(_mmdetection_raw())
 

@@ -80,16 +80,31 @@ DEVICES = ("cpu", "cuda")
 
 #: 값이 없는 옛 설정이 뜻하던 model입니다. 새 실험의 기본값이기도 합니다.
 DEFAULT_ARCHITECTURE = "fasterrcnn_mobilenet_v3_large_320_fpn"
-#: MMDetection으로 학습하는 model입니다. 아래 제약이 이 둘에만 걸립니다.
-MMDETECTION_ARCHITECTURES = ("dino_r50_4scale", "cascade_rcnn_swin_t_fpn")
+#: MMDetection으로 학습하는 model입니다. 아래 제약이 여기 적힌 것에만 걸립니다.
+MMDETECTION_ARCHITECTURES = (
+    "dino_r50_4scale",
+    "dino_swin_t_4scale",
+    "dino_swin_b_4scale",
+    "dino_swin_l_5scale",
+    "cascade_rcnn_swin_t_fpn",
+)
 ARCHITECTURES = (
     DEFAULT_ARCHITECTURE,
     "fasterrcnn_resnet50_fpn_v2",
     "retinanet_resnet50_fpn_v2",
     *MMDETECTION_ARCHITECTURES,
 )
-#: MMDetection model이 8GB에서 도는 유일한 조합입니다. 다른 값이면 학습을 시작한 뒤
-#: 메모리로 터지므로, GUI는 대기열에 넣기 전에 같은 이유로 막습니다.
+#: MMDetection model에 **이 저장소가 지원하는 하나뿐인 조합**입니다. 이유가 값마다
+#: 다릅니다 — `batch_size=1`과 `amp`는 메모리 때문이고, `AdamW`는 DETR 계열이 그것으로
+#: 수렴하기 때문이며(메모리로는 오히려 SGD보다 optimizer state를 더 씁니다), `cuda`는
+#: `amp`가 CUDA에서만 되기 때문입니다(`CUDA_ONLY_PRECISIONS`). **CPU에서 아예 안 도는
+#: 것은 아닙니다** — test는 CPU에서 다섯 detector를 만들어 loss까지 봅니다. 다만 그
+#: 조합으로 학습을 재 본 적이 없어 받지 않고, GUI도 같은 이유로 미리 막습니다.
+#:
+#: **이 조합이 메모리를 보장하지는 않습니다.** 1280px·batch 1·amp로 잰 최고
+#: 사용량은 resnet50 2.98 GiB, swin_t 3.32, swin_b 3.81, **swin_l 11.21**입니다
+#: (2026-08-19, RTX 3080 10GB). swin_l은 10GB 카드에서도 넘쳐 공유 메모리로 밀리므로
+#: 더 큰 GPU에서 돌리거나 `input_size`를 낮춰야 합니다.
 MMDETECTION_REQUIRED = {
     "device": "cuda",
     "precision": "amp",
@@ -98,7 +113,7 @@ MMDETECTION_REQUIRED = {
 }
 #: MMDetection model만 쓰는 입력 크기입니다.
 DEFAULT_INPUT_SIZE = 640
-#: MMDetection model을 고르면 이만큼 모아 한 번 갱신합니다. batch 1로 도는 두 모델이
+#: MMDetection model을 고르면 이만큼 모아 한 번 갱신합니다. batch 1로 도는 이 모델들이
 #: 쓸 만한 유효 batch를 갖게 하는 값입니다.
 DEFAULT_ACCUMULATION_STEPS = 8
 

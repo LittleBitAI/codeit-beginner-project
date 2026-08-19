@@ -215,18 +215,23 @@ def test_real_dependency_failure_is_reported_as_an_install_problem(failure):
     ("architecture", "detector_type"),
     [
         ("dino_r50_4scale", "DINO"),
+        ("dino_swin_b_4scale", "DINO"),
         ("cascade_rcnn_swin_t_fpn", "CascadeRCNN"),
     ],
 )
 def test_each_architecture_is_rebuilt_and_receives_the_checkpoint_state(
     monkeypatch, architecture, detector_type
 ):
-    """계약이 요구한 두 architecture 각각의 재생성·state 적용을 확인합니다.
+    """재생성·state 적용 경로를 **대표 architecture**로 확인합니다.
 
-    한쪽만 확인하면 다른 architecture는 registry 생성 경로를 한 번도 지나지 않은 채
-    merge됩니다. 설정의 **모양**만 볼 수 있고 train과 값이 같은지는 확인하지 못합니다.
-    threshold나 정규화 상수처럼 값만 다른 drift는 state_dict도 그대로 맞아서 여기서
-    잡히지 않습니다. 그것은 `model_config.schema_version`이 맡습니다.
+    한쪽만 확인하면 다른 detector는 이 경로를 한 번도 지나지 않은 채 merge됩니다.
+    DINO 갈래끼리는 이 경로가 같은 코드라 대표 하나면 충분하고, 이름마다 설정이
+    실제로 만들어지는지는 `test_this_pipeline_can_build_every_mmdetection_model_the_contract_names`가
+    계약 목록 전체로 봅니다.
+
+    여기서는 설정의 **모양**만 볼 수 있고 train과 값이 같은지는 확인하지 못합니다.
+    그것은 `tests/test_mmdetection_config_agreement.py`가 맡고, 전처리 쪽은
+    `model_config.schema_version`이 맡습니다.
     """
 
     built: list[_StubDetector] = []
@@ -391,8 +396,9 @@ def test_this_pipeline_can_build_every_mmdetection_model_the_contract_names():
     """계약이 이름을 정하고, 그 이름으로 무엇을 만들지는 각 pipeline이 정합니다.
 
     허용 목록은 계약 전체를 그대로 받는데(`SUPPORTED_ARCHITECTURES`) 만들 줄 아는
-    것은 여기 적힌 둘뿐입니다. 계약에 세 번째 이름이 생기면 GUI는 그것을 내놓고
-    train은 학습까지 마치는데, 평가만 마지막에 거부합니다 — 밤새 학습한 뒤에.
+    것은 여기 적힌 것뿐입니다. 계약에 이름이 하나 늘었는데 여기 config가 없으면 GUI는
+    그것을 내놓고 train은 학습까지 마치는데, 평가만 마지막에 거부합니다 — 밤새 학습한
+    뒤에.
     """
 
     buildable = set()

@@ -7,14 +7,23 @@ train을 import하지 않습니다(소유 경계). detector 설정과 전처리�
 ## 옮겨 적은 값이 어긋나면
 
 `model_config.schema_version`이 **detector 설정과 전처리 두 가지 모두**를 함께
-가리킵니다. train이 detector 설정값이나 전처리를 바꾸면 이 번호를 올려야 하고, 그러면
-옛 번호를 읽는 이쪽이 멈춥니다.
+가리킵니다. train이 둘 중 무엇을 바꾸든 이 번호를 올려야 하고, 그러면 옛 번호를 읽는
+이쪽이 멈춥니다. 그중 detector 설정은 아래처럼 test가 따로 대조하므로, 번호가 혼자
+지키는 것은 전처리 쪽입니다.
 
 번호에 기대는 이유는 자동으로 잡히지 않기 때문입니다. module 구조가 달라지면
 state_dict 모양이 맞지 않아 곧바로 실패하지만, NMS threshold·score threshold·정규화
 상수·positional encoding처럼 **값만 달라진 경우에는 state_dict가 그대로 맞습니다.**
-그때는 오류 없이 점수만 조용히 나빠집니다. 그래서 번호를 올리는 것이 train의 의무이고,
-두 source를 직접 대조하는 test는 train의 adapter가 main에 들어온 뒤에 추가합니다.
+그때는 오류 없이 점수만 조용히 나빠집니다.
+
+**detector 설정은 이제 `tests/test_mmdetection_config_agreement.py`가 직접 대조합니다**
+— 계약의 모든 architecture에 대해 train의 `build_mmdetection_config()`와 여기
+`build_detector_config()`의 key 집합과 값이 같은지 봅니다. 그 test는 두 pipeline을 함께
+import할 수 있는 root `tests/`에 있습니다.
+
+`schema_version`이 여전히 맡는 것은 **전처리 쪽**입니다. `model_config`의 입력 크기와
+`resize`·`pad_multiple`은 model dict에 없어서 위 대조로는 보이지 않습니다. 그것을
+train이 바꾸면 번호를 올려야 하고, 그러면 옛 번호를 읽는 이쪽이 멈춥니다.
 
 `backend` key가 없는 checkpoint는 지금까지처럼 torchvision으로 읽습니다.
 """
@@ -33,6 +42,16 @@ BACKEND_NAME = "mmdetection"
 # 이름은 train과 함께 쓰는 계약이 정합니다(`src/common/train_contract.py`). 여기서는
 # 그 이름의 checkpoint를 어떤 model로 되살릴지만 정합니다.
 DINO_ARCHITECTURE = "dino_r50_4scale"
+DINO_SWIN_T_ARCHITECTURE = "dino_swin_t_4scale"
+DINO_SWIN_B_ARCHITECTURE = "dino_swin_b_4scale"
+DINO_SWIN_L_ARCHITECTURE = "dino_swin_l_5scale"
+#: backbone만 다른 DINO 갈래입니다. train의 `DINO_ARCHITECTURES`와 같아야 합니다.
+DINO_ARCHITECTURES = (
+    DINO_ARCHITECTURE,
+    DINO_SWIN_T_ARCHITECTURE,
+    DINO_SWIN_B_ARCHITECTURE,
+    DINO_SWIN_L_ARCHITECTURE,
+)
 CASCADE_ARCHITECTURE = "cascade_rcnn_swin_t_fpn"
 MODEL_CONFIG_SCHEMA_VERSION = 1
 PAD_MULTIPLE = 32
@@ -58,14 +77,82 @@ def _data_preprocessor() -> dict[str, Any]:
     }
 
 
-def _dino_config(num_classes: int) -> dict[str, Any]:
+#: train의 `_SWIN_VARIANTS`와 같은 값이어야 합니다. 여기 값은 하나만 어긋나도 state의
+#: 모양이 달라져 적재가 실패합니다 — `window_size`를 7에서 12로 바꾸면
+#: `relative_position_bias_table`이 (169, heads)에서 (529, heads)가 됩니다. 조용히
+#: 나빠지는 것은 state에 자국을 남기지 않는 값(`test_cfg` 같은 것)이고, 그쪽까지
+#: `tests/test_mmdetection_config_agreement.py`가 두 벌을 통째로 대조합니다.
+_SWIN_VARIANTS: dict[str, dict[str, Any]] = {
+    DINO_SWIN_T_ARCHITECTURE: {
+        "embed_dims": 96,
+        "depths": [2, 2, 6, 2],
+        "num_heads": [3, 6, 12, 24],
+        "window_size": 7,
+    },
+    DINO_SWIN_B_ARCHITECTURE: {
+        "embed_dims": 128,
+        "depths": [2, 2, 18, 2],
+        "num_heads": [4, 8, 16, 32],
+        "window_size": 7,
+    },
+    DINO_SWIN_L_ARCHITECTURE: {
+        "embed_dims": 192,
+        "depths": [2, 2, 18, 2],
+        "num_heads": [6, 12, 24, 48],
+        "window_size": 12,
+    },
+}
+_FIVE_SCALE_ARCHITECTURES = (DINO_SWIN_L_ARCHITECTURE,)
+
+
+def _dino_levels(architecture: str) -> int:
+    return 5 if architecture in _FIVE_SCALE_ARCHITECTURES else 4
+
+
+def _swin_backbone(architecture: str) -> dict[str, Any]:
+    variant = _SWIN_VARIANTS[architecture]
+    levels = _dino_levels(architecture)
     return {
+        "type": "SwinTransformer",
+        "embed_dims": variant["embed_dims"],
+        "depths": list(variant["depths"]),
+        "num_heads": list(variant["num_heads"]),
+        "window_size": variant["window_size"],
+        "mlp_ratio": 4,
+        "qkv_bias": True,
+        "qk_scale": None,
+        "drop_rate": 0.0,
+        "attn_drop_rate": 0.0,
+        "drop_path_rate": 0.2,
+        "patch_norm": True,
+        "out_indices": (0, 1, 2, 3) if levels == 5 else (1, 2, 3),
+        "with_cp": True,
+        "convert_weights": False,
+        "init_cfg": None,
+    }
+
+
+def _dino_in_channels(architecture: str) -> list[int]:
+    if architecture == DINO_ARCHITECTURE:
+        return [512, 1024, 2048]
+    first = _SWIN_VARIANTS[architecture]["embed_dims"]
+    stages = [first * 2**step for step in range(4)]
+    return stages if _dino_levels(architecture) == 5 else stages[1:]
+
+
+def _dino_config(
+    num_classes: int, *, architecture: str = DINO_ARCHITECTURE
+) -> dict[str, Any]:
+    levels = _dino_levels(architecture)
+    config: dict[str, Any] = {
         "type": "DINO",
         "num_queries": 900,
         "with_box_refine": True,
         "as_two_stage": True,
         "data_preprocessor": _data_preprocessor(),
-        "backbone": {
+        "backbone": _swin_backbone(architecture)
+        if architecture != DINO_ARCHITECTURE
+        else {
             "type": "ResNet",
             "depth": 50,
             "num_stages": 4,
@@ -79,17 +166,17 @@ def _dino_config(num_classes: int) -> dict[str, Any]:
         },
         "neck": {
             "type": "ChannelMapper",
-            "in_channels": [512, 1024, 2048],
+            "in_channels": _dino_in_channels(architecture),
             "kernel_size": 1,
             "out_channels": 256,
             "act_cfg": None,
             "norm_cfg": {"type": "GN", "num_groups": 32},
-            "num_outs": 4,
+            "num_outs": levels,
         },
         "encoder": {
             "num_layers": 6,
             "layer_cfg": {
-                "self_attn_cfg": {"embed_dims": 256, "num_levels": 4, "dropout": 0.0},
+                "self_attn_cfg": {"embed_dims": 256, "num_levels": levels, "dropout": 0.0},
                 "ffn_cfg": {
                     "embed_dims": 256,
                     "feedforward_channels": 2048,
@@ -102,7 +189,7 @@ def _dino_config(num_classes: int) -> dict[str, Any]:
             "return_intermediate": True,
             "layer_cfg": {
                 "self_attn_cfg": {"embed_dims": 256, "num_heads": 8, "dropout": 0.0},
-                "cross_attn_cfg": {"embed_dims": 256, "num_levels": 4, "dropout": 0.0},
+                "cross_attn_cfg": {"embed_dims": 256, "num_levels": levels, "dropout": 0.0},
                 "ffn_cfg": {
                     "embed_dims": 256,
                     "feedforward_channels": 2048,
@@ -152,6 +239,10 @@ def _dino_config(num_classes: int) -> dict[str, Any]:
         },
         "test_cfg": {"max_per_img": 300},
     }
+    # 넷은 DINO의 기본값이라 4scale에서는 적지 않습니다. train과 같은 규칙입니다.
+    if levels != 4:
+        config["num_feature_levels"] = levels
+    return config
 
 
 def _cascade_bbox_head(num_classes: int, target_stds: Sequence[float]) -> dict[str, Any]:
@@ -327,8 +418,8 @@ def build_detector_config(
 ) -> dict[str, Any]:
     """train이 학습한 것과 같은 모양의 detector 설정을 만듭니다."""
 
-    if architecture == DINO_ARCHITECTURE:
-        return _dino_config(foreground_classes)
+    if architecture in DINO_ARCHITECTURES:
+        return _dino_config(foreground_classes, architecture=architecture)
     if architecture == CASCADE_ARCHITECTURE:
         return _cascade_config(foreground_classes)
     raise PredictionError(
