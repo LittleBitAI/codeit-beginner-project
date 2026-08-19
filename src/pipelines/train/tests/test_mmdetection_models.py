@@ -522,7 +522,7 @@ def test_input_size_is_refused_with_a_torchvision_architecture():
     ],
 )
 def test_mmdetection_refuses_combinations_that_do_not_fit_8gb(pretend_cuda, field, value):
-    """8GB에서 도는 조합만 받습니다. 학습을 시작한 뒤 터지면 밤을 버립니다."""
+    """작은 GPU에서 돌 가능성이 있는 조합만 받습니다. 시작한 뒤 터지면 밤을 버립니다."""
 
     raw = {
         "run_id": "t",

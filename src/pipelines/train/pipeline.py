@@ -553,8 +553,9 @@ def _checkpoint_payload(
     }
 
 
-# 8GB GPU에서 batch 1로 도는 조합입니다. 학습을 시작한 뒤 메모리로 터지면 그 밤을
-# 통째로 버리므로 첫 batch 전에 막습니다.
+# 작은 GPU에서 batch 1로 돌 가능성이 있는 유일한 조합입니다(필요조건이지 충분조건은
+# 아닙니다 — backbone이 크면 지켜도 모자랍니다). 학습을 시작한 뒤 메모리로 터지면 그
+# 밤을 통째로 버리므로 첫 batch 전에 막습니다.
 _MMDETECTION_REQUIRED = _contract.MMDETECTION_REQUIRED
 
 
@@ -576,7 +577,7 @@ def _check_mmdetection_settings(settings: Mapping[str, Any], raw: Mapping[str, A
         if value != required:
             raise ValueError(
                 f"train.{name} must be {required!r} for {settings['architecture']} "
-                "so the run fits in 8GB of GPU memory"
+                "because no other value has a chance of fitting a small GPU"
             )
 
 

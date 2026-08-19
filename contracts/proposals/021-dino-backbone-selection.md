@@ -62,10 +62,11 @@ train의 `_SWIN_VARIANTS`, `_swin_backbone()`, `_dino_in_channels()`, `_dino_lev
 evaluate가 만든 설정의 **key 집합이 같은지, 그리고 모든 값이 같은지**를 견줍니다.
 교집합만 견주면 한쪽에서 key가 통째로 사라진 것을 놓칩니다 — `test_cfg`가 빠지면
 DINO의 `max_per_img`가 300에서 MMDetection 기본값 100으로 조용히 줄어듭니다.
-pipeline은 서로를 import하지 않으므로 같은
-설정이 두 곳에 따로 있고, `window_size`처럼 **모양은 같은데 뜻이 다른 값**이 어긋나면
-지금까지는 멈추지 않고 점수만 나빠졌습니다. root `tests/`가 두 pipeline을 함께 볼 수
-있는 유일한 자리입니다.
+pipeline은 서로를 import하지 않으므로 같은 설정이 두 곳에 따로 있습니다. backbone
+값처럼 state의 모양을 바꾸는 것은 적재가 실패해 바로 드러나지만(`window_size`를 7에서
+12로 바꾸면 `relative_position_bias_table`이 (169, heads)에서 (529, heads)가 됩니다),
+**state에 자국을 남기지 않는 값**은 지금까지 멈추지 않고 점수만 나빠졌습니다. root
+`tests/`가 두 pipeline을 함께 볼 수 있는 유일한 자리입니다.
 
 기존 `test_each_architecture_is_rebuilt_and_receives_the_checkpoint_state`의 docstring이
 *"train과 값이 같은지는 확인하지 못합니다"*라고 적어 둔 자리를 메웁니다.

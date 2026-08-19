@@ -503,7 +503,7 @@ def test_every_mmdetection_name_in_the_shared_contract_has_a_config_here():
     """계약이 이름을 정하고, 그 이름으로 어떤 detector를 만들지는 여기서 정합니다.
 
     이름만 늘고 config가 없으면 GUI는 즉시 그 모델을 고를 수 있게 내놓는데 학습은
-    엉뚱한 모델로 돌거나 죽습니다. 두 이름이 실제로 갈라지는지도 함께 봅니다.
+    엉뚱한 모델로 돌거나 죽습니다. 이름마다 실제로 다른 설정이 나오는지도 함께 봅니다.
     """
 
     from src.pipelines.train.mmdetection_adapter import (
@@ -515,7 +515,7 @@ def test_every_mmdetection_name_in_the_shared_contract_has_a_config_here():
     assert {*DINO_ARCHITECTURES, CASCADE_ARCHITECTURE} == set(
         train_contract.MMDETECTION_ARCHITECTURES
     )
-    # DINO 두 갈래는 `type`이 같으므로 설정 전체를 견줍니다. 이름만 늘고 설정이 같으면
+    # DINO 갈래끼리는 `type`이 같으므로 설정 전체를 견줍니다. 이름만 늘고 설정이 같으면
     # 사람은 다른 모델을 골랐다고 믿은 채 같은 것을 학습합니다.
     built = {
         name: build_mmdetection_config(name, foreground_classes=3)

@@ -94,10 +94,11 @@ ARCHITECTURES = (
     "retinanet_resnet50_fpn_v2",
     *MMDETECTION_ARCHITECTURES,
 )
-#: MMDetection model이 8GB에서 도는 유일한 조합입니다. 다른 값이면 학습을 시작한 뒤
-#: 메모리로 터지므로, GUI는 대기열에 넣기 전에 같은 이유로 막습니다.
+#: MMDetection model이 작은 GPU에서 돌 **가능성이 있는 유일한 조합**입니다. 다른
+#: 값이면 학습을 시작한 뒤 메모리로 터지므로, GUI는 대기열에 넣기 전에 같은 이유로
+#: 막습니다. **필요조건이지 충분조건이 아닙니다** — 지켜도 backbone이 크면 모자랍니다.
 #:
-#: **이 조합을 지켜도 backbone이 크면 8GB로 모자랍니다.** 1280px·batch 1·amp로 잰 최고
+#: 1280px·batch 1·amp로 잰 최고
 #: 사용량은 resnet50 2.98 GiB, swin_t 3.32, swin_b 3.81, **swin_l 11.21**입니다
 #: (2026-08-19, RTX 3080 10GB). swin_l은 10GB 카드에서도 넘쳐 공유 메모리로 밀리므로
 #: 더 큰 GPU에서 돌리거나 `input_size`를 낮춰야 합니다.

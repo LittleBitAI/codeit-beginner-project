@@ -215,7 +215,9 @@ def test_real_dependency_failure_is_reported_as_an_install_problem(failure):
     ("architecture", "detector_type"),
     [
         ("dino_r50_4scale", "DINO"),
+        ("dino_swin_t_4scale", "DINO"),
         ("dino_swin_b_4scale", "DINO"),
+        ("dino_swin_l_5scale", "DINO"),
         ("cascade_rcnn_swin_t_fpn", "CascadeRCNN"),
     ],
 )

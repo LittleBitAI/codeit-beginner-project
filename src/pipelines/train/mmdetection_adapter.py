@@ -92,8 +92,9 @@ def _data_preprocessor() -> dict[str, Any]:
     }
 
 
-#: Swin 갈래마다 다른 값입니다. 나머지 backbone 설정은 셋이 같습니다. `embed_dims`는
-#: 첫 단계 채널이고 단계마다 두 배가 됩니다.
+#: Swin 갈래마다 다른 값입니다. `embed_dims`는 첫 단계 채널이고 단계마다 두 배가
+#: 됩니다. 여기 없는 backbone 설정은 갈래끼리 같지만, `out_indices`만은 예외로
+#: :func:`_swin_backbone`이 scale 수를 보고 정합니다 — 5scale은 네 단계를 다 내보냅니다.
 _SWIN_VARIANTS: dict[str, dict[str, Any]] = {
     DINO_SWIN_T_ARCHITECTURE: {
         "embed_dims": 96,

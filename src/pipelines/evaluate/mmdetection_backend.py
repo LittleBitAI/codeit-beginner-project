@@ -68,10 +68,11 @@ def _data_preprocessor() -> dict[str, Any]:
     }
 
 
-#: train의 `_SWIN_VARIANTS`와 같은 값이어야 합니다. 한 값이라도 어긋나면 checkpoint를
-#: 싣지 못하거나(모양이 다를 때), **멈추지 않고 점수만 나빠집니다**(`window_size`처럼
-#: 모양은 같고 뜻만 다른 값일 때). `tests/test_mmdetection_config_agreement.py`가 두
-#: 벌을 대조합니다.
+#: train의 `_SWIN_VARIANTS`와 같은 값이어야 합니다. 여기 값은 하나만 어긋나도 state의
+#: 모양이 달라져 적재가 실패합니다 — `window_size`를 7에서 12로 바꾸면
+#: `relative_position_bias_table`이 (169, heads)에서 (529, heads)가 됩니다. 조용히
+#: 나빠지는 것은 state에 자국을 남기지 않는 값(`test_cfg` 같은 것)이고, 그쪽까지
+#: `tests/test_mmdetection_config_agreement.py`가 두 벌을 통째로 대조합니다.
 _SWIN_VARIANTS: dict[str, dict[str, Any]] = {
     DINO_SWIN_T_ARCHITECTURE: {
         "embed_dims": 96,

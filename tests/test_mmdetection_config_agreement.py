@@ -1,9 +1,10 @@
 """train이 학습한 model과 evaluate가 되살리는 model이 같은 모양인지 확인합니다.
 
 pipeline은 서로를 import하지 않으므로 같은 detector 설정이 두 곳에 따로 있습니다.
-어긋나면 checkpoint를 아예 못 싣거나(모양이 다를 때), **멈추지 않고 점수만
-나빠집니다**(`window_size`처럼 모양은 같은데 뜻이 다른 값일 때). 두 pipeline을 함께
-볼 수 있는 자리는 여기뿐입니다.
+어긋나면 checkpoint를 아예 못 싣거나(state의 모양이 달라질 때), **멈추지 않고 점수만
+나빠집니다**(`test_cfg`의 `max_per_img`처럼 state에 자국을 남기지 않는 값일 때 —
+300에서 MMDetection 기본값 100으로 줄어도 적재는 성공합니다). 두 pipeline을 함께 볼
+수 있는 자리는 여기뿐입니다.
 """
 
 from __future__ import annotations
