@@ -215,13 +215,14 @@ def test_real_dependency_failure_is_reported_as_an_install_problem(failure):
     ("architecture", "detector_type"),
     [
         ("dino_r50_4scale", "DINO"),
+        ("dino_swin_b_4scale", "DINO"),
         ("cascade_rcnn_swin_t_fpn", "CascadeRCNN"),
     ],
 )
 def test_each_architecture_is_rebuilt_and_receives_the_checkpoint_state(
     monkeypatch, architecture, detector_type
 ):
-    """계약이 요구한 두 architecture 각각의 재생성·state 적용을 확인합니다.
+    """계약이 요구한 architecture 각각의 재생성·state 적용을 확인합니다.
 
     한쪽만 확인하면 다른 architecture는 registry 생성 경로를 한 번도 지나지 않은 채
     merge됩니다. 설정의 **모양**만 볼 수 있고 train과 값이 같은지는 확인하지 못합니다.

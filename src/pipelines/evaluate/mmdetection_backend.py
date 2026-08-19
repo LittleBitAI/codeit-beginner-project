@@ -33,6 +33,7 @@ BACKEND_NAME = "mmdetection"
 # 이름은 train과 함께 쓰는 계약이 정합니다(`src/common/train_contract.py`). 여기서는
 # 그 이름의 checkpoint를 어떤 model로 되살릴지만 정합니다.
 DINO_ARCHITECTURE = "dino_r50_4scale"
+DINO_SWIN_ARCHITECTURE = "dino_swin_b_4scale"
 CASCADE_ARCHITECTURE = "cascade_rcnn_swin_t_fpn"
 MODEL_CONFIG_SCHEMA_VERSION = 1
 PAD_MULTIPLE = 32
@@ -58,14 +59,47 @@ def _data_preprocessor() -> dict[str, Any]:
     }
 
 
-def _dino_config(num_classes: int) -> dict[str, Any]:
+#: Swin-B 단계별 출력 채널입니다. train의 `_SWIN_B_CHANNELS`와 같은 값이어야 합니다.
+_SWIN_B_CHANNELS = (128, 256, 512, 1024)
+
+
+def _swin_b_backbone() -> dict[str, Any]:
+    """train의 `_swin_b_backbone()`과 같은 모양입니다.
+
+    한 값이라도 어긋나면 checkpoint를 싣지 못하거나(모양이 다를 때) **멈추지 않고
+    점수만 나빠집니다**(`window_size`처럼 모양이 같은 값일 때).
+    """
+
+    return {
+        "type": "SwinTransformer",
+        "embed_dims": _SWIN_B_CHANNELS[0],
+        "depths": [2, 2, 18, 2],
+        "num_heads": [4, 8, 16, 32],
+        "window_size": 7,
+        "mlp_ratio": 4,
+        "qkv_bias": True,
+        "qk_scale": None,
+        "drop_rate": 0.0,
+        "attn_drop_rate": 0.0,
+        "drop_path_rate": 0.2,
+        "patch_norm": True,
+        "out_indices": (1, 2, 3),
+        "with_cp": True,
+        "convert_weights": False,
+        "init_cfg": None,
+    }
+
+
+def _dino_config(num_classes: int, *, swin: bool = False) -> dict[str, Any]:
     return {
         "type": "DINO",
         "num_queries": 900,
         "with_box_refine": True,
         "as_two_stage": True,
         "data_preprocessor": _data_preprocessor(),
-        "backbone": {
+        "backbone": _swin_b_backbone()
+        if swin
+        else {
             "type": "ResNet",
             "depth": 50,
             "num_stages": 4,
@@ -79,7 +113,7 @@ def _dino_config(num_classes: int) -> dict[str, Any]:
         },
         "neck": {
             "type": "ChannelMapper",
-            "in_channels": [512, 1024, 2048],
+            "in_channels": list(_SWIN_B_CHANNELS[1:]) if swin else [512, 1024, 2048],
             "kernel_size": 1,
             "out_channels": 256,
             "act_cfg": None,
@@ -329,6 +363,8 @@ def build_detector_config(
 
     if architecture == DINO_ARCHITECTURE:
         return _dino_config(foreground_classes)
+    if architecture == DINO_SWIN_ARCHITECTURE:
+        return _dino_config(foreground_classes, swin=True)
     if architecture == CASCADE_ARCHITECTURE:
         return _cascade_config(foreground_classes)
     raise PredictionError(

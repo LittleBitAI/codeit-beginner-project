@@ -81,7 +81,11 @@ DEVICES = ("cpu", "cuda")
 #: 값이 없는 옛 설정이 뜻하던 model입니다. 새 실험의 기본값이기도 합니다.
 DEFAULT_ARCHITECTURE = "fasterrcnn_mobilenet_v3_large_320_fpn"
 #: MMDetection으로 학습하는 model입니다. 아래 제약이 이 둘에만 걸립니다.
-MMDETECTION_ARCHITECTURES = ("dino_r50_4scale", "cascade_rcnn_swin_t_fpn")
+MMDETECTION_ARCHITECTURES = (
+    "dino_r50_4scale",
+    "dino_swin_b_4scale",
+    "cascade_rcnn_swin_t_fpn",
+)
 ARCHITECTURES = (
     DEFAULT_ARCHITECTURE,
     "fasterrcnn_resnet50_fpn_v2",

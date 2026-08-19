@@ -509,17 +509,22 @@ def test_every_mmdetection_name_in_the_shared_contract_has_a_config_here():
     from src.pipelines.train.mmdetection_adapter import (
         CASCADE_ARCHITECTURE,
         DINO_ARCHITECTURE,
+        DINO_SWIN_ARCHITECTURE,
         build_mmdetection_config,
     )
 
-    assert {DINO_ARCHITECTURE, CASCADE_ARCHITECTURE} == set(
+    assert {DINO_ARCHITECTURE, DINO_SWIN_ARCHITECTURE, CASCADE_ARCHITECTURE} == set(
         train_contract.MMDETECTION_ARCHITECTURES
     )
+    # DINO 두 갈래는 `type`이 같으므로 설정 전체를 견줍니다. 이름만 늘고 설정이 같으면
+    # 사람은 다른 모델을 골랐다고 믿은 채 같은 것을 학습합니다.
     built = {
-        name: build_mmdetection_config(name, foreground_classes=3)["type"]
+        name: build_mmdetection_config(name, foreground_classes=3)
         for name in train_contract.MMDETECTION_ARCHITECTURES
     }
-    assert len(set(built.values())) == len(built), f"같은 detector로 갈립니다: {built}"
+    assert len({repr(config) for config in built.values()}) == len(
+        built
+    ), f"같은 detector로 갈립니다: {list(built)}"
 
 
 def test_a_contract_name_without_a_config_here_stops_instead_of_training_cascade(

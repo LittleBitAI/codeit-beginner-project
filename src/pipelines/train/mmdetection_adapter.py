@@ -22,6 +22,7 @@ from .errors import TrainError
 # 있습니다. 여기서는 그 이름이 어떤 config와 checkpoint를 뜻하는지만 정합니다. 이름을
 # 계약에서 풀어 받지 않는 것은 순서가 바뀌면 두 model이 조용히 뒤바뀌기 때문입니다.
 DINO_ARCHITECTURE = "dino_r50_4scale"
+DINO_SWIN_ARCHITECTURE = "dino_swin_b_4scale"
 CASCADE_ARCHITECTURE = "cascade_rcnn_swin_t_fpn"
 PAD_MULTIPLE = 32
 MODEL_CONFIG_SCHEMA_VERSION = 1
@@ -39,6 +40,15 @@ CASCADE_CHECKPOINT = (
     "https://github.com/SwinTransformer/storage/releases/download/v1.0.2/"
     "cascade_mask_rcnn_swin_tiny_patch4_window7.pth"
 )
+SWIN_B_CHECKPOINT = (
+    "https://github.com/SwinTransformer/storage/releases/download/v1.0.2/"
+    "cascade_mask_rcnn_swin_base_patch4_window7.pth"
+)
+#: DINO-Swin은 공개 checkpoint가 하나로 오지 않습니다. MMDetection이 내놓는 DINO는
+#: Swin-L뿐이라, backbone은 Swin-B 검출 checkpoint에서, encoder·decoder·head는 같은
+#: 4scale R50 DINO에서 가져옵니다. 둘은 모두 256채널이라 모양이 그대로 맞고, 어긋나는
+#: neck만 빼면 됩니다. 순서가 중요합니다 — 뒤에 오는 것이 이미 실린 이름을 덮습니다.
+DINO_SWIN_CHECKPOINTS = (SWIN_B_CHECKPOINT, DINO_CHECKPOINT)
 
 
 def _data_preprocessor() -> dict[str, Any]:
@@ -52,14 +62,48 @@ def _data_preprocessor() -> dict[str, Any]:
     }
 
 
-def _dino_config(num_classes: int) -> dict[str, Any]:
+#: Swin-B 단계별 출력 채널입니다. embed_dims 128이 단계마다 두 배가 됩니다.
+_SWIN_B_CHANNELS = (128, 256, 512, 1024)
+
+
+def _swin_b_backbone() -> dict[str, Any]:
+    """DINO에 붙이는 Swin-B입니다.
+
+    ``out_indices``는 R50과 같은 뒤 세 단계입니다 — 4scale을 그대로 두려는 것이고,
+    그래야 encoder·decoder의 ``num_levels``와 R50 DINO checkpoint를 손대지 않습니다.
+    ``convert_weights``는 :func:`_load_pretrained`가 직접 이름을 고치므로 꺼 둡니다.
+    """
+
+    return {
+        "type": "SwinTransformer",
+        "embed_dims": _SWIN_B_CHANNELS[0],
+        "depths": [2, 2, 18, 2],
+        "num_heads": [4, 8, 16, 32],
+        "window_size": 7,
+        "mlp_ratio": 4,
+        "qkv_bias": True,
+        "qk_scale": None,
+        "drop_rate": 0.0,
+        "attn_drop_rate": 0.0,
+        "drop_path_rate": 0.2,
+        "patch_norm": True,
+        "out_indices": (1, 2, 3),
+        "with_cp": True,
+        "convert_weights": False,
+        "init_cfg": None,
+    }
+
+
+def _dino_config(num_classes: int, *, swin: bool = False) -> dict[str, Any]:
     return {
         "type": "DINO",
         "num_queries": 900,
         "with_box_refine": True,
         "as_two_stage": True,
         "data_preprocessor": _data_preprocessor(),
-        "backbone": {
+        "backbone": _swin_b_backbone()
+        if swin
+        else {
             "type": "ResNet",
             "depth": 50,
             "num_stages": 4,
@@ -73,7 +117,7 @@ def _dino_config(num_classes: int) -> dict[str, Any]:
         },
         "neck": {
             "type": "ChannelMapper",
-            "in_channels": [512, 1024, 2048],
+            "in_channels": list(_SWIN_B_CHANNELS[1:]) if swin else [512, 1024, 2048],
             "kernel_size": 1,
             "out_channels": 256,
             "act_cfg": None,
@@ -365,6 +409,8 @@ def build_mmdetection_config(
         raise ValueError("foreground_classes must be positive")
     if architecture == DINO_ARCHITECTURE:
         return _dino_config(foreground_classes)
+    if architecture == DINO_SWIN_ARCHITECTURE:
+        return _dino_config(foreground_classes, swin=True)
     if architecture == CASCADE_ARCHITECTURE:
         return _cascade_config(foreground_classes)
     # 계약에 이름이 하나 더 늘었는데 여기 config가 없으면, 그것을 조용히 cascade로
@@ -515,7 +561,11 @@ class MMDetectionAdapter(nn.Module):
 
 
 def _allowed_pretrained_key(architecture: str, key: str) -> bool:
-    if architecture == DINO_ARCHITECTURE:
+    if architecture in (DINO_ARCHITECTURE, DINO_SWIN_ARCHITECTURE):
+        # R50 DINO의 neck은 입력 채널이 [512, 1024, 2048]이라 Swin-B의 것과 어긋납니다.
+        # 1x1 conv 세 개뿐이라 새로 초기화합니다. 빼지 않으면 모양 불일치로 멈춥니다.
+        if architecture == DINO_SWIN_ARCHITECTURE and key.startswith("neck."):
+            return True
         return "bbox_head.cls_branches" in key or "label_embedding" in key
     return (
         "roi_head.mask" in key
@@ -550,7 +600,10 @@ def _modern_backbone_entry(
     바꾸는 규칙은 ``mmdet.models.backbones.swin.swin_converter``와 같습니다.
     """
 
-    if architecture != CASCADE_ARCHITECTURE or not name.startswith("backbone."):
+    if architecture not in (
+        CASCADE_ARCHITECTURE,
+        DINO_SWIN_ARCHITECTURE,
+    ) or not name.startswith("backbone."):
         return name, value
     inner = name.removeprefix("backbone.")
     if inner.startswith("patch_embed"):
@@ -570,30 +623,50 @@ def _modern_backbone_entry(
     return "backbone." + inner.replace("layers", "stages", 1), value
 
 
+def _pretrained_sources(architecture: str) -> tuple[str, ...]:
+    if architecture == DINO_ARCHITECTURE:
+        return (DINO_CHECKPOINT,)
+    if architecture == DINO_SWIN_ARCHITECTURE:
+        return DINO_SWIN_CHECKPOINTS
+    return (CASCADE_CHECKPOINT,)
+
+
 def _load_pretrained(detector: nn.Module, architecture: str, loader: Any) -> None:
-    source = DINO_CHECKPOINT if architecture == DINO_ARCHITECTURE else CASCADE_CHECKPOINT
-    document = loader.load_checkpoint(source, map_location="cpu")
-    raw_state = document.get("state_dict", document) if isinstance(document, Mapping) else None
-    if not isinstance(raw_state, Mapping):
-        raise TrainError("MMDetection pretrained checkpoint has no state_dict")
     expected = detector.state_dict()
     filtered: dict[str, torch.Tensor] = {}
     mismatched: list[str] = []
-    for raw_name, raw_value in raw_state.items():
-        name, value = _modern_backbone_entry(
-            architecture, raw_name.removeprefix("module."), raw_value
+    for source in _pretrained_sources(architecture):
+        document = loader.load_checkpoint(source, map_location="cpu")
+        raw_state = (
+            document.get("state_dict", document) if isinstance(document, Mapping) else None
         )
-        if _allowed_pretrained_key(architecture, name):
-            continue
-        if name not in expected:
-            continue
-        if not isinstance(value, torch.Tensor) or value.shape != expected[name].shape:
-            mismatched.append(name)
-            continue
-        filtered[name] = value
+        if not isinstance(raw_state, Mapping):
+            raise TrainError("MMDetection pretrained checkpoint has no state_dict")
+        for raw_name, raw_value in raw_state.items():
+            name, value = _modern_backbone_entry(
+                architecture, raw_name.removeprefix("module."), raw_value
+            )
+            if _allowed_pretrained_key(architecture, name):
+                continue
+            if name not in expected:
+                continue
+            if not isinstance(value, torch.Tensor) or value.shape != expected[name].shape:
+                mismatched.append(name)
+                continue
+            filtered[name] = value
     if mismatched:
         raise TrainError(
             "MMDetection pretrained state shape mismatch: " + ", ".join(sorted(mismatched))
+        )
+    # 이름이 어긋난 항목은 위에서 조용히 걸러집니다. 그대로 두면 `pretrained=true`인데
+    # backbone이 비어 있는 채로 밤새 학습합니다. 그 실패는 끝나야 보이므로 여기서 셉니다.
+    missing = sorted(
+        name for name in expected if name.startswith("backbone.") and name not in filtered
+    )
+    if missing:
+        raise TrainError(
+            f"MMDetection pretrained backbone is incomplete ({len(missing)} keys "
+            f"unfilled, first {missing[0]}); training would silently start from scratch"
         )
     detector.load_state_dict(filtered, strict=False)
 

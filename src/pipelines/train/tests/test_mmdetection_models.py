@@ -11,8 +11,12 @@ import torch
 import torchvision
 from torch import nn
 
+from src.pipelines.train.errors import TrainError
 from src.pipelines.train.mmdetection_adapter import (
+    DINO_CHECKPOINT,
+    DINO_SWIN_CHECKPOINTS,
     MMDETECTION_ARCHITECTURES,
+    SWIN_B_CHECKPOINT,
     MMDetectionAdapter,
     _prepare_detector,
     _shimmed_mmcv_version,
@@ -33,6 +37,7 @@ from src.pipelines.train.pipeline import _checkpoint_payload, _settings
     ("architecture", "detector_type"),
     [
         ("dino_r50_4scale", "DINO"),
+        ("dino_swin_b_4scale", "DINO"),
         ("cascade_rcnn_swin_t_fpn", "CascadeRCNN"),
     ],
 )
@@ -43,7 +48,7 @@ def test_mmdetection_architectures_build_allowlisted_bbox_configs(
 
     assert architecture in MMDETECTION_ARCHITECTURES
     assert config["type"] == detector_type
-    if architecture == "dino_r50_4scale":
+    if detector_type == "DINO":
         assert config["bbox_head"]["num_classes"] == 3
     else:
         assert [head["num_classes"] for head in config["roi_head"]["bbox_head"]] == [
@@ -256,6 +261,80 @@ def test_legacy_swin_checkpoint_keys_are_converted_before_filtering():
         detector.loaded["backbone.stages.0.downsample.reduction.weight"],
         torch.tensor([[1.0, 3.0, 2.0, 4.0], [5.0, 7.0, 6.0, 8.0]]),
     )
+
+
+class _SourceLoader:
+    """source마다 다른 state를 주는 loader입니다."""
+
+    def __init__(self, states: Mapping[str, Mapping[str, torch.Tensor]]) -> None:
+        self.states = dict(states)
+        self.sources: list[str] = []
+
+    def load_checkpoint(self, source: str, map_location: str = "cpu"):
+        self.sources.append(source)
+        return {"state_dict": dict(self.states[source])}
+
+
+def test_dino_swin_swaps_the_backbone_and_the_channels_it_feeds_only():
+    r50 = build_mmdetection_config("dino_r50_4scale", foreground_classes=3)
+    swin = build_mmdetection_config("dino_swin_b_4scale", foreground_classes=3)
+
+    assert swin["backbone"]["type"] == "SwinTransformer"
+    assert swin["neck"]["in_channels"] == [256, 512, 1024]
+    # 4scale을 그대로 두어야 R50 DINO의 encoder·decoder를 실을 수 있습니다.
+    assert swin["neck"]["num_outs"] == r50["neck"]["num_outs"]
+    assert swin["encoder"] == r50["encoder"]
+    assert swin["decoder"] == r50["decoder"]
+
+
+def test_dino_swin_takes_backbone_and_transformer_from_different_checkpoints():
+    """MMDetection이 내놓는 DINO는 Swin-L뿐이라 Swin-B는 두 곳에서 모읍니다."""
+
+    detector = _RecordingDetector(
+        {
+            "backbone.patch_embed.projection.weight": torch.zeros(2),
+            "backbone.stages.0.blocks.0.attn.w_msa.qkv.weight": torch.zeros(2),
+            "neck.convs.0.conv.weight": torch.zeros((256, 256, 1, 1)),
+            "encoder.layers.0.ffn.layers.0.0.weight": torch.zeros(2),
+        }
+    )
+    loader = _SourceLoader(
+        {
+            SWIN_B_CHECKPOINT: {
+                "backbone.patch_embed.proj.weight": torch.ones(2),
+                "backbone.layers.0.blocks.0.attn.qkv.weight": torch.full((2,), 3.0),
+            },
+            DINO_CHECKPOINT: {
+                "neck.convs.0.conv.weight": torch.zeros((256, 512, 1, 1)),
+                "encoder.layers.0.ffn.layers.0.0.weight": torch.full((2,), 7.0),
+            },
+        }
+    )
+
+    _prepare_detector(detector, "dino_swin_b_4scale", pretrained=True, loader=loader)
+
+    assert loader.sources == list(DINO_SWIN_CHECKPOINTS)
+    assert torch.equal(
+        detector.loaded["backbone.stages.0.blocks.0.attn.w_msa.qkv.weight"],
+        torch.full((2,), 3.0),
+    )
+    assert torch.equal(
+        detector.loaded["encoder.layers.0.ffn.layers.0.0.weight"], torch.full((2,), 7.0)
+    )
+    # 입력 채널이 달라 모양이 어긋나는 neck은 멈추지 않고 빠집니다.
+    assert "neck.convs.0.conv.weight" not in detector.loaded
+
+
+def test_a_backbone_that_does_not_fill_stops_the_run_instead_of_training_scratch():
+    detector = _RecordingDetector(
+        {"backbone.stages.0.blocks.0.norm1.weight": torch.zeros(2)}
+    )
+    loader = _SourceLoader(
+        {source: {"backbone.gone.weight": torch.ones(2)} for source in DINO_SWIN_CHECKPOINTS}
+    )
+
+    with pytest.raises(TrainError):
+        _prepare_detector(detector, "dino_swin_b_4scale", pretrained=True, loader=loader)
 
 
 MMDETECTION_PACKAGES = ("mmcv", "mmdet", "mmengine")
