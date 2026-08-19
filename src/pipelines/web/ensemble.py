@@ -971,6 +971,11 @@ def check_rerank_selection(
         raise WebError(
             f"{candidate['run_id']}의 기록에 {', '.join(missing)}가 없어 재순위할 수 없습니다."
         )
+    # **저장 계층이 이 checkpoint를 읽을 수 있는지 지금 봅니다.** 등록은 되어 있지만
+    # 지금 설정된 bucket 밖을 가리키는 기록이 있고, 그대로 받으면 GPU로 test 한 판을
+    # 돌린 뒤에 evaluate가 같은 주소를 거절합니다. 융합 경로는 중복을 가리면서 이미
+    # 이 검사를 지나가므로, 여기서만 빠뜨리면 갈래에 따라 규칙이 달라집니다.
+    _checkpoint_identity(str(candidate.get("checkpoint_uri") or ""))
     if not overwrite:
         existing = _existing_output(name)
         if existing is not None:

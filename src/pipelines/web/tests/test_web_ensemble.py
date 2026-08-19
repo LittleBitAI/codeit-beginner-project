@@ -1126,6 +1126,28 @@ def test_an_existing_name_is_refused_for_an_embedding_ensemble(fake_runs, monkey
     assert ensemble.check_rerank_selection(["a"], run_id="rerank-a", overwrite=True)["run_id"] == "a"
 
 
+def test_a_base_checkpoint_the_storage_cannot_read_is_refused(fake_runs, monkeypatch) -> None:
+    """저장 계층이 못 읽는 checkpoint는 **시작 전에** 거절합니다.
+
+    등록은 되어 있지만 지금 설정된 bucket 밖을 가리키는 기록이 있습니다. 그대로
+    받으면 GPU로 test 한 판을 돌린 **뒤에** evaluate가 같은 주소를 거절합니다.
+    융합 경로는 중복을 가리면서 이미 이 검사를 지나갑니다.
+    """
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    elsewhere = [
+        {**item, "checkpoint_uri": "s3://other-bucket/a/best_checkpoint.pt"}
+        for item in ensemble.list_candidates()
+    ]
+    monkeypatch.setattr(ensemble, "list_candidates", lambda: elsewhere)
+
+    with pytest.raises(WebError) as error:
+        ensemble.check_rerank_selection(["a"], run_id="rerank-a")
+
+    assert "s3://other-bucket/a/best_checkpoint.pt" in str(error.value)
+
+
 def test_the_runner_refuses_an_embedding_ensemble_with_no_embedding(fake_runs, monkeypatch) -> None:
     """embedding을 하나도 안 골랐으면 재순위가 아닙니다.
 

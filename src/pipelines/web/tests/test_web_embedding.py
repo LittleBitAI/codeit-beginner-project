@@ -203,7 +203,10 @@ def test_embedding_list_leaves_out_detector_training(fake_jobs):
     assert runs["emb-r34"]["ready"] is False
 
 
-def test_rerank_settings_name_every_chosen_checkpoint(fake_jobs):
+def test_rerank_settings_name_every_chosen_checkpoint(monkeypatch, fake_jobs):
+    # bucket을 함께 세웁니다. 이 주소를 읽을 수 있는 설정이라야 실제로 있을 수 있는
+    # 조합이고, 못 읽는 주소는 이제 재순위를 걸기 전에 거절합니다.
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "b")
     fake_jobs.append(_record("emb-r18", checkpoint="s3://b/r18.pt"))
     fake_jobs.append(_record("emb-r34", checkpoint="s3://b/r34.pt", backbone="resnet34"))
 
@@ -240,6 +243,25 @@ def test_rerank_settings_read_the_same_bank_written_two_ways(monkeypatch, fake_j
     settings = embedding.rerank_settings(["emb-r18", "emb-r34"])
 
     assert settings["rerank_crop_bank_uri"] == "v5/crop_bank.tar"
+
+
+def test_rerank_settings_refuse_a_checkpoint_the_storage_cannot_read(monkeypatch, fake_jobs):
+    """은행만 보고 넘기면 못 읽는 checkpoint가 재순위 직전까지 살아남습니다.
+
+    그러면 evaluate가 GPU를 쓴 **뒤에** 같은 주소를 거절합니다. 은행에 거는 것과
+    같은 계층에 checkpoint도 물어봅니다.
+    """
+
+    monkeypatch.setenv("PILL_STORAGE_S3_BUCKET", "bucket")
+    fake_jobs.append(_record("emb-r18", checkpoint="s3://bucket/r18.pt"))
+    fake_jobs.append(
+        _record("emb-r34", checkpoint="s3://other/r34.pt", backbone="resnet34")
+    )
+
+    with pytest.raises(WebError) as error:
+        embedding.rerank_settings(["emb-r18", "emb-r34"])
+
+    assert "s3://other/r34.pt" in str(error.value)
 
 
 def test_rerank_settings_refuse_an_embedding_without_a_checkpoint(fake_jobs):

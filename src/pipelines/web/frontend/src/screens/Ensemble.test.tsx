@@ -293,8 +293,15 @@ describe('앙상블 화면', () => {
     await screen.findByText('dino-a');
     fireEvent.click(screen.getByRole('button', { name: '임베딩 앙상블' }));
     fireEvent.click(screen.getAllByRole('radio')[0] as HTMLElement);
+    // **고를 수 있는 embedding이 화면에 온 뒤에 잽니다.** 목록이 도착하기 전에 재면
+    // "아직 아무것도 없어서" 막힌 것을 "고르지 않아서" 막힌 것으로 읽습니다.
+    const box = await screen.findByRole('checkbox');
 
     expect(screen.getByRole('button', { name: /재순위/ })).toHaveProperty('disabled', true);
+
+    // 고르면 풀립니다. 이것까지 봐야 막은 이유가 embedding 선택이라는 뜻이 됩니다.
+    fireEvent.click(box);
+    expect(screen.getByRole('button', { name: /재순위/ })).toHaveProperty('disabled', false);
   });
 
   it('여기서 embedding을 학습하지는 않는다', async () => {

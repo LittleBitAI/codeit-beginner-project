@@ -311,6 +311,11 @@ def rerank_settings(run_ids: Sequence[str]) -> dict[str, Any]:
     # checkpoint 중복을 가릴 때 쓰는 것과 **같은 저장 계층**에 맡깁니다.
     from .ensemble import _checkpoint_identity
 
+    # checkpoint도 같은 계층에 물어봅니다. 은행만 보고 넘기면 지금 설정으로는 못 읽는
+    # checkpoint가 재순위 직전까지 살아남아, evaluate가 GPU를 쓴 뒤에 거절합니다.
+    for item in selected:
+        _checkpoint_identity(str(item["checkpoint_uri"]))
+
     identities = {_checkpoint_identity(str(bank)): str(bank) for bank in banks}
     if len(identities) > 1:
         raise WebError(
