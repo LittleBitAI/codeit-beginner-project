@@ -40,11 +40,19 @@ from .train_config import RUN_ID_PATTERN
 __all__ = [
     "build_fusion_config",
     "build_harvest_config",
+    "build_rerank_config",
+    "check_rerank_selection",
     "check_selection",
     "diagnose",
     "list_candidates",
     "pending_runs",
 ]
+
+
+#: 예측을 만들려면 이 셋이 다 있어야 합니다. 무엇을 채점하고(test) 무엇으로 지표를
+#: 내고(validation) 어느 이름이 어느 class인지(class map) 알아야 하기 때문입니다.
+#: 한 곳에 적습니다 — 네 자리에 흩어 적었더니 한쪽만 늘어나는 일이 생겼습니다.
+_REQUIRED_INPUTS = ("validation_manifest_uri", "test_manifest_uri", "class_map_uri")
 
 
 #: 제출 CSV가 이미지마다 남기는 수입니다. 다양성도 **제출에 남을 것**끼리 재야
@@ -124,6 +132,14 @@ def _submission_uri(run_id: str) -> str:
     if _uses_s3():
         return f"{_storage_root()}/submissions/{run_id}/submission.csv"
     return f"artifacts/ensemble/{run_id}/submission.csv"
+
+
+def _output_dir(run_id: str) -> str:
+    """이 화면이 만든 결과가 놓일 자리입니다. 융합이든 재순위든 같은 자리를 씁니다."""
+
+    if _uses_s3():
+        return f"{_storage_root()}/experiments/ensemble/{run_id}"
+    return f"artifacts/ensemble/{run_id}"
 
 
 def _scope() -> tuple[dict[str, Any], str]:
@@ -225,7 +241,7 @@ def list_candidates() -> list[dict[str, Any]]:
             continue
         data_inputs = {
             key: _text(artifacts.get(key))
-            for key in ("validation_manifest_uri", "test_manifest_uri", "class_map_uri")
+            for key in _REQUIRED_INPUTS
         }
         # 기록이 가리키는 것이 먼저입니다. 없으면 이 화면이 만들어 둔 것을 씁니다.
         predictions = _text(artifacts.get("test_predictions_uri"))
@@ -686,7 +702,7 @@ def check_selection(
     for item in selected:
         missing = [
             key
-            for key in ("validation_manifest_uri", "test_manifest_uri", "class_map_uri")
+            for key in _REQUIRED_INPUTS
             if not (item.get("data_inputs") or {}).get(key)
         ]
         if missing:
@@ -811,7 +827,7 @@ def build_harvest_config(candidate: Mapping[str, Any], *, device: str | None = N
     if not run_id or not checkpoint:
         raise WebError("체크포인트가 없는 실행은 예측을 만들 수 없습니다.")
     data_inputs = {key: value for key, value in (candidate.get("data_inputs") or {}).items() if value}
-    for key in ("validation_manifest_uri", "test_manifest_uri", "class_map_uri"):
+    for key in _REQUIRED_INPUTS:
         if key not in data_inputs:
             raise WebError(f"{run_id}에 {key}가 없어 예측을 만들 수 없습니다.")
 
@@ -882,16 +898,12 @@ def build_fusion_config(
         key=lambda item: item["kaggle_score"] if isinstance(item["kaggle_score"], (int, float)) else -1.0,
     )
     data_inputs = {key: value for key, value in anchor["data_inputs"].items() if value}
-    for key in ("validation_manifest_uri", "test_manifest_uri", "class_map_uri"):
+    for key in _REQUIRED_INPUTS:
         if key not in data_inputs:
             raise WebError(f"{anchor['run_id']}에 {key}가 없어 융합 config를 만들 수 없습니다.")
 
     storage = _storage_config()
-    output_dir = (
-        f"{_storage_root()}/experiments/ensemble/{name}"
-        if _uses_s3()
-        else f"artifacts/ensemble/{name}"
-    )
+    output_dir = _output_dir(name)
     submission_uri = _submission_uri(name)
 
     settings: dict[str, Any] = {
@@ -920,5 +932,111 @@ def build_fusion_config(
         "project": {"name": "pill-object-detection"},
         "execution": {"mode": "real"},
         "storage": storage,
+        "evaluate": settings,
+    }
+
+
+# ------------------------------------------------------------- 임베딩 앙상블
+
+def check_rerank_selection(
+    run_ids: Sequence[str],
+    *,
+    run_id: str,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """embedding 여럿으로 다시 매길 **기준 실행 하나**를 고릅니다.
+
+    합치는 것이 아니라 한 실행이 낸 상자의 점수만 고치는 일이라 실행은 하나입니다.
+    둘 이상 받으면 무엇을 재현한 결과인지 나중에 되짚을 수 없습니다 — 합치고 싶다면
+    그것은 모델 앙상블이고, 거기에서도 재순위를 함께 걸 수 있습니다.
+
+    거절은 여기서 다 합니다. 뒤로 미루면 GPU가 test 한 판을 돌고 난 뒤에 실패합니다.
+    """
+
+    wanted = [str(item).strip() for item in run_ids if str(item).strip()]
+    if len(wanted) != 1:
+        raise WebError("임베딩 앙상블은 기준이 될 실행 하나만 고릅니다.")
+    name = str(run_id).strip()
+    if not RUN_ID_PATTERN.fullmatch(name):
+        raise WebError(
+            "결과 이름은 영문·숫자로 시작하고 영문·숫자·`.`·`_`·`-`만 쓸 수 있습니다: "
+            f"{run_id!r}"
+        )
+    by_run = {item["run_id"]: item for item in list_candidates()}
+    if wanted[0] not in by_run:
+        raise WebError(f"기록에 없는 실행입니다: {wanted[0]}")
+    candidate = by_run[wanted[0]]
+    missing = [key for key in _REQUIRED_INPUTS if not (candidate.get("data_inputs") or {}).get(key)]
+    if missing:
+        raise WebError(
+            f"{candidate['run_id']}의 기록에 {', '.join(missing)}가 없어 재순위할 수 없습니다."
+        )
+    # **저장 계층이 이 checkpoint를 읽을 수 있는지 지금 봅니다.** 등록은 되어 있지만
+    # 지금 설정된 bucket 밖을 가리키는 기록이 있고, 그대로 받으면 GPU로 test 한 판을
+    # 돌린 뒤에 evaluate가 같은 주소를 거절합니다. 융합 경로는 중복을 가리면서 이미
+    # 이 검사를 지나가므로, 여기서만 빠뜨리면 갈래에 따라 규칙이 달라집니다.
+    _checkpoint_identity(str(candidate.get("checkpoint_uri") or ""))
+    if not overwrite:
+        existing = _existing_output(name)
+        if existing is not None:
+            raise WebError(
+                f"{name}이라는 결과가 이미 있습니다: {existing} — 다른 이름을 쓰거나 "
+                "덮어쓰기를 켜세요."
+            )
+    return candidate
+
+
+def build_rerank_config(
+    candidate: Mapping[str, Any],
+    *,
+    run_id: str,
+    rerank: Mapping[str, Any],
+    overwrite: bool = False,
+    device: str | None = None,
+) -> dict[str, Any]:
+    """실행 하나의 제출을 embedding 여럿으로 다시 매기는 evaluate config입니다.
+
+    **저장해 둔 test 예측을 그대로 다시 쓰지는 못합니다.** evaluate는 합칠 예측을
+    하나만 주는 길을 막아 두었습니다 — 하나만 주어도 겹치는 상자를 묶어 원본과 다른
+    예측이 나오기 때문입니다. 그래서 checkpoint로 test 추론을 다시 돌립니다.
+    validation은 그 실행이 남긴 예측을 그대로 넘겨 건너뜁니다(융합과 같습니다).
+
+    상한은 제출과 같은 4개입니다. 후보를 모을 때 쓰는 20개(`_HARVEST_DETECTIONS`)로
+    두면 제출할 수 없는 CSV가 나옵니다.
+    """
+
+    from .evaluation import resolve_device
+
+    name = str(run_id).strip()
+    checkpoint = str(candidate.get("checkpoint_uri") or "").strip()
+    if not checkpoint:
+        raise WebError("체크포인트가 없는 실행은 재순위할 수 없습니다.")
+    if not rerank:
+        raise WebError("재순위에 쓸 embedding을 하나 이상 고르세요.")
+    data_inputs = {key: value for key, value in (candidate.get("data_inputs") or {}).items() if value}
+    for key in _REQUIRED_INPUTS:
+        if key not in data_inputs:
+            raise WebError(f"{candidate.get('run_id')}에 {key}가 없어 재순위할 수 없습니다.")
+
+    settings: dict[str, Any] = {
+        "run_id": name,
+        "output_dir": _output_dir(name),
+        "submission_uri": _submission_uri(name),
+        "checkpoint_uri": checkpoint,
+        "max_detections_per_image": _SUBMISSION_LIMIT,
+        "score_threshold": 0.0,
+        "overwrite": bool(overwrite),
+        # 융합과 달리 GPU를 씁니다. test 추론과 crop embedding 둘 다 여기서 돕니다.
+        "device": resolve_device(device),
+        **data_inputs,
+        **rerank,
+    }
+    if candidate.get("predictions_uri"):
+        settings["predictions_input_uri"] = str(candidate["predictions_uri"])
+
+    return {
+        "project": {"name": "pill-object-detection"},
+        "execution": {"mode": "real"},
+        "storage": _storage_config(),
         "evaluate": settings,
     }

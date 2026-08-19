@@ -311,6 +311,22 @@ def rerank_settings(run_ids: Sequence[str]) -> dict[str, Any]:
     # checkpoint 중복을 가릴 때 쓰는 것과 **같은 저장 계층**에 맡깁니다.
     from .ensemble import _checkpoint_identity
 
+    # checkpoint도 같은 계층에 물어봅니다. 은행만 보고 넘기면 지금 설정으로는 못 읽는
+    # checkpoint가 재순위 직전까지 살아남아, evaluate가 GPU를 쓴 뒤에 거절합니다.
+    #
+    # 물어본 신원은 **그대로 씁니다.** 이름이 달라도 같은 파일이면 그 embedding이
+    # margin 평균에서 두 표를 갖습니다. evaluate도 같은 판정을 하지만
+    # (`_guard_distinct_checkpoints`) 그때는 융합 갈래가 harvest로 GPU를 쓴 뒤입니다.
+    seen: dict[str, str] = {}
+    for item in selected:
+        identity = _checkpoint_identity(str(item["checkpoint_uri"]))
+        if identity in seen:
+            raise WebError(
+                f"{seen[identity]}와 {item['run_id']}가 같은 checkpoint를 가리킵니다. "
+                "한 embedding이 두 표를 갖게 되어 margin 평균이 그쪽으로 기웁니다."
+            )
+        seen[identity] = str(item["run_id"])
+
     identities = {_checkpoint_identity(str(bank)): str(bank) for bank in banks}
     if len(identities) > 1:
         raise WebError(

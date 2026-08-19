@@ -48,6 +48,25 @@ function stub(candidates: EnsembleCandidate[], result: EnsembleDiagnosis = diagn
   return diagnose;
 }
 
+/** 재순위에 쓸 수 있는 embedding 하나를 세워 둡니다. */
+function stubEmbeddings() {
+  vi.spyOn(api, 'embeddingRuns').mockResolvedValue({
+    runs: [
+      {
+        run_id: 'emb-r18',
+        job_id: 'job-1',
+        status: 'succeeded',
+        backbone: 'resnet18',
+        epochs: 30,
+        checkpoint_uri: 'artifacts/emb/best.pt',
+        crop_bank_uri: 'datasets/v5/crop_bank.tar',
+        created_at: null,
+        ready: true,
+      },
+    ],
+  });
+}
+
 /** 후보 둘을 고릅니다. 진단은 둘 이상일 때만 돕니다. */
 function pickTwo() {
   const boxes = screen.getAllByRole('checkbox') as HTMLElement[];
@@ -220,21 +239,7 @@ describe('앙상블 화면', () => {
     // 화면에서 골랐는데 요청에 빠지면, 사람은 재순위한 제출이라고 믿고 Kaggle에
     // 올립니다. 점수가 왜 그대로인지 알아낼 방법이 없습니다.
     stub([candidate(), candidate({ run_id: 'dino-b' })]);
-    vi.spyOn(api, 'embeddingRuns').mockResolvedValue({
-      runs: [
-        {
-          run_id: 'emb-r18',
-          job_id: 'job-1',
-          status: 'succeeded',
-          backbone: 'resnet18',
-          epochs: 30,
-          checkpoint_uri: 'artifacts/emb/best.pt',
-          crop_bank_uri: 'datasets/v5/crop_bank.tar',
-          created_at: null,
-          ready: true,
-        },
-      ],
-    });
+    stubEmbeddings();
     const start = vi
       .spyOn(api, 'startEnsemble')
       .mockResolvedValue({ status: 'running', run_id: 'fusion-2' });
@@ -250,6 +255,84 @@ describe('앙상블 화면', () => {
 
     await waitFor(() => expect(start).toHaveBeenCalled());
     expect(start.mock.calls[0]?.[0].embedding_run_ids).toEqual(['emb-r18']);
+  });
+
+  it('임베딩 앙상블은 실행 하나와 embedding을 mode와 함께 보낸다', async () => {
+    // mode가 빠지면 서버가 융합으로 받습니다. 실행 하나로는 융합이 안 되니 실패하고,
+    // 재순위만 한 제출을 다시 만들 길이 없어집니다.
+    stub([candidate(), candidate({ run_id: 'dino-b' })]);
+    stubEmbeddings();
+    const start = vi
+      .spyOn(api, 'startEnsemble')
+      .mockResolvedValue({ status: 'running', run_id: 'rerank-1' });
+
+    render(<Ensemble />);
+    await screen.findByText('dino-a');
+    fireEvent.click(screen.getByRole('button', { name: '임베딩 앙상블' }));
+
+    // 기준 실행은 하나만 고릅니다 — 라디오입니다.
+    fireEvent.click(screen.getAllByRole('radio')[0] as HTMLElement);
+    fireEvent.click(await screen.findByRole('checkbox'));
+    fireEvent.click(screen.getByRole('button', { name: /재순위/ }));
+
+    await waitFor(() => expect(start).toHaveBeenCalled());
+    expect(start.mock.calls[0]?.[0]).toMatchObject({
+      mode: 'embedding',
+      run_ids: ['dino-a'],
+      embedding_run_ids: ['emb-r18'],
+    });
+  });
+
+  it('임베딩 앙상블은 embedding을 고르기 전에는 실행을 막는다', async () => {
+    // 안 막으면 GPU로 test 한 판을 다시 돌리고 원본과 같은 제출을 냅니다. 사람은
+    // 재순위한 것으로 믿고 Kaggle 제출을 한 번 씁니다.
+    stub([candidate()]);
+    stubEmbeddings();
+
+    render(<Ensemble />);
+    await screen.findByText('dino-a');
+    fireEvent.click(screen.getByRole('button', { name: '임베딩 앙상블' }));
+    fireEvent.click(screen.getAllByRole('radio')[0] as HTMLElement);
+    // **고를 수 있는 embedding이 화면에 온 뒤에 잽니다.** 목록이 도착하기 전에 재면
+    // "아직 아무것도 없어서" 막힌 것을 "고르지 않아서" 막힌 것으로 읽습니다.
+    const box = await screen.findByRole('checkbox');
+
+    expect(screen.getByRole('button', { name: /재순위/ })).toHaveProperty('disabled', true);
+
+    // 고르면 풀립니다. 이것까지 봐야 막은 이유가 embedding 선택이라는 뜻이 됩니다.
+    fireEvent.click(box);
+    expect(screen.getByRole('button', { name: /재순위/ })).toHaveProperty('disabled', false);
+  });
+
+  it('여기서 embedding을 학습하지는 않는다', async () => {
+    // 고르는 자리와 GPU를 몇 시간 쓰는 자리가 한 화면에 있으면, 무엇을 누르는
+    // 화면인지 알 수 없습니다. 학습은 왼쪽 메뉴의 자기 시트에 있습니다.
+    stub([candidate()]);
+    stubEmbeddings();
+
+    render(<Ensemble />);
+    await screen.findByText('emb-r18');
+
+    expect(screen.queryByRole('button', { name: /학습/ })).toBeNull();
+  });
+
+  it('끝나면 제출 CSV가 어디에 놓였는지 말한다', async () => {
+    // 자동으로 Kaggle에 올라가지 않습니다. 자리를 말해 주지 않으면 만들어 놓고도
+    // 무엇을 올려야 할지 알 수 없습니다.
+    vi.spyOn(api, 'ensembleCandidates').mockResolvedValue({ candidates: [candidate()] });
+    vi.spyOn(api, 'ensembleStatus').mockResolvedValue({
+      status: 'succeeded',
+      run_id: 'rerank-1',
+      message: '평가 완료',
+      artifacts: { submission_uri: 'artifacts/ensemble/rerank-1/submission.csv' },
+    });
+    stubEmbeddings();
+
+    render(<Ensemble />);
+
+    expect(
+      await screen.findByText(/artifacts\/ensemble\/rerank-1\/submission\.csv/),
+    ).toBeTruthy();
   });
 
   it('추론 중인지 합치는 중인지 구분해 보여 준다', async () => {

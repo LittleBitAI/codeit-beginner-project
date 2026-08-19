@@ -1063,3 +1063,143 @@ def test_a_configured_local_root_is_where_a_relative_key_lives(monkeypatch, tmp_
     assert ensemble._checkpoint_identity("ckpt/best.pt") != str(
         LocalStorage(tmp_path).identity("ckpt/best.pt")
     )
+
+
+# ------------------------------------------------------------- 임베딩 앙상블
+
+def test_an_embedding_ensemble_reranks_one_run_without_fusing(fake_runs) -> None:
+    """융합 없이 실행 하나의 점수만 다시 매깁니다.
+
+    합칠 예측을 함께 보내면 evaluate가 융합 길로 가서, 재순위만 한 제출을 재현하려던
+    것이 조용히 다른 결과가 됩니다.
+    """
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+
+    candidate = ensemble.check_rerank_selection(["a"], run_id="rerank-a")
+    settings = ensemble.build_rerank_config(
+        candidate,
+        run_id="rerank-a",
+        rerank={
+            "rerank_checkpoint_uris": ["s3://bucket/emb/best.pt"],
+            "rerank_crop_bank_uri": "s3://bucket/v/crop_bank.tar",
+        },
+    )["evaluate"]
+
+    assert settings["checkpoint_uri"] == "s3://bucket/a/best_checkpoint.pt"
+    assert settings["rerank_checkpoint_uris"] == ["s3://bucket/emb/best.pt"]
+    assert "test_predictions_input_uris" not in settings
+    # 제출할 수 있는 CSV여야 합니다. 후보를 모을 때 쓰는 20개로 두면 못 냅니다.
+    assert settings["max_detections_per_image"] == 4
+    # validation은 그 실행이 남긴 예측을 그대로 씁니다. 다시 추론하면 GPU만 씁니다.
+    assert settings["predictions_input_uri"] == "s3://bucket/a/predictions.json"
+
+
+def test_an_embedding_ensemble_takes_exactly_one_run(fake_runs) -> None:
+    """둘을 받으면 무엇을 재현한 결과인지 되짚을 수 없습니다. 합치려면 모델 앙상블입니다."""
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    fake_runs("b", 0.61, _prediction_document(checkpoint="ckpt/b.pt", boxes=boxes))
+
+    with pytest.raises(WebError) as error:
+        ensemble.check_rerank_selection(["a", "b"], run_id="rerank-two")
+
+    assert "하나만" in str(error.value)
+
+
+def test_an_existing_name_is_refused_for_an_embedding_ensemble(fake_runs, monkeypatch) -> None:
+    """융합과 같은 자리에 씁니다. 이름이 겹치면 남의 제출을 덮습니다."""
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    monkeypatch.setattr(
+        ensemble, "_existing_output", lambda name: f"artifacts/ensemble/{name}/submission.csv"
+    )
+
+    with pytest.raises(WebError) as error:
+        ensemble.check_rerank_selection(["a"], run_id="rerank-a")
+    assert "이미 있습니다" in str(error.value)
+
+    # 덮어쓰기를 켜면 통과합니다. 막기만 하면 다시 돌릴 길이 없습니다.
+    assert ensemble.check_rerank_selection(["a"], run_id="rerank-a", overwrite=True)["run_id"] == "a"
+
+
+def test_a_base_checkpoint_the_storage_cannot_read_is_refused(fake_runs, monkeypatch) -> None:
+    """저장 계층이 못 읽는 checkpoint는 **시작 전에** 거절합니다.
+
+    등록은 되어 있지만 지금 설정된 bucket 밖을 가리키는 기록이 있습니다. 그대로
+    받으면 GPU로 test 한 판을 돌린 **뒤에** evaluate가 같은 주소를 거절합니다.
+    융합 경로는 중복을 가리면서 이미 이 검사를 지나갑니다.
+    """
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    elsewhere = [
+        {**item, "checkpoint_uri": "s3://other-bucket/a/best_checkpoint.pt"}
+        for item in ensemble.list_candidates()
+    ]
+    monkeypatch.setattr(ensemble, "list_candidates", lambda: elsewhere)
+
+    with pytest.raises(WebError) as error:
+        ensemble.check_rerank_selection(["a"], run_id="rerank-a")
+
+    assert "s3://other-bucket/a/best_checkpoint.pt" in str(error.value)
+
+
+def test_the_runner_refuses_an_embedding_ensemble_with_no_embedding(fake_runs, monkeypatch) -> None:
+    """embedding을 하나도 안 골랐으면 재순위가 아닙니다.
+
+    그대로 두면 GPU로 test 한 판을 다시 돌리고 나서 원본과 같은 제출을 냅니다 — 사람은
+    재순위한 것으로 믿고 Kaggle 제출 한 번을 씁니다.
+    """
+
+    from src.pipelines.web import ensemble_jobs
+
+    boxes = {(1, 7): [0.0, 0.0, 5.0, 5.0]}
+    fake_runs("a", 0.62, _prediction_document(checkpoint="ckpt/a.pt", boxes=boxes))
+    calls: list[Any] = []
+    monkeypatch.setattr(
+        ensemble_jobs, "run_evaluation", lambda *a, **k: calls.append(a) or {"ok": True}
+    )
+
+    runner = ensemble_jobs.EnsembleRunner()
+    with pytest.raises(Exception) as error:
+        runner.start_rerank(["a"], run_id="rerank-a", embedding_run_ids=[])
+
+    assert "embedding" in str(error.value)
+    assert calls == []
+    assert runner.status()["status"] == "idle"
+
+
+def test_the_route_sends_an_embedding_ensemble_to_the_rerank_path(monkeypatch) -> None:
+    """mode를 안 보면 화면이 임베딩 앙상블을 눌러도 융합이 돕니다."""
+
+    from src.pipelines.web.api import routes_ensemble
+
+    seen: dict[str, Any] = {}
+
+    class Recorder:
+        def start(self, run_ids, **kwargs):
+            seen["fused"] = True
+            return {"status": "running"}
+
+        def start_rerank(self, run_ids, **kwargs):
+            seen.update(kwargs)
+            seen["run_ids"] = list(run_ids)
+            return {"status": "running"}
+
+    monkeypatch.setattr(routes_ensemble, "get_ensemble_runner", Recorder)
+    routes_ensemble.start(
+        routes_ensemble.StartRequest(
+            run_ids=["a"],
+            run_id="rerank-a",
+            mode="embedding",
+            embedding_run_ids=["emb-r18"],
+        )
+    )
+
+    assert seen["run_ids"] == ["a"]
+    assert seen["embedding_run_ids"] == ["emb-r18"]
+    assert "fused" not in seen

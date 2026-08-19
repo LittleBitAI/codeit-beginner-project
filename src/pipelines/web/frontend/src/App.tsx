@@ -22,6 +22,7 @@ import { Live } from './screens/Live';
 import { NewExperimentSheet } from './screens/NewExperimentSheet';
 import { DiagnosisSheet } from './screens/DiagnosisSheet';
 import { EdaSheet } from './screens/EdaSheet';
+import { EmbeddingTrainSheet } from './screens/EmbeddingTrainSheet';
 import { Ensemble } from './screens/Ensemble';
 import { PrepareSheet } from './screens/PrepareSheet';
 import { Records, type DatasetOption } from './screens/Records';
@@ -43,7 +44,7 @@ export function App() {
   );
 }
 
-type SheetKey = 'new' | 'settings' | 'prepare' | 'eda' | 'diagnosis' | null;
+type SheetKey = 'new' | 'settings' | 'prepare' | 'eda' | 'embedding' | 'diagnosis' | null;
 
 function Shell() {
   // 목록은 3초마다, 설정 정의와 전처리 선택은 필요할 때만 읽습니다.
@@ -132,6 +133,7 @@ function Shell() {
       running={Boolean(active)}
       onOpenPrepare={() => setSheet('prepare')}
       onOpenEda={() => setSheet('eda')}
+      onOpenEmbedding={() => setSheet('embedding')}
       onOpenSettings={() => setSheet('settings')}
     >
       <Routes>
@@ -245,6 +247,7 @@ function Shell() {
         />
       )}
       {sheet === 'eda' && <EdaSheet onClose={() => setSheet(null)} />}
+      {sheet === 'embedding' && <EmbeddingTrainSheet onClose={() => setSheet(null)} />}
       {sheet === 'diagnosis' && diagnosisRun !== null && (
         <DiagnosisSheet runId={diagnosisRun} onClose={() => setSheet(null)} />
       )}

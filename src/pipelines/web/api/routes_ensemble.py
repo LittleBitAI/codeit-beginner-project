@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Body
 from pydantic import BaseModel, Field
@@ -32,6 +32,10 @@ class StartRequest(SelectionRequest):
     """합쳐서 제출을 만들 때 쓰는 요청."""
 
     run_id: str = Field(min_length=1, max_length=128)
+    # 무엇을 앙상블하는지입니다. `model`은 실행 여럿의 예측을 합치고, `embedding`은
+    # 실행 하나의 점수를 embedding 여럿으로 다시 매깁니다. 둘은 GPU를 쓰는 양도
+    # 결과의 뜻도 달라서, 고른 개수로 눈치껏 가르지 않고 화면이 말하게 합니다.
+    mode: Literal["model", "embedding"] = "model"
     # 사진이 같은데 위치만 다른 것을 사람이 확인했을 때만 켭니다. 진단이 시험지
     # 경고를 냈을 때 화면이 이 값을 물어봅니다.
     allow_copied_images: bool = False
@@ -67,8 +71,18 @@ def start(request: StartRequest = Body(...)) -> dict[str, Any]:
     예측이 아직 없는 실행은 **먼저 만듭니다.** 체크포인트만 있으면 후보가 되므로,
     한 번도 test 추론을 안 돌린 학습도 여기서 바로 고를 수 있습니다. 그 단계만
     GPU를 쓰고, 합치는 것 자체는 CPU로 몇 분입니다.
+
+    `mode="embedding"`이면 합치지 않습니다. 실행 하나의 test 추론을 다시 돌리고 고른
+    embedding들로 점수만 다시 매깁니다 — 융합 없이 재순위만 한 제출을 재현하는 길입니다.
     """
 
+    if request.mode == "embedding":
+        return get_ensemble_runner().start_rerank(
+            request.run_ids,
+            run_id=request.run_id,
+            embedding_run_ids=request.embedding_run_ids,
+            overwrite=request.overwrite,
+        )
     return get_ensemble_runner().start(
         request.run_ids,
         run_id=request.run_id,

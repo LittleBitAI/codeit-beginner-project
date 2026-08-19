@@ -136,6 +136,9 @@ export const api = {
   startEnsemble: (payload: {
     run_ids: string[];
     run_id: string;
+    // `model`은 실행 여럿의 예측을 합치고, `embedding`은 실행 하나의 점수만 고른
+    // embedding들로 다시 매깁니다. 안 보내면 지금까지와 같은 융합입니다.
+    mode?: 'model' | 'embedding';
     allow_copied_images?: boolean;
     // 비우면 지금까지처럼 detector 점수를 그대로 냅니다.
     embedding_run_ids?: string[];
