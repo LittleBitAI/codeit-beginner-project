@@ -62,8 +62,9 @@ DINO_SWIN_L_CHECKPOINT = (
 #: MMDetection이 DINO로 내놓는 Swin은 **L 하나뿐**입니다. T와 B는 DINO checkpoint가
 #: 없어서 backbone과 transformer를 서로 다른 곳에서 모읍니다 — backbone은 Swin 저장소의
 #: 검출 checkpoint에서, encoder·decoder·head는 같은 4scale R50 DINO에서. 둘 다 256채널
-#: 이라 모양이 그대로 맞고 어긋나는 neck만 빼면 됩니다. **순서가 중요합니다** — 뒤에
-#: 오는 것이 이미 실린 이름을 덮습니다. L은 제 DINO checkpoint 하나로 끝납니다.
+#: 이라 모양이 그대로 맞고 어긋나는 neck만 빼면 됩니다. L은 제 DINO checkpoint 하나로
+#: 끝납니다. 뒤에 오는 것이 이미 실린 이름을 덮으므로 순서대로 적습니다 — 지금 두 쌍은
+#: 실리는 이름이 겹치지 않아 결과가 같지만, 겹치는 짝이 생기면 이 순서가 답을 정합니다.
 DINO_PRETRAINED_SOURCES: dict[str, tuple[str, ...]] = {
     DINO_ARCHITECTURE: (DINO_CHECKPOINT,),
     DINO_SWIN_T_ARCHITECTURE: (CASCADE_CHECKPOINT, DINO_CHECKPOINT),
@@ -637,8 +638,10 @@ class MMDetectionAdapter(nn.Module):
 def _allowed_pretrained_key(architecture: str, key: str) -> bool:
     if architecture in DINO_ARCHITECTURES:
         # R50 DINO의 neck은 입력 채널이 [512, 1024, 2048]이라 Swin 것과 어긋납니다.
-        # T·B는 그 checkpoint에서 transformer를 가져오므로 neck만 새로 초기화합니다
-        # (1x1 conv 몇 개뿐입니다). L은 제 DINO checkpoint 하나로 와서 neck도 맞습니다.
+        # T·B는 그 checkpoint에서 transformer를 가져오므로 **neck 전체**를 새로
+        # 초기화합니다 — ChannelMapper의 1x1 conv 셋, 네 번째 level을 만드는 3x3
+        # extra conv, 그리고 각자의 GN까지 state key 12개입니다. L은 제 DINO
+        # checkpoint 하나로 와서 neck도 그대로 맞습니다.
         if key.startswith("neck.") and len(_pretrained_sources(architecture)) > 1:
             return True
         return "bbox_head.cls_branches" in key or "label_embedding" in key

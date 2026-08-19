@@ -115,7 +115,7 @@ _INTEGER_FIELDS = (
     ("checkpoint_every", _contract.SETTING_DEFAULTS["checkpoint_every"], 1),
 )
 # 기본값이 architecture에 따라 다른 정수 설정입니다. train과 같은 규칙입니다.
-# MMDetection 두 모델은 8GB에서 batch 1로 도므로 그만큼 모아야 쓸 만한 유효 batch가
+# MMDetection model은 8GB에서 batch 1로 도므로 그만큼 모아야 쓸 만한 유효 batch가
 # 됩니다. 기존 모델은 지금까지처럼 1입니다.
 _ACCUMULATION_FIELD = (
     "gradient_accumulation_steps",

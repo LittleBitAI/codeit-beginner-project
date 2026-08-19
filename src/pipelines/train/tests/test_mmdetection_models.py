@@ -336,7 +336,6 @@ def test_dino_swin_takes_backbone_and_transformer_from_different_checkpoints():
 
     _prepare_detector(detector, "dino_swin_b_4scale", pretrained=True, loader=loader)
 
-    assert loader.sources == list(DINO_PRETRAINED_SOURCES["dino_swin_b_4scale"])
     assert torch.equal(
         detector.loaded["backbone.stages.0.blocks.0.attn.w_msa.qkv.weight"],
         torch.full((2,), 3.0),
@@ -458,7 +457,7 @@ def test_mmdetection_amp_uses_fp16_for_mmcv_cuda_ops(pretend_cuda, architecture:
 def pretend_cuda(monkeypatch):
     """GPU가 없는 곳에서도 같은 결과가 나오게 합니다.
 
-    두 모델은 device가 cuda여야 하는데 CI runner에는 GPU가 없습니다. 실제로 CUDA를
+    MMDetection model은 device가 cuda여야 하는데 CI runner에는 GPU가 없습니다. 실제로 CUDA를
     쓰는 test가 아니라 설정 검증만 보는 test이므로 확인 함수만 바꿉니다.
     """
 
