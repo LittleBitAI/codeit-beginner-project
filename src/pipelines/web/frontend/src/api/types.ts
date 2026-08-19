@@ -18,6 +18,16 @@ export interface FieldSpec {
   defaults_by_architecture?: Record<string, number>;
   /** 여기 적힌 모델에서만 쓰는 칸입니다. 다른 모델이면 감춥니다. */
   only_for_architectures?: string[];
+  /**
+   * backbone만 다른 갈래를 편 표입니다(`{ dino: { resnet50: 'dino_r50_4scale' } }`).
+   * 있으면 화면이 모델 칸 옆에 backbone 칸을 하나 더 그립니다. 보내는 값은 여전히
+   * architecture 이름 하나입니다.
+   */
+  backbones?: Record<string, Record<string, string>>;
+  /** 갈래를 처음 골랐을 때 놓을 backbone입니다. */
+  backbone_defaults?: Record<string, string>;
+  backbone_label?: string;
+  backbone_hint?: string;
   minimum?: number;
   choices?: string[];
   label: string;
