@@ -35,18 +35,18 @@ FAILED src/pipelines/evaluate/tests/test_evaluate_mmdetection.py::
 있었습니다. 이 PR이 다섯으로 늘리므로 개수를 빼고 같이 고쳤습니다.)
 
 web은 다릅니다. 화면은 계약 목록을 그대로 읽어 내놓으므로 이름이 늘어도 초록입니다.
-그래서 **이 PR에 web 동작 변경은 없습니다.** 다만 **이 PR이 낡게 만든 설명은
-고쳤습니다** — 네 파일에서 더한 줄과 지운 줄을 합쳐 20줄이고, 전부 주석·문서·docstring·
-test 이름입니다:
+그래서 **이 PR은 web의 판단 로직을 하나도 바꾸지 않습니다** — 거절하는 조합도, 거절하는
+자리도 그대로입니다. 다만 **이 PR이 낡게 만든 설명은 고쳤습니다**:
 
 | 파일 | 무엇 |
 | --- | --- |
-| `web/CLAUDE.md`, `web/AGENTS.md` | "MMDetection pair" → "ones", "the 8GB combination" → "the only combination"(각 2곳) |
-| `web/train_config.py` | 개수를 못 박은 주석과 "8GB에서 돌리려면"이라던 화면 오류 메시지 |
+| `web/CLAUDE.md`, `web/AGENTS.md` | 지침서 문장. "MMDetection pair" → "ones", "the 8GB combination" → "the only combination"(각 2곳) |
+| `web/train_config.py` | 개수를 못 박은 주석 둘, 그리고 **화면에 보이는 오류 메시지 한 줄** — "…는 8GB에서 돌리려면 X여야 합니다" → "…는 X로만 돌릴 수 있습니다" |
 | `web/tests/test_web_train_contract.py` | test 이름 `..._do_not_fit_8gb` → `..._refuses_unsupported_combinations`, docstring 둘 |
 
-그대로 두면 문서와 화면이 틀린 개수와 틀린 근거를 말하게 됩니다. 근거를 바꾼 이유는
-아래 "지원 범위" 절에 있습니다.
+**사용자에게 보이는 문자열이 하나 바뀌는 것**이 유일한 눈에 띄는 변화입니다. 그대로
+두면 화면이 틀린 근거를 말합니다 — swin_l은 8GB에 안 들어가고, 애초에 이 조합은 메모리
+때문이 아닙니다. 근거는 아래 "지원 범위" 절에 있습니다.
 
 ## 지원 범위 — `MMDETECTION_REQUIRED`의 근거를 바로잡았습니다
 
@@ -102,7 +102,7 @@ pipeline은 서로를 import하지 않으므로 같은 설정이 두 곳에 따�
 새 실험 화면의 model 목록에 `dino_r50_4scale`·`dino_swin_t_4scale`·
 `dino_swin_b_4scale`·`dino_swin_l_5scale`가 그대로 나옵니다. 화면 코드는 계약 목록을
 그대로 읽으므로 **화면 동작을 고칠 것이 없습니다** — web에서 바꾼 것은 "왜 쪼갤 수
-없었는가" 절의 표에 적은 주석·문서·docstring·test 이름뿐입니다.
+없었는가" 절의 표에 적은 설명들과 오류 메시지 한 줄뿐이고, 판단 로직은 그대로입니다.
 
 목록을 model 한 칸과 backbone 한 칸으로 접는 화면은 이 PR에 넣지 않았습니다. CI를
 초록으로 유지하는 데 필요하지 않고 `src/pipelines/web/`은 제 영역이 아니기 때문입니다.
