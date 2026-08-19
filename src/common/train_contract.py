@@ -80,7 +80,7 @@ DEVICES = ("cpu", "cuda")
 
 #: 값이 없는 옛 설정이 뜻하던 model입니다. 새 실험의 기본값이기도 합니다.
 DEFAULT_ARCHITECTURE = "fasterrcnn_mobilenet_v3_large_320_fpn"
-#: MMDetection으로 학습하는 model입니다. 아래 제약이 이 둘에만 걸립니다.
+#: MMDetection으로 학습하는 model입니다. 아래 제약이 이 셋에만 걸립니다.
 MMDETECTION_ARCHITECTURES = (
     "dino_r50_4scale",
     "dino_swin_b_4scale",
@@ -102,7 +102,7 @@ MMDETECTION_REQUIRED = {
 }
 #: MMDetection model만 쓰는 입력 크기입니다.
 DEFAULT_INPUT_SIZE = 640
-#: MMDetection model을 고르면 이만큼 모아 한 번 갱신합니다. batch 1로 도는 두 모델이
+#: MMDetection model을 고르면 이만큼 모아 한 번 갱신합니다. batch 1로 도는 이 모델들이
 #: 쓸 만한 유효 batch를 갖게 하는 값입니다.
 DEFAULT_ACCUMULATION_STEPS = 8
 

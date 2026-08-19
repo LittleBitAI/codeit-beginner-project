@@ -20,7 +20,7 @@ from .errors import TrainError
 
 # 고를 수 있는 이름과 기본값은 GUI와 함께 쓰는 계약(`src/common/train_contract.py`)에
 # 있습니다. 여기서는 그 이름이 어떤 config와 checkpoint를 뜻하는지만 정합니다. 이름을
-# 계약에서 풀어 받지 않는 것은 순서가 바뀌면 두 model이 조용히 뒤바뀌기 때문입니다.
+# 계약에서 풀어 받지 않는 것은 순서가 바뀌면 model이 조용히 뒤바뀌기 때문입니다.
 DINO_ARCHITECTURE = "dino_r50_4scale"
 DINO_SWIN_ARCHITECTURE = "dino_swin_b_4scale"
 CASCADE_ARCHITECTURE = "cascade_rcnn_swin_t_fpn"
