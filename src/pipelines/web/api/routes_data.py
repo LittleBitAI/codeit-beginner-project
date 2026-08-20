@@ -73,6 +73,9 @@ class PrepareRequest(BaseModel):
     backend: str = Field(default="auto", description='"auto", "local", "s3"')
     raw_prefix: str | None = Field(default=None, max_length=512)
     processed_root: str | None = Field(default=None, max_length=512)
+    crop_bank: bool = Field(
+        default=False, description="embedding 학습이 참조로 쓸 crop 은행도 함께 만들지"
+    )
 
 
 @router.get("/prepare")

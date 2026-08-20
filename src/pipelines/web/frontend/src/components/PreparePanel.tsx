@@ -20,6 +20,7 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
   const [ratio, setRatio] = useState('8:2');
   const [seed, setSeed] = useState('42');
   const [overwrite, setOverwrite] = useState(false);
+  const [cropBank, setCropBank] = useState(false);
   const [rawPrefix, setRawPrefix] = useState('');
   const [backend, setBackend] = useState('auto');
   const [error, setError] = useState<string | null>(null);
@@ -50,6 +51,7 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
         seed: Number.parseInt(seed, 10),
         overwrite,
         backend,
+        crop_bank: cropBank,
         // 비운 칸은 보내지 않습니다. 빈 문자열을 보내면 서버가 기본값 대신 그것을
         // 경로로 읽습니다.
         ...(rawPrefix.trim() ? { raw_prefix: rawPrefix.trim() } : {}),
@@ -158,24 +160,20 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
           </Field>
         </div>
 
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            font: `400 12.5px/1 ${font.sans}`,
-            color: color.textStrong,
-            paddingBottom: 9,
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={overwrite}
-            disabled={running}
-            onChange={(event) => setOverwrite(event.target.checked)}
-          />
-          이미 있으면 덮어쓰기
-        </label>
+        <Toggle
+          label="이미 있으면 덮어쓰기"
+          checked={overwrite}
+          disabled={running}
+          onChange={setOverwrite}
+        />
+
+        <Toggle
+          label="참조 crop 은행도 만들기"
+          hint="embedding 학습이 씁니다. 더 걸리고, 이미 만든 폴더에 더하려면 덮어쓰기도 켜야 합니다."
+          checked={cropBank}
+          disabled={running}
+          onChange={setCropBank}
+        />
 
         <Button
           kind="primary"
@@ -202,6 +200,51 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
 
       {state && state.status !== 'idle' && <PreparationResult state={state} />}
     </div>
+  );
+}
+
+/** 준비 설정을 켜고 끄는 칸입니다. 버튼 줄에 나란히 서도록 아래를 맞춥니다. */
+function Toggle({
+  label,
+  hint,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  hint?: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <label
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 3,
+        font: `400 12.5px/1 ${font.sans}`,
+        color: color.textStrong,
+        paddingBottom: 9,
+      }}
+    >
+      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.checked)}
+        />
+        {label}
+      </span>
+      {hint && (
+        <span
+          style={{ font: `400 11.5px/1.45 ${font.sans}`, color: color.textMuted, maxWidth: 240 }}
+        >
+          {hint}
+        </span>
+      )}
+    </label>
   );
 }
 

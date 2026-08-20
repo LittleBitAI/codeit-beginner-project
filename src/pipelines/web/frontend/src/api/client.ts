@@ -331,6 +331,8 @@ export const api = {
     overwrite?: boolean;
     backend?: string;
     raw_prefix?: string;
+    /** embedding 학습이 참조로 쓸 crop 은행도 함께 만들지. */
+    crop_bank?: boolean;
   }) =>
     request<PreparationResponse>('/api/data/prepare', {
       method: 'POST',

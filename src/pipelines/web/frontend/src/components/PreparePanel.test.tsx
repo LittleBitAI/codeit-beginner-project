@@ -58,6 +58,23 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('PreparePanel · 참조 crop 은행', () => {
+  it('은행을 켜고 실행하면 그 요청을 함께 보낸다', async () => {
+    startPreparation.mockResolvedValue(undefined);
+    show({ status: 'idle' });
+
+    fireEvent.click(await screen.findByLabelText(/참조 crop 은행/));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '데이터 준비 실행' }));
+    });
+
+    expect(startPreparation).toHaveBeenCalledWith(
+      expect.objectContaining({ split_ratio: '8:2', crop_bank: true }),
+    );
+  });
+
+});
+
 describe('PreparePanel · 준비 진행 상황', () => {
   it('경과 시간을 초 단위로 보여 주고 계속 갱신한다', async () => {
     show(running());

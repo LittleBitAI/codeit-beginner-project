@@ -52,6 +52,7 @@ class PreparationRunner:
             backend=backend,
             raw_prefix=request.get("raw_prefix"),
             processed_root=request.get("processed_root"),
+            crop_bank=request.get("crop_bank", False),
         )
 
         return self._launch(
