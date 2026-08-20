@@ -13,6 +13,7 @@ import re
 
 import pytest
 
+from scripts import build_reproduce_bundle
 from scripts.build_reproduce_bundle import (
     COVER_TIMES,
     FUSION_RUNS,
@@ -228,3 +229,43 @@ def test_the_two_flags_cannot_be_given_together():
     """하나는 있는 것을 믿고 하나는 버립니다. 조용히 고르면 파괴적인 쪽이 이깁니다."""
 
     assert main(["--resume", "--overwrite"]) == 1
+
+
+@pytest.fixture
+def repo_with_an_escaping_link(tmp_path, monkeypatch):
+    """저장소 안에 저장소 밖을 가리키는 폴더 link를 둡니다."""
+
+    root = tmp_path / "repo"
+    (root / "datasets" ).mkdir(parents=True)
+    outside = tmp_path / "밖"
+    outside.mkdir()
+    link = root / "datasets" / "샛길"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError) as error:  # Windows는 권한이 필요합니다.
+        pytest.skip(f"이 환경에서는 link를 만들 수 없습니다: {error}")
+    monkeypatch.setattr(build_reproduce_bundle, "REPOSITORY_ROOT", root)
+    return root
+
+
+def test_a_link_that_leaves_the_repository_stops_the_download(repo_with_an_escaping_link):
+    """시작점만 확인하면 그 아래 link를 타고 저장소 밖에 씁니다."""
+
+    escaping = repo_with_an_escaping_link / "datasets" / "샛길" / "x.json"
+
+    class Store:
+        bucket = "team-bucket"
+
+        def download_file(self, source, destination, *, overwrite=False):
+            raise AssertionError("저장소 밖으로 내려받으면 안 됩니다.")
+
+    with pytest.raises(BundleError):
+        download_many(Store(), [("key.json", escaping)], label="test", resume=False, overwrite=False)
+
+
+def test_a_link_that_leaves_the_repository_stops_a_derived_write(repo_with_an_escaping_link):
+    escaping = repo_with_an_escaping_link / "datasets" / "샛길" / "SHA256SUMS"
+
+    with pytest.raises(BundleError):
+        write_derived(escaping, "내용\n", rebuilding=True)
+    assert not escaping.exists()

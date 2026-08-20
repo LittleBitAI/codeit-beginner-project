@@ -101,16 +101,21 @@ DEFAULT_DEMO_GROUPS = 60
 COVER_TIMES = 2
 
 
-def _inside_repository(value: str, *, label: str) -> Path:
+def _inside_repository(value: str | Path, *, label: str) -> Path:
     """저장소 안으로 확정되는 절대 경로를 만듭니다.
 
     문자열 접두사로 견주면 안 됩니다. `<repo>-bundle`은 `<repo>`로 **시작하지만**
     저장소 밖입니다. 경로로 견줘야 그 둘이 갈립니다.
+
+    **목적지마다 부릅니다.** 시작점만 확인하면, 그 아래 어느 폴더가 저장소 밖을 가리키는
+    symlink나 junction일 때 그리로 쓰게 됩니다. `resolve()`가 그것을 따라가므로 여기서
+    걸립니다. 아직 없는 파일도 있는 조상까지는 풀리므로 같은 방식으로 확인됩니다.
     """
 
-    resolved = (REPOSITORY_ROOT / value).resolve()
+    root = REPOSITORY_ROOT.resolve()
+    resolved = (root / value).resolve()
     try:
-        resolved.relative_to(REPOSITORY_ROOT.resolve())
+        resolved.relative_to(root)
     except ValueError as error:
         raise BundleError(f"{label}는 저장소 안이어야 합니다: {value}") from error
     return resolved
@@ -127,6 +132,7 @@ def write_derived(path: Path, text: str, *, rebuilding: bool) -> Path:
     합니다 — 담긴 파일 목록이 달라졌는데 옛 목록이 남아 있으면 그것이 더 나쁩니다.
     """
 
+    path = _inside_repository(path, label=path.name)
     if path.exists() and not rebuilding:
         raise BundleError(
             f"{path.name}이 이미 있습니다. 다시 만들려면 --resume 또는 --overwrite를 주세요."
@@ -168,6 +174,9 @@ def download_many(
     ``resume``은 끊긴 다운로드를 이어받을 때(있는 것을 믿는다), ``overwrite``는 다시
     받아 채울 때(있는 것을 버린다) 켭니다.
     """
+
+    # 목적지마다 확인합니다. 시작점만 보면 그 아래 symlink로 저장소를 빠져나갑니다.
+    pairs = [(key, _inside_repository(path, label=label)) for key, path in pairs]
 
     existing = [path for _, path in pairs if path.exists()]
     if existing and not resume and not overwrite:
