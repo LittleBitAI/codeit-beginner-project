@@ -73,9 +73,6 @@ class PrepareRequest(BaseModel):
     backend: str = Field(default="auto", description='"auto", "local", "s3"')
     raw_prefix: str | None = Field(default=None, max_length=512)
     processed_root: str | None = Field(default=None, max_length=512)
-    # 임베딩 학습과 재순위가 읽을 참조 crop을 함께 만들지입니다. 판마다 따로 만들어지고
-    # 나중에 덧붙일 수 없어서, 준비할 때가 유일한 기회입니다.
-    crop_bank: bool = Field(default=False)
 
 
 @router.get("/prepare")

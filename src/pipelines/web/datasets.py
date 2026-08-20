@@ -928,13 +928,8 @@ def build_prepare_config(
     backend: str = "auto",
     raw_prefix: str | None = None,
     processed_root: str | None = None,
-    crop_bank: bool = False,
 ) -> dict[str, Any]:
-    """``--only data``로 원본에서 artifact를 만들게 하는 config를 만듭니다.
-
-    ``crop_bank``는 준비할 때만 켤 수 있습니다. 은행은 판마다 따로 만들어지고, 임베딩
-    학습과 재순위는 그것 없이는 시작조차 못 합니다.
-    """
+    """``--only data``로 원본에서 artifact를 만들게 하는 config를 만듭니다."""
 
     if split_ratio not in SPLIT_RATIOS:
         allowed = ", ".join(SPLIT_RATIOS)
@@ -947,8 +942,6 @@ def build_prepare_config(
         )
     if not isinstance(overwrite, bool):
         raise WebValidationError([FieldError("overwrite", "true 또는 false여야 합니다.")])
-    if not isinstance(crop_bank, bool):
-        raise WebValidationError([FieldError("crop_bank", "true 또는 false여야 합니다.")])
 
     section: dict[str, Any] = {
         "prepare": True,
@@ -960,10 +953,6 @@ def build_prepare_config(
         section["raw_prefix"] = raw_prefix
     if processed_root:
         section["processed_root"] = processed_root
-    if crop_bank:
-        # 켠 경우에만 보냅니다. data의 기본값이 만들지 않는 것이라, 끈 상태를 굳이
-        # 적어 보내면 옛 data pipeline이 모르는 key로 거절할 수 있습니다.
-        section["crop_bank"] = True
 
     resolved = resolve_backend(backend)
     if resolved == "s3":

@@ -239,11 +239,11 @@ def test_start_is_allowed_again_after_finishing(runner, monkeypatch):
     assert state["split_ratio"] == "9:1"
 
 
-def test_the_request_carries_the_source_and_the_crop_bank_into_the_config(runner, monkeypatch):
-    """화면에서 고른 원본과 crop 은행이 data까지 실려 가야 합니다.
+def test_the_request_carries_the_source_into_the_config(runner, monkeypatch):
+    """화면에서 고른 원본이 data까지 실려 가야 합니다.
 
-    실려 가지 않으면 화면은 켜 놓고 data는 기본값으로 돌아, 만들어진 판이 화면이
-    말한 것과 다릅니다. crop 은행이 없으면 임베딩 학습은 그 판을 아예 못 씁니다.
+    실려 가지 않으면 화면은 한 판을 가리키는데 data는 기본 원본을 읽어, 만들어진
+    판이 화면이 말한 것과 다릅니다.
     """
     seen: dict = {}
 
@@ -253,14 +253,7 @@ def test_the_request_carries_the_source_and_the_crop_bank_into_the_config(runner
 
     monkeypatch.setattr(datasets, "prepare_dataset", capture)
 
-    runner.start(
-        {
-            "split_ratio": "8:2",
-            "raw_prefix": "datasets/pill_detection/raw/v90/",
-            "crop_bank": True,
-        }
-    )
+    runner.start({"split_ratio": "8:2", "raw_prefix": "datasets/pill_detection/raw/v90/"})
     wait_until_done(runner)
 
     assert seen["raw_prefix"] == "datasets/pill_detection/raw/v90/"
-    assert seen["crop_bank"] is True

@@ -192,42 +192,6 @@ describe('PreparePanel · 준비 진행 상황', () => {
   });
 });
 
-describe('PreparePanel · crop 은행', () => {
-  const idle: PreparationState = {
-    status: 'idle',
-    started_at: null,
-    finished_at: null,
-  };
-
-  it('켜고 실행하면 crop 은행을 함께 만들라고 보낸다', async () => {
-    startPreparation.mockResolvedValue({});
-    show(idle);
-
-    fireEvent.click(await screen.findByLabelText('crop 은행 함께 만들기'));
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: '데이터 준비 실행' }));
-    });
-
-    // 은행 없이 준비하면 그 판으로는 임베딩 학습도 재순위도 못 합니다.
-    expect(startPreparation).toHaveBeenCalledWith(
-      expect.objectContaining({ crop_bank: true }),
-    );
-  });
-
-  it('켜지 않으면 만들지 않는다', async () => {
-    startPreparation.mockResolvedValue({});
-    show(idle);
-
-    await act(async () => {
-      fireEvent.click(await screen.findByRole('button', { name: '데이터 준비 실행' }));
-    });
-
-    expect(startPreparation).toHaveBeenCalledWith(
-      expect.objectContaining({ crop_bank: false }),
-    );
-  });
-});
-
 describe('PreparePanel · 원본 경로', () => {
   const idle: PreparationState = {
     status: 'idle',

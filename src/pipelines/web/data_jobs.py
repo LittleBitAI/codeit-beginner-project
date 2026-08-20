@@ -52,7 +52,6 @@ class PreparationRunner:
             backend=backend,
             raw_prefix=request.get("raw_prefix"),
             processed_root=request.get("processed_root"),
-            crop_bank=request.get("crop_bank", False),
         )
 
         return self._launch(
@@ -63,7 +62,6 @@ class PreparationRunner:
                 "split_ratio": request["split_ratio"],
                 "seed": config["data"]["seed"],
                 "overwrite": config["data"]["overwrite"],
-                "crop_bank": config["data"].get("crop_bank", False),
                 "backend": config["storage"]["backend"],
                 "message": "원본을 읽어 artifact를 만들고 있습니다.",
                 "selected": False,

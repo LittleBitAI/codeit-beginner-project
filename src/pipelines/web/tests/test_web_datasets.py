@@ -850,18 +850,13 @@ def test_corrupt_selection_file_is_ignored(isolated_repo):
     assert datasets.load_selection() is None
 
 
-def test_prepare_config_can_ask_for_the_crop_bank():
-    """임베딩 학습은 crop 은행 없이는 시작조차 못 합니다.
+def test_prepare_config_carries_the_source_the_screen_chose():
+    """원본을 고를 칸이 없으면 기본 원본 하나만 준비할 수 있습니다."""
 
-    화면에서 켤 길이 없으면 data의 기본값(만들지 않음)이 그대로 나가서, 새로 준비한
-    판으로는 임베딩 학습도 재순위도 영원히 못 합니다. 은행은 판마다 따로 만들어야
-    하므로 준비할 때가 유일한 기회입니다.
-    """
-    assert "crop_bank" not in datasets.build_prepare_config("8:2")["data"]
-    assert datasets.build_prepare_config("8:2", crop_bank=True)["data"]["crop_bank"] is True
-
-
-@pytest.mark.parametrize("bad", ("true", 1, None))
-def test_prepare_config_rejects_a_crop_bank_that_is_not_a_choice(bad):
-    with pytest.raises(WebValidationError):
-        datasets.build_prepare_config("8:2", crop_bank=bad)
+    assert "raw_prefix" not in datasets.build_prepare_config("8:2")["data"]
+    assert (
+        datasets.build_prepare_config("8:2", raw_prefix="datasets/pill_detection/raw/v90/")["data"][
+            "raw_prefix"
+        ]
+        == "datasets/pill_detection/raw/v90/"
+    )
