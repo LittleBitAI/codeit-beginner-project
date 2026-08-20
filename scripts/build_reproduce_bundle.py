@@ -101,6 +101,21 @@ DEFAULT_DEMO_GROUPS = 60
 COVER_TIMES = 2
 
 
+def _inside_repository(value: str, *, label: str) -> Path:
+    """저장소 안으로 확정되는 절대 경로를 만듭니다.
+
+    문자열 접두사로 견주면 안 됩니다. `<repo>-bundle`은 `<repo>`로 **시작하지만**
+    저장소 밖입니다. 경로로 견줘야 그 둘이 갈립니다.
+    """
+
+    resolved = (REPOSITORY_ROOT / value).resolve()
+    try:
+        resolved.relative_to(REPOSITORY_ROOT.resolve())
+    except ValueError as error:
+        raise BundleError(f"{label}는 저장소 안이어야 합니다: {value}") from error
+    return resolved
+
+
 def storage() -> Any:
     """팀 bucket을 읽는 storage입니다. bucket 이름은 환경 변수에서 옵니다."""
 
@@ -111,17 +126,26 @@ def _bucket_uri(store: Any, key: str) -> str:
     return f"s3://{store.bucket}/{key}"
 
 
-def download_many(store: Any, pairs: Sequence[tuple[str, Path]], *, label: str) -> None:
-    """(S3 key, 로컬 경로) 쌍을 한꺼번에 받습니다. 이미 받은 것은 건너뜁니다."""
+def download_many(
+    store: Any, pairs: Sequence[tuple[str, Path]], *, label: str, resume: bool
+) -> None:
+    """(S3 key, 로컬 경로) 쌍을 한꺼번에 받습니다.
 
-    todo = [(key, path) for key, path in pairs if not path.exists()]
+    기본은 **있어도 다시 받습니다.** 있다고 건너뛰면, 앞선 실행이나 다른 출처가 남긴
+    파일이 그대로 번들에 들어가고 `SHA256SUMS`가 그것을 정품으로 서명해 줍니다. 이
+    번들의 존재 이유가 "점수를 낸 그 바이트"인데 그것을 확인할 길이 사라집니다.
+
+    ``resume``은 그 위험을 아는 사람이 끊긴 다운로드를 이어받을 때만 켭니다.
+    """
+
+    todo = [(key, path) for key, path in pairs if resume is False or not path.exists()]
     print(f"{label}: {len(pairs)}개 중 {len(todo)}개 내려받습니다.")
     if not todo:
         return
 
     def fetch(item: tuple[str, Path]) -> None:
         key, path = item
-        store.download_file(_bucket_uri(store, key), path)
+        store.download_file(_bucket_uri(store, key), path, overwrite=True)
 
     with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
         for index, _ in enumerate(pool.map(fetch, todo), start=1):
@@ -298,14 +322,14 @@ def pack(out: Path, files: Sequence[Path], archive: Path) -> None:
     print(f"묶었습니다: {archive.name} ({archive.stat().st_size / 1e9:.2f} GB)")
 
 
-def build(out: Path, *, groups: int, skip_test_images: bool) -> list[Path]:
+def build(out: Path, *, groups: int, skip_test_images: bool, resume: bool) -> list[Path]:
     """번들에 담을 파일을 모두 제자리에 놓고, 담을 목록을 돌려줍니다."""
 
     store = storage()
     files: list[Path] = []
 
     fixed = [(key, out / target) for key, target in FIXED_FILES]
-    download_many(store, fixed, label="재현 재료")
+    download_many(store, fixed, label="재현 재료", resume=resume)
     files.extend(path for _, path in fixed)
 
     files.append(write_test_manifest(store, out))
@@ -313,14 +337,14 @@ def build(out: Path, *, groups: int, skip_test_images: bool) -> list[Path]:
 
     if not skip_test_images:
         pairs = test_image_pairs(store, out)
-        download_many(store, pairs, label="test 이미지")
+        download_many(store, pairs, label="test 이미지", resume=resume)
         files.extend(path for _, path in pairs)
 
     if groups > 0:
         chosen = choose_demo_groups(_annotation_entries(store), wanted=groups)
         annotations, images = demo_pairs(chosen, out)
-        download_many(store, annotations, label="데모 annotation")
-        download_many(store, images, label="데모 train 이미지")
+        download_many(store, annotations, label="데모 annotation", resume=resume)
+        download_many(store, images, label="데모 train 이미지", resume=resume)
         files.extend(path for _, path in annotations)
         files.extend(path for _, path in images)
 
@@ -359,18 +383,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="묶을 tar.gz 경로. 주지 않으면 폴더만 만듭니다",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "이미 있는 파일을 다시 받지 않습니다. 끊긴 다운로드를 이어받을 때만 쓰세요 — "
+            "다른 출처가 남긴 파일이 그대로 번들에 들어가고 SHA256SUMS가 그것을 서명합니다"
+        ),
+    )
     args = parser.parse_args(argv)
 
-    out = (REPOSITORY_ROOT / args.out).resolve()
-    if not str(out).startswith(str(REPOSITORY_ROOT)):
-        raise BundleError("번들은 저장소 안에 만들어야 합니다.")
+    out = _inside_repository(args.out, label="번들 폴더")
     out.mkdir(parents=True, exist_ok=True)
 
     try:
-        files = build(out, groups=args.groups, skip_test_images=args.skip_test_images)
+        files = build(
+            out,
+            groups=args.groups,
+            skip_test_images=args.skip_test_images,
+            resume=args.resume,
+        )
         files.append(write_checksums(out, files))
         if args.pack:
-            pack(out, files, (REPOSITORY_ROOT / args.pack).resolve())
+            pack(out, files, _inside_repository(args.pack, label="묶을 파일"))
     except (BundleError, StorageError) as error:
         print(f"실패: {error}", file=sys.stderr)
         return 1

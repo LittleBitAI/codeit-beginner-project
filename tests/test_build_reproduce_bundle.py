@@ -18,7 +18,9 @@ from scripts.build_reproduce_bundle import (
     FUSION_RUNS,
     REPRODUCE_DIR,
     BundleError,
+    _inside_repository,
     choose_demo_groups,
+    download_many,
     retarget_fusion_inputs,
     write_test_manifest,
 )
@@ -140,3 +142,39 @@ def test_every_class_comes_from_more_than_one_group(tmp_path):
 def test_a_source_without_any_combination_stops_the_build():
     with pytest.raises(BundleError):
         choose_demo_groups([f"{RAW}/train_annotations/notes.txt"], wanted=3)
+
+
+@pytest.mark.parametrize("outside", ("../sabrefish-bundle", "../밖", "/tmp/번들"))
+def test_a_destination_outside_the_repository_is_refused(outside: str):
+    """`<repo>-bundle`은 `<repo>`로 시작하지만 저장소 밖입니다.
+
+    문자열 접두사로 견주면 그 둘이 갈리지 않아, 번들이 저장소 밖에 쓰입니다.
+    """
+    with pytest.raises(BundleError):
+        _inside_repository(outside, label="번들 폴더")
+
+
+def test_a_destination_inside_the_repository_passes():
+    assert _inside_repository("artifacts/reproduce-bundle", label="번들 폴더").is_absolute()
+
+
+def test_files_already_there_are_downloaded_again_unless_resume(tmp_path):
+    """있다고 건너뛰면 남의 파일이 그대로 번들에 들어가고 SHA256SUMS가 서명합니다."""
+
+    target = tmp_path / "이미있음.json"
+    target.write_text("{}", encoding="utf-8")
+    fetched: list[str] = []
+
+    class Store:
+        bucket = "team-bucket"
+
+        def download_file(self, source, destination, *, overwrite=False):
+            fetched.append(str(source))
+            assert overwrite is True
+
+    download_many(Store(), [("key.json", target)], label="test", resume=False)
+    assert fetched == ["s3://team-bucket/key.json"]
+
+    fetched.clear()
+    download_many(Store(), [("key.json", target)], label="test", resume=True)
+    assert fetched == []

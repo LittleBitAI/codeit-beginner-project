@@ -54,6 +54,8 @@ cd datasets/pill_detection/reproduce && sha256sum -c SHA256SUMS && cd -
 | `datasets/pill_detection/raw/v90/` | 데모 학습용 표본 원본. train 511장 + 대회 test 842장 전부 |
 | `datasets/pill_detection/reproduce/` | 최고 제출 재현 재료. 융합 입력 3개, 임베딩 3개, crop 은행, manifest, **원본 제출 CSV** |
 
+번들의 `test_manifest.json`과 융합 입력 3개는 **위치 문자열만** 팀 S3 URI에서 번들 안 상대 경로로 바뀌어 있습니다. 자격 증명 없이 열 수 있게 하려는 것이고, id·크기·category·예측 값은 원본 그대로입니다. 그래서 이 두 종류는 S3 원본과 바이트 단위로 같지 않습니다.
+
 `v90`은 발표 데모용 표본이라는 뜻의 판 번호입니다. 학습에 실제로 쓴 판(v5, 이미지 10,553장)이 아닙니다.
 
 ## 5. 최고 제출 재현
@@ -62,7 +64,7 @@ cd datasets/pill_detection/reproduce && sha256sum -c SHA256SUMS && cd -
 python -m src.main_pipeline --only evaluate --config configs/reproduce.best.json
 ```
 
-RTX 3080에서 **290초**가 걸렸고, 결과는 `artifacts/reproduce/best/`에 놓입니다. 융합 3개와 임베딩 3개가 모두 실렸는지는 `test_predictions.json`의 `fused_from`과 `rerank`에서 확인합니다.
+RTX 3080에서 **5~6분**이 걸렸고(두 번 재서 290초와 366초), 결과는 `artifacts/reproduce/best/`에 놓입니다. 융합 3개와 임베딩 3개가 모두 실렸는지는 `test_predictions.json`의 `fused_from`과 `rerank`에서 확인합니다.
 
 **여기서 만들어진 CSV를 Kaggle에 올리지 마세요.** 기록과 같지 않습니다 — 실제로 채점받아 보니 **0.00096 낮습니다.** 이 실행은 *방법이 재현된다*는 것을 보이는 용도이고, 제출 파일을 대체하지 않습니다.
 
@@ -83,12 +85,12 @@ python -m src.pipelines.web.server
 
 브라우저에서 `http://127.0.0.1:8000`을 엽니다. 로그인은 필요 없습니다.
 
-1. **데이터 준비** — 원본 경로에 `datasets/pill_detection/raw/v90/`을 넣고 8:2, seed 42로 실행합니다. **`crop 은행 함께 만들기`를 켜세요.** 임베딩 학습과 재순위는 그것 없이는 시작조차 못 하고, 판마다 따로 만들어져 나중에 덧붙일 수 없습니다. 끝나면 `v90-seed42-8020-group`이 목록에 뜹니다(train 288 / validation 219 / 118종).
+1. **데이터 준비** — 원본 경로에 `datasets/pill_detection/raw/v90/`을 넣고 8:2, seed 42로 실행합니다. 끝나면 `v90-seed42-8020-group`이 목록에 뜹니다(train 288 / validation 219 / 118종).
 2. **EDA** — 준비한 판을 그대로 읽어 class 분포와 상자 크기를 잽니다.
 3. **새 실험** — 위쪽 `점수를 받은 설정 채우기 · 최고 점수 detector`를 누르면 0.62437을 받은 설정이 그대로 채워집니다. **발표 시연이라면 `epochs`만 1이나 2로 낮추세요.** 12 epoch은 표본이 아닌 진짜 판에서 하루 가까이 걸립니다.
 4. **평가와 제출** — 학습이 끝나면 그 실행에서 평가를 돌립니다. test manifest가 있으면 제출 CSV가 함께 만들어지고, 화면의 `내려받기`로 바로 받습니다.
 5. **앙상블** — 끝난 실행 둘 이상을 골라 합칩니다. 합치기 전에 진단이 얼마나 닮았는지 알려 줍니다. 약한 실행을 넣으면 점수가 내려갑니다(7개 0.62087 < 단독 0.62437 < 상위 3개 0.62645).
-6. **임베딩 학습** — 1번에서 만든 crop 은행을 골라 학습합니다. 끝난 임베딩은 앙상블 화면에서 재순위에 쓸 수 있습니다.
+**임베딩 학습은 이 문서 기준으로 화면에서 시작할 수 없습니다.** 학습에는 참조 crop을 모은 crop 은행이 필요한데, 준비 화면에 그것을 만드는 칸이 아직 없습니다. 은행은 판마다 따로 만들어져 나중에 덧붙일 수도 없습니다. 그 칸이 들어온 뒤에 시연하세요. 5절의 재현은 **번들에 든 은행과 임베딩**을 쓰므로 이것과 무관하게 그대로 됩니다.
 
 ## 7. 알아 둘 것
 
