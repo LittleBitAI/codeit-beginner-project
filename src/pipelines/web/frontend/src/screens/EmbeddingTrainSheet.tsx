@@ -24,10 +24,24 @@ import { useTeam } from '../team/TeamContext';
 const CROP_BANK_FILE = 'crop_bank.tar';
 const CLASS_MAP_FILE = 'class_map.json';
 
+/** 고르는 줄 하나. 두 자리를 이어 붙이므로 어디서 왔는지 `label`이 들고 있습니다. */
+type BankOption = ProcessedDataset & { label: string };
+
+/**
+ * 은행과 class map이 **둘 다** 있어야 고를 수 있습니다.
+ *
+ * 한쪽만 있으면 학습은 대기열을 지나 자기 차례에 거절당합니다. 손으로 올린 폴더는
+ * 그 짝이 보장되지 않고, 전처리 폴더도 준비가 중간에 끊기면 같은 모양이 됩니다.
+ * 그래서 두 목록에 같은 문을 답니다.
+ */
+function usable(item: ProcessedDataset): boolean {
+  return Boolean(item.has_crop_bank) && !item.missing.includes('class_map_uri');
+}
+
 export function EmbeddingTrainSheet({ onClose }: { onClose: () => void }) {
   const team = useTeam();
   const [defaults, setDefaults] = useState<EmbeddingDefaults | null>(null);
-  const [datasets, setDatasets] = useState<ProcessedDataset[]>([]);
+  const [datasets, setDatasets] = useState<BankOption[]>([]);
   const [directory, setDirectory] = useState('');
   const [backbone, setBackbone] = useState('');
   const [name, setName] = useState('');
@@ -47,11 +61,15 @@ export function EmbeddingTrainSheet({ onClose }: { onClose: () => void }) {
     // 은행은 두 자리에 있습니다. 준비가 만든 것은 전처리 폴더 안에, 손으로 자른
     // 것은 `crop-bank/` 밑에. 한쪽만 보면 나머지로는 학습을 걸 방법이 없습니다.
     Promise.all([api.listDatasets(), api.listCropBanks()])
-      // 은행이 없는 폴더로 걸면 대기열에 들어간 뒤 자기 차례에 실패합니다.
       .then(([processed, banks]) => {
         if (!alive) return;
         setDatasets(
-          [...processed.datasets, ...banks.datasets].filter((item) => item.has_crop_bank),
+          [
+            ...processed.datasets.map((item) => ({ ...item, label: item.name })),
+            // 두 자리에 같은 이름이 있을 수 있습니다. 어느 쪽인지 안 보이면 밤새
+            // 도는 학습을 엉뚱한 은행으로 겁니다.
+            ...banks.datasets.map((item) => ({ ...item, label: `${item.name} (crop-bank)` })),
+          ].filter(usable),
         );
       })
       .catch(() => undefined);
@@ -107,8 +125,9 @@ export function EmbeddingTrainSheet({ onClose }: { onClose: () => void }) {
 
         {datasets.length === 0 ? (
           <AlertRow level="warning" title="참조 crop이 없습니다">
-            은행이 있는 전처리 폴더도, 손으로 올린 은행도 없습니다. dataset 준비에서 은행을
-            함께 만드세요.
+            crop_bank.tar와 class_map.json이 <b style={{ color: color.text }}>함께</b> 있는
+            폴더가 없습니다. 전처리 폴더와 crop-bank 폴더를 둘 다 봤습니다. dataset 준비에서
+            은행을 함께 만드세요.
           </AlertRow>
         ) : null}
 
@@ -123,7 +142,7 @@ export function EmbeddingTrainSheet({ onClose }: { onClose: () => void }) {
             {/* 두 자리를 이어 붙이므로 이름은 겹칠 수 있습니다. 폴더가 진짜 열쇠입니다. */}
             {datasets.map((item) => (
               <option key={item.directory} value={item.directory}>
-                {item.name}
+                {item.label}
               </option>
             ))}
           </select>

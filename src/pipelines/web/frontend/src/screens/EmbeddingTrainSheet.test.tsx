@@ -140,6 +140,35 @@ describe('embedding 학습 시트', () => {
     });
   });
 
+  it('class map이 없는 은행은 고르는 자리에 두지 않는다', async () => {
+    // 은행만 있고 class map이 없으면 학습은 대기열을 지나 자기 차례에 거절당합니다.
+    // 손으로 올린 폴더는 그 짝이 보장되지 않아 여기가 유일한 문의 자리입니다.
+    stub(
+      [dataset()],
+      [handMadeBank(), { ...handMadeBank(), name: '20260901', missing: ['class_map_uri'] }],
+    );
+
+    render(<EmbeddingTrainSheet onClose={() => undefined} />);
+    // 목록이 도착한 뒤에 재야 합니다. 이 줄을 빼면 아무것도 안 그려진 화면을 재게 되어,
+    // 아래를 거르는 문을 통째로 없애도 그냥 통과합니다(실제로 확인했습니다).
+    await screen.findByText(/20260817/);
+
+    expect(screen.queryByText(/20260901/)).toBeNull();
+  });
+
+  it('이름이 같아도 어느 자리의 은행인지 구분해 보여 준다', async () => {
+    // 둘 다 "v5"로 보이면 밤새 도는 학습을 엉뚱한 은행으로 겁니다.
+    stub(
+      [dataset({ name: 'v5' })],
+      [{ ...handMadeBank(), name: 'v5', directory: 'datasets/pill_detection/crop-bank/v5/' }],
+    );
+
+    render(<EmbeddingTrainSheet onClose={() => undefined} />);
+
+    expect(await screen.findByText('v5')).toBeInTheDocument();
+    expect(screen.getByText('v5 (crop-bank)')).toBeInTheDocument();
+  });
+
   it('은행이 없는 전처리 폴더는 고르는 자리에 두지 않는다', async () => {
     // 은행 없는 폴더로 걸면 대기열에 들어간 뒤 자기 차례에 실패합니다.
     stub([dataset(), dataset({ name: 'v4-old', has_crop_bank: false })]);
