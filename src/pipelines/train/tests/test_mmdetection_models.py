@@ -430,6 +430,42 @@ def test_real_detector_is_built_and_produces_a_finite_loss(architecture):
     assert torch.isfinite(total), f"loss가 유한하지 않습니다: {total}"
 
 
+def test_real_detector_trains_on_a_batch_of_two_different_sized_images():
+    """batch 2가 shape만이 아니라 **진짜 mmdet loss까지** 지나가는지 봅니다.
+
+    설정이 batch 2를 받는 것과 그 batch가 실제로 학습되는 것은 다른 이야기입니다.
+    adapter는 이미지마다 크기가 달라도 batch 하나의 padding 크기로 다시 맞춰
+    쌓는데(`prepare_mmdetection_batch`), 그 경로를 지금까지 shape로만 확인했습니다.
+    DINO의 pre_transformer는 `batch_data_samples[0].batch_input_shape`를 읽으므로
+    이미지마다 다른 값이 남으면 여기서 터집니다. GPU를 밤새 잡고 나서가 아니라
+    지금 알아야 합니다.
+    """
+
+    _require_mmdetection()
+    model = build_mmdetection_model(
+        4, architecture="dino_r50_4scale", pretrained=False, input_size=320
+    )
+
+    images = [torch.rand(3, 240, 320), torch.rand(3, 320, 200)]
+    targets = [
+        {
+            "boxes": torch.tensor([[10.0, 10.0, 100.0, 120.0]]),
+            "labels": torch.tensor([1]),
+            "image_id": torch.tensor([1]),
+        },
+        {
+            "boxes": torch.tensor([[5.0, 5.0, 60.0, 90.0], [20.0, 30.0, 80.0, 140.0]]),
+            "labels": torch.tensor([2, 3]),
+            "image_id": torch.tensor([2]),
+        },
+    ]
+    losses = model(images, targets)
+
+    total = sum(losses.values())
+    assert torch.isfinite(total), f"loss가 유한하지 않습니다: {total}"
+    total.backward()
+
+
 @pytest.mark.parametrize("architecture", MMDETECTION_ARCHITECTURES)
 def test_mmdetection_architectures_are_selectable(pretend_cuda, architecture: str):
     """이제 고를 수 있어야 합니다. 이 test가 그 문을 여는 표시입니다."""
@@ -522,7 +558,6 @@ def test_input_size_is_refused_with_a_torchvision_architecture():
         ("device", "cpu"),
         ("precision", "fp32"),
         ("optimizer", "SGD"),
-        ("batch_size", 2),
     ],
 )
 def test_mmdetection_refuses_unsupported_combinations(pretend_cuda, field, value):
@@ -540,6 +575,21 @@ def test_mmdetection_refuses_unsupported_combinations(pretend_cuda, field, value
 
     with pytest.raises(ValueError, match=field):
         _settings({"train": raw})
+
+
+def test_mmdetection_accepts_a_batch_larger_than_one(pretend_cuda):
+    """batch 크기는 GPU가 정할 일이지 이 저장소가 정할 일이 아닙니다.
+
+    위 세 칸과 잃는 것이 다릅니다. device·precision·optimizer가 틀리면 학습은 끝까지
+    돌면서 조용히 나쁜 결과를 내놓고 밤을 통째로 버립니다. batch가 GPU에 안 맞으면
+    model을 세운 직후 첫 batch에서 곧바로 터져 몇 분만 잃습니다. batch 1도 이미
+    메모리를 보장하지 못하므로(swin_l은 10GB 카드에서 넘칩니다) 여기서 1로 묶어 두면
+    큰 카드를 쓰는 사람의 손만 묶습니다.
+    """
+
+    settings = _settings(_mmdetection_raw(batch_size=2))
+
+    assert settings["batch_size"] == 2
 
 
 def test_mmdetection_checkpoint_carries_what_evaluate_needs(pretend_cuda):
@@ -651,7 +701,7 @@ def test_training_config_records_input_size_only_for_mmdetection(pretend_cuda):
 
 
 def test_new_models_default_to_accumulating_eight_microbatches(pretend_cuda):
-    """제안서 013이 정한 값입니다. batch 1로만 도니 그만큼 모아야 쓸 만합니다."""
+    """제안서 013이 정한 값입니다. batch 1로 도는 것을 전제로 그만큼 모아야 쓸 만합니다."""
 
     settings = _settings(_mmdetection_raw())
 

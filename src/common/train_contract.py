@@ -111,26 +111,32 @@ ARCHITECTURES = (
     *MMDETECTION_ARCHITECTURES,
 )
 #: MMDetection model에 **이 저장소가 지원하는 하나뿐인 조합**입니다. 이유가 값마다
-#: 다릅니다 — `batch_size=1`과 `amp`는 메모리 때문이고, `AdamW`는 DETR 계열이 그것으로
-#: 수렴하기 때문이며(메모리로는 오히려 SGD보다 optimizer state를 더 씁니다), `cuda`는
-#: `amp`가 CUDA에서만 되기 때문입니다(`CUDA_ONLY_PRECISIONS`). **CPU에서 아예 안 도는
-#: 것은 아닙니다** — test는 CPU에서 다섯 detector를 만들어 loss까지 봅니다. 다만 그
-#: 조합으로 학습을 재 본 적이 없어 받지 않고, GUI도 같은 이유로 미리 막습니다.
+#: 다릅니다 — `amp`는 메모리 때문이고, `AdamW`는 DETR 계열이 그것으로 수렴하기
+#: 때문이며(메모리로는 오히려 SGD보다 optimizer state를 더 씁니다), `cuda`는 `amp`가
+#: CUDA에서만 되기 때문입니다(`CUDA_ONLY_PRECISIONS`). **CPU에서 아예 안 도는 것은
+#: 아닙니다** — test는 CPU에서 다섯 detector를 만들어 loss까지 봅니다. 다만 그 조합으로
+#: 학습을 재 본 적이 없어 받지 않고, GUI도 같은 이유로 미리 막습니다.
+#:
+#: **`batch_size`는 여기 없습니다.** 위 셋과 잃는 것이 다르기 때문입니다. 셋 중
+#: 하나가 틀리면 학습은 끝까지 돌면서 조용히 나쁜 결과를 내놓아 밤을 통째로 버리지만,
+#: batch가 GPU에 안 맞으면 model을 세운 직후 첫 batch에서 곧바로 터져 몇 분만
+#: 잃습니다. 시끄럽고 값싼 실패는 계약이 미리 막을 값이 아니라 GPU가 정할 값입니다.
 #:
 #: **이 조합이 메모리를 보장하지는 않습니다.** 1280px·batch 1·amp로 잰 최고
 #: 사용량은 resnet50 2.98 GiB, swin_t 3.32, swin_b 3.81, **swin_l 11.21**입니다
-#: (2026-08-19, RTX 3080 10GB). swin_l은 10GB 카드에서도 넘쳐 공유 메모리로 밀리므로
-#: 더 큰 GPU에서 돌리거나 `input_size`를 낮춰야 합니다.
+#: (2026-08-19, RTX 3080 10GB). swin_l은 batch 1에서도 10GB 카드에서 넘쳐 공유 메모리로
+#: 밀립니다. batch를 올리면 활성값이 대략 그만큼 곱해지므로 A100처럼 큰 카드에서만
+#: 올리고, 작은 카드에서는 batch 1로 두고 `input_size`를 낮춥니다.
 MMDETECTION_REQUIRED = {
     "device": "cuda",
     "precision": "amp",
     "optimizer": "AdamW",
-    "batch_size": 1,
 }
 #: MMDetection model만 쓰는 입력 크기입니다.
 DEFAULT_INPUT_SIZE = 640
-#: MMDetection model을 고르면 이만큼 모아 한 번 갱신합니다. batch 1로 도는 이 모델들이
-#: 쓸 만한 유효 batch를 갖게 하는 값입니다.
+#: MMDetection model을 고르고 이 칸을 비우면 이만큼 모아 한 번 갱신합니다. batch 1로
+#: 도는 것을 전제로 고른 값이라 **실제 유효 batch는 `batch_size`를 곱한 값**입니다.
+#: batch를 2로 올리면서 지금까지와 같은 유효 batch 8을 쓰려면 이 값을 4로 낮춥니다.
 DEFAULT_ACCUMULATION_STEPS = 8
 
 OPTIMIZERS = ("AdamW", "SGD", "Adam")
