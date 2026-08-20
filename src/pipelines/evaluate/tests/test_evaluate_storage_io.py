@@ -156,10 +156,12 @@ def test_an_artifact_this_run_must_open_still_stops_here():
         "s3://[team/key.pt",
     ),
 )
-@pytest.mark.parametrize("never_read", (True, False))
-def test_a_broken_s3_uri_is_reported_and_never_escapes(uri: str, never_read: bool):
+def test_a_broken_s3_uri_is_reported_and_never_escapes(uri: str):
+    # `never_read=False`는 재지 않습니다. 그 갈래는 `urlsplit`까지 가지도 않고
+    # (`LocalStorage`가 s3 URI를 먼저 거부합니다)
+    # `test_an_artifact_this_run_must_open_still_stops_here`가 이미 지킵니다.
     with pytest.raises(InputArtifactError, match="저장 위치를 확인하지 못했습니다"):
-        local_store().artifact_identity(uri, never_read=never_read)
+        local_store().artifact_identity(uri, never_read=True)
 
 
 def test_a_broken_s3_uri_never_escapes_an_s3_backed_run_either():
