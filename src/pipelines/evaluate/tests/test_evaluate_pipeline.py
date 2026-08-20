@@ -1168,6 +1168,68 @@ def test_fusing_saved_predictions_makes_a_submission_without_a_checkpoint(
     assert float(fused[7]) == pytest.approx(0.9)
 
 
+def test_fusing_works_when_the_declared_checkpoints_sit_in_a_bucket_we_cannot_read(
+    base_config: dict, repository_root: Path
+):
+    """합칠 예측이 s3의 checkpoint를 가리켜도 local 실행이 합칠 수 있어야 합니다.
+
+    그 checkpoint는 **열지 않습니다.** 같은 model을 두 번 세지 않으려고 이름만 봅니다.
+    여기서 멈추면 팀 자격 증명이 없는 사람은 이미 만들어 둔 예측조차 합칠 수 없습니다.
+    """
+    _add_test_manifest(base_config, repository_root)
+    base_config["inputs"]["train"].pop("best_checkpoint_uri")
+
+    for name, bbox_x in (("s3a", 3.0), ("s3b", 3.4)):
+        write_json(
+            repository_root / f"data/test/{name}.json",
+            {
+                "test_manifest_uri": "data/test/instances.json",
+                "checkpoint_uri": f"s3://team-bucket/experiments/{name}/best_checkpoint.pt",
+                "predictions": [
+                    {"image_id": 10, "category_id": 7, "bbox": [bbox_x, 2.0, 3.0, 4.0], "score": 0.9},
+                ],
+            },
+        )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/s3a.json",
+        "data/test/s3b.json",
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "ok", result["message"]
+
+
+def test_fusion_still_refuses_the_same_bucket_checkpoint_twice(
+    base_config: dict, repository_root: Path
+):
+    """이름만 보더라도 같은 checkpoint를 두 번 세지는 않아야 합니다."""
+
+    _add_test_manifest(base_config, repository_root)
+    base_config["inputs"]["train"].pop("best_checkpoint_uri")
+
+    for name in ("dup1", "dup2"):
+        write_json(
+            repository_root / f"data/test/{name}.json",
+            {
+                "test_manifest_uri": "data/test/instances.json",
+                "checkpoint_uri": "s3://team-bucket/experiments/one/best_checkpoint.pt",
+                "predictions": [
+                    {"image_id": 10, "category_id": 7, "bbox": [3.0, 2.0, 3.0, 4.0], "score": 0.9},
+                ],
+            },
+        )
+    base_config["evaluate"]["test_predictions_input_uris"] = [
+        "data/test/dup1.json",
+        "data/test/dup2.json",
+    ]
+
+    result = run(base_config)
+
+    assert result["status"] == "error"
+    assert "같은 실행의 예측이 두 번" in result["message"]
+
+
 def test_fusion_refuses_predictions_from_another_test_set(
     base_config: dict, repository_root: Path
 ):

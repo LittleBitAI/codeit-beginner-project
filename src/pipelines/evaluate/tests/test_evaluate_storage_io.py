@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from src.common import S3Storage
 from src.pipelines.evaluate.errors import ArtifactWriteError, InputArtifactError
 from src.pipelines.evaluate.storage_io import ArtifactStore, is_remote_uri, join_uri
 
@@ -95,6 +96,10 @@ def test_remove_local_ignores_paths_outside_the_repository(repository_root: Path
     assert outside.exists()
 
 
+def local_store() -> ArtifactStore:
+    return ArtifactStore({"storage": {"backend": "local", "local": {"root": "artifacts"}}})
+
+
 def test_a_local_run_can_name_an_s3_artifact_it_never_opens():
     """열지 않고 이름만 견주는 자리는 local backend로 돌아도 답이 나와야 합니다.
 
@@ -102,18 +107,45 @@ def test_a_local_run_can_name_an_s3_artifact_it_never_opens():
     checkpoint를 두 번 세지 않게 막습니다. 그 checkpoint를 여는 일은 없습니다.
     여기서 멈추면 자격 증명이 없는 사람은 이미 만들어 둔 예측조차 합칠 수 없습니다.
     """
-    store = ArtifactStore({"storage": {"backend": "local", "local": {"root": "artifacts"}}})
+    store = local_store()
 
-    identity = store.artifact_identity("s3://team/experiments/a/best_checkpoint.pt")
+    identity = store.artifact_identity(
+        "s3://team/experiments/a/best_checkpoint.pt", never_read=True
+    )
 
     # 표기가 달라도 같은 자리면 같은 값이라는 약속은 그대로여야 합니다.
-    assert identity == store.artifact_identity("S3://team/experiments/a/best_checkpoint.pt")
-    assert identity != store.artifact_identity("s3://team/experiments/b/best_checkpoint.pt")
-    assert identity != store.artifact_identity("s3://other/experiments/a/best_checkpoint.pt")
+    assert identity == store.artifact_identity(
+        "S3://team/experiments/a/best_checkpoint.pt", never_read=True
+    )
+    assert identity != store.artifact_identity(
+        "s3://team/experiments/b/best_checkpoint.pt", never_read=True
+    )
+    assert identity != store.artifact_identity(
+        "s3://other/experiments/a/best_checkpoint.pt", never_read=True
+    )
+
+
+def test_the_name_a_local_run_gives_matches_what_the_s3_backend_gives():
+    """우회로가 backend와 **같은 해석**을 내야 합니다.
+
+    두 실행이 같은 자리를 다르게 부르면, 한쪽에서 막힌 중복이 다른 쪽에서 지나갑니다.
+    """
+    uri = "s3://team/experiments/a/best_checkpoint.pt"
+    on_s3 = ArtifactStore(storage=S3Storage("team"))
+
+    assert local_store().artifact_identity(uri, never_read=True) == on_s3.artifact_identity(uri)
+
+
+def test_an_artifact_this_run_must_open_still_stops_here():
+    """열어야 하는 대상은 이름을 묻는 자리에서 그대로 멈춰야 합니다.
+
+    재순위 checkpoint가 그렇습니다. 여기서 지나가면 test 추론과 crop 준비를 다 한
+    뒤에야 못 연다는 것을 알게 되어, 설정 오류 하나로 GPU 시간을 버립니다.
+    """
+    with pytest.raises(InputArtifactError, match="저장 위치를 확인하지 못했습니다"):
+        local_store().artifact_identity("s3://team/experiments/a/embedding.pt")
 
 
 def test_a_broken_s3_uri_is_still_reported():
-    store = ArtifactStore({"storage": {"backend": "local", "local": {"root": "artifacts"}}})
-
     with pytest.raises(InputArtifactError, match="저장 위치를 확인하지 못했습니다"):
-        store.artifact_identity("s3://team/key.json?version=2")
+        local_store().artifact_identity("s3://team/key.json?version=2", never_read=True)
