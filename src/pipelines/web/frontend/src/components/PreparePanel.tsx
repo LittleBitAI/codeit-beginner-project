@@ -21,6 +21,7 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
   const [seed, setSeed] = useState('42');
   const [overwrite, setOverwrite] = useState(false);
   const [cropBank, setCropBank] = useState(false);
+  const [rawPrefix, setRawPrefix] = useState('');
   const [backend, setBackend] = useState('auto');
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -51,6 +52,9 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
         overwrite,
         backend,
         crop_bank: cropBank,
+        // 비운 칸은 보내지 않습니다. 빈 문자열을 보내면 서버가 기본값 대신 그것을
+        // 경로로 읽습니다.
+        ...(rawPrefix.trim() ? { raw_prefix: rawPrefix.trim() } : {}),
       });
       status.refresh();
     } catch (caught) {
@@ -125,6 +129,20 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
           <span style={{ font: `400 11.5px/1.45 ${font.sans}`, color: color.textMuted }}>
             8:2는 검증에 20%, 9:1은 10%를 씁니다.
           </span>
+        </div>
+
+        {/* 이 칸이 없으면 data pipeline의 기본 원본 하나만 준비할 수 있습니다. 판이
+            여럿인 저장소에서 화면으로 고를 길이 아예 없었습니다. */}
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <Field label="원본 경로" hint="비워 두면 data pipeline의 기본 원본을 씁니다">
+            <input
+              value={rawPrefix}
+              disabled={running}
+              placeholder="datasets/pill_detection/raw/<판>/"
+              onChange={(event) => setRawPrefix(event.target.value)}
+              style={controlStyle}
+            />
+          </Field>
         </div>
 
         <div style={{ width: 110 }}>

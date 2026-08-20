@@ -13,8 +13,9 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
-from src.common import LocalStorage, Storage, StorageError, create_storage
+from src.common import LocalStorage, S3Storage, Storage, StorageError, create_storage
 
 from .errors import ArtifactWriteError, InputArtifactError
 
@@ -84,7 +85,7 @@ class ArtifactStore:
         except ValueError:
             return absolute.resolve().as_posix()
 
-    def artifact_identity(self, uri: str) -> tuple[str, ...]:
+    def artifact_identity(self, uri: str, *, never_read: bool = False) -> tuple[str, ...]:
         """저장 계층이 보는 대상을 그대로 돌려줍니다.
 
         두 산출물이 같은 파일에 저장되는지 쓰기 전에 판정하려는 쪽이 씁니다. 표기
@@ -94,19 +95,51 @@ class ArtifactStore:
         local은 이 저장소 root 기준으로 봅니다. 쓸 때 `local_path`가 쓰는 것과 같은
         기준이라야 판정과 실제 저장이 어긋나지 않습니다. 저장소 밖 경로는 다른
         입출력과 똑같이 `local_path`가 먼저 막습니다.
+
+        ``never_read``는 **이 실행이 그 대상을 끝까지 열지 않을 때만** 켭니다. 그러면
+        이 실행의 backend가 못 다루는 remote URI도 이름은 돌려줍니다. 켜지 않은 자리는
+        지금까지처럼 그 자리에서 멈춥니다 — 열어야 하는 대상이 안 열린다는 것을 첫
+        batch 전에 알리는 것이 이 검사가 있는 이유이기 때문입니다.
         """
         if is_remote_uri(uri):
             try:
                 return self.storage.identity(uri)
-            except StorageError as error:
-                raise InputArtifactError(
-                    f"저장 위치를 확인하지 못했습니다 ({uri}): {error}"
-                ) from error
+            # `ValueError`는 URI 표기 자체가 망가졌을 때 `urlsplit`이 냅니다
+            # (`s3://[team/key.pt`). S3 backend로 도는 실행은 `identity` 안에서 그것을
+            # 만납니다. 그대로 두면 `run()`이 `EvaluateError`만 잡으므로 예외가 pipeline
+            # 경계 밖으로 새고, 계약이 요구하는 `status="error"` 대신 호출자가 예외를
+            # 받습니다.
+            except (StorageError, ValueError) as error:
+                if not never_read:
+                    raise InputArtifactError(
+                        f"저장 위치를 확인하지 못했습니다 ({uri}): {error}"
+                    ) from error
+                return self._declared_remote_identity(uri)
 
         path = self.local_path(uri)
         try:
             return LocalStorage(self.repository_root).identity(path)
         except StorageError as error:
+            raise InputArtifactError(
+                f"저장 위치를 확인하지 못했습니다 ({uri}): {error}"
+            ) from error
+
+    @staticmethod
+    def _declared_remote_identity(uri: str) -> tuple[str, ...]:
+        """이 실행의 backend가 다루지 않는 remote URI의 이름을 얻습니다.
+
+        **열지 않고 이름만 견주는 자리**에서만 부릅니다(`never_read`). 합칠 예측이
+        적어 둔 checkpoint가 그렇습니다 — 같은 checkpoint를 두 번 세지 않으려고 이름만
+        봅니다. local backend로 도는 실행이라고 그 이름을 못 견줄 이유는 없고, 실제로
+        못 견디면 자격 증명이 없는 사람은 이미 만들어 둔 예측조차 합칠 수 없습니다.
+
+        해석 규칙을 여기서 다시 만들지 않고, 그 URI가 말하는 bucket을 그대로 쓰는
+        backend에게 묻습니다. `identity`는 표기만 정리하므로 network도 자격 증명도
+        쓰지 않습니다. 정말로 잘못된 URI는 여기서도 걸립니다.
+        """
+        try:
+            return S3Storage(urlsplit(uri).netloc).identity(uri)
+        except (StorageError, ValueError) as error:
             raise InputArtifactError(
                 f"저장 위치를 확인하지 못했습니다 ({uri}): {error}"
             ) from error

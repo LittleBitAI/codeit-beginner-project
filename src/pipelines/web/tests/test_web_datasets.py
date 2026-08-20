@@ -849,3 +849,41 @@ def test_corrupt_selection_file_is_ignored(isolated_repo):
     path.write_text("{깨짐", encoding="utf-8", newline="\n")
 
     assert datasets.load_selection() is None
+
+
+def test_prepare_config_carries_the_source_the_screen_chose():
+    """원본을 고를 칸이 없으면 기본 원본 하나만 준비할 수 있습니다."""
+
+    assert "raw_prefix" not in datasets.build_prepare_config("8:2")["data"]
+    assert (
+        datasets.build_prepare_config("8:2", raw_prefix="datasets/pill_detection/raw/v90/")["data"][
+            "raw_prefix"
+        ]
+        == "datasets/pill_detection/raw/v90/"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad", ("../밖/원본/", "/절대/경로/", "C:/원본/", "\\서버\공유\\", "  ")
+)
+def test_prepare_config_refuses_a_source_path_that_leaves_the_repository(bad: str):
+    """잘못된 경로는 202를 주고 subprocess에서 죽는 대신 여기서 거절합니다."""
+
+    with pytest.raises(WebValidationError):
+        datasets.build_prepare_config("8:2", raw_prefix=bad)
+
+
+def test_prepare_config_keeps_the_trailing_slash_data_expects():
+    section = datasets.build_prepare_config(
+        "8:2", raw_prefix="datasets/pill_detection/raw/v90"
+    )["data"]
+
+    assert section["raw_prefix"] == "datasets/pill_detection/raw/v90/"
+
+
+@pytest.mark.parametrize("bad", ("s3://bucket/원본/", "https://example/원본/"))
+def test_prepare_config_refuses_a_uri_instead_of_mangling_it(bad: str):
+    """`s3://bucket/x`를 정규화에 넘기면 `s3:/bucket/x`로 조용히 뭉개집니다."""
+
+    with pytest.raises(WebValidationError):
+        datasets.build_prepare_config("8:2", raw_prefix=bad)

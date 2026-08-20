@@ -39,6 +39,7 @@ from .masking import sanitize_line
 # 저장소 root를 바꿔도 실제 저장소에 파일을 쓰게 됩니다. 항상 함수로 물어봅니다.
 from .paths import (
     config_dir,
+    normalize_relative_posix,
     repository_root,
     resolve_within_repo,
     to_repo_relative_posix,
@@ -686,15 +687,56 @@ def list_processed_datasets() -> dict[str, Any]:
     }
 
 
+def local_processed_prefix() -> str:
+    """준비 결과가 **실제로** 쌓이는 자리를 저장소 기준 상대 경로로 돌려줍니다.
+
+    `create_storage`는 `PILL_STORAGE_LOCAL_ROOT`를 config보다 **먼저** 봅니다
+    (`src/common/storage.py`). 그래서 화면이 config에 어떤 root를 적어 보내든, 그
+    환경 변수가 있으면 결과는 거기에 쌓입니다. 목록이 그 사실을 모르면 방금 만든 판을
+    못 찾습니다 — `.env.example`이 권하는 값이 `artifacts`라 흔한 조합입니다.
+
+    그래서 쓰는 쪽 규칙을 여기서 다시 만들지 않고 **같은 환경 변수를 같은 순서로**
+    봅니다.
+    """
+
+    configured = os.environ.get("PILL_STORAGE_LOCAL_ROOT", "").strip()
+    if not configured:
+        return PROCESSED_ROOT
+
+    # `LocalStorage`와 **같은 방식**으로 풉니다 — `~`를 펴고, 상대 경로는 실행 위치
+    # 기준으로 봅니다(`Path(root).expanduser().resolve()`). 여기서 다르게 풀면
+    # `~/판`처럼 쓰기는 되는데 목록만 못 찾는 자리가 다시 생깁니다.
+    root = Path(configured).expanduser()
+    if not root.is_absolute():
+        root = repository_root() / root
+    try:
+        relative = root.resolve().relative_to(repository_root().resolve())
+    except (OSError, ValueError) as error:
+        raise WebPathError(
+            "PILL_STORAGE_LOCAL_ROOT이 저장소 밖을 가리킵니다."
+        ) from error
+    return f"{relative.as_posix()}/{PROCESSED_ROOT}" if relative.parts else PROCESSED_ROOT
+
+
 def _local_processed_datasets() -> dict[str, Any]:
     """local backend에서 전처리 폴더를 훑습니다."""
 
     try:
-        root = resolve_within_repo(PROCESSED_ROOT, label="전처리 폴더")
+        prefix = local_processed_prefix()
+        root = resolve_within_repo(prefix, label="전처리 폴더")
     except WebPathError:
-        return {"backend": "local", "root": None, "datasets": [], "problems": []}
+        # root가 저장소 밖이면 이 화면은 그 자리를 열지 않습니다. 조용히 비워 두면
+        # 준비는 되는데 목록만 비어 보여서, 어디를 봐야 하는지 알 수가 없습니다.
+        return {
+            "backend": "local",
+            "root": None,
+            "datasets": [],
+            "problems": [
+                "PILL_STORAGE_LOCAL_ROOT이 저장소 밖을 가리켜 목록을 읽지 못했습니다."
+            ],
+        }
     if not root.is_dir():
-        return {"backend": "local", "root": PROCESSED_ROOT, "datasets": [], "problems": []}
+        return {"backend": "local", "root": prefix, "datasets": [], "problems": []}
     # 하위 폴더까지 봅니다. EDA 리포트는 `<dataset>/eda/report.json`에 있어서,
     # 한 단계만 보면 S3 목록과 결과가 달라집니다.
     entries = [
@@ -706,8 +748,8 @@ def _local_processed_datasets() -> dict[str, Any]:
     ]
     return {
         "backend": "local",
-        "root": PROCESSED_ROOT,
-        "datasets": _group_by_dataset(entries, PROCESSED_ROOT),
+        "root": prefix,
+        "datasets": _group_by_dataset(entries, prefix),
         "problems": [],
     }
 
@@ -755,8 +797,11 @@ def build_data_config(data_inputs: dict[str, str]) -> dict[str, Any]:
     uses_s3_inputs = any(value.lower().startswith("s3://") for value in data_inputs.values())
     storage: dict[str, Any] = (
         {"backend": "s3", "s3": {"prefix": ""}}
+        # local artifact URI는 저장소 root 기준입니다. root를 `artifacts`로 두면
+        # `artifacts/artifacts/…`를 찾고, 저장소 안이지만 `artifacts/` 밖에 있는
+        # 전처리 폴더는 아예 읽지 못합니다.
         if uses_s3_inputs
-        else {"backend": "local", "local": {"root": "artifacts"}}
+        else {"backend": "local", "local": {"root": str(repository_root())}}
     )
     return {
         "project": {"name": "pill-object-detection"},
@@ -784,10 +829,6 @@ def build_eda_config(
 
     config = build_data_config(data_inputs)
     config["data"] = {"eda": True, "eda_image_sample": image_sample, "overwrite": overwrite}
-    if config["storage"]["backend"] == "local":
-        # artifact URI는 저장소 root 기준입니다. root를 `artifacts`로 두면 저장소
-        # 안이지만 `artifacts/` 밖에 있는 전처리 폴더를 root 이탈로 거절합니다.
-        config["storage"]["local"] = {"root": str(repository_root())}
     return config
 
 
@@ -961,10 +1002,28 @@ def build_prepare_config(
         # 실행 기록에서 같아 보입니다.
         "crop_bank": crop_bank,
     }
-    if raw_prefix:
-        section["raw_prefix"] = raw_prefix
-    if processed_root:
-        section["processed_root"] = processed_root
+    # 화면에서 온 경로는 여기서 한 번 걸러 보냅니다. 지금까지는 비어 있지 않기만
+    # 하면 그대로 실어 보내서, 잘못된 값도 202를 받고 subprocess가 뜬 뒤에야
+    # 실패했습니다. 어느 칸이 잘못됐는지 화면에 남지도 않습니다.
+    #
+    # **data의 규칙을 여기에 옮겨 적지는 않습니다.** `datasets/`로 시작해야 한다는
+    # 것처럼 data만 아는 것은 data가 거부합니다. 여기서는 web이 이미 아는 것
+    # (절대 경로, drive 문자, UNC, `..`, 예약된 이름)만 봅니다.
+    for key, value in (("raw_prefix", raw_prefix), ("processed_root", processed_root)):
+        if not value:
+            continue
+        if "://" in value:
+            # `s3://bucket/x`를 정규화에 넘기면 `s3:/bucket/x`로 **조용히 뭉개집니다.**
+            # 두 backend 모두 여기서는 URI가 아니라 prefix를 받습니다.
+            raise WebValidationError(
+                [FieldError(key, "URI가 아니라 저장소 기준 경로를 적어 주세요.")]
+            )
+        try:
+            normalized = normalize_relative_posix(value, label=key)
+        except WebPathError as error:
+            raise WebValidationError([FieldError(key, str(error))]) from error
+        # data는 prefix로 다루므로 끝의 `/`를 되돌려 줍니다.
+        section[key] = f"{normalized}/"
 
     resolved = resolve_backend(backend)
     if resolved == "s3":
@@ -981,7 +1040,10 @@ def build_prepare_config(
         # bucket 이름은 환경 변수에서 오므로 config 파일에 적지 않습니다.
         storage: dict[str, Any] = {"backend": "s3", "s3": {"prefix": ""}}
     else:
-        storage = {"backend": "local", "local": {"root": "artifacts"}}
+        # local artifact URI는 **저장소 root 기준**입니다. root를 `artifacts`로 두면
+        # 준비 결과가 `artifacts/datasets/…`로 들어가는데, 목록과 EDA는 저장소 root의
+        # `datasets/…`를 봅니다. 준비한 판이 화면 목록에 아예 뜨지 않습니다.
+        storage = {"backend": "local", "local": {"root": str(repository_root())}}
 
     return {
         "project": {"name": "pill-object-detection"},

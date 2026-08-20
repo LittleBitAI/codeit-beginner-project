@@ -208,3 +208,40 @@ describe('PreparePanel · 준비 진행 상황', () => {
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
   });
 });
+
+describe('PreparePanel · 원본 경로', () => {
+  const idle: PreparationState = {
+    status: 'idle',
+    started_at: null,
+    finished_at: null,
+  };
+
+  it('적은 경로를 그대로 실어 보낸다', async () => {
+    startPreparation.mockResolvedValue({});
+    show(idle);
+
+    fireEvent.change(await screen.findByPlaceholderText('datasets/pill_detection/raw/<판>/'), {
+      target: { value: ' datasets/pill_detection/raw/v90/ ' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '데이터 준비 실행' }));
+    });
+
+    expect(startPreparation).toHaveBeenCalledWith(
+      expect.objectContaining({ raw_prefix: 'datasets/pill_detection/raw/v90/' }),
+    );
+  });
+
+  it('비워 두면 보내지 않아 서버가 기본값을 쓰게 둔다', async () => {
+    startPreparation.mockResolvedValue({});
+    show(idle);
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: '데이터 준비 실행' }));
+    });
+
+    expect(startPreparation).toHaveBeenCalledWith(
+      expect.not.objectContaining({ raw_prefix: expect.anything() }),
+    );
+  });
+});
