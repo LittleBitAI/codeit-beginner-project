@@ -38,7 +38,7 @@ python -c "import mmcv._ext; print('mmcv ops OK')"
 
 ### 2. 팀 S3 자격 증명
 
-데이터와 checkpoint는 모두 팀 S3에 있습니다. 저장소에는 넣지 않으니 shell 환경이나 commit하지 않는 `.env`에 넣으세요.
+데이터와 checkpoint는 모두 팀 S3에 있습니다. **값은 shell 환경 변수로 넣어야 합니다** — 저장소에 `.env.example`이 있지만 어떤 이름이 필요한지 보여 주는 목록일 뿐이고, `.env` 파일을 자동으로 읽는 코드는 없습니다. 거기 적어 두고 되겠거니 하면 S3를 못 찾습니다.
 
 ```powershell
 $env:PILL_STORAGE_BACKEND = "s3"
@@ -81,10 +81,12 @@ python -m src.pipelines.web.server
 ```powershell
 python -m src.main_pipeline --config configs/base.json    # data → train → evaluate → registry
 python -m src.main_pipeline --only data --config configs/prepare.v5.aws.json
-python -m src.main_pipeline --only evaluate --config configs/reproduce.best.json
+python -m src.main_pipeline --only train --config <make_colab_config.py가 만든 config>
 ```
 
-마지막 줄이 최고 점수 구성을 그대로 재현합니다(RTX 3080에서 5~6분). 앙상블과 재순위는 별도 stage가 아니라 `evaluate`가 config를 보고 함께 합니다.
+앙상블과 재순위는 별도 stage가 아니라 `evaluate`가 config를 보고 함께 합니다.
+
+`configs/reproduce.best.json`으로 최고 점수를 재현하는 것은 **여기서 하지 마세요.** 공개 번들을 먼저 받아야 하고, 위에서 `PILL_STORAGE_BACKEND`를 `s3`로 두었다면 환경 변수가 config보다 우선해서 번들 안의 파일 대신 S3를 봅니다. 절차 전체가 `docs/reproduce.md`에 있습니다.
 
 ## 문서 지도
 
