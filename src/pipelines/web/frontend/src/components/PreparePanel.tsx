@@ -20,6 +20,10 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
   const [ratio, setRatio] = useState('8:2');
   const [seed, setSeed] = useState('42');
   const [overwrite, setOverwrite] = useState(false);
+  // 은행은 판마다 따로 만들어지고 나중에 덧붙일 수 없습니다. 임베딩 학습과 재순위를
+  // 하려면 여기서 켜는 수밖에 없습니다.
+  const [cropBank, setCropBank] = useState(false);
+  const [rawPrefix, setRawPrefix] = useState('');
   const [backend, setBackend] = useState('auto');
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -49,6 +53,10 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
         seed: Number.parseInt(seed, 10),
         overwrite,
         backend,
+        crop_bank: cropBank,
+        // 비운 칸은 보내지 않습니다. 빈 문자열을 보내면 서버가 기본값 대신 그것을
+        // 경로로 읽습니다.
+        ...(rawPrefix.trim() ? { raw_prefix: rawPrefix.trim() } : {}),
       });
       status.refresh();
     } catch (caught) {
@@ -125,6 +133,20 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
           </span>
         </div>
 
+        {/* 이 칸이 없으면 data pipeline의 기본 원본 하나만 준비할 수 있습니다. 판이
+            여럿인 저장소에서 화면으로 고를 길이 아예 없었습니다. */}
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <Field label="원본 경로" hint="비워 두면 data pipeline의 기본 원본을 씁니다">
+            <input
+              value={rawPrefix}
+              disabled={running}
+              placeholder="datasets/pill_detection/raw/<판>/"
+              onChange={(event) => setRawPrefix(event.target.value)}
+              style={controlStyle}
+            />
+          </Field>
+        </div>
+
         <div style={{ width: 110 }}>
           <Field
             label="Seed"
@@ -157,6 +179,26 @@ export function PreparePanel({ onPrepared }: { onPrepared: () => void }) {
             onChange={(event) => setOverwrite(event.target.checked)}
           />
           이미 있으면 덮어쓰기
+        </label>
+
+        <label
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            font: `400 12.5px/1 ${font.sans}`,
+            color: color.textStrong,
+            paddingBottom: 9,
+          }}
+          title="학습 이미지에서 알약을 한 개씩 잘라 모읍니다. 임베딩 학습과 재순위가 이것을 읽습니다."
+        >
+          <input
+            type="checkbox"
+            checked={cropBank}
+            disabled={running}
+            onChange={(event) => setCropBank(event.target.checked)}
+          />
+          crop 은행 함께 만들기
         </label>
 
         <Button

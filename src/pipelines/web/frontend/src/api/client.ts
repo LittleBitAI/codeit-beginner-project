@@ -323,6 +323,7 @@ export const api = {
     seed?: number;
     overwrite?: boolean;
     backend?: string;
+    crop_bank?: boolean;
   }) =>
     request<PreparationResponse>('/api/data/prepare', {
       method: 'POST',

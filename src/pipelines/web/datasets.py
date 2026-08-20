@@ -755,8 +755,11 @@ def build_data_config(data_inputs: dict[str, str]) -> dict[str, Any]:
     uses_s3_inputs = any(value.lower().startswith("s3://") for value in data_inputs.values())
     storage: dict[str, Any] = (
         {"backend": "s3", "s3": {"prefix": ""}}
+        # local artifact URI는 저장소 root 기준입니다. root를 `artifacts`로 두면
+        # `artifacts/artifacts/…`를 찾고, 저장소 안이지만 `artifacts/` 밖에 있는
+        # 전처리 폴더는 아예 읽지 못합니다.
         if uses_s3_inputs
-        else {"backend": "local", "local": {"root": "artifacts"}}
+        else {"backend": "local", "local": {"root": str(repository_root())}}
     )
     return {
         "project": {"name": "pill-object-detection"},
@@ -784,10 +787,6 @@ def build_eda_config(
 
     config = build_data_config(data_inputs)
     config["data"] = {"eda": True, "eda_image_sample": image_sample, "overwrite": overwrite}
-    if config["storage"]["backend"] == "local":
-        # artifact URI는 저장소 root 기준입니다. root를 `artifacts`로 두면 저장소
-        # 안이지만 `artifacts/` 밖에 있는 전처리 폴더를 root 이탈로 거절합니다.
-        config["storage"]["local"] = {"root": str(repository_root())}
     return config
 
 
@@ -929,8 +928,13 @@ def build_prepare_config(
     backend: str = "auto",
     raw_prefix: str | None = None,
     processed_root: str | None = None,
+    crop_bank: bool = False,
 ) -> dict[str, Any]:
-    """``--only data``로 원본에서 artifact를 만들게 하는 config를 만듭니다."""
+    """``--only data``로 원본에서 artifact를 만들게 하는 config를 만듭니다.
+
+    ``crop_bank``는 준비할 때만 켤 수 있습니다. 은행은 판마다 따로 만들어지고, 임베딩
+    학습과 재순위는 그것 없이는 시작조차 못 합니다.
+    """
 
     if split_ratio not in SPLIT_RATIOS:
         allowed = ", ".join(SPLIT_RATIOS)
@@ -943,6 +947,8 @@ def build_prepare_config(
         )
     if not isinstance(overwrite, bool):
         raise WebValidationError([FieldError("overwrite", "true 또는 false여야 합니다.")])
+    if not isinstance(crop_bank, bool):
+        raise WebValidationError([FieldError("crop_bank", "true 또는 false여야 합니다.")])
 
     section: dict[str, Any] = {
         "prepare": True,
@@ -954,6 +960,10 @@ def build_prepare_config(
         section["raw_prefix"] = raw_prefix
     if processed_root:
         section["processed_root"] = processed_root
+    if crop_bank:
+        # 켠 경우에만 보냅니다. data의 기본값이 만들지 않는 것이라, 끈 상태를 굳이
+        # 적어 보내면 옛 data pipeline이 모르는 key로 거절할 수 있습니다.
+        section["crop_bank"] = True
 
     resolved = resolve_backend(backend)
     if resolved == "s3":
@@ -970,7 +980,10 @@ def build_prepare_config(
         # bucket 이름은 환경 변수에서 오므로 config 파일에 적지 않습니다.
         storage: dict[str, Any] = {"backend": "s3", "s3": {"prefix": ""}}
     else:
-        storage = {"backend": "local", "local": {"root": "artifacts"}}
+        # local artifact URI는 **저장소 root 기준**입니다. root를 `artifacts`로 두면
+        # 준비 결과가 `artifacts/datasets/…`로 들어가는데, 목록과 EDA는 저장소 root의
+        # `datasets/…`를 봅니다. 준비한 판이 화면 목록에 아예 뜨지 않습니다.
+        storage = {"backend": "local", "local": {"root": str(repository_root())}}
 
     return {
         "project": {"name": "pill-object-detection"},
