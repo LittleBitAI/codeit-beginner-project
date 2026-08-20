@@ -93,3 +93,27 @@ def test_remove_local_ignores_paths_outside_the_repository(repository_root: Path
     ArtifactStore().remove_local("../keep-me.json")
 
     assert outside.exists()
+
+
+def test_a_local_run_can_name_an_s3_artifact_it_never_opens():
+    """열지 않고 이름만 견주는 자리는 local backend로 돌아도 답이 나와야 합니다.
+
+    합칠 예측은 어느 checkpoint의 증거인지 적어 두고, 융합은 그 이름으로 같은
+    checkpoint를 두 번 세지 않게 막습니다. 그 checkpoint를 여는 일은 없습니다.
+    여기서 멈추면 자격 증명이 없는 사람은 이미 만들어 둔 예측조차 합칠 수 없습니다.
+    """
+    store = ArtifactStore({"storage": {"backend": "local", "local": {"root": "artifacts"}}})
+
+    identity = store.artifact_identity("s3://team/experiments/a/best_checkpoint.pt")
+
+    # 표기가 달라도 같은 자리면 같은 값이라는 약속은 그대로여야 합니다.
+    assert identity == store.artifact_identity("S3://team/experiments/a/best_checkpoint.pt")
+    assert identity != store.artifact_identity("s3://team/experiments/b/best_checkpoint.pt")
+    assert identity != store.artifact_identity("s3://other/experiments/a/best_checkpoint.pt")
+
+
+def test_a_broken_s3_uri_is_still_reported():
+    store = ArtifactStore({"storage": {"backend": "local", "local": {"root": "artifacts"}}})
+
+    with pytest.raises(InputArtifactError, match="저장 위치를 확인하지 못했습니다"):
+        store.artifact_identity("s3://team/key.json?version=2")
