@@ -116,6 +116,26 @@ def _inside_repository(value: str, *, label: str) -> Path:
     return resolved
 
 
+def write_derived(path: Path, text: str, *, rebuilding: bool) -> Path:
+    """이 실행이 **만들어 내는** 파일을 씁니다. 내려받는 파일이 아닙니다.
+
+    test manifest와 `SHA256SUMS`가 그렇습니다. 내려받는 쪽만 막아 두면 이 둘이 그 검사를
+    지나지 않아, flag 없는 기본 실행도 그 자리에 있던 것을 지웁니다.
+
+    ``rebuilding``은 `--resume`이나 `--overwrite`가 켜진 경우입니다. 둘 중 하나를 준
+    사람은 이미 "이 자리에 파일이 있다"를 알고 있고, 그때 이 둘은 **다시 만들어야**
+    합니다 — 담긴 파일 목록이 달라졌는데 옛 목록이 남아 있으면 그것이 더 나쁩니다.
+    """
+
+    if path.exists() and not rebuilding:
+        raise BundleError(
+            f"{path.name}이 이미 있습니다. 다시 만들려면 --resume 또는 --overwrite를 주세요."
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8", newline="\n")
+    return path
+
+
 def storage() -> Any:
     """팀 bucket을 읽는 storage입니다. bucket 이름은 환경 변수에서 옵니다."""
 
@@ -172,7 +192,7 @@ def download_many(
                 print(f"  {index}/{len(todo)}")
 
 
-def write_test_manifest(store: Any, out: Path) -> Path:
+def write_test_manifest(store: Any, out: Path, *, rebuilding: bool) -> Path:
     """test manifest의 이미지 위치만 번들 안 상대 경로로 바꿔 씁니다.
 
     원본은 S3에서 만들어져 `file_name`이 `s3://...`입니다. 그대로 두면 자격 증명이
@@ -192,10 +212,10 @@ def write_test_manifest(store: Any, out: Path) -> Path:
         # 재현 폴더에서 데모 원본 폴더의 test 이미지를 가리킵니다.
         image["file_name"] = f"../raw/v90/test_images/{name.rsplit('/', 1)[-1]}"
 
-    target = out / REPRODUCE_DIR / "test_manifest.json"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    target = write_derived(
+        out / REPRODUCE_DIR / "test_manifest.json",
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+        rebuilding=rebuilding,
     )
     print(f"test manifest: 이미지 {len(images)}장을 번들 안 경로로 바꿔 적었습니다.")
     return target
@@ -311,7 +331,7 @@ def test_image_pairs(store: Any, out: Path) -> list[tuple[str, Path]]:
     return pairs
 
 
-def write_checksums(out: Path, files: Sequence[Path]) -> Path:
+def write_checksums(out: Path, files: Sequence[Path], *, rebuilding: bool) -> Path:
     """번들에 담을 파일의 sha256을 적습니다. 받은 쪽이 깨진 다운로드를 알아챕니다.
 
     폴더를 훑지 않고 **이번에 담기로 한 목록**만 적습니다. 번들은 저장소 안 실제
@@ -322,9 +342,11 @@ def write_checksums(out: Path, files: Sequence[Path]) -> Path:
     for path in files:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         lines.append(f"{digest}  {path.relative_to(out).as_posix()}")
-    target = out / REPRODUCE_DIR / "SHA256SUMS"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    target = write_derived(
+        out / REPRODUCE_DIR / "SHA256SUMS",
+        "\n".join(lines) + "\n",
+        rebuilding=rebuilding,
+    )
     print(f"SHA256SUMS: {len(lines)}개 파일")
     return target
 
@@ -344,6 +366,7 @@ def pack(out: Path, files: Sequence[Path], archive: Path) -> None:
 def build(
     out: Path, *, groups: int, skip_test_images: bool, resume: bool, overwrite: bool
 ) -> list[Path]:
+    rebuilding = resume or overwrite
     """번들에 담을 파일을 모두 제자리에 놓고, 담을 목록을 돌려줍니다."""
 
     store = storage()
@@ -353,7 +376,7 @@ def build(
     download_many(store, fixed, label="재현 재료", resume=resume, overwrite=overwrite)
     files.extend(path for _, path in fixed)
 
-    files.append(write_test_manifest(store, out))
+    files.append(write_test_manifest(store, out, rebuilding=rebuilding))
     retarget_fusion_inputs(out)
 
     if not skip_test_images:
@@ -419,6 +442,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.resume and args.overwrite:
+        # 하나는 있는 것을 믿고 하나는 버립니다. 조용히 한쪽을 고르면 파괴적인 쪽이
+        # 이깁니다.
+        print("실패: --resume과 --overwrite는 함께 쓸 수 없습니다.", file=sys.stderr)
+        return 1
+
     out = _inside_repository(args.out, label="번들 폴더")
     out.mkdir(parents=True, exist_ok=True)
 
@@ -430,7 +459,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             resume=args.resume,
             overwrite=args.overwrite,
         )
-        files.append(write_checksums(out, files))
+        files.append(write_checksums(out, files, rebuilding=args.resume or args.overwrite))
         if args.pack:
             pack(out, files, _inside_repository(args.pack, label="묶을 파일"))
     except (BundleError, StorageError) as error:

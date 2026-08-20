@@ -21,6 +21,8 @@ from scripts.build_reproduce_bundle import (
     _inside_repository,
     choose_demo_groups,
     download_many,
+    main,
+    write_derived,
     retarget_fusion_inputs,
     write_test_manifest,
 )
@@ -57,7 +59,7 @@ def manifest() -> dict[str, object]:
 def test_the_test_manifest_points_at_the_images_the_bundle_carries(tmp_path):
     """`s3://`가 적힌 채로 두면 자격 증명이 없는 사람은 시험지를 열지 못합니다."""
 
-    written = write_test_manifest(FakeStore(manifest()), tmp_path)
+    written = write_test_manifest(FakeStore(manifest()), tmp_path, rebuilding=False)
 
     document = json.loads(written.read_text(encoding="utf-8"))
     assert [image["file_name"] for image in document["images"]] == [
@@ -76,7 +78,7 @@ def test_the_test_manifest_points_at_the_images_the_bundle_carries(tmp_path):
 
 def test_a_manifest_without_images_stops_the_build(tmp_path):
     with pytest.raises(BundleError):
-        write_test_manifest(FakeStore({"images": []}), tmp_path)
+        write_test_manifest(FakeStore({"images": []}), tmp_path, rebuilding=False)
 
 
 def test_the_fusion_inputs_point_at_the_bundled_manifest(tmp_path):
@@ -205,3 +207,24 @@ def test_a_missing_file_is_fetched_without_any_flag(tmp_path):
     )
 
     assert fetched == ["s3://team-bucket/key.json"]
+
+
+def test_a_derived_file_already_there_also_stops_the_build(tmp_path):
+    """내려받는 파일만 막으면 이 둘이 그 검사를 지나 기본 실행이 지웁니다."""
+
+    target = tmp_path / "SHA256SUMS"
+    target.write_text("남의 것\n", encoding="utf-8")
+
+    with pytest.raises(BundleError):
+        write_derived(target, "새 것\n", rebuilding=False)
+    assert target.read_text(encoding="utf-8") == "남의 것\n"
+
+    # 다시 만들기로 한 실행은 옛 목록을 남기지 않습니다.
+    write_derived(target, "새 것\n", rebuilding=True)
+    assert target.read_text(encoding="utf-8") == "새 것\n"
+
+
+def test_the_two_flags_cannot_be_given_together():
+    """하나는 있는 것을 믿고 하나는 버립니다. 조용히 고르면 파괴적인 쪽이 이깁니다."""
+
+    assert main(["--resume", "--overwrite"]) == 1
