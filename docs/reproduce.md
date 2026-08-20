@@ -37,13 +37,21 @@ python -c "import mmcv._ext; print('mmcv ops OK')"
 데이터와 재현 재료는 Git에 담지 않습니다. 저장소 root에서 받아 풉니다. **자격 증명은 필요 없습니다.**
 
 ```
-curl -L -o bundle.tar.gz <번들 주소>
+curl -L -o bundle.tar.gz "https://drive.usercontent.google.com/download?id=1D_ujTqb5USy32-WtbRdcUjX6NrSEVe_8&export=download&confirm=t"
 tar xzf bundle.tar.gz
 ```
 
-`<번들 주소>`는 번들을 공개 위치에 올린 뒤 이 자리에 적습니다.
+브라우저로 받으셔도 됩니다: <https://drive.google.com/file/d/1D_ujTqb5USy32-WtbRdcUjX6NrSEVe_8/view>
+`confirm=t`가 붙는 이유는 100 MB가 넘는 파일에 Google Drive가 바이러스 검사 경고 페이지를 먼저 내주기 때문입니다. 그것 없이 받으면 2 KB짜리 HTML이 저장됩니다.
 
-받은 뒤 확인합니다(2.74 GB, 파일 3,294개).
+받은 파일이 맞는지 먼저 확인합니다. **2,713,249,502 바이트(2.53 GiB)** 이고 sha256은 이렇습니다.
+
+```
+sha256sum bundle.tar.gz          # Windows: certutil -hashfile bundle.tar.gz SHA256
+632aedb6f3dc57c8e7846fc34b834c36e148d94c2e4cca321695c1f4dff909bb
+```
+
+풀면 파일 3,295개가 저장소 제자리에 놓입니다. 안에 든 파일 하나하나는 이렇게 확인합니다.
 
 ```
 cd datasets/pill_detection/reproduce && sha256sum -c SHA256SUMS && cd -
