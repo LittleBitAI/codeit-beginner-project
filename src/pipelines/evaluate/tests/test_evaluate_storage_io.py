@@ -146,6 +146,26 @@ def test_an_artifact_this_run_must_open_still_stops_here():
         local_store().artifact_identity("s3://team/experiments/a/embedding.pt")
 
 
-def test_a_broken_s3_uri_is_still_reported():
+@pytest.mark.parametrize(
+    "uri",
+    (
+        "s3://team/key.json?version=2",
+        # 표기가 망가지면 `urlsplit`이 `ValueError`를 냅니다. 그대로 새면 `run()`이
+        # 잡지 못해 pipeline 경계 밖으로 예외가 나가고, 계약이 요구하는
+        # `status="error"` 대신 호출자가 예외를 받습니다.
+        "s3://[team/key.pt",
+    ),
+)
+@pytest.mark.parametrize("never_read", (True, False))
+def test_a_broken_s3_uri_is_reported_and_never_escapes(uri: str, never_read: bool):
     with pytest.raises(InputArtifactError, match="저장 위치를 확인하지 못했습니다"):
-        local_store().artifact_identity("s3://team/key.json?version=2", never_read=True)
+        local_store().artifact_identity(uri, never_read=never_read)
+
+
+def test_a_broken_s3_uri_never_escapes_an_s3_backed_run_either():
+    """S3 backend로 도는 실행은 `identity` 안에서 그 `ValueError`를 만납니다."""
+
+    store = ArtifactStore(storage=S3Storage("team"))
+
+    with pytest.raises(InputArtifactError, match="저장 위치를 확인하지 못했습니다"):
+        store.artifact_identity("s3://[team/key.pt")

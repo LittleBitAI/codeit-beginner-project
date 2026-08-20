@@ -104,7 +104,12 @@ class ArtifactStore:
         if is_remote_uri(uri):
             try:
                 return self.storage.identity(uri)
-            except StorageError as error:
+            # `ValueError`는 URI 표기 자체가 망가졌을 때 `urlsplit`이 냅니다
+            # (`s3://[team/key.pt`). S3 backend로 도는 실행은 `identity` 안에서 그것을
+            # 만납니다. 그대로 두면 `run()`이 `EvaluateError`만 잡으므로 예외가 pipeline
+            # 경계 밖으로 새고, 계약이 요구하는 `status="error"` 대신 호출자가 예외를
+            # 받습니다.
+            except (StorageError, ValueError) as error:
                 if not never_read:
                     raise InputArtifactError(
                         f"저장 위치를 확인하지 못했습니다 ({uri}): {error}"
@@ -134,7 +139,7 @@ class ArtifactStore:
         """
         try:
             return S3Storage(urlsplit(uri).netloc).identity(uri)
-        except StorageError as error:
+        except (StorageError, ValueError) as error:
             raise InputArtifactError(
                 f"저장 위치를 확인하지 못했습니다 ({uri}): {error}"
             ) from error
