@@ -299,6 +299,9 @@ export const api = {
   // 고를 수 있는 전처리 폴더 목록. 파일을 열지 않으므로 판이 늘어도 빠릅니다.
   listDatasets: () => request<ProcessedDatasets>('/api/data/datasets'),
 
+  /** 준비가 만들지 않고 손으로 올린 crop 은행 폴더. 항목 모양은 dataset과 같습니다. */
+  listCropBanks: () => request<ProcessedDatasets>('/api/data/crop-banks'),
+
   getDataSource: () => request<{ source: DataSource | null }>('/api/data/source'),
 
   setDataSource: (directory: string) =>

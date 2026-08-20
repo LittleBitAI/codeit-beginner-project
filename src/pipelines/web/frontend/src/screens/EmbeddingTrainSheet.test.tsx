@@ -41,7 +41,7 @@ function dataset(overrides: Partial<ProcessedDataset> = {}): ProcessedDataset {
   };
 }
 
-function stub(datasets: ProcessedDataset[] = [dataset()]) {
+function stub(datasets: ProcessedDataset[] = [dataset()], banks: ProcessedDataset[] = []) {
   vi.spyOn(api, 'embeddingDefaults').mockResolvedValue({
     backbones: ['resnet18', 'resnet34', 'resnet50'],
     devices: ['cpu', 'cuda'],
@@ -62,6 +62,23 @@ function stub(datasets: ProcessedDataset[] = [dataset()]) {
     root: 'datasets/pill_detection/processed/',
     datasets,
     problems: [],
+  });
+  vi.spyOn(api, 'listCropBanks').mockResolvedValue({
+    backend: 'local',
+    root: 'datasets/pill_detection/crop-bank/',
+    datasets: banks,
+    problems: [],
+  });
+}
+
+/** 전처리 폴더 밖에 손으로 올린 은행. manifest가 없으므로 `complete`가 false입니다. */
+function handMadeBank(): ProcessedDataset {
+  return dataset({
+    name: '20260817',
+    directory: 'datasets/pill_detection/crop-bank/20260817/',
+    complete: false,
+    missing: ['train_manifest_uri', 'validation_manifest_uri', 'dataset_summary_uri'],
+    has_test_manifest: false,
   });
 }
 
@@ -100,6 +117,27 @@ describe('embedding 학습 시트', () => {
 
     await waitFor(() => expect(start).toHaveBeenCalled());
     expect(start.mock.calls[0]?.[1]).toBe('login-token');
+  });
+
+  it('전처리 폴더 밖에 손으로 올린 은행도 같은 목록에서 고른다', async () => {
+    // 0.63594를 만든 은행은 준비가 만든 것이 아니라 `crop-bank/<날짜>/`에 있습니다.
+    // 전처리 폴더만 보여 주면 그 은행으로는 학습을 걸 방법이 없습니다.
+    stub([dataset()], [handMadeBank()]);
+    const start = vi
+      .spyOn(api, 'startEmbedding')
+      .mockResolvedValue({ config_id: 'c1', run_id: 'web-emb' });
+
+    render(<EmbeddingTrainSheet onClose={() => undefined} />);
+    fireEvent.change(await screen.findByLabelText('crop 은행'), {
+      target: { value: 'datasets/pill_detection/crop-bank/20260817/' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '학습 걸기' }));
+
+    await waitFor(() => expect(start).toHaveBeenCalled());
+    expect(start.mock.calls[0]?.[0]).toMatchObject({
+      crop_bank_uri: 'datasets/pill_detection/crop-bank/20260817/crop_bank.tar',
+      class_map_uri: 'datasets/pill_detection/crop-bank/20260817/class_map.json',
+    });
   });
 
   it('은행이 없는 전처리 폴더는 고르는 자리에 두지 않는다', async () => {

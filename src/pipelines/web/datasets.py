@@ -53,6 +53,7 @@ __all__ = [
     "classify_document",
     "clear_selection",
     "inspect_directory",
+    "list_crop_banks",
     "list_processed_datasets",
     "load_selection",
     "read_eda_report",
@@ -108,6 +109,10 @@ TEST_MANIFEST_FILE_NAME = "test_manifest.json"
 EDA_REPORT_FILE_NAME = "report.json"
 # data가 crop 은행을 함께 만들었을 때만 있습니다. embedding 학습이 이것을 봅니다.
 CROP_BANK_FILE_NAME = "crop_bank.tar"
+# 준비가 만들지 않은 은행이 놓이는 자리입니다. 전처리 폴더가 아니므로 manifest가
+# 없고, 그래서 학습 dataset 목록에는 절대 섞지 않습니다. 여기 폴더도 은행과
+# class map을 같은 두 이름으로 갖춰야 화면이 집을 수 있습니다.
+CROP_BANK_ROOT = "datasets/pill_detection/crop-bank/"
 
 
 def _looks_like_class_map(document: Any) -> bool:
@@ -657,11 +662,30 @@ def list_processed_datasets() -> dict[str, Any]:
     ``inspect``가 보여 줍니다.
     """
 
-    backend = resolve_backend("auto")
-    if backend != "s3":
-        return _local_processed_datasets()
+    return _list_folders(PROCESSED_ROOT, label="전처리 폴더")
+
+
+def list_crop_banks() -> dict[str, Any]:
+    """준비가 만들지 않은 crop 은행 폴더 목록입니다. 같은 항목 모양을 씁니다.
+
+    은행이 늘 전처리 폴더 안에 있는 것은 아닙니다. 손으로 잘라 올린 은행은
+    ``crop-bank/<날짜>/``에 있고, 전처리 폴더만 훑으면 embedding 학습 화면에
+    영영 안 나옵니다.
+
+    **학습 dataset 목록과 따로 둡니다.** 여기 폴더에는 manifest가 없어서, 한
+    목록에 섞으면 학습 데이터를 고르는 자리에 영영 못 고를 줄이 늘어납니다.
+    """
+
+    return _list_folders(CROP_BANK_ROOT, label="crop 은행 폴더")
+
+
+def _list_folders(root_prefix: str, *, label: str) -> dict[str, Any]:
+    """저장소 한 자리를 훑어 폴더별 artifact 유무를 돌려줍니다. 읽기만 합니다."""
+
+    if resolve_backend("auto") != "s3":
+        return _local_folders(root_prefix, label=label)
     # `resolve_backend`는 bucket이 설정됐을 때만 s3를 돌려주므로 여기서는 늘 있습니다.
-    root = f"s3://{storage_environment()['bucket']}/{PROCESSED_ROOT}"
+    root = f"s3://{storage_environment()['bucket']}/{root_prefix}"
 
     from src.common import StorageError, create_storage
 
@@ -686,15 +710,15 @@ def list_processed_datasets() -> dict[str, Any]:
     }
 
 
-def _local_processed_datasets() -> dict[str, Any]:
-    """local backend에서 전처리 폴더를 훑습니다."""
+def _local_folders(root_prefix: str, *, label: str) -> dict[str, Any]:
+    """local backend에서 한 자리를 훑습니다."""
 
     try:
-        root = resolve_within_repo(PROCESSED_ROOT, label="전처리 폴더")
+        root = resolve_within_repo(root_prefix, label=label)
     except WebPathError:
         return {"backend": "local", "root": None, "datasets": [], "problems": []}
     if not root.is_dir():
-        return {"backend": "local", "root": PROCESSED_ROOT, "datasets": [], "problems": []}
+        return {"backend": "local", "root": root_prefix, "datasets": [], "problems": []}
     # 하위 폴더까지 봅니다. EDA 리포트는 `<dataset>/eda/report.json`에 있어서,
     # 한 단계만 보면 S3 목록과 결과가 달라집니다.
     entries = [
@@ -706,8 +730,8 @@ def _local_processed_datasets() -> dict[str, Any]:
     ]
     return {
         "backend": "local",
-        "root": PROCESSED_ROOT,
-        "datasets": _group_by_dataset(entries, PROCESSED_ROOT),
+        "root": root_prefix,
+        "datasets": _group_by_dataset(entries, root_prefix),
         "problems": [],
     }
 

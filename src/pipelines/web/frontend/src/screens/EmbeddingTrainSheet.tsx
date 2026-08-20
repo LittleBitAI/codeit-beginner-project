@@ -44,11 +44,15 @@ export function EmbeddingTrainSheet({ onClose }: { onClose: () => void }) {
         setBackbone(result.defaults.backbone);
       })
       .catch(() => undefined);
-    api
-      .listDatasets()
+    // 은행은 두 자리에 있습니다. 준비가 만든 것은 전처리 폴더 안에, 손으로 자른
+    // 것은 `crop-bank/` 밑에. 한쪽만 보면 나머지로는 학습을 걸 방법이 없습니다.
+    Promise.all([api.listDatasets(), api.listCropBanks()])
       // 은행이 없는 폴더로 걸면 대기열에 들어간 뒤 자기 차례에 실패합니다.
-      .then((result) => {
-        if (alive) setDatasets(result.datasets.filter((item) => item.has_crop_bank));
+      .then(([processed, banks]) => {
+        if (!alive) return;
+        setDatasets(
+          [...processed.datasets, ...banks.datasets].filter((item) => item.has_crop_bank),
+        );
       })
       .catch(() => undefined);
     return () => {
@@ -103,7 +107,8 @@ export function EmbeddingTrainSheet({ onClose }: { onClose: () => void }) {
 
         {datasets.length === 0 ? (
           <AlertRow level="warning" title="참조 crop이 없습니다">
-            crop 은행이 있는 전처리 폴더가 없습니다. dataset 준비에서 은행을 함께 만드세요.
+            은행이 있는 전처리 폴더도, 손으로 올린 은행도 없습니다. dataset 준비에서 은행을
+            함께 만드세요.
           </AlertRow>
         ) : null}
 
@@ -115,8 +120,9 @@ export function EmbeddingTrainSheet({ onClose }: { onClose: () => void }) {
             aria-label="crop 은행"
           >
             <option value="">참조 crop을 고르세요</option>
+            {/* 두 자리를 이어 붙이므로 이름은 겹칠 수 있습니다. 폴더가 진짜 열쇠입니다. */}
             {datasets.map((item) => (
-              <option key={item.name} value={item.directory}>
+              <option key={item.directory} value={item.directory}>
                 {item.name}
               </option>
             ))}
