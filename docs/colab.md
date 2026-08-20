@@ -35,11 +35,27 @@ Python version, package, CUDA, 실제 tensor 연산까지 확인합니다. 실�
 import os
 os.environ["AWS_ACCESS_KEY_ID"] = ""      # 팀에서 받은 값
 os.environ["AWS_SECRET_ACCESS_KEY"] = ""
-os.environ["AWS_DEFAULT_REGION"] = "ap-northeast-2"
+os.environ["AWS_DEFAULT_REGION"] = "ap-southeast-2"
 os.environ["PILL_STORAGE_S3_BUCKET"] = "" # 팀 bucket 이름
 ```
 
 키를 노트북에 그대로 적으면 저장된 노트북에 남습니다. **단기 키를 쓰고 학습이 끝나면 세션을 삭제**하세요. 저장소에 commit하지 않습니다. Colab의 보안 비밀 기능을 쓰면 더 낫습니다.
+
+### S3 다운로드 비용 주의
+
+S3에 저장하거나 올리는 비용보다 **S3에서 Colab으로 이미지를 받는 인터넷 전송 비용**이
+훨씬 클 수 있습니다. 새 Colab 런타임은 디스크가 비어 있으므로 학습을 시작할 때 dataset
+전체를 다시 받습니다. `PILL_WEB_STATE_WORKSPACE`가 복원하는 것은 job 기록과 config뿐이며
+image cache는 복원하지 않습니다.
+
+- 1번의 dependency 설치 뒤 재시작은 학습을 시작하기 전에 한 번만 합니다.
+- 같은 dataset의 실험은 한 런타임의 queue에서 연달아 실행해 첫 다운로드를 재사용합니다.
+- 화면만 끊겼다면 새 런타임을 만들지 말고 기존 서버와 학습 process를 먼저 확인합니다.
+- 런타임을 새로 만들거나 dataset을 바꾸면 전체 다운로드 비용이 다시 든다고 봅니다.
+
+비용이 예상보다 늘면 학습을 더 시작하지 말고 Cost Explorer에서 S3의
+`DataTransfer-Out-Bytes`를 일별로 확인합니다. AWS 안의 같은 리전에서 학습하거나 Colab 쪽에
+dataset을 영구 보관하는 방식으로 바꾸는 것은 비용과 저장 공간을 먼저 비교한 뒤 결정합니다.
 
 ## 4. 어떤 dataset이 있는지 확인
 
@@ -141,4 +157,6 @@ output.serve_kernel_port_as_iframe(8000, height=900)   # 창 방식은 브라우
 | 학습 시작이 오래 걸린다 | 이미지를 S3에서 받는 중입니다. 첫 batch 전에 한꺼번에 받아 두므로 여기서 한 번 기다립니다. `image_cache_progress` 줄에 받은 장수가 나옵니다 |
 | 세션이 끊겼다 | 화면을 쓴다면 위 "런타임이 끊겨도 화면에서 이어서 합니다"를 보세요. 명령줄로 돌렸다면 `train.resume_from`에 `s3://<bucket>/experiments/completed/<실행 이름>/running/last_checkpoint.pt`를 적고 **새 실행 이름**으로 돌립니다. `epochs`는 남은 수가 아니라 전체 목표를 그대로 적습니다 |
 
-이미지는 학습을 시작하기 전에 여러 장씩 동시에 받아 둡니다. 런타임이 끊겨 다시 시작해도 이미 받아 둔 것은 건너뛰고 남은 것만 받습니다. 다만 런타임이 바뀌면 디스크가 비므로 그때는 처음부터 다시 받습니다.
+이미지는 학습을 시작하기 전에 여러 장씩 동시에 받아 둡니다. 같은 런타임에서 명령이나
+서버만 다시 시작하면 이미 받은 것은 건너뛰고 남은 것만 받습니다. Colab 런타임 자체가
+바뀌면 디스크가 비므로 처음부터 다시 받고 S3 전송 비용도 다시 듭니다.
