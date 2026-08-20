@@ -1,3 +1,13 @@
+# 보고서 링크
+https://drive.google.com/file/d/10eTOHCgdnSJ5NzE5_c7KhqyUFEiWYQec/view?usp=sharing
+
+# 협업일지
+김민기
+https://app.notion.com/p/3c05a6b60260800d81c1d69ba9bbc510
+
+김현경
+https://app.notion.com/p/3b267f3920118016b804e4bf2549a045?v=3b267f392011801db4ae000c6521b9dd&source=copy_link
+
 # 알약 객체 탐지 — 사용 안내
 
 이미지에서 알약을 찾아 class, bounding box, confidence score를 예측합니다. 이미지 한 장당 최대 4개까지 예측하며, 전처리부터 제출 파일까지 전 과정을 **브라우저 화면 하나**에서 할 수 있습니다.
@@ -38,7 +48,7 @@ python -c "import mmcv._ext; print('mmcv ops OK')"
 
 ### 2. 팀 S3 자격 증명
 
-데이터와 checkpoint는 모두 팀 S3에 있습니다. **값은 shell 환경 변수로 넣어야 합니다** — 저장소에 `.env.example`이 있지만 어떤 이름이 필요한지 보여 주는 목록일 뿐이고, `.env` 파일을 자동으로 읽는 코드는 없습니다. 거기 적어 두고 되겠거니 하면 S3를 못 찾습니다.
+데이터와 checkpoint는 모두 팀 S3에 있습니다. **값은 shell 환경 변수로 넣어야 합니다** — 저장소에 `.env.example`이 있지만 어떤 이름이 필요한지 보여 주는 목록일 뿐이고, `.env` 파일을 자동으로 읽는 코드는 없습니다. 
 
 Windows PowerShell:
 
