@@ -40,15 +40,27 @@ python -c "import mmcv._ext; print('mmcv ops OK')"
 
 데이터와 checkpoint는 모두 팀 S3에 있습니다. **값은 shell 환경 변수로 넣어야 합니다** — 저장소에 `.env.example`이 있지만 어떤 이름이 필요한지 보여 주는 목록일 뿐이고, `.env` 파일을 자동으로 읽는 코드는 없습니다. 거기 적어 두고 되겠거니 하면 S3를 못 찾습니다.
 
+Windows PowerShell:
+
 ```powershell
 $env:PILL_STORAGE_BACKEND = "s3"
-$env:PILL_STORAGE_S3_BUCKET = "<팀 bucket 이름>"
-$env:AWS_ACCESS_KEY_ID = "<받은 값>"
-$env:AWS_SECRET_ACCESS_KEY = "<받은 값>"
+$env:PILL_STORAGE_S3_BUCKET = "팀-bucket-이름"
+$env:AWS_ACCESS_KEY_ID = "받은-값"
+$env:AWS_SECRET_ACCESS_KEY = "받은-값"
 $env:AWS_DEFAULT_REGION = "ap-northeast-2"
 ```
 
-SSO를 쓴다면 `aws sso login --profile <이름>` 뒤에 `$env:AWS_PROFILE`만 지정하면 됩니다. 연결 확인은 `python scripts/s3_smoke_test.py --config configs/env.aws.json`입니다(작은 임시 파일 하나를 올렸다 지웁니다).
+Linux·macOS bash:
+
+```bash
+export PILL_STORAGE_BACKEND=s3
+export PILL_STORAGE_S3_BUCKET=팀-bucket-이름
+export AWS_ACCESS_KEY_ID=받은-값
+export AWS_SECRET_ACCESS_KEY=받은-값
+export AWS_DEFAULT_REGION=ap-northeast-2
+```
+
+SSO를 쓴다면 `aws sso login --profile 이름` 뒤에 `AWS_PROFILE`만 지정하면 됩니다. 연결 확인은 `python scripts/s3_smoke_test.py --config configs/env.aws.json`입니다(작은 임시 파일 하나를 올렸다 지웁니다).
 
 ### 3. 화면 띄우기
 
@@ -81,7 +93,14 @@ python -m src.pipelines.web.server
 ```powershell
 python -m src.main_pipeline --config configs/base.json    # data → train → evaluate → registry
 python -m src.main_pipeline --only data --config configs/prepare.v5.aws.json
-python -m src.main_pipeline --only train --config <make_colab_config.py가 만든 config>
+```
+
+학습 config는 손으로 쓰지 말고 만들게 하세요. 고른 값만 적고 나머지는 train의 기본값에 맡깁니다.
+
+```powershell
+python scripts/make_colab_config.py --list-datasets          # 쓸 수 있는 판 이름 보기
+python scripts/make_colab_config.py --dataset 목록에서-고른-이름 --epochs 12
+python -m src.main_pipeline --only train --config artifacts/colab/train.json
 ```
 
 앙상블과 재순위는 별도 stage가 아니라 `evaluate`가 config를 보고 함께 합니다.
