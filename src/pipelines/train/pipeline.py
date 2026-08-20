@@ -40,8 +40,10 @@ from .mmdetection_adapter import (
 from .model import ARCHITECTURE, SUPPORTED_ARCHITECTURES, build_model
 from .progress import ProgressEmitter
 from .trainer import (
+    BATCH_WEIGHTED_RESUME_STATE_VERSION,
     RESUME_STATE_VERSION,
     SUPPORTED_OPTIMIZERS,
+    SUPPORTED_RESUME_STATE_VERSIONS,
     set_seed,
     train_model,
 )
@@ -871,7 +873,7 @@ def _load_resume(
         raise ValueError(
             f"checkpoint predates resume support and cannot be resumed: {location}"
         )
-    if state.get("version") != RESUME_STATE_VERSION:
+    if state.get("version") not in SUPPORTED_RESUME_STATE_VERSIONS:
         raise ValueError(
             f"unsupported resume_state version: {state.get('version')}"
         )
@@ -924,6 +926,33 @@ def _load_resume(
             "resume checkpoint used a different train.gradient_accumulation_steps "
             f"({recorded_accumulation}) than this run "
             f"({expected['gradient_accumulation_steps']})"
+        )
+    # 같은 이유입니다. 유효 batch는 batch_size와 모으는 수를 곱한 값이라, 모으는 수만
+    # 대조하면 절반만 지키는 셈입니다. batch가 달라지면 epoch당 갱신 횟수와 schedule
+    # 걸음도 함께 달라집니다. **없음을 봐 주지 않습니다** — 이 key는 resume_state
+    # version 2보다 먼저 기록되기 시작했고 그보다 옛 state는 위에서 이미 거절되므로,
+    # 여기 닿는 checkpoint는 반드시 값을 들고 있습니다.
+    recorded_batch_size = training_config.get("batch_size")
+    if recorded_batch_size != expected["batch_size"]:
+        raise ValueError(
+            "resume checkpoint used a different train.batch_size "
+            f"({recorded_batch_size}) than this run ({expected['batch_size']})"
+        )
+    # version 2는 손실과 gradient를 batch 수로 나눴습니다. batch가 1이면 batch 수와
+    # 이미지 수가 같아 지금 방식과 **같은 수**가 나오므로 그대로 이어 붙여도 됩니다.
+    # 2 이상이면 다른 가중치로 적힌 history·best·early stopping 기준을 지금 재는
+    # 값과 견주게 됩니다. 가중치가 고정이어도 순위는 보존되지 않습니다 — 검증 batch
+    # 손실이 (0, 10)과 (4, 4)면 batch 평균은 뒤 epoch을, 이미지 평균은 앞 epoch을
+    # 고릅니다. 조용히 다른 checkpoint가 best라는 이름으로 나갑니다.
+    if (
+        state.get("version") == BATCH_WEIGHTED_RESUME_STATE_VERSION
+        and recorded_batch_size != 1
+    ):
+        raise ValueError(
+            "resume checkpoint has resume_state version "
+            f"{BATCH_WEIGHTED_RESUME_STATE_VERSION}, whose losses were averaged over "
+            f"batches instead of images; that only matches this run when batch_size "
+            f"is 1, but the checkpoint used {recorded_batch_size}"
         )
     # 같은 이유입니다. worker 수가 달라지면 augmentation의 무작위 수가 주 process의
     # RNG가 아니라 worker마다 따로 뿌린 RNG에서 나오므로, 이어붙인 실행이 끊기지 않고

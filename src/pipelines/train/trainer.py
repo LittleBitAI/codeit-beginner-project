@@ -22,7 +22,14 @@ from .errors import TrainError
 from .progress import ProgressEmitter
 
 
-RESUME_STATE_VERSION = 2
+#: 3부터는 손실과 gradient를 batch 수가 아니라 이미지 수로 나눕니다. 2로 적힌
+#: checkpoint는 batch가 1이었을 때만 두 방식이 같은 수를 냅니다.
+RESUME_STATE_VERSION = 3
+#: 이어서 학습할 수 있는 resume_state version입니다. 2를 어디까지 받아 주는지는
+#: `_load_resume`이 batch를 보고 정합니다.
+SUPPORTED_RESUME_STATE_VERSIONS = (2, RESUME_STATE_VERSION)
+#: 손실 가중치가 batch 수이던 마지막 version입니다.
+BATCH_WEIGHTED_RESUME_STATE_VERSION = 2
 
 
 class _PrecisionRuntime:
@@ -321,18 +328,23 @@ def _add_components(
     components: Mapping[str, float],
     *,
     phase: str,
+    weight: float = 1.0,
 ) -> None:
-    """Batch마다 loss key가 바뀌어 잘못된 평균이 생기는 것을 막습니다."""
+    """Batch마다 loss key가 바뀌어 잘못된 평균이 생기는 것을 막습니다.
+
+    `weight`는 그 batch에 든 이미지 수입니다. 마지막 batch가 덜 차면 batch마다
+    같은 무게로 더한 합이 이미지 평균과 달라집니다.
+    """
     if totals and set(totals) != set(components):
         raise TrainError(f"detector {phase} loss names changed between batches")
     if not totals:
         totals.update({name: 0.0 for name in components})
     for name, value in components.items():
-        totals[name] += value
+        totals[name] += value * weight
 
 
-def _average_components(totals: Mapping[str, float], batches: int) -> dict[str, float]:
-    return {name: value / batches for name, value in totals.items()}
+def _average_components(totals: Mapping[str, float], count: int) -> dict[str, float]:
+    return {name: value / count for name, value in totals.items()}
 
 
 def _state_on_cpu(model: nn.Module) -> dict[str, torch.Tensor]:
@@ -462,12 +474,17 @@ def _train_model(
     # 몇 개의 microbatch를 모아 한 번 갱신할지입니다. 1이면 지금까지와 같습니다.
     # GPU 메모리가 모자라 batch_size를 못 올릴 때 같은 효과를 냅니다.
     accumulation = max(1, int(settings.get("gradient_accumulation_steps", 1) or 1))
+    # 묶음을 batch 수가 아니라 **이미지 수**로 나누기 위한 값입니다. batch가 1이면
+    # 둘이 같지만, 2 이상이면 마지막 batch가 덜 찬 채로 끝날 수 있습니다.
+    batch_size = max(1, int(settings["batch_size"]))
+    train_image_count = len(train_dataset)
     for epoch in range(start_epoch, settings["epochs"] + 1):
         epoch_started_at = time.perf_counter()
         if progress is not None:
             progress.emit("epoch_started", epoch=epoch, epochs=settings["epochs"])
         model.train()
         train_total = 0.0
+        train_images = 0
         train_component_totals: dict[str, float] = {}
         # epoch이 끝난 뒤 남길 값입니다. 아래에서 batch마다 갱신합니다.
         learning_rate = optimizer.param_groups[0]["lr"]
@@ -481,20 +498,35 @@ def _train_model(
                 loss, components = _loss(model, images, targets, device)
             # 이 batch가 실제로 쓴 값이므로 schedule을 넘기기 전에 읽습니다.
             learning_rate = optimizer.param_groups[0]["lr"]
-            # **그 묶음이 실제로 모은 수**로 나눕니다. 나누지 않으면 gradient가 그
-            # 배로 커져 사실상 learning rate를 올린 것과 같아지고, 마지막 묶음까지
+            # **그 묶음이 실제로 모은 이미지 수**로 나눕니다. 나누지 않으면 gradient가
+            # 그 배로 커져 사실상 learning rate를 올린 것과 같아지고, 마지막 묶음까지
             # accumulation으로 나누면 반대로 그 몇 장의 gradient가 작아집니다.
+            #
+            # batch 수가 아니라 이미지 수인 이유는 마지막 batch가 덜 찰 수 있기
+            # 때문입니다. batch 수로 나누면 그 몇 장이 다른 이미지보다 무겁게
+            # 배우는데, 오류는 나지 않고 학습만 조용히 달라집니다. batch가 1이면
+            # 두 값이 같아 지금까지와 똑같이 돕니다.
             group_start = ((step - 1) // accumulation) * accumulation
             group_size = min(accumulation, total_steps - group_start)
-            precision.backward(loss / group_size)
+            group_images = (
+                min(train_image_count, (group_start + group_size) * batch_size)
+                - group_start * batch_size
+            )
+            precision.backward(loss * len(images) / group_images)
             # 마지막 묶음이 N개를 못 채우고 끝나면 그 gradient가 통째로 버려집니다.
             # 오류는 나지 않고 그 몇 장만 학습에서 빠지므로 알아채기 어렵습니다.
             if step % accumulation == 0 or step == total_steps:
                 precision.step(optimizer)
                 if schedule is not None:
                     schedule.step()
-            train_total += float(loss.detach().cpu())
-            _add_components(train_component_totals, components, phase="train")
+            train_total += float(loss.detach().cpu()) * len(images)
+            train_images += len(images)
+            _add_components(
+                train_component_totals,
+                components,
+                phase="train",
+                weight=len(images),
+            )
             if progress is not None:
                 progress.emit_step_progress(
                     epoch=epoch,
@@ -507,16 +539,19 @@ def _train_model(
         model.train()
         _freeze_batch_norm(model)
         validation_total = 0.0
+        validation_images = 0
         validation_component_totals: dict[str, float] = {}
         with torch.no_grad():
             for step, (images, targets) in enumerate(validation_loader, start=1):
                 with precision.autocast():
                     loss, components = _loss(model, images, targets, device)
-                validation_total += float(loss.detach().cpu())
+                validation_total += float(loss.detach().cpu()) * len(images)
+                validation_images += len(images)
                 _add_components(
                     validation_component_totals,
                     components,
                     phase="validation",
+                    weight=len(images),
                 )
                 if progress is not None:
                     progress.emit_step_progress(
@@ -527,13 +562,15 @@ def _train_model(
                         total_steps=len(validation_loader),
                     )
 
-        train_loss = train_total / len(train_loader)
-        validation_loss = validation_total / len(validation_loader)
+        # batch 수가 아니라 이미지 수로 나눕니다. 마지막 batch가 덜 차면 batch 평균은
+        # 그 몇 장을 다른 이미지보다 무겁게 세는 다른 가중치의 평균이 됩니다.
+        train_loss = train_total / train_images
+        validation_loss = validation_total / validation_images
         train_loss_components = _average_components(
-            train_component_totals, len(train_loader)
+            train_component_totals, train_images
         )
         validation_loss_components = _average_components(
-            validation_component_totals, len(validation_loader)
+            validation_component_totals, validation_images
         )
         epoch_record = {
             "epoch": epoch,

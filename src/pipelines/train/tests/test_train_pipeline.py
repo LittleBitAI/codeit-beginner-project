@@ -1994,6 +1994,38 @@ def test_run_rejects_resuming_into_a_different_accumulation(
     build_model_spy.assert_not_called()
 
 
+@pytest.mark.parametrize(("first", "second"), [(1, 2), (2, 1)])
+def test_run_rejects_resuming_into_a_different_batch_size(
+    local_config, monkeypatch, first, second
+):
+    """batch가 바뀌면 유효 batch와 epoch당 갱신 횟수가 함께 달라집니다.
+
+    바로 위 accumulation과 같은 이유입니다. 유효 batch는 두 값을 곱한 것이라
+    accumulation만 대조해서는 절반만 지키는 셈입니다. 막지 않으면 이어붙인 실행이
+    끊기지 않고 돈 실행과 다른데, 오류는 나지 않고 점수로만 드러납니다.
+    """
+
+    local_config["train"]["batch_size"] = first
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"].update({"epochs": 4, "batch_size": second})
+    build_model_spy = Mock()
+    monkeypatch.setattr(pipeline, "build_model", build_model_spy)
+
+    result = train.run(resumed)
+
+    assert result["status"] == "error"
+    assert "batch_size" in result["message"]
+    build_model_spy.assert_not_called()
+
+
 def test_a_worker_gets_its_own_s3_connection_instead_of_the_parents(monkeypatch):
     """fork한 worker가 부모의 S3 client를 그대로 쓰면 안 됩니다.
 
@@ -2144,6 +2176,99 @@ def test_an_old_checkpoint_without_the_input_size_key_resumes(local_config):
     result = train.run(resumed)
 
     assert result["status"] == "ok", result["message"]
+
+
+def test_a_checkpoint_without_the_batch_size_key_is_refused(local_config, monkeypatch):
+    """batch_size는 resume_state version 2보다 먼저 기록되기 시작했습니다.
+
+    version 2가 아닌 state는 앞에서 이미 거절되므로, 여기 닿는 checkpoint는 반드시
+    이 값을 들고 있습니다. 없다면 우리가 모르는 파일이라는 뜻이지 옛 실행이라는
+    뜻이 아닙니다. 없는 값을 1로 짐작하면 batch 2로 돌던 실행을 조용히 이어 붙입니다.
+    """
+
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+    checkpoint = torch.load(source, map_location="cpu", weights_only=False)
+    checkpoint["training_config"].pop("batch_size")
+    torch.save(checkpoint, source)
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"]["epochs"] = 4
+    build_model_spy = Mock()
+    monkeypatch.setattr(pipeline, "build_model", build_model_spy)
+
+    result = train.run(resumed)
+
+    assert result["status"] == "error"
+    assert "batch_size" in result["message"]
+    build_model_spy.assert_not_called()
+
+
+def test_a_batch_one_checkpoint_from_the_older_weighting_still_resumes(local_config):
+    """손실 가중치가 바뀌기 전의 checkpoint라도 batch 1이면 값이 같습니다.
+
+    batch가 1이면 batch 수와 이미지 수가 같아 옛 평균과 새 평균이 **같은 수**입니다.
+    그래서 이어 붙여도 섞이는 것이 없습니다. 지금까지 쌓인 checkpoint는 거의 전부
+    여기 해당하므로, 버전을 올렸다고 이것까지 막으면 멀쩡한 것을 버리는 셈입니다.
+    """
+
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+    checkpoint = torch.load(source, map_location="cpu", weights_only=False)
+    checkpoint["resume_state"]["version"] = 2
+    torch.save(checkpoint, source)
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"]["epochs"] = 4
+
+    result = train.run(resumed)
+
+    assert result["status"] == "ok", result["message"]
+
+
+def test_a_batch_two_checkpoint_from_the_older_weighting_is_refused(
+    local_config, monkeypatch
+):
+    """batch가 2 이상이던 옛 checkpoint는 손실이 다른 가중치로 적혀 있습니다.
+
+    이어 붙이면 batch 가중으로 적힌 best·early stopping 기준과 이미지 가중으로 새로
+    재는 값을 한 실행에서 견주게 됩니다. 가중치가 고정이어도 순위는 보존되지
+    않습니다 — 검증 batch 손실이 (0, 10)과 (4, 4)면 batch 평균은 뒤 epoch을, 이미지
+    평균은 앞 epoch을 고릅니다. 조용히 다른 checkpoint가 best로 나갑니다.
+    """
+
+    local_config["train"]["batch_size"] = 2
+    train.run(local_config)
+    source = (
+        REPOSITORY_ROOT
+        / local_config["train"]["output_dir"]
+        / "cpu-smoke"
+        / "last_checkpoint.pt"
+    )
+    checkpoint = torch.load(source, map_location="cpu", weights_only=False)
+    checkpoint["resume_state"]["version"] = 2
+    torch.save(checkpoint, source)
+
+    resumed = _resume_config(local_config, source)
+    resumed["train"]["epochs"] = 4
+    build_model_spy = Mock()
+    monkeypatch.setattr(pipeline, "build_model", build_model_spy)
+
+    result = train.run(resumed)
+
+    assert result["status"] == "error"
+    assert "version" in result["message"]
+    build_model_spy.assert_not_called()
 
 
 def test_an_old_checkpoint_without_the_accumulation_key_resumes_as_one(
@@ -3325,6 +3450,7 @@ def _train_with_accumulation(
     accumulation: int,
     lr_scheduler=None,
     learning_rate: float = 0.0,
+    batch_size: int = 1,
 ):
     monkeypatch.setattr(
         trainer_module, "_PrecisionRuntime", lambda precision, device: spy
@@ -3341,7 +3467,7 @@ def _train_with_accumulation(
     settings = {
         "seed": 17,
         "device": "cpu",
-        "batch_size": 1,
+        "batch_size": batch_size,
         "num_workers": 0,
         # 0으로 두어 묶음 사이에 가중치가 변하지 않게 합니다. 변하면 손실도 함께
         # 달라져서, 나눗셈이 맞는지와 model이 바뀐 것이 뒤섞입니다.
@@ -3415,6 +3541,74 @@ def test_a_partial_last_group_still_updates_the_weights(monkeypatch):
     # 마지막 묶음은 microbatch가 하나뿐입니다. 그런데도 accumulation으로 나누면
     # 그 몇 장의 gradient만 작아져, 오류 없이 그 데이터가 덜 반영됩니다.
     assert spy.scaled_losses[2] == pytest.approx(spy.scaled_losses[0] * 2)
+
+
+def test_a_short_last_batch_weighs_its_images_like_the_others(monkeypatch):
+    """묶음을 batch 수로 나누면 덜 찬 마지막 batch의 몇 장이 더 무거워집니다.
+
+    batch 1에서는 batch 수와 이미지 수가 같아 드러나지 않던 자리입니다. batch를
+    올릴 수 있게 되면서 생겼습니다. 이미지 3장을 batch 2로 나누면 2장과 1장이
+    되는데, 둘을 같은 비중으로 더하면 마지막 1장이 앞의 2장보다 두 배로 배웁니다.
+    오류는 나지 않고 학습만 조용히 달라집니다.
+    """
+
+    spy = _AccumulationSpy()
+
+    _train_with_accumulation(
+        monkeypatch, spy, images=3, accumulation=2, batch_size=2
+    )
+
+    # TinyDetector는 batch에 몇 장이 들었든 같은 손실을 냅니다. 그래서 세 장이 같은
+    # 비중을 가지려면 2장짜리가 1장짜리의 두 배로 실려야 합니다.
+    assert spy.events.count("backward") == 2
+    assert spy.scaled_losses[0] == pytest.approx(spy.scaled_losses[1] * 2)
+
+
+class _LossPerCallDetector(nn.Module):
+    """부를 때마다 정해 둔 손실을 차례로 내놓습니다. batch마다 값이 달라야 평균이 보입니다."""
+
+    def __init__(self, losses: list[float]) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.tensor(1.0))
+        self.losses = iter(losses)
+
+    def forward(self, images, targets):
+        return {"loss_classifier": self.weight.square() * 0 + next(self.losses)}
+
+
+def test_epoch_loss_averages_over_images_not_batches():
+    """덜 찬 마지막 batch가 있으면 batch 수로 나눈 평균은 이미지 평균이 아닙니다.
+
+    batch 1에서는 둘이 같아 드러나지 않던 자리입니다. 남는 값은 손실 곡선과
+    best checkpoint 판단에 그대로 실려 나가므로, 사람이 보는 숫자가 조용히
+    다른 가중치의 평균이 됩니다.
+    """
+
+    # 이미지 3장을 batch 2로 나누면 2장 + 1장입니다. 한 epoch의 호출 순서는
+    # 학습 batch 둘, 검증 batch 둘입니다.
+    model = _LossPerCallDetector([6.0, 3.0, 6.0, 3.0])
+    settings = {
+        "seed": 17,
+        "device": "cpu",
+        "batch_size": 2,
+        "num_workers": 0,
+        "learning_rate": 0.0,
+        "momentum": 0.0,
+        "weight_decay": 0.0,
+        "epochs": 1,
+    }
+
+    _, _, history = train_model(
+        model,
+        InMemoryDetectionDataset(1.0, size=3),
+        InMemoryDetectionDataset(0.0, size=3),
+        settings,
+    )
+
+    # 이미지 평균은 (6*2 + 3*1) / 3 = 5.0입니다. batch 평균이면 4.5가 됩니다.
+    assert history[0]["train_loss"] == pytest.approx(5.0)
+    assert history[0]["validation_loss"] == pytest.approx(5.0)
+    assert history[0]["train_loss_components"]["loss_classifier"] == pytest.approx(5.0)
 
 
 def test_schedule_length_counts_updates_not_microbatches(monkeypatch):
