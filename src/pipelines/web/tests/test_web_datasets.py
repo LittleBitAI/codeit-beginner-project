@@ -878,3 +878,11 @@ def test_prepare_config_keeps_the_trailing_slash_data_expects():
     )["data"]
 
     assert section["raw_prefix"] == "datasets/pill_detection/raw/v90/"
+
+
+@pytest.mark.parametrize("bad", ("s3://bucket/원본/", "https://example/원본/"))
+def test_prepare_config_refuses_a_uri_instead_of_mangling_it(bad: str):
+    """`s3://bucket/x`를 정규화에 넘기면 `s3:/bucket/x`로 조용히 뭉개집니다."""
+
+    with pytest.raises(WebValidationError):
+        datasets.build_prepare_config("8:2", raw_prefix=bad)

@@ -702,8 +702,20 @@ def local_processed_prefix() -> str:
     configured = os.environ.get("PILL_STORAGE_LOCAL_ROOT", "").strip()
     if not configured:
         return PROCESSED_ROOT
-    root = normalize_relative_posix(configured, label="local storage root")
-    return f"{root}/{PROCESSED_ROOT}"
+
+    # `LocalStorage`와 **같은 방식**으로 풉니다 — `~`를 펴고, 상대 경로는 실행 위치
+    # 기준으로 봅니다(`Path(root).expanduser().resolve()`). 여기서 다르게 풀면
+    # `~/판`처럼 쓰기는 되는데 목록만 못 찾는 자리가 다시 생깁니다.
+    root = Path(configured).expanduser()
+    if not root.is_absolute():
+        root = repository_root() / root
+    try:
+        relative = root.resolve().relative_to(repository_root().resolve())
+    except (OSError, ValueError) as error:
+        raise WebPathError(
+            "PILL_STORAGE_LOCAL_ROOT이 저장소 밖을 가리킵니다."
+        ) from error
+    return f"{relative.as_posix()}/{PROCESSED_ROOT}" if relative.parts else PROCESSED_ROOT
 
 
 def _local_processed_datasets() -> dict[str, Any]:
@@ -989,6 +1001,12 @@ def build_prepare_config(
     for key, value in (("raw_prefix", raw_prefix), ("processed_root", processed_root)):
         if not value:
             continue
+        if "://" in value:
+            # `s3://bucket/x`를 정규화에 넘기면 `s3:/bucket/x`로 **조용히 뭉개집니다.**
+            # 두 backend 모두 여기서는 URI가 아니라 prefix를 받습니다.
+            raise WebValidationError(
+                [FieldError(key, "URI가 아니라 저장소 기준 경로를 적어 주세요.")]
+            )
         try:
             normalized = normalize_relative_posix(value, label=key)
         except WebPathError as error:
