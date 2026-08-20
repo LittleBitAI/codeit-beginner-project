@@ -156,3 +156,34 @@ def test_a_locally_prepared_dataset_lands_where_the_list_looks(isolated_repo, mo
     found = {item["name"]: item for item in datasets.list_processed_datasets()["datasets"]}
 
     assert found["v90-seed42-8020-group"]["complete"] is True
+
+
+def test_the_list_follows_the_root_the_environment_forces(isolated_repo, monkeypatch):
+    """`PILL_STORAGE_LOCAL_ROOT`은 config를 이깁니다. 목록도 그 자리를 봐야 합니다.
+
+    `.env.example`이 권하는 값이 `artifacts`라, 그것을 그대로 쓴 사람은 준비는
+    되는데 목록만 비어 보였습니다.
+    """
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+    monkeypatch.setenv("PILL_STORAGE_LOCAL_ROOT", "artifacts")
+    write_dataset(isolated_repo / "artifacts" / ROOT, "v90-seed42-8020-group", *FILES)
+
+    listing = datasets.list_processed_datasets()
+
+    assert listing["root"] == f"artifacts/{ROOT}"
+    found = {item["name"]: item for item in listing["datasets"]}
+    assert found["v90-seed42-8020-group"]["complete"] is True
+    # 고를 수 있으려면 화면이 받는 경로도 그 자리를 가리켜야 합니다.
+    assert found["v90-seed42-8020-group"]["directory"].startswith("artifacts/")
+
+
+def test_a_root_outside_the_repository_says_so_instead_of_looking_empty(
+    isolated_repo, monkeypatch
+):
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+    monkeypatch.setenv("PILL_STORAGE_LOCAL_ROOT", "../밖")
+
+    listing = datasets.list_processed_datasets()
+
+    assert listing["datasets"] == []
+    assert listing["problems"]
