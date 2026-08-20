@@ -14,6 +14,7 @@
 | `contracts/README.md` | 전원 | pipeline 사이의 공용 계약 |
 | `docs/shared-files.md` | 전원 | 여러 명이 동시에 건드리면 부딪히는 파일 |
 | `docs/testing.md` | 전원 | 어떤 test를 남기고 어떤 test를 지우는가 |
+| `docs/reproduce.md` | 처음 보는 사람 | 자격 증명 없이 최고 점수 제출을 재현하고 화면으로 전 과정 해 보기 |
 | `docs/colab.md` | GPU가 없는 팀원 | Colab에서 팀 S3 데이터로 학습 돌리기 |
 | `onboarding/docs/onboarding.md` | 신규 팀원 | 환경 설치와 dependency 확인 |
 
@@ -46,6 +47,15 @@ python -m src.main_pipeline --config configs/base.json   # 전체 연결 확인
 python -m src.main_pipeline --only train                 # 한 pipeline만
 python -m pytest -q                                      # 공통 test
 ```
+
+학습 GUI는 frontend를 한 번 빌드한 뒤 띄웁니다. `http://127.0.0.1:8000`에서 데이터 준비, 학습, 평가, 앙상블, 임베딩 학습을 화면으로 합니다.
+
+```powershell
+cd src/pipelines/web/frontend; npm ci; npm run build; cd ../../../..
+python -m src.pipelines.web.server
+```
+
+팀 AWS 자격 증명 없이 최고 점수 제출을 재현하는 절차는 `docs/reproduce.md`에 있습니다.
 
 ## 저장·실행 역할
 

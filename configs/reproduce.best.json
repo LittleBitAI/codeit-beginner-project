@@ -1,0 +1,37 @@
+{
+  "project": {
+    "name": "pill-object-detection"
+  },
+  "execution": {
+    "mode": "real"
+  },
+  "storage": {
+    "backend": "local",
+    "local": {
+      "root": "artifacts"
+    }
+  },
+  "evaluate": {
+    "run_id": "reproduce-best",
+    "output_dir": "artifacts/reproduce/best",
+    "submission_uri": "artifacts/reproduce/best/submission.csv",
+    "class_map_uri": "datasets/pill_detection/reproduce/class_map.json",
+    "validation_manifest_uri": "datasets/pill_detection/reproduce/validation_manifest.json",
+    "predictions_input_uri": "datasets/pill_detection/reproduce/validation_predictions.json",
+    "test_manifest_uri": "datasets/pill_detection/reproduce/test_manifest.json",
+    "test_predictions_input_uris": [
+      "datasets/pill_detection/reproduce/fused/dino-4675.json",
+      "datasets/pill_detection/reproduce/fused/dino-b711.json",
+      "datasets/pill_detection/reproduce/fused/dino-bfeb.json"
+    ],
+    "rerank_crop_bank_uri": "datasets/pill_detection/reproduce/crop-bank-contract.tar.gz",
+    "rerank_checkpoint_uris": [
+      "datasets/pill_detection/reproduce/embeddings/resnet18.pt",
+      "datasets/pill_detection/reproduce/embeddings/resnet34.pt",
+      "datasets/pill_detection/reproduce/embeddings/resnet50.pt"
+    ],
+    "max_detections_per_image": 4,
+    "score_threshold": 0.0,
+    "device": "cuda"
+  }
+}
