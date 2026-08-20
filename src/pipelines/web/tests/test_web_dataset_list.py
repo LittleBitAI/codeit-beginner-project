@@ -156,3 +156,61 @@ def test_a_locally_prepared_dataset_lands_where_the_list_looks(isolated_repo, mo
     found = {item["name"]: item for item in datasets.list_processed_datasets()["datasets"]}
 
     assert found["v90-seed42-8020-group"]["complete"] is True
+
+
+def test_the_list_follows_the_root_the_environment_forces(isolated_repo, monkeypatch):
+    """`PILL_STORAGE_LOCAL_ROOT`은 config를 이깁니다. 목록도 그 자리를 봐야 합니다.
+
+    `.env.example`이 권하는 값이 `artifacts`라, 그것을 그대로 쓴 사람은 준비는
+    되는데 목록만 비어 보였습니다.
+    """
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+    monkeypatch.setenv("PILL_STORAGE_LOCAL_ROOT", "artifacts")
+    write_dataset(isolated_repo / "artifacts" / ROOT, "v90-seed42-8020-group", *FILES)
+
+    listing = datasets.list_processed_datasets()
+
+    assert listing["root"] == f"artifacts/{ROOT}"
+    found = {item["name"]: item for item in listing["datasets"]}
+    assert found["v90-seed42-8020-group"]["complete"] is True
+    # 고를 수 있으려면 화면이 받는 경로도 그 자리를 가리켜야 합니다.
+    assert found["v90-seed42-8020-group"]["directory"].startswith("artifacts/")
+
+
+def test_a_root_outside_the_repository_says_so_instead_of_looking_empty(
+    isolated_repo, monkeypatch
+):
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+    monkeypatch.setenv("PILL_STORAGE_LOCAL_ROOT", "../밖")
+
+    listing = datasets.list_processed_datasets()
+
+    assert listing["datasets"] == []
+    assert listing["problems"]
+
+
+@pytest.mark.parametrize("shape", ("absolute", "home"))
+def test_the_list_resolves_the_root_the_way_local_storage_does(
+    isolated_repo, monkeypatch, shape: str
+):
+    """`LocalStorage`는 `~`를 펴고 절대 경로를 그대로 씁니다. 목록도 같아야 합니다.
+
+    다르게 풀면 쓰기는 되는데 목록만 그 판을 못 찾습니다. 고친 자리가 다시 벌어집니다.
+    """
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+    store = isolated_repo / "판보관"
+    if shape == "absolute":
+        monkeypatch.setenv("PILL_STORAGE_LOCAL_ROOT", str(store))
+    else:
+        # `~`가 저장소 안을 가리키게 두고 그 상대 경로를 씁니다.
+        monkeypatch.setenv("HOME", str(isolated_repo))
+        monkeypatch.setenv("USERPROFILE", str(isolated_repo))
+        monkeypatch.setenv("PILL_STORAGE_LOCAL_ROOT", "~/판보관")
+    write_dataset(store / ROOT, "v90-seed42-8020-group", *FILES)
+
+    listing = datasets.list_processed_datasets()
+
+    assert listing["problems"] == []
+    found = {item["name"]: item for item in listing["datasets"]}
+    assert found["v90-seed42-8020-group"]["complete"] is True
+    assert found["v90-seed42-8020-group"]["directory"].startswith("판보관/")

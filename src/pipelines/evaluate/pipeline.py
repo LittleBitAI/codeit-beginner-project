@@ -259,7 +259,10 @@ def _prediction_source(
         raise InputArtifactError(
             f"{uri}: 어느 checkpoint의 증거인지 말하지 않아 합칠 수 없습니다."
         )
-    return str(store.artifact_identity(checkpoint.strip()))
+    # 이 checkpoint는 **열지 않습니다.** 합칠 예측이 어느 model의 증거인지 세는 데만
+    # 씁니다. 그래서 이 실행의 backend가 못 다루는 자리에 있어도 이름은 셉니다 —
+    # 자격 증명 없이 이미 만들어 둔 예측을 합치는 길이 여기서 막혔었습니다.
+    return str(store.artifact_identity(checkpoint.strip(), never_read=True))
 
 
 def _load_fusion_inputs(
