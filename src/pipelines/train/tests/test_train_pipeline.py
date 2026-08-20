@@ -469,8 +469,8 @@ def test_train_reads_exactly_the_setting_names_in_the_shared_contract(monkeypatc
             "momentum": 0.8,
         },
         {
-            # `input_size`와 절반 정밀도는 이 model에서만 받습니다. 그 조합은 CUDA와
-            # batch_size 1을 함께 요구하므로 나머지 값만 기본값과 다르게 보냅니다.
+            # `input_size`와 절반 정밀도는 이 model에서만 받습니다. 그 조합은 CUDA를
+            # 함께 요구하므로 나머지 값만 기본값과 다르게 보냅니다.
             **common,
             **adam,
             "architecture": train_contract.MMDETECTION_ARCHITECTURES[0],

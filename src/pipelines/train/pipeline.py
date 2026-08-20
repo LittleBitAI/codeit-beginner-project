@@ -443,8 +443,9 @@ def _settings(config: Mapping[str, Any]) -> dict[str, Any]:
         ),
         # microbatch를 몇 개 모아 한 번 갱신할지입니다. 1이면 지금까지와 같습니다.
         # web이 이 기본값을 먼저 복제해 두었습니다(PR 143).
-        # 기본값이 architecture에 따라 다릅니다. batch 1로만 도는 MMDetection model은
-        # 그만큼 모아야 쓸 만한 유효 batch가 됩니다. 기존 모델은 1입니다.
+        # 기본값이 architecture에 따라 다릅니다. batch 1로 도는 것을 전제로 MMDetection
+        # model은 그만큼 모아야 쓸 만한 유효 batch가 됩니다 — batch를 올렸다면 유효
+        # batch도 그만큼 곱해지므로 이 값을 함께 낮춥니다. 기존 모델은 1입니다.
         "gradient_accumulation_steps": _integer(
             raw,
             "gradient_accumulation_steps",

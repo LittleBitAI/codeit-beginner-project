@@ -343,7 +343,6 @@ def test_a_torchvision_run_sends_no_input_size():
         ("device", "cpu"),
         ("precision", "fp32"),
         ("optimizer", "SGD"),
-        ("batch_size", 2),
     ],
 )
 def test_mmdetection_refuses_unsupported_combinations(
@@ -359,6 +358,16 @@ def test_mmdetection_refuses_unsupported_combinations(
 
     with pytest.raises(Exception, match=field):
         normalize_train_settings(_mmdetection_request(**{field: value}))
+
+
+def test_mmdetection_accepts_a_batch_larger_than_one(monkeypatch):
+    """batch 크기는 train도 막지 않습니다. 화면이 train보다 좁으면 못 보내집니다."""
+
+    monkeypatch.setattr(train_config, "cuda_is_available", lambda: True)
+
+    settings = normalize_train_settings(_mmdetection_request(batch_size=2))
+
+    assert settings["batch_size"] == 2
 
 
 def test_every_offered_field_has_a_place_on_the_new_experiment_form():
