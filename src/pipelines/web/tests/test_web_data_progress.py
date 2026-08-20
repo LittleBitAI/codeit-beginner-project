@@ -79,6 +79,22 @@ def test_read_progress_reports_done_total_and_percent():
     }
 
 
+def test_crop_bank_is_a_read_stage_too():
+    """은행 자르기는 ``step_started``와 ``read_progress``를 둘 다 냅니다.
+
+    한쪽만 알면 준비에서 가장 오래 걸리는 단계가 통째로 "모르는 단계"로 세어져,
+    막대는 멈춘 채 malformed 줄만 쌓입니다.
+    """
+
+    state = feed(line("read_progress", stage="crop_bank", done=1180, total=4720))
+
+    result = snapshot(state)
+
+    assert result["read"]["stage"] == "crop_bank"
+    assert result["read"]["percent"] == pytest.approx(25.0)
+    assert state.malformed_lines == 0
+
+
 def test_second_read_stage_replaces_the_first():
     state = feed(
         line("read_progress", stage="annotations", done=1842, total=1842),
@@ -98,6 +114,7 @@ def test_second_read_stage_replaces_the_first():
     (
         ("split", "나누는 중"),
         ("manifests", "manifest 만드는 중"),
+        ("crop_bank", "참조 crop 자르는 중"),
         ("publish", "올리는 중"),
     ),
 )

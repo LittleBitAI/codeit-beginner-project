@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -827,6 +828,44 @@ def test_prepare_can_be_started_for_each_ratio(client, monkeypatch, ratio):
     assert preparation["split_ratio"] == ratio
     # 진행 블록이 응답에 실려 나가되, 아직 아무 줄도 못 봤으므로 지어내지 않습니다.
     assert preparation["progress"]["available"] is False
+
+
+def test_prepare_passes_the_crop_bank_request_all_the_way_to_the_config(
+    client, preparation_runner, monkeypatch
+):
+    """embedding 학습이 쓸 은행은 이 경로로만 만들어집니다.
+
+    받는 칸이 없으면 요청이 조용히 사라지고, data는 기본값 false로 은행을
+    건너뜁니다. 화면에 체크박스만 생기고 파일은 안 생기는 일을 막습니다.
+    """
+
+    from src.pipelines.web import datasets
+
+    seen: list[dict] = []
+
+    def record(config, on_progress_line=None, *, mode="prepare"):
+        seen.append(config)
+        return {
+            "ok": True,
+            "supported": True,
+            "exit_code": 0,
+            "artifacts": {key: f"artifacts/p/{key}.json" for key in DATA_ARTIFACT_KEYS},
+            "summary": {"mode": mode, "split_ratio": "8:2"},
+            "message": "준비 완료",
+        }
+
+    monkeypatch.setattr(datasets, "prepare_dataset", record)
+
+    response = client.post(
+        "/api/data/prepare", json={"split_ratio": "8:2", "crop_bank": True}
+    )
+    assert response.status_code == 202
+
+    deadline = time.monotonic() + 10
+    while preparation_runner.status()["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    assert [config["data"]["crop_bank"] for config in seen] == [True]
 
 
 @pytest.mark.parametrize("bad", ("7:3", "80:20", "", "0.2"))

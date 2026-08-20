@@ -521,6 +521,7 @@ def test_prepare_config_carries_the_chosen_ratio(ratio):
         "split_ratio": ratio,
         "seed": 7,
         "overwrite": True,
+        "crop_bank": False,
     }
     # dummy면 data가 준비를 건너뛰고 dummy 결과만 돌려줍니다.
     assert config["execution"] == {"mode": "real"}

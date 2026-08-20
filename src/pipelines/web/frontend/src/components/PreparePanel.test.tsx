@@ -1,15 +1,16 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PreparationProgress, PreparationState } from '../api/types';
 
 const prepareStatus = vi.fn();
+const startPreparation = vi.fn();
 
 vi.mock('../api/client', () => ({
   ApiError: class ApiError extends Error {},
   api: {
     prepareStatus: (...args: unknown[]) => prepareStatus(...args),
-    startPreparation: vi.fn(),
+    startPreparation: (...args: unknown[]) => startPreparation(...args),
   },
 }));
 
@@ -55,6 +56,23 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('PreparePanel · 참조 crop 은행', () => {
+  it('은행을 켜고 실행하면 그 요청을 함께 보낸다', async () => {
+    startPreparation.mockResolvedValue(undefined);
+    show({ status: 'idle' });
+
+    fireEvent.click(await screen.findByLabelText(/참조 crop 은행/));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '데이터 준비 실행' }));
+    });
+
+    expect(startPreparation).toHaveBeenCalledWith(
+      expect.objectContaining({ split_ratio: '8:2', crop_bank: true }),
+    );
+  });
+
 });
 
 describe('PreparePanel · 준비 진행 상황', () => {

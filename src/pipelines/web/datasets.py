@@ -929,8 +929,14 @@ def build_prepare_config(
     backend: str = "auto",
     raw_prefix: str | None = None,
     processed_root: str | None = None,
+    crop_bank: bool = False,
 ) -> dict[str, Any]:
-    """``--only data``로 원본에서 artifact를 만들게 하는 config를 만듭니다."""
+    """``--only data``로 원본에서 artifact를 만들게 하는 config를 만듭니다.
+
+    ``crop_bank``는 embedding 학습이 참조로 쓸 crop 은행을 같이 만들지입니다.
+    기본은 끔입니다 — 정답 상자마다 이미지를 한 번 더 열고 megabyte 단위 tar를
+    올리므로, 켠 실행만 그 비용을 냅니다.
+    """
 
     if split_ratio not in SPLIT_RATIOS:
         allowed = ", ".join(SPLIT_RATIOS)
@@ -943,12 +949,17 @@ def build_prepare_config(
         )
     if not isinstance(overwrite, bool):
         raise WebValidationError([FieldError("overwrite", "true 또는 false여야 합니다.")])
+    if not isinstance(crop_bank, bool):
+        raise WebValidationError([FieldError("crop_bank", "true 또는 false여야 합니다.")])
 
     section: dict[str, Any] = {
         "prepare": True,
         "split_ratio": split_ratio,
         "seed": seed,
         "overwrite": overwrite,
+        # 끈 경우에도 적어 둡니다. 값이 없으면 "물어본 적 없음"과 "끄기로 했음"이
+        # 실행 기록에서 같아 보입니다.
+        "crop_bank": crop_bank,
     }
     if raw_prefix:
         section["raw_prefix"] = raw_prefix

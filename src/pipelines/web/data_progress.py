@@ -31,12 +31,16 @@ _ERROR_MARKERS = ("[e]", "error", "traceback", "exception", "failed", "credentia
 READ_STAGES = {
     "annotations": "annotation 읽는 중",
     "test_images": "test 이미지 읽는 중",
+    # 은행은 단계 시작도 알리고 개수도 셉니다. 그래서 아래 STEPS에도 있습니다.
+    # 한쪽만 알면 준비에서 가장 오래 걸리는 단계가 통째로 "모르는 단계"가 됩니다.
+    "crop_bank": "참조 crop 자르는 중",
 }
 
 # 읽기가 끝난 뒤의 단계입니다.
 STEPS = {
     "split": "나누는 중",
     "manifests": "manifest 만드는 중",
+    "crop_bank": READ_STAGES["crop_bank"],
     "publish": "올리는 중",
 }
 
