@@ -423,7 +423,7 @@ export function NewExperimentSheet({
 }) {
   const navigate = useNavigate();
   const team = useTeam();
-  const { draft, setTrainField, setDataFields, setSaved } = useDraft();
+  const { draft, setTrainField, setTrainFields, setDataFields, setSaved } = useDraft();
   const [tab, setTab] = useState<TabKey>('basic');
   const [result, setResult] = useState<ValidationResult | null>(null);
   const [showJson, setShowJson] = useState(false);
@@ -609,6 +609,32 @@ export function NewExperimentSheet({
         </>
       }
     >
+      {/* 기본값은 가장 가벼운 model에 1 epoch입니다. 점수를 받은 설정으로 시작하려면
+          열 몇 칸을 정확히 고쳐야 해서, 서버가 가진 기록을 한 번에 채워 줍니다. */}
+      {(defaults.recipes ?? []).length > 0 && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 18, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ font: `400 12.5px/1 ${font.sans}`, color: color.textMuted }}>
+            점수를 받은 설정 채우기
+          </span>
+          {(defaults.recipes ?? []).map((recipe) => (
+            <Button
+              key={recipe.name}
+              kind="ghost"
+              title={recipe.note}
+              onClick={() =>
+                setTrainFields(
+                  Object.fromEntries(
+                    Object.entries(recipe.settings).map(([name, value]) => [name, String(value)]),
+                  ),
+                )
+              }
+            >
+              {recipe.label}
+            </Button>
+          ))}
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: 8, marginBottom: 26, flexWrap: 'wrap' }}>
         {TABS.map((item) => (
           <Chip

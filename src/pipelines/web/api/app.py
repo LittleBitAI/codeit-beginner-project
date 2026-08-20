@@ -28,6 +28,7 @@ from . import (
     routes_gpu,
     routes_meta,
     routes_settings,
+    routes_submission,
     routes_team,
     routes_train,
 )
@@ -146,6 +147,7 @@ def create_app(*, serve_frontend: bool = True) -> FastAPI:
     app.include_router(routes_team.router)
     app.include_router(routes_ensemble.router)
     app.include_router(routes_embedding.router)
+    app.include_router(routes_submission.router)
 
     if serve_frontend and _FRONTEND_DIST.is_dir():
         # 빌드된 frontend가 있으면 같은 origin에서 함께 제공합니다.

@@ -14,6 +14,7 @@ vi.mock('../api/client', () => ({
     startEvaluation: (...args: unknown[]) => startEvaluation(...args),
     retryRegistration: (...args: unknown[]) => retryRegistration(...args),
     evaluationPerClass: (...args: unknown[]) => evaluationPerClass(...args),
+    submissionUrl: (uri: string) => `/api/submission?uri=${encodeURIComponent(uri)}`,
   },
 }));
 
@@ -163,6 +164,11 @@ describe('EvaluatePanel · 대회 제출 흐름', () => {
     expect(await screen.findByText('mAP@[0.75:0.95]')).toBeInTheDocument();
     expect(screen.getByText('대회 제출 파일 생성 완료')).toBeInTheDocument();
     expect(screen.getByText('submissions/run-1/submission.csv')).toBeInTheDocument();
+    // 경로만 알려 주면 Kaggle에 올릴 파일을 사람이 탐색기에서 찾아 들어가야 합니다.
+    expect(screen.getByRole('link', { name: '내려받기' })).toHaveAttribute(
+      'href',
+      '/api/submission?uri=submissions%2Frun-1%2Fsubmission.csv',
+    );
   });
 
   it('기존 4-artifact 학습은 validation 평가 화면을 그대로 유지한다', async () => {

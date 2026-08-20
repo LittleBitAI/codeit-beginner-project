@@ -45,6 +45,16 @@ export interface Defaults {
   fields: FieldSpec[];
   data_fields: FieldSpec[];
   devices: { value: string; available: boolean; reason: string | null }[];
+  /** 실제로 점수를 받은 설정 한 벌. 구버전 backend 응답에는 없습니다. */
+  recipes?: Recipe[];
+}
+
+/** 끝난 실행의 설정을 그대로 옮겨 둔 것입니다. 기본값이 아니라 기록입니다. */
+export interface Recipe {
+  name: string;
+  label: string;
+  note: string;
+  settings: Record<string, string | number | boolean>;
 }
 
 export interface TrainCapabilityChoice {

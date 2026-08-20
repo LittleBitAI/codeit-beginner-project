@@ -35,6 +35,7 @@ from ..jobs.model import (
     JobRecord,
 )
 from ..masking import redact
+from ..recipes import recipe_specs
 from ..train_config import (
     build_resume_config,
     data_field_specs,
@@ -86,6 +87,9 @@ def get_defaults() -> dict[str, Any]:
         "train_capability": capability,
         "fields": field_specs(),
         "data_fields": data_field_specs(),
+        # 실제로 점수를 받은 설정 한 벌입니다. 기본값이 아니라 기록이라 화면이 채워
+        # 주기만 하고, 검증은 지금까지처럼 `/validate`가 합니다.
+        "recipes": recipe_specs(),
         "devices": [
             {"value": "cpu", "available": True, "reason": None},
             {

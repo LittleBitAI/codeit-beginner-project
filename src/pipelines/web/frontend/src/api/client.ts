@@ -247,6 +247,13 @@ export const api = {
 
   gpu: () => request<GpuStatus>('/api/gpu/status'),
 
+  /**
+   * 만들어 둔 제출 CSV를 그대로 받는 주소입니다. 링크에 걸어 쓰라고 주소만 만듭니다.
+   *
+   * S3에 올라간 결과는 이 주소로 받지 못합니다. 부르는 쪽이 `s3://`를 먼저 가릅니다.
+   */
+  submissionUrl: (uri: string) => `/api/submission?uri=${encodeURIComponent(uri)}`,
+
   evaluationStatus: (jobId: string) =>
     request<{ evaluation: EvaluationState }>(`/api/train/jobs/${jobId}/evaluate`),
 

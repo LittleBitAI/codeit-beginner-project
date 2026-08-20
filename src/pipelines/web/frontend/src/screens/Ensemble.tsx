@@ -449,6 +449,20 @@ export function Ensemble() {
           {typeof submissionUri === 'string' ? (
             <div style={{ ...type.monoId, color: color.textMid, marginTop: 6 }}>
               제출 CSV: {submissionUri}
+              {/* 저장소 안에 만든 것만 바로 받을 수 있습니다. S3에 올라간 것은
+                  bucket을 볼 수 있는 사람이 다른 길로 받습니다. */}
+              {!submissionUri.startsWith('s3://') && (
+                <>
+                  {' · '}
+                  <a
+                    href={api.submissionUrl(submissionUri)}
+                    download
+                    style={{ color: color.accent }}
+                  >
+                    내려받기
+                  </a>
+                </>
+              )}
             </div>
           ) : null}
         </AlertRow>
