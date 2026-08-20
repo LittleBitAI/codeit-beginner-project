@@ -41,7 +41,7 @@ function dataset(overrides: Partial<ProcessedDataset> = {}): ProcessedDataset {
   };
 }
 
-function stub(datasets: ProcessedDataset[] = [dataset()]) {
+function stub(datasets: ProcessedDataset[] = [dataset()], banks: ProcessedDataset[] = []) {
   vi.spyOn(api, 'embeddingDefaults').mockResolvedValue({
     backbones: ['resnet18', 'resnet34', 'resnet50'],
     devices: ['cpu', 'cuda'],
@@ -62,6 +62,23 @@ function stub(datasets: ProcessedDataset[] = [dataset()]) {
     root: 'datasets/pill_detection/processed/',
     datasets,
     problems: [],
+  });
+  vi.spyOn(api, 'listCropBanks').mockResolvedValue({
+    backend: 'local',
+    root: 'datasets/pill_detection/crop-bank/',
+    datasets: banks,
+    problems: [],
+  });
+}
+
+/** 전처리 폴더 밖에 손으로 올린 은행. manifest가 없으므로 `complete`가 false입니다. */
+function handMadeBank(): ProcessedDataset {
+  return dataset({
+    name: '20260817',
+    directory: 'datasets/pill_detection/crop-bank/20260817/',
+    complete: false,
+    missing: ['train_manifest_uri', 'validation_manifest_uri', 'dataset_summary_uri'],
+    has_test_manifest: false,
   });
 }
 
@@ -100,6 +117,56 @@ describe('embedding 학습 시트', () => {
 
     await waitFor(() => expect(start).toHaveBeenCalled());
     expect(start.mock.calls[0]?.[1]).toBe('login-token');
+  });
+
+  it('전처리 폴더 밖에 손으로 올린 은행도 같은 목록에서 고른다', async () => {
+    // 0.63594를 만든 은행은 준비가 만든 것이 아니라 `crop-bank/<날짜>/`에 있습니다.
+    // 전처리 폴더만 보여 주면 그 은행으로는 학습을 걸 방법이 없습니다.
+    stub([dataset()], [handMadeBank()]);
+    const start = vi
+      .spyOn(api, 'startEmbedding')
+      .mockResolvedValue({ config_id: 'c1', run_id: 'web-emb' });
+
+    render(<EmbeddingTrainSheet onClose={() => undefined} />);
+    fireEvent.change(await screen.findByLabelText('crop 은행'), {
+      target: { value: 'datasets/pill_detection/crop-bank/20260817/' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '학습 걸기' }));
+
+    await waitFor(() => expect(start).toHaveBeenCalled());
+    expect(start.mock.calls[0]?.[0]).toMatchObject({
+      crop_bank_uri: 'datasets/pill_detection/crop-bank/20260817/crop_bank.tar',
+      class_map_uri: 'datasets/pill_detection/crop-bank/20260817/class_map.json',
+    });
+  });
+
+  it('class map이 없는 은행은 고르는 자리에 두지 않는다', async () => {
+    // 은행만 있고 class map이 없으면 학습은 대기열을 지나 자기 차례에 거절당합니다.
+    // 손으로 올린 폴더는 그 짝이 보장되지 않아 여기가 유일한 문의 자리입니다.
+    stub(
+      [dataset()],
+      [handMadeBank(), { ...handMadeBank(), name: '20260901', missing: ['class_map_uri'] }],
+    );
+
+    render(<EmbeddingTrainSheet onClose={() => undefined} />);
+    // 목록이 도착한 뒤에 재야 합니다. 이 줄을 빼면 아무것도 안 그려진 화면을 재게 되어,
+    // 아래를 거르는 문을 통째로 없애도 그냥 통과합니다(실제로 확인했습니다).
+    await screen.findByText(/20260817/);
+
+    expect(screen.queryByText(/20260901/)).toBeNull();
+  });
+
+  it('이름이 같아도 어느 자리의 은행인지 구분해 보여 준다', async () => {
+    // 둘 다 "v5"로 보이면 밤새 도는 학습을 엉뚱한 은행으로 겁니다.
+    stub(
+      [dataset({ name: 'v5' })],
+      [{ ...handMadeBank(), name: 'v5', directory: 'datasets/pill_detection/crop-bank/v5/' }],
+    );
+
+    render(<EmbeddingTrainSheet onClose={() => undefined} />);
+
+    expect(await screen.findByText('v5')).toBeInTheDocument();
+    expect(screen.getByText('v5 (crop-bank)')).toBeInTheDocument();
   });
 
   it('은행이 없는 전처리 폴더는 고르는 자리에 두지 않는다', async () => {

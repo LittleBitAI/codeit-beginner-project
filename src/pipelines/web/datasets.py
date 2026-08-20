@@ -54,6 +54,7 @@ __all__ = [
     "classify_document",
     "clear_selection",
     "inspect_directory",
+    "list_crop_banks",
     "list_processed_datasets",
     "load_selection",
     "read_eda_report",
@@ -109,6 +110,10 @@ TEST_MANIFEST_FILE_NAME = "test_manifest.json"
 EDA_REPORT_FILE_NAME = "report.json"
 # data가 crop 은행을 함께 만들었을 때만 있습니다. embedding 학습이 이것을 봅니다.
 CROP_BANK_FILE_NAME = "crop_bank.tar"
+# 준비가 만들지 않은 은행이 놓이는 자리입니다. 전처리 폴더가 아니므로 manifest가
+# 없고, 그래서 학습 dataset 목록에는 절대 섞지 않습니다. 여기 폴더도 은행과
+# class map을 같은 두 이름으로 갖춰야 화면이 집을 수 있습니다.
+CROP_BANK_ROOT = "datasets/pill_detection/crop-bank/"
 
 
 def _looks_like_class_map(document: Any) -> bool:
@@ -658,11 +663,30 @@ def list_processed_datasets() -> dict[str, Any]:
     ``inspect``가 보여 줍니다.
     """
 
-    backend = resolve_backend("auto")
-    if backend != "s3":
-        return _local_processed_datasets()
+    return _list_folders(PROCESSED_ROOT, label="전처리 폴더")
+
+
+def list_crop_banks() -> dict[str, Any]:
+    """준비가 만들지 않은 crop 은행 폴더 목록입니다. 같은 항목 모양을 씁니다.
+
+    은행이 늘 전처리 폴더 안에 있는 것은 아닙니다. 손으로 잘라 올린 은행은
+    ``crop-bank/<날짜>/``에 있고, 전처리 폴더만 훑으면 embedding 학습 화면에
+    영영 안 나옵니다.
+
+    **학습 dataset 목록과 따로 둡니다.** 여기 폴더에는 manifest가 없어서, 한
+    목록에 섞으면 학습 데이터를 고르는 자리에 영영 못 고를 줄이 늘어납니다.
+    """
+
+    return _list_folders(CROP_BANK_ROOT, label="crop 은행 폴더")
+
+
+def _list_folders(root_prefix: str, *, label: str) -> dict[str, Any]:
+    """저장소 한 자리를 훑어 폴더별 artifact 유무를 돌려줍니다. 읽기만 합니다."""
+
+    if resolve_backend("auto") != "s3":
+        return _local_folders(root_prefix, label=label)
     # `resolve_backend`는 bucket이 설정됐을 때만 s3를 돌려주므로 여기서는 늘 있습니다.
-    root = f"s3://{storage_environment()['bucket']}/{PROCESSED_ROOT}"
+    root = f"s3://{storage_environment()['bucket']}/{root_prefix}"
 
     from src.common import StorageError, create_storage
 
@@ -687,8 +711,8 @@ def list_processed_datasets() -> dict[str, Any]:
     }
 
 
-def local_processed_prefix() -> str:
-    """준비 결과가 **실제로** 쌓이는 자리를 저장소 기준 상대 경로로 돌려줍니다.
+def local_processed_prefix(root_prefix: str = PROCESSED_ROOT) -> str:
+    """저장소 안 한 자리가 local backend에서 **실제로** 놓이는 상대 경로입니다.
 
     `create_storage`는 `PILL_STORAGE_LOCAL_ROOT`를 config보다 **먼저** 봅니다
     (`src/common/storage.py`). 그래서 화면이 config에 어떤 root를 적어 보내든, 그
@@ -696,12 +720,13 @@ def local_processed_prefix() -> str:
     못 찾습니다 — `.env.example`이 권하는 값이 `artifacts`라 흔한 조합입니다.
 
     그래서 쓰는 쪽 규칙을 여기서 다시 만들지 않고 **같은 환경 변수를 같은 순서로**
-    봅니다.
+    봅니다. 전처리 폴더든 crop 은행 폴더든 같은 root 아래로 옮겨지므로 자리마다
+    규칙을 다시 쓰지 않습니다.
     """
 
     configured = os.environ.get("PILL_STORAGE_LOCAL_ROOT", "").strip()
     if not configured:
-        return PROCESSED_ROOT
+        return root_prefix
 
     # `LocalStorage`와 **같은 방식**으로 풉니다 — `~`를 펴고, 상대 경로는 실행 위치
     # 기준으로 봅니다(`Path(root).expanduser().resolve()`). 여기서 다르게 풀면
@@ -715,15 +740,15 @@ def local_processed_prefix() -> str:
         raise WebPathError(
             "PILL_STORAGE_LOCAL_ROOT이 저장소 밖을 가리킵니다."
         ) from error
-    return f"{relative.as_posix()}/{PROCESSED_ROOT}" if relative.parts else PROCESSED_ROOT
+    return f"{relative.as_posix()}/{root_prefix}" if relative.parts else root_prefix
 
 
-def _local_processed_datasets() -> dict[str, Any]:
-    """local backend에서 전처리 폴더를 훑습니다."""
+def _local_folders(root_prefix: str, *, label: str) -> dict[str, Any]:
+    """local backend에서 한 자리를 훑습니다."""
 
     try:
-        prefix = local_processed_prefix()
-        root = resolve_within_repo(prefix, label="전처리 폴더")
+        prefix = local_processed_prefix(root_prefix)
+        root = resolve_within_repo(prefix, label=label)
     except WebPathError:
         # root가 저장소 밖이면 이 화면은 그 자리를 열지 않습니다. 조용히 비워 두면
         # 준비는 되는데 목록만 비어 보여서, 어디를 봐야 하는지 알 수가 없습니다.

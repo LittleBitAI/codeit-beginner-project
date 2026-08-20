@@ -130,6 +130,37 @@ def test_the_route_serves_the_list(client, isolated_repo, monkeypatch):
     assert body["datasets"][0]["directory"].endswith("v5-seed42-8020-group-angle/")
 
 
+def test_the_route_serves_hand_made_crop_banks_from_outside_the_processed_root(
+    client, isolated_repo, monkeypatch
+):
+    """은행이 늘 전처리 폴더 안에 있는 것은 아닙니다.
+
+    0.63594를 만든 은행은 손으로 잘라 `crop-bank/<날짜>/`에 올렸습니다. 전처리
+    폴더만 훑으면 그 은행은 embedding 학습 화면에 영영 안 나옵니다.
+    """
+
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+    write_dataset(
+        isolated_repo / datasets.CROP_BANK_ROOT, "20260817", "crop_bank.tar", "class_map.json"
+    )
+
+    entry = client.get("/api/data/crop-banks").json()["datasets"][0]
+
+    assert entry["name"] == "20260817"
+    assert entry["has_crop_bank"] is True
+    # 화면이 여기에 file 이름을 붙여 두 URI를 만듭니다.
+    assert entry["directory"].endswith("crop-bank/20260817/")
+
+
+def test_the_crop_bank_list_does_not_repeat_the_processed_datasets(isolated_repo, monkeypatch):
+    """화면이 두 목록을 이어 붙이므로, 겹치면 같은 판이 두 번 보입니다."""
+
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+    write_dataset(isolated_repo / ROOT, "v6-seed42-8020-group", *FILES, "crop_bank.tar")
+
+    assert datasets.list_crop_banks()["datasets"] == []
+
+
 @pytest.mark.parametrize("key", ("name", "directory", "complete", "missing", "has_eda_report"))
 def test_every_entry_carries_what_the_screen_draws(client, isolated_repo, monkeypatch, key):
     monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)

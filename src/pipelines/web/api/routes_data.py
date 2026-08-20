@@ -37,6 +37,17 @@ def list_datasets() -> dict[str, Any]:
     return datasets.list_processed_datasets()
 
 
+@router.get("/crop-banks")
+def list_crop_banks() -> dict[str, Any]:
+    """준비가 만들지 않고 손으로 올린 crop 은행 폴더입니다.
+
+    embedding 학습 화면이 전처리 폴더 목록과 이어 붙여 함께 보여 줍니다. 학습
+    데이터를 고르는 목록에는 섞지 않습니다 — 여기 폴더에는 manifest가 없습니다.
+    """
+
+    return datasets.list_crop_banks()
+
+
 @router.post("/inspect")
 def inspect(payload: DirectoryRequest = Body(...)) -> dict[str, Any]:
     """폴더를 살펴보기만 합니다. 고르지도, 저장하지도 않습니다."""
