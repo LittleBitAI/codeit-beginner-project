@@ -1,15 +1,16 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { PreparationProgress, PreparationState } from '../api/types';
 
 const prepareStatus = vi.fn();
+const startPreparation = vi.fn();
 
 vi.mock('../api/client', () => ({
   ApiError: class ApiError extends Error {},
   api: {
     prepareStatus: (...args: unknown[]) => prepareStatus(...args),
-    startPreparation: vi.fn(),
+    startPreparation: (...args: unknown[]) => startPreparation(...args),
   },
 }));
 
@@ -188,5 +189,42 @@ describe('PreparePanel · 준비 진행 상황', () => {
 
     expect(await screen.findByText(/데이터 준비 완료/)).toBeInTheDocument();
     expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  });
+});
+
+describe('PreparePanel · 원본 경로', () => {
+  const idle: PreparationState = {
+    status: 'idle',
+    started_at: null,
+    finished_at: null,
+  };
+
+  it('적은 경로를 그대로 실어 보낸다', async () => {
+    startPreparation.mockResolvedValue({});
+    show(idle);
+
+    fireEvent.change(await screen.findByPlaceholderText('datasets/pill_detection/raw/<판>/'), {
+      target: { value: ' datasets/pill_detection/raw/v90/ ' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '데이터 준비 실행' }));
+    });
+
+    expect(startPreparation).toHaveBeenCalledWith(
+      expect.objectContaining({ raw_prefix: 'datasets/pill_detection/raw/v90/' }),
+    );
+  });
+
+  it('비워 두면 보내지 않아 서버가 기본값을 쓰게 둔다', async () => {
+    startPreparation.mockResolvedValue({});
+    show(idle);
+
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: '데이터 준비 실행' }));
+    });
+
+    expect(startPreparation).toHaveBeenCalledWith(
+      expect.not.objectContaining({ raw_prefix: expect.anything() }),
+    );
   });
 });
