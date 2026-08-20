@@ -127,25 +127,44 @@ def _bucket_uri(store: Any, key: str) -> str:
 
 
 def download_many(
-    store: Any, pairs: Sequence[tuple[str, Path]], *, label: str, resume: bool
+    store: Any,
+    pairs: Sequence[tuple[str, Path]],
+    *,
+    label: str,
+    resume: bool,
+    overwrite: bool,
 ) -> None:
     """(S3 key, 로컬 경로) 쌍을 한꺼번에 받습니다.
 
-    기본은 **있어도 다시 받습니다.** 있다고 건너뛰면, 앞선 실행이나 다른 출처가 남긴
-    파일이 그대로 번들에 들어가고 `SHA256SUMS`가 그것을 정품으로 서명해 줍니다. 이
-    번들의 존재 이유가 "점수를 낸 그 바이트"인데 그것을 확인할 길이 사라집니다.
+    **이미 있는 파일을 만나면 기본은 멈춥니다.** 두 갈래가 모두 위험해서 사람이 골라야
+    합니다.
 
-    ``resume``은 그 위험을 아는 사람이 끊긴 다운로드를 이어받을 때만 켭니다.
+    - 건너뛰면 앞선 실행이나 다른 출처가 남긴 파일이 그대로 번들에 들어가고
+      `SHA256SUMS`가 그것을 정품으로 서명해 줍니다. 이 번들의 존재 이유가 "점수를 낸 그
+      바이트"인데 확인할 길이 사라집니다.
+    - 덮어쓰면 그 자리에 있던 것이 사라집니다. 기본 목적지가 저장소 root라 남의 산출물
+      위일 수 있습니다.
+
+    ``resume``은 끊긴 다운로드를 이어받을 때(있는 것을 믿는다), ``overwrite``는 다시
+    받아 채울 때(있는 것을 버린다) 켭니다.
     """
 
-    todo = [(key, path) for key, path in pairs if resume is False or not path.exists()]
+    existing = [path for _, path in pairs if path.exists()]
+    if existing and not resume and not overwrite:
+        shown = ", ".join(path.name for path in existing[:3])
+        raise BundleError(
+            f"{label}: 이미 있는 파일이 {len(existing)}개 있습니다 ({shown}…). "
+            "이어받으려면 --resume, 다시 받으려면 --overwrite를 주세요."
+        )
+
+    todo = [(key, path) for key, path in pairs if overwrite or not path.exists()]
     print(f"{label}: {len(pairs)}개 중 {len(todo)}개 내려받습니다.")
     if not todo:
         return
 
     def fetch(item: tuple[str, Path]) -> None:
         key, path = item
-        store.download_file(_bucket_uri(store, key), path, overwrite=True)
+        store.download_file(_bucket_uri(store, key), path, overwrite=overwrite)
 
     with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
         for index, _ in enumerate(pool.map(fetch, todo), start=1):
@@ -322,14 +341,16 @@ def pack(out: Path, files: Sequence[Path], archive: Path) -> None:
     print(f"묶었습니다: {archive.name} ({archive.stat().st_size / 1e9:.2f} GB)")
 
 
-def build(out: Path, *, groups: int, skip_test_images: bool, resume: bool) -> list[Path]:
+def build(
+    out: Path, *, groups: int, skip_test_images: bool, resume: bool, overwrite: bool
+) -> list[Path]:
     """번들에 담을 파일을 모두 제자리에 놓고, 담을 목록을 돌려줍니다."""
 
     store = storage()
     files: list[Path] = []
 
     fixed = [(key, out / target) for key, target in FIXED_FILES]
-    download_many(store, fixed, label="재현 재료", resume=resume)
+    download_many(store, fixed, label="재현 재료", resume=resume, overwrite=overwrite)
     files.extend(path for _, path in fixed)
 
     files.append(write_test_manifest(store, out))
@@ -337,14 +358,14 @@ def build(out: Path, *, groups: int, skip_test_images: bool, resume: bool) -> li
 
     if not skip_test_images:
         pairs = test_image_pairs(store, out)
-        download_many(store, pairs, label="test 이미지", resume=resume)
+        download_many(store, pairs, label="test 이미지", resume=resume, overwrite=overwrite)
         files.extend(path for _, path in pairs)
 
     if groups > 0:
         chosen = choose_demo_groups(_annotation_entries(store), wanted=groups)
         annotations, images = demo_pairs(chosen, out)
-        download_many(store, annotations, label="데모 annotation", resume=resume)
-        download_many(store, images, label="데모 train 이미지", resume=resume)
+        download_many(store, annotations, label="데모 annotation", resume=resume, overwrite=overwrite)
+        download_many(store, images, label="데모 train 이미지", resume=resume, overwrite=overwrite)
         files.extend(path for _, path in annotations)
         files.extend(path for _, path in images)
 
@@ -387,9 +408,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--resume",
         action="store_true",
         help=(
-            "이미 있는 파일을 다시 받지 않습니다. 끊긴 다운로드를 이어받을 때만 쓰세요 — "
-            "다른 출처가 남긴 파일이 그대로 번들에 들어가고 SHA256SUMS가 그것을 서명합니다"
+            "이미 있는 파일을 그대로 두고 없는 것만 받습니다. 끊긴 다운로드를 이어받을 "
+            "때만 쓰세요 — 다른 출처가 남긴 파일도 번들에 들어가고 SHA256SUMS가 서명합니다"
         ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="이미 있는 파일을 버리고 다시 받습니다. 그 자리에 있던 것은 사라집니다",
     )
     args = parser.parse_args(argv)
 
@@ -402,6 +428,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             groups=args.groups,
             skip_test_images=args.skip_test_images,
             resume=args.resume,
+            overwrite=args.overwrite,
         )
         files.append(write_checksums(out, files))
         if args.pack:

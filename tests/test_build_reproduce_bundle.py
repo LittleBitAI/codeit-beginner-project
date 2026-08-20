@@ -158,11 +158,36 @@ def test_a_destination_inside_the_repository_passes():
     assert _inside_repository("artifacts/reproduce-bundle", label="번들 폴더").is_absolute()
 
 
-def test_files_already_there_are_downloaded_again_unless_resume(tmp_path):
-    """있다고 건너뛰면 남의 파일이 그대로 번들에 들어가고 SHA256SUMS가 서명합니다."""
+def test_a_file_already_there_stops_the_build_until_a_person_chooses(tmp_path):
+    """건너뛰면 남의 파일이 서명을 받고, 덮어쓰면 있던 것이 사라집니다.
+
+    둘 다 위험하므로 기본은 멈추고 사람이 고르게 합니다.
+    """
 
     target = tmp_path / "이미있음.json"
     target.write_text("{}", encoding="utf-8")
+    fetched: list[tuple[str, bool]] = []
+
+    class Store:
+        bucket = "team-bucket"
+
+        def download_file(self, source, destination, *, overwrite=False):
+            fetched.append((str(source), overwrite))
+
+    pairs = [("key.json", target)]
+
+    with pytest.raises(BundleError):
+        download_many(Store(), pairs, label="test", resume=False, overwrite=False)
+    assert fetched == []
+
+    download_many(Store(), pairs, label="test", resume=True, overwrite=False)
+    assert fetched == []
+
+    download_many(Store(), pairs, label="test", resume=False, overwrite=True)
+    assert fetched == [("s3://team-bucket/key.json", True)]
+
+
+def test_a_missing_file_is_fetched_without_any_flag(tmp_path):
     fetched: list[str] = []
 
     class Store:
@@ -170,11 +195,13 @@ def test_files_already_there_are_downloaded_again_unless_resume(tmp_path):
 
         def download_file(self, source, destination, *, overwrite=False):
             fetched.append(str(source))
-            assert overwrite is True
 
-    download_many(Store(), [("key.json", target)], label="test", resume=False)
+    download_many(
+        Store(),
+        [("key.json", tmp_path / "없음.json")],
+        label="test",
+        resume=False,
+        overwrite=False,
+    )
+
     assert fetched == ["s3://team-bucket/key.json"]
-
-    fetched.clear()
-    download_many(Store(), [("key.json", target)], label="test", resume=True)
-    assert fetched == []
