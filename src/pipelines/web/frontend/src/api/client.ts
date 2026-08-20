@@ -326,6 +326,7 @@ export const api = {
     seed?: number;
     overwrite?: boolean;
     backend?: string;
+    raw_prefix?: string;
   }) =>
     request<PreparationResponse>('/api/data/prepare', {
       method: 'POST',

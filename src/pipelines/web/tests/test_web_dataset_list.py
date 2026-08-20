@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -168,3 +169,79 @@ def test_every_entry_carries_what_the_screen_draws(client, isolated_repo, monkey
     entry = client.get("/api/data/datasets").json()["datasets"][0]
 
     assert key in entry
+
+
+def test_a_locally_prepared_dataset_lands_where_the_list_looks(isolated_repo, monkeypatch):
+    """준비가 쓰는 자리와 목록이 보는 자리는 같아야 합니다.
+
+    다르면 로컬에서 준비한 사람의 화면에는 방금 만든 판이 없습니다. 경로를 손으로
+    붙여넣는 길만 남는데, 그러라고 만든 목록이 아닙니다. 팀은 늘 S3로 준비해서
+    아무도 밟지 않았습니다.
+    """
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+    config = datasets.build_prepare_config("8:2")
+
+    root = Path(config["storage"]["local"]["root"]) / ROOT
+    write_dataset(root, "v90-seed42-8020-group", *FILES, "test_manifest.json")
+
+    found = {item["name"]: item for item in datasets.list_processed_datasets()["datasets"]}
+
+    assert found["v90-seed42-8020-group"]["complete"] is True
+
+
+def test_the_list_follows_the_root_the_environment_forces(isolated_repo, monkeypatch):
+    """`PILL_STORAGE_LOCAL_ROOT`은 config를 이깁니다. 목록도 그 자리를 봐야 합니다.
+
+    `.env.example`이 권하는 값이 `artifacts`라, 그것을 그대로 쓴 사람은 준비는
+    되는데 목록만 비어 보였습니다.
+    """
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+    monkeypatch.setenv("PILL_STORAGE_LOCAL_ROOT", "artifacts")
+    write_dataset(isolated_repo / "artifacts" / ROOT, "v90-seed42-8020-group", *FILES)
+
+    listing = datasets.list_processed_datasets()
+
+    assert listing["root"] == f"artifacts/{ROOT}"
+    found = {item["name"]: item for item in listing["datasets"]}
+    assert found["v90-seed42-8020-group"]["complete"] is True
+    # 고를 수 있으려면 화면이 받는 경로도 그 자리를 가리켜야 합니다.
+    assert found["v90-seed42-8020-group"]["directory"].startswith("artifacts/")
+
+
+def test_a_root_outside_the_repository_says_so_instead_of_looking_empty(
+    isolated_repo, monkeypatch
+):
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+    monkeypatch.setenv("PILL_STORAGE_LOCAL_ROOT", "../밖")
+
+    listing = datasets.list_processed_datasets()
+
+    assert listing["datasets"] == []
+    assert listing["problems"]
+
+
+@pytest.mark.parametrize("shape", ("absolute", "home"))
+def test_the_list_resolves_the_root_the_way_local_storage_does(
+    isolated_repo, monkeypatch, shape: str
+):
+    """`LocalStorage`는 `~`를 펴고 절대 경로를 그대로 씁니다. 목록도 같아야 합니다.
+
+    다르게 풀면 쓰기는 되는데 목록만 그 판을 못 찾습니다. 고친 자리가 다시 벌어집니다.
+    """
+    monkeypatch.delenv("PILL_STORAGE_S3_BUCKET", raising=False)
+    store = isolated_repo / "판보관"
+    if shape == "absolute":
+        monkeypatch.setenv("PILL_STORAGE_LOCAL_ROOT", str(store))
+    else:
+        # `~`가 저장소 안을 가리키게 두고 그 상대 경로를 씁니다.
+        monkeypatch.setenv("HOME", str(isolated_repo))
+        monkeypatch.setenv("USERPROFILE", str(isolated_repo))
+        monkeypatch.setenv("PILL_STORAGE_LOCAL_ROOT", "~/판보관")
+    write_dataset(store / ROOT, "v90-seed42-8020-group", *FILES)
+
+    listing = datasets.list_processed_datasets()
+
+    assert listing["problems"] == []
+    found = {item["name"]: item for item in listing["datasets"]}
+    assert found["v90-seed42-8020-group"]["complete"] is True
+    assert found["v90-seed42-8020-group"]["directory"].startswith("판보관/")
