@@ -3,10 +3,16 @@ https://drive.google.com/file/d/10eTOHCgdnSJ5NzE5_c7KhqyUFEiWYQec/view?usp=shari
 
 # 협업일지
 김민기
+
 https://app.notion.com/p/3c05a6b60260800d81c1d69ba9bbc510
 
 김현경
+
 https://app.notion.com/p/3b267f3920118016b804e4bf2549a045?v=3b267f392011801db4ae000c6521b9dd&source=copy_link
+
+유찬혁
+
+https://app.notion.com/p/Daily-3b23c5ff1ba7806eacc1f77c1891b378?source=copy_link
 
 # 알약 객체 탐지 — 사용 안내
 
